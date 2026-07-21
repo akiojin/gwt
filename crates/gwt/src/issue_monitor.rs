@@ -201,9 +201,10 @@ impl Default for IssueMonitorPrefs {
 
 impl IssueMonitorPrefs {
     /// Adopt another process's completed migration only when its marker is
-    /// strictly newer. The failure collection (including retained stale-window
-    /// ids) is the migration result and therefore moves atomically with the
-    /// marker. Equal/older snapshots cannot erase failures recorded later.
+    /// strictly newer. A launch already owned by this process remains
+    /// authoritative over a stale disk failure, while an adopted failure
+    /// cancels any claimed-but-unbound launch for the same issue. Equal/older
+    /// snapshots cannot erase failures recorded later.
     pub fn adopt_newer_legacy_git_launch_failure_migration(
         &mut self,
         disk: &IssueMonitorPrefs,
@@ -215,7 +216,24 @@ impl IssueMonitorPrefs {
         }
         self.legacy_git_launch_failure_migration_version =
             disk.legacy_git_launch_failure_migration_version;
-        self.failed_issues.clone_from(&disk.failed_issues);
+        let launched_issue_numbers = self
+            .launched_issues
+            .iter()
+            .map(|launched| launched.issue_number)
+            .collect::<BTreeSet<_>>();
+        self.failed_issues = disk
+            .failed_issues
+            .iter()
+            .filter(|failed| !launched_issue_numbers.contains(&failed.issue_number))
+            .cloned()
+            .collect();
+        let adopted_failure_numbers = self
+            .failed_issues
+            .iter()
+            .map(|failed| failed.issue_number)
+            .collect::<BTreeSet<_>>();
+        self.launching_issues
+            .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
         true
     }
 }

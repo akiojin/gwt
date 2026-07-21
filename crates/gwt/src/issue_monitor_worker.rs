@@ -125,6 +125,15 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     owner: &str,
     repo: &str,
 ) -> Result<LoadedIssueMonitorCandidates, String> {
+    let live_error = match load_open_issue_monitor_candidates(owner, repo) {
+        Ok(issues) => {
+            return Ok(LoadedIssueMonitorCandidates {
+                issues,
+                source: IssueMonitorCandidateSource::Live,
+            });
+        }
+        Err(error) => error,
+    };
     let cache_roots = [
         crate::issue_cache::issue_cache_root_for_repo_path(repo_path),
         Some(crate::issue_cache::issue_cache_root_for_repo_slug(
@@ -141,10 +150,7 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         }
         result
     });
-    resolve_loaded_issue_monitor_candidates(
-        load_open_issue_monitor_candidates(owner, repo),
-        cache_results,
-    )
+    resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)
 }
 
 fn resolve_loaded_issue_monitor_candidates<I>(

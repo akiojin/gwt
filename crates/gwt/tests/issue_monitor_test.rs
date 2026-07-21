@@ -1335,3 +1335,100 @@ fn newer_disk_failure_adoption_preserves_real_launched_window_across_roundtrip_a
         .iter()
         .all(|failed| failed.issue_number != 42));
 }
+
+#[test]
+fn prefs_newer_disk_failure_adoption_preserves_real_launch_and_reconciles_unbound_launch() {
+    let mut outgoing = IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents: 3,
+        legacy_git_launch_failure_migration_version: 0,
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab::agent-42".to_string(),
+        }],
+        launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+            issue_number: 43,
+            claimed_at: Some("2026-07-21T00:00:00Z".to_string()),
+        }],
+        ..IssueMonitorPrefs::default()
+    };
+    let disk = IssueMonitorPrefs {
+        legacy_git_launch_failure_migration_version: LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+        failed_issues: vec![
+            IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "stale failure for real launch".to_string(),
+                window_id: Some("tab::stale-agent-42".to_string()),
+            },
+            IssueMonitorFailedIssue {
+                issue_number: 43,
+                message: "authoritative unbound launch failure".to_string(),
+                window_id: None,
+            },
+            IssueMonitorFailedIssue {
+                issue_number: 99,
+                message: "unrelated authoritative failure".to_string(),
+                window_id: Some("tab::agent-99".to_string()),
+            },
+        ],
+        ..IssueMonitorPrefs::default()
+    };
+
+    assert!(outgoing.adopt_newer_legacy_git_launch_failure_migration(&disk));
+    assert_eq!(outgoing.launched_issues[0].issue_number, 42);
+    assert_eq!(outgoing.launched_issues[0].window_id, "tab::agent-42");
+    assert!(outgoing
+        .failed_issues
+        .iter()
+        .all(|failed| failed.issue_number != 42));
+    assert!(outgoing
+        .launching_issues
+        .iter()
+        .all(|launching| launching.issue_number != 43));
+    assert_eq!(
+        outgoing
+            .failed_issues
+            .iter()
+            .map(|failed| failed.issue_number)
+            .collect::<Vec<_>>(),
+        vec![43, 99]
+    );
+    assert!(outgoing.launched_issues.iter().all(|launched| {
+        outgoing
+            .failed_issues
+            .iter()
+            .all(|failed| failed.issue_number != launched.issue_number)
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("issue-monitor.json");
+    save_issue_monitor_prefs(&path, &outgoing).expect("save adopted prefs");
+    let loaded = load_issue_monitor_prefs(&path).expect("reload adopted prefs");
+    let mut state = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), loaded);
+    scan_issue_monitor_candidates(
+        &mut state,
+        &[
+            issue(42, &["bug"]),
+            issue(43, &["bug"]),
+            issue(99, &["bug"]),
+        ],
+        "2026-07-21T00:01:00Z",
+    );
+
+    assert_eq!(state.active_count(), 1);
+    let launched = state.inbox_item(42).expect("restored real launch");
+    assert_eq!(launched.state, MonitorInboxState::Launched);
+    assert_eq!(
+        launched.launched_window_id.as_deref(),
+        Some("tab::agent-42")
+    );
+    assert_eq!(
+        state.inbox_item(43).map(|item| item.state),
+        Some(MonitorInboxState::AgentFailed)
+    );
+    assert!(state
+        .prefs()
+        .failed_issues
+        .iter()
+        .all(|failed| failed.issue_number != 42));
+}
