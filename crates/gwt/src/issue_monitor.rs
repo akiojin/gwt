@@ -1354,6 +1354,13 @@ impl IssueMonitorState {
         let mut disk_failures = BTreeMap::new();
         let mut disk_windows = BTreeMap::new();
         for failed in &disk.failed_issues {
+            // A window currently owned by this process is stronger evidence
+            // than a newer marker paired with another process's stale failure
+            // snapshot. Keep the live launch internally and on the next prefs
+            // roundtrip instead of creating a launched+failed split-brain row.
+            if self.launched_windows.contains_key(&failed.issue_number) {
+                continue;
+            }
             if failed.message.trim().is_empty() {
                 continue;
             }

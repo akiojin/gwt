@@ -1270,3 +1270,68 @@ fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox
         Some("unrelated failure retained on disk")
     );
 }
+
+#[test]
+fn newer_disk_failure_adoption_preserves_real_launched_window_across_roundtrip_and_scan() {
+    let mut state = IssueMonitorState::with_prefs(
+        IssueMonitorConfig::default(),
+        IssueMonitorPrefs {
+            enabled: true,
+            legacy_git_launch_failure_migration_version: 0,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab::agent-42".to_string(),
+            }],
+            ..IssueMonitorPrefs::default()
+        },
+    );
+    scan_issue_monitor_candidates(&mut state, &[issue(42, &["bug"])], "2026-07-21T00:00:00Z");
+    assert_eq!(
+        state.inbox_item(42).map(|item| item.state),
+        Some(MonitorInboxState::Launched)
+    );
+
+    let disk = IssueMonitorPrefs {
+        legacy_git_launch_failure_migration_version: LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+        failed_issues: vec![IssueMonitorFailedIssue {
+            issue_number: 42,
+            message: "stale disk failure for a live launch".to_string(),
+            window_id: Some("tab::stale-agent-42".to_string()),
+        }],
+        ..IssueMonitorPrefs::default()
+    };
+
+    assert!(state.adopt_newer_legacy_git_launch_failure_migration_from_prefs(&disk));
+    assert_eq!(state.active_count(), 1);
+    let launched = state.inbox_item(42).expect("live launched row");
+    assert_eq!(launched.state, MonitorInboxState::Launched);
+    assert_eq!(
+        launched.launched_window_id.as_deref(),
+        Some("tab::agent-42")
+    );
+    let persisted = state.prefs();
+    assert!(persisted
+        .failed_issues
+        .iter()
+        .all(|failed| failed.issue_number != 42));
+    assert_eq!(persisted.launched_issues[0].window_id, "tab::agent-42");
+
+    let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), persisted);
+    scan_issue_monitor_candidates(
+        &mut restored,
+        &[issue(42, &["bug"])],
+        "2026-07-21T00:01:00Z",
+    );
+    assert_eq!(restored.active_count(), 1);
+    let restored_item = restored.inbox_item(42).expect("restored launched row");
+    assert_eq!(restored_item.state, MonitorInboxState::Launched);
+    assert_eq!(
+        restored_item.launched_window_id.as_deref(),
+        Some("tab::agent-42")
+    );
+    assert!(restored
+        .prefs()
+        .failed_issues
+        .iter()
+        .all(|failed| failed.issue_number != 42));
+}
