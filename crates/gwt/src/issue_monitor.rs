@@ -33,6 +33,15 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
     "Then verify: git ls-remote origin HEAD."
 );
 
+/// Project-scoped schema marker for the one-shot recovery of the exact launch
+/// failure persisted before Issue #3272 was fixed. Missing serde fields remain
+/// version 0; fresh projects start at this current version and never replay a
+/// historical migration.
+pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
+
+const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
+    "Current branch is unavailable: Git error: Not a git repository: ";
+
 pub fn github_auth_setup_message() -> &'static str {
     GITHUB_AUTH_SETUP_MESSAGE
 }
@@ -131,6 +140,11 @@ pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
     pub priority_order: Vec<u64>,
+    /// One-shot, project-scoped migration marker. The serde default is
+    /// intentionally the numeric default (0) for pre-migration JSON, while
+    /// [`Default`] uses the current version for genuinely fresh projects.
+    #[serde(default)]
+    pub legacy_git_launch_failure_migration_version: u32,
     #[serde(default)]
     pub launch_profile: Option<IssueMonitorLaunchProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -171,6 +185,8 @@ impl Default for IssueMonitorPrefs {
             enabled: false,
             max_active_agents: 1,
             priority_order: Vec::new(),
+            legacy_git_launch_failure_migration_version:
+                LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: None,
             launched_issues: Vec::new(),
             launching_issues: Vec::new(),
@@ -180,6 +196,27 @@ impl Default for IssueMonitorPrefs {
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
         }
+    }
+}
+
+impl IssueMonitorPrefs {
+    /// Adopt another process's completed migration only when its marker is
+    /// strictly newer. The failure collection (including retained stale-window
+    /// ids) is the migration result and therefore moves atomically with the
+    /// marker. Equal/older snapshots cannot erase failures recorded later.
+    pub fn adopt_newer_legacy_git_launch_failure_migration(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+    ) -> bool {
+        if disk.legacy_git_launch_failure_migration_version
+            <= self.legacy_git_launch_failure_migration_version
+        {
+            return false;
+        }
+        self.legacy_git_launch_failure_migration_version =
+            disk.legacy_git_launch_failure_migration_version;
+        self.failed_issues.clone_from(&disk.failed_issues);
+        true
     }
 }
 
@@ -358,6 +395,28 @@ pub enum IssueMonitorIssueState {
     Closed,
 }
 
+/// Provenance of one Issue Monitor candidate snapshot. Only a complete live
+/// GitHub result is safe to authorize a destructive persisted-state migration;
+/// cache snapshots may be partial and are scan-only inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorCandidateSource {
+    Live,
+    Cache,
+}
+
+/// Match only the exact pre-#3272 launch failure for the current project.
+/// Windows provider/verbatim prefixes are normalized on both sides, but the
+/// remaining path must otherwise be equal — substrings, suffixes and nearby
+/// errors are deliberately rejected.
+pub fn is_legacy_git_launch_failure_for_project(message: &str, project_root: &Path) -> bool {
+    let Some(failed_path) = message.strip_prefix(LEGACY_GIT_LAUNCH_FAILURE_PREFIX) else {
+        return false;
+    };
+    gwt_core::paths::normalize_windows_child_process_path(Path::new(failed_path))
+        == gwt_core::paths::normalize_windows_child_process_path(project_root)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorIssue {
     pub number: u64,
@@ -473,6 +532,7 @@ pub struct IssueMonitorState {
     pub config: IssueMonitorConfig,
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
+    legacy_git_launch_failure_migration_version: u32,
     last_scan_at: Option<String>,
     last_error: Option<String>,
     launch_auth_required: bool,
@@ -840,6 +900,8 @@ impl IssueMonitorState {
             config,
             gui_connected: false,
             inbox: Vec::new(),
+            legacy_git_launch_failure_migration_version:
+                LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             last_scan_at: None,
             last_error: None,
             launch_auth_required: false,
@@ -866,6 +928,8 @@ impl IssueMonitorState {
         config.enabled = prefs.enabled;
         config.max_active = prefs.max_active_agents.max(1);
         let mut state = Self::new(config);
+        state.legacy_git_launch_failure_migration_version =
+            prefs.legacy_git_launch_failure_migration_version;
         state.priority_order = prefs.priority_order;
         state.launch_profile = prefs.launch_profile;
         for launched in prefs.launched_issues {
@@ -916,6 +980,8 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             max_active_agents: self.config.max_active.max(1),
             priority_order: self.priority_order.clone(),
+            legacy_git_launch_failure_migration_version: self
+                .legacy_git_launch_failure_migration_version,
             launch_profile: self.launch_profile.clone(),
             launched_issues: self
                 .launched_windows
@@ -1263,6 +1329,153 @@ impl IssueMonitorState {
     pub fn refresh_gui_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
         self.launch_profile = disk.launch_profile.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
+    }
+
+    /// Adopt a strictly newer cross-process migration result. Failure rows
+    /// removed by the authoritative disk snapshot are removed before the next
+    /// scan can reconcile candidates; retained unrelated failures stay intact.
+    /// Equal/older markers are a complete no-op so a newly recorded same-text
+    /// failure can never be erased by stale disk state.
+    pub fn adopt_newer_legacy_git_launch_failure_migration_from_prefs(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+    ) -> bool {
+        if disk.legacy_git_launch_failure_migration_version
+            <= self.legacy_git_launch_failure_migration_version
+        {
+            return false;
+        }
+
+        let old_failures = self.failed_issues.clone();
+        let old_banners = old_failures
+            .iter()
+            .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
+            .collect::<BTreeSet<_>>();
+        let mut disk_failures = BTreeMap::new();
+        let mut disk_windows = BTreeMap::new();
+        for failed in &disk.failed_issues {
+            if failed.message.trim().is_empty() {
+                continue;
+            }
+            disk_failures.insert(failed.issue_number, failed.message.clone());
+            if let Some(window_id) = failed.window_id.as_ref().filter(|id| !id.is_empty()) {
+                disk_windows.insert(failed.issue_number, window_id.clone());
+            }
+        }
+        let removed = old_failures
+            .keys()
+            .filter(|issue_number| !disk_failures.contains_key(issue_number))
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        self.failed_issues = disk_failures;
+        self.failed_windows = disk_windows;
+        for issue_number in self.failed_issues.keys().copied().collect::<Vec<_>>() {
+            self.queue.retain(|queued| *queued != issue_number);
+            let had_pending_launch = self
+                .pending_launches
+                .iter()
+                .any(|pending| pending.issue_number == issue_number);
+            self.pending_launches
+                .retain(|pending| pending.issue_number != issue_number);
+            if had_pending_launch && !self.launched_windows.contains_key(&issue_number) {
+                self.active_launches
+                    .retain(|active| *active != issue_number);
+                self.launching_claimed_at.remove(&issue_number);
+            }
+        }
+        self.inbox.retain(|item| {
+            !(removed.contains(&item.issue.number)
+                && matches!(
+                    item.state,
+                    MonitorInboxState::LaunchFailed | MonitorInboxState::AgentFailed
+                ))
+        });
+        for item in &mut self.inbox {
+            let Some(message) = self.failed_issues.get(&item.issue.number) else {
+                continue;
+            };
+            if matches!(
+                item.state,
+                MonitorInboxState::Merged
+                    | MonitorInboxState::Released
+                    | MonitorInboxState::NeedsHuman
+            ) {
+                continue;
+            }
+            if item.state != MonitorInboxState::LaunchFailed {
+                item.state = MonitorInboxState::AgentFailed;
+            }
+            item.error_message = Some(message.clone());
+            item.launched_window_id = None;
+        }
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|error| old_banners.contains(error))
+        {
+            self.last_error = self.first_failed_issue_banner();
+        }
+        self.legacy_git_launch_failure_migration_version =
+            disk.legacy_git_launch_failure_migration_version;
+        true
+    }
+
+    fn apply_legacy_git_launch_failure_migration(&mut self, project_root: &Path) {
+        if self.legacy_git_launch_failure_migration_version
+            >= LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        {
+            return;
+        }
+
+        let targets = self
+            .failed_issues
+            .iter()
+            .filter_map(|(issue_number, message)| {
+                let needs_human = self
+                    .autonomous_records
+                    .get(issue_number)
+                    .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+                    || self
+                        .inbox_item(*issue_number)
+                        .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman);
+                (!needs_human
+                    && !self.failed_windows.contains_key(issue_number)
+                    && is_legacy_git_launch_failure_for_project(message, project_root))
+                .then_some((*issue_number, message.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let removed_banners = targets
+            .iter()
+            .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
+            .collect::<BTreeSet<_>>();
+
+        for issue_number in targets.keys() {
+            self.failed_issues.remove(issue_number);
+        }
+        self.inbox.retain(|item| {
+            !(targets.contains_key(&item.issue.number)
+                && matches!(
+                    item.state,
+                    MonitorInboxState::LaunchFailed | MonitorInboxState::AgentFailed
+                ))
+        });
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|error| removed_banners.contains(error))
+        {
+            self.last_error = self.first_failed_issue_banner();
+        }
+        self.legacy_git_launch_failure_migration_version =
+            LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION;
+    }
+
+    fn first_failed_issue_banner(&self) -> Option<String> {
+        self.failed_issues
+            .iter()
+            .next()
+            .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
     }
 
     /// #3223 follow-up (codex P1): absorb the OTHER process's in-flight launch
@@ -1741,8 +1954,19 @@ impl IssueMonitorState {
         } else if error_message.is_some() {
             existing
                 .as_ref()
-                .filter(|item| item.state == MonitorInboxState::LaunchFailed)
+                .filter(|item| {
+                    matches!(
+                        item.state,
+                        MonitorInboxState::LaunchFailed | MonitorInboxState::NeedsHuman
+                    )
+                })
                 .map(|item| item.state)
+                .or_else(|| {
+                    self.autonomous_records
+                        .get(&issue_number)
+                        .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+                        .then_some(MonitorInboxState::NeedsHuman)
+                })
                 .unwrap_or(MonitorInboxState::AgentFailed)
         } else if launched_window_id.is_some() {
             MonitorInboxState::Launched
@@ -2408,6 +2632,29 @@ pub fn scan_issue_monitor_candidates(
     }
 
     summary
+}
+
+/// Canonical candidate scan for provenance-aware loaders. A historical
+/// persisted failure is reconciled only for an unapplied project receiving a
+/// complete live snapshot and only after the shared Launch Agent resolver
+/// proves that the project now has a usable base branch. The resolved branch is
+/// intentionally only a gate; this transition never changes branches and never
+/// creates queue/claim/launch work directly.
+pub fn scan_issue_monitor_candidates_with_provenance(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    source: IssueMonitorCandidateSource,
+    project_root: &Path,
+    now: &str,
+) -> IssueMonitorScanSummary {
+    if monitor.legacy_git_launch_failure_migration_version
+        < LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        && source == IssueMonitorCandidateSource::Live
+        && crate::start_work::resolve_launch_agent_base_branch(project_root).is_ok()
+    {
+        monitor.apply_legacy_git_launch_failure_migration(project_root);
+    }
+    scan_issue_monitor_candidates(monitor, issues, now)
 }
 
 fn expiry_from_now_lexical(now: &str, ttl_secs: u64) -> String {
@@ -4273,5 +4520,58 @@ mod tests {
             "merge clears the autonomous record",
         );
         assert_eq!(monitor.attempt_count(42), 0);
+    }
+
+    #[test]
+    fn legacy_git_failure_migration_core_is_exact_windowless_and_one_shot() {
+        let project_root = Path::new("/tmp/gwt-issue-3314");
+        let message = format!(
+            "{LEGACY_GIT_LAUNCH_FAILURE_PREFIX}{}",
+            project_root.display()
+        );
+        let prefs = IssueMonitorPrefs {
+            enabled: true,
+            legacy_git_launch_failure_migration_version: 0,
+            failed_issues: vec![
+                IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: message.clone(),
+                    window_id: None,
+                },
+                IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: message.clone(),
+                    window_id: Some("tab::agent-43".to_string()),
+                },
+            ],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-21T00:00:00Z",
+        );
+
+        monitor.apply_legacy_git_launch_failure_migration(project_root);
+
+        assert_eq!(
+            monitor.legacy_git_launch_failure_migration_version,
+            LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert!(!monitor.failed_issues.contains_key(&42));
+        assert!(monitor.failed_issues.contains_key(&43));
+        assert!(monitor.inbox_item(42).is_none());
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::AgentFailed)
+        );
+
+        monitor.record_launch_failed(42, message);
+        monitor.apply_legacy_git_launch_failure_migration(project_root);
+        assert!(
+            monitor.failed_issues.contains_key(&42),
+            "an equal marker cannot erase a newly recorded same-text failure"
+        );
     }
 }
