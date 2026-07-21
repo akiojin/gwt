@@ -830,19 +830,44 @@ fn probe_host_package_runner(
     );
     let started_at = std::time::Instant::now();
 
-    let mut process = gwt_core::process::hidden_command(command);
+    let mut request = gwt_core::process::ProcessPlanRequest::new(command).args(&args);
+    for key in remove_env {
+        request = request.env_remove(key);
+    }
+    for (key, value) in env_vars {
+        request = request.env(key, value);
+    }
+    if let Some(cwd) = cwd {
+        request = request.current_dir(cwd);
+    }
+    let mut process = match gwt_core::process::resolved_command(request) {
+        Ok(process) => process,
+        Err(error) => {
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            tracing::warn!(
+                command,
+                error = %error,
+                "package-runner probe could not resolve a safe executable"
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = spawn_id,
+                label = %label,
+                phase = "end",
+                exit_code = Option::<i64>::None,
+                duration_ms = duration_ms,
+                success = false,
+                resolution_error = %error,
+                "process end",
+            );
+            return false;
+        }
+    };
     process
-        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for key in remove_env {
-        process.env_remove(key);
-    }
-    process.envs(env_vars);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
     let status = process.status();
     let ok = status.as_ref().is_ok_and(|status| status.success());
 
@@ -2652,5 +2677,44 @@ mod tests {
         );
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
         assert!(entries.contains(&PathBuf::from("/bin")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_runner_resolution_failure_still_emits_an_end_summary() {
+        use crate::test_capture::{CaptureLayer, CapturedEvents};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let temp = tempdir().expect("tempdir");
+        let placeholder = temp.path().join("npx.exe");
+        fs::write(&placeholder, "Error: native binary not installed\r\n")
+            .expect("write unsafe placeholder");
+        let env = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            ("PATHEXT".to_string(), ".EXE".to_string()),
+        ]);
+        let events = CapturedEvents::new();
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            probe_host_package_runner("npx", vec!["--version".to_string()], &env, &[], None)
+        });
+
+        assert!(!result);
+        let summaries = events
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.target == "gwt.process.summary")
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2, "expected balanced start/end events");
+        assert_eq!(
+            summaries[1].fields.get("phase").map(String::as_str),
+            Some("end")
+        );
+        assert_eq!(
+            summaries[1].fields.get("success").map(String::as_str),
+            Some("false")
+        );
+        assert!(summaries[1].fields.contains_key("resolution_error"));
     }
 }

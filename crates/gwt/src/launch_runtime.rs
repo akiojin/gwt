@@ -442,7 +442,7 @@ pub fn apply_windows_host_shell_wrapper(
             &config.args,
             &config.env_vars,
             &config.remove_env,
-        );
+        )?;
     // Share the PTY path's pre-spawn backstop: if resolution still landed on a
     // non-PE placeholder stub (no cli-wrapper/native to redirect to), refuse here
     // rather than embed it into the shell expression and surface the Windows
@@ -614,8 +614,16 @@ fn quote_cmd_token_if_needed(value: &str) -> String {
 }
 
 fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
-    let mut parts = Vec::with_capacity(args.len() + 2);
-    parts.push("call".to_string());
+    let requires_call = Path::new(command)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    let mut parts = Vec::with_capacity(args.len() + 1 + usize::from(requires_call));
+    if requires_call {
+        parts.push("call".to_string());
+    }
     parts.push(quote_cmd_token_if_needed(command));
     parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
     parts.join(" ")
@@ -1151,19 +1159,51 @@ fn probe_host_package_runner_with_timeout_and_hub(
         "process start",
     );
 
-    let mut process = gwt_core::process::hidden_command(command);
+    let mut request = gwt_core::process::ProcessPlanRequest::new(command).args(&args);
+    for key in remove_env {
+        request = request.env_remove(key);
+    }
+    for (key, value) in env_vars {
+        request = request.env(key, value);
+    }
+    if let Some(cwd) = cwd {
+        request = request.current_dir(cwd);
+    }
+    let mut process = match gwt_core::process::resolved_command(request) {
+        Ok(process) => process,
+        Err(error) => {
+            let message = format!("[gwt] failed to resolve package-runner probe safely: {error}");
+            push_probe_console_line(
+                hub,
+                agent_spawn_id,
+                gwt_core::process_console::ProcessStream::Stderr,
+                &message,
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = agent_spawn_id,
+                label = %agent_label,
+                phase = "end",
+                exit_code = None::<i64>,
+                success = false,
+                error = "resolution failed",
+                "process end",
+            );
+            return PackageRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                timed_out: false,
+                error: Some(error.to_string()),
+            };
+        }
+    };
     process
-        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for key in remove_env {
-        process.env_remove(key);
-    }
-    process.envs(env_vars);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
     let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -1949,7 +1989,11 @@ mod tests {
         let nodejs_dir = temp.path().join("nodejs");
         fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
         let node_exe = nodejs_dir.join("node.exe");
-        fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+        fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &node_exe,
+        )
+        .expect("copy real node PE fixture");
 
         let mut config = sample_versioned_launch_config();
         config.command = "claude".to_string();

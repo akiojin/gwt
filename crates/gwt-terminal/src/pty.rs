@@ -25,7 +25,7 @@ use crate::TerminalError;
 pub const SLOW_RESIZE_WARN_MS: u64 = 250;
 
 mod process_group;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod windows_spawn;
 
 use process_group::ProcessGroup;
@@ -73,10 +73,10 @@ impl PtyHandle {
     /// Spawn a child process with a PTY.
     #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
-        let config = normalize_spawn_config(config);
-        if let Some(reason) = reject_non_pe_executable(&config.command) {
-            return Err(TerminalError::PtyCreationFailed { reason });
-        }
+        let config =
+            normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: reason.to_string(),
+            })?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -317,15 +317,15 @@ impl PtyHandle {
     }
 }
 
-fn normalize_spawn_config(config: SpawnConfig) -> SpawnConfig {
+fn normalize_spawn_config(config: SpawnConfig) -> Result<SpawnConfig, String> {
     #[cfg(windows)]
     {
-        windows_spawn::normalize_spawn_config(config)
+        windows_spawn::normalize_spawn_config(config).map_err(|failure| failure.to_string())
     }
 
     #[cfg(not(windows))]
     {
-        normalize_non_windows_spawn_config(config)
+        Ok(normalize_non_windows_spawn_config(config))
     }
 }
 
@@ -357,16 +357,17 @@ pub fn normalize_command_for_windows_host_shell(
     args: &[String],
     env: &HashMap<String, String>,
     remove_env: &[String],
-) -> (String, Vec<String>) {
+) -> Result<(String, Vec<String>), String> {
     #[cfg(windows)]
     {
         windows_spawn::normalize_host_shell_command(command, args, env, remove_env)
+            .map_err(|failure| failure.to_string())
     }
 
     #[cfg(not(windows))]
     {
         let _ = (env, remove_env);
-        (command.to_string(), args.to_vec())
+        Ok((command.to_string(), args.to_vec()))
     }
 }
 
@@ -547,7 +548,7 @@ mod tests {
             cwd: None,
         };
 
-        let normalized = normalize_spawn_config(config);
+        let normalized = normalize_spawn_config(config).expect("normalize spawn config");
 
         assert_eq!(PathBuf::from(normalized.command), runner);
     }
