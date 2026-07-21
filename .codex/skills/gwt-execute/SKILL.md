@@ -54,7 +54,11 @@ included):
   `build.complete` settles the record too), or
 - blocked by the environment or missing verification: JSON operation
   `execution.blocked` with a non-empty `params.reason` and optional
-  `params.missing_verification`. Blocked is not done — report the blocker.
+  `params.missing_verification`. When same-session recovery is intended, also
+  provide a non-empty ordered `params.required_recovery_commands` array whose
+  entries bind exact command text to `execution_root:"worktree"`. Exact
+  duplicates are removed in first-seen order. Omitting the array creates an
+  audit-only Legacy Requirement Gap. Blocked is not done — report the blocker.
 
 `execution.blocked` is a terminal outcome, not a pause. Never use it while
 waiting for a temporary question, owner decision, or verification that can
@@ -63,16 +67,24 @@ instead.
 
 If the same owning session later resolves a genuine terminal blocker, recover
 without rewriting trusted state or relaunching: register the changed-surface
-matrix through `verify.plan` with `params.derive:true`, run the entire
-post-block matrix through `verify.run`, then call `execution.reopen` with a
-non-empty `params.reason`. Reopen requires the exact immutable derived-plan
-snapshot, fresh passing evidence that started after the block, the same
-session/owner/worktree fingerprint, and valid integrity hashes. It appends a
-recovery audit entry and returns the execution to Active; it does not claim
-completion. Completed executions remain immutable. Another session must use
-audited `execution.adopt` only while the record is Active. Blocked and
-Completed records are terminal and cannot be adopted; another session must
-use a fresh linked-owner launch.
+matrix through `verify.plan` with `params.derive:true`. An ordinary derived
+matrix appends every missing Required Recovery Command in trusted order. When
+no non-bookkeeping surface exists, derivation first enumerates committed,
+working-tree, and non-ignored untracked paths, accepts only exact versioned
+`.gwt/` and `tasks/` bookkeeping paths, then produces the machine-owned
+Non-Vacuous No-Change Floor followed by the immutable Required Recovery
+Command Set as the exact plan. Do not hand-select, substitute, omit, or add
+plan commands. `verify.run` may execute a superset only when it covers that
+exact plan. A Legacy Requirement Gap cannot use same-session recovery; use a
+fresh linked-owner launch instead. Run the entire post-block matrix through
+`verify.run`, then call `execution.reopen` with a non-empty `params.reason`.
+Reopen also requires fresh passing evidence that started after the block, the
+same session/owner/worktree fingerprint and derivation provenance, and valid
+integrity hashes. It appends a recovery audit entry and returns the execution
+to Active; it does not claim completion. Completed executions remain
+immutable. Another session must use audited `execution.adopt` only while the
+record is Active. Blocked and Completed records are terminal and cannot be
+adopted; another session must use a fresh linked-owner launch.
 
 Completion and Ready PR handoffs consume tool-generated verification
 evidence (SPEC-3248 P8b): run the verification matrix through JSON operation

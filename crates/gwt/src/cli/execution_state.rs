@@ -74,6 +74,23 @@ pub enum ExecutionControlStatus {
     Blocked,
 }
 
+/// Canonical working directory for a required recovery command. Keeping the
+/// root explicit makes command identity stable and prevents a verifier from
+/// silently running the same text in a different directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryExecutionRoot {
+    Worktree,
+}
+
+/// One exact command that must be present in a recovery verification plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredRecoveryCommand {
+    pub execution_root: RecoveryExecutionRoot,
+    pub command: String,
+}
+
 /// One audited ownership transfer (SPEC-3248 P9a, T-117/T-123): who held the
 /// execution, who took it over, why, and when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +152,14 @@ pub struct ExecutionControlRecord {
     pub blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_verification: Option<String>,
+    /// Immutable blocker snapshot captured by `execution.blocked`. This is a
+    /// rolling-compatible extension: the outer ECR hash deliberately omits
+    /// it so an older reader can preserve the record, while the extension's
+    /// own hash lets current readers detect edits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_recovery_commands: Vec<RequiredRecoveryCommand>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub required_recovery_commands_hash: String,
     pub launched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,
@@ -162,9 +187,74 @@ pub struct ExecutionControlRecord {
 #[must_use]
 pub fn compute_content_hash(record: &ExecutionControlRecord) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = recovery_storage_projection(record);
+    let mut canonical = recovery_storage_projection(record);
+    // Rolling compatibility: binaries predating Required Recovery Command
+    // Sets deserialize neither extension field. Hash the old-schema view so
+    // they do not falsely diagnose a modern record as tampered.
+    canonical.required_recovery_commands.clear();
+    canonical.required_recovery_commands_hash.clear();
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     format!("{:x}", Sha256::digest(&bytes))
+}
+
+fn compute_required_recovery_commands_hash(commands: &[RequiredRecoveryCommand]) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(commands).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+fn required_recovery_commands_integrity_ok(record: &ExecutionControlRecord) -> bool {
+    match (
+        record.required_recovery_commands.is_empty(),
+        record.required_recovery_commands_hash.is_empty(),
+    ) {
+        (true, true) => true,
+        (false, false) => {
+            record.required_recovery_commands_hash
+                == compute_required_recovery_commands_hash(&record.required_recovery_commands)
+        }
+        _ => false,
+    }
+}
+
+fn normalize_required_recovery_commands(
+    commands: Vec<RequiredRecoveryCommand>,
+) -> io::Result<Vec<RequiredRecoveryCommand>> {
+    if commands.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "execution.blocked requires non-empty params.required_recovery_commands",
+        ));
+    }
+    let mut normalized = Vec::with_capacity(commands.len());
+    for mut required in commands {
+        required.command = required.command.trim().to_string();
+        if required.command.is_empty() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "params.required_recovery_commands must not contain an empty command",
+            ));
+        }
+        let args = crate::cli::verification_record::split_command_line(&required.command)
+            .map_err(|err| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "params.required_recovery_commands must contain one plain command per entry: {err}"
+                    ),
+                )
+            })?;
+        if args[0].is_empty() || args.iter().any(|arg| arg.contains('\0')) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "params.required_recovery_commands must contain one plain command per entry: the executable must be non-empty and command tokens must not contain NUL",
+            ));
+        }
+        if !normalized.contains(&required) {
+            normalized.push(required);
+        }
+    }
+    Ok(normalized)
 }
 
 fn compute_legacy_hash_with_recoveries(record: &ExecutionControlRecord) -> String {
@@ -290,16 +380,20 @@ fn recovery_chain_integrity_ok(recoveries: &[ExecutionRecovery]) -> bool {
 #[must_use]
 pub fn integrity_ok(record: &ExecutionControlRecord) -> bool {
     if record.content_hash.is_empty() {
-        return record.recoveries.is_empty();
+        return record.recoveries.is_empty()
+            && record.required_recovery_commands.is_empty()
+            && record.required_recovery_commands_hash.is_empty();
     }
     if record.content_hash == compute_content_hash(record) {
-        return recovery_chain_integrity_ok(&record.recoveries);
+        return recovery_chain_integrity_ok(&record.recoveries)
+            && required_recovery_commands_integrity_ok(record);
     }
     // One in-flight development record may have been written by the initial
     // recovery implementation, whose ECR hash still included the extension
     // and whose recovery entries had no individual hashes. Accept it only as
     // a migration source; the next canonical save upgrades it.
     record.content_hash == compute_legacy_hash_with_recoveries(record)
+        && required_recovery_commands_integrity_ok(record)
         && record.recoveries.iter().all(|recovery| {
             recovery.previous_recovery_hash.is_empty() && recovery.content_hash.is_empty()
         })
@@ -403,6 +497,12 @@ fn load_existing_for_save(worktree: &Path) -> io::Result<Option<ExecutionControl
 /// integrity hash is recomputed on every save (P9a).
 pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> {
     let mut record = record.clone();
+    if !required_recovery_commands_integrity_ok(&record) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "the required recovery command snapshot failed integrity validation",
+        ));
+    }
     if record.transfers.iter().any(is_recovery_envelope_transfer) {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
@@ -430,6 +530,23 @@ pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> 
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
                     "execution recovery history is append-only within one execution lifetime",
+                ));
+            }
+            // Requirements are immutable for one terminal Blocked lifetime,
+            // not forever. A successful reopen returns to Active, so a later
+            // Active -> Blocked transition must establish the new blocker's
+            // own (possibly audit-only) snapshot.
+            let starts_new_blocked_lifetime = previous.status == ExecutionControlStatus::Active
+                && record.status == ExecutionControlStatus::Blocked
+                && required_recovery_commands_integrity_ok(&record);
+            if (previous.required_recovery_commands != record.required_recovery_commands
+                || previous.required_recovery_commands_hash
+                    != record.required_recovery_commands_hash)
+                && !starts_new_blocked_lifetime
+            {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "the required recovery command snapshot is immutable within one blocked lifetime",
                 ));
             }
         }
@@ -522,6 +639,8 @@ fn materialize_at_launch_locked(
             status: ExecutionControlStatus::Active,
             blocked_reason: None,
             missing_verification: None,
+            required_recovery_commands: Vec::new(),
+            required_recovery_commands_hash: String::new(),
             launched_at: Utc::now(),
             settled_at: None,
             transfers,
@@ -626,6 +745,37 @@ fn settle_locked(
     session_id: &str,
     settlement: ExecutionSettlement,
 ) -> io::Result<SettleResult> {
+    settle_locked_with_required_commands(worktree, session_id, settlement, Vec::new())
+}
+
+fn settle_blocked_with_required_commands(
+    worktree: &Path,
+    session_id: &str,
+    reason: String,
+    missing_verification: Option<String>,
+    required_recovery_commands: Vec<RequiredRecoveryCommand>,
+) -> io::Result<SettleResult> {
+    let required_recovery_commands =
+        normalize_required_recovery_commands(required_recovery_commands)?;
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        settle_locked_with_required_commands(
+            worktree,
+            session_id,
+            ExecutionSettlement::Blocked {
+                reason,
+                missing_verification,
+            },
+            required_recovery_commands,
+        )
+    })
+}
+
+fn settle_locked_with_required_commands(
+    worktree: &Path,
+    session_id: &str,
+    settlement: ExecutionSettlement,
+    required_recovery_commands: Vec<RequiredRecoveryCommand>,
+) -> io::Result<SettleResult> {
     let Some(mut record) = load(worktree)? else {
         return Ok(SettleResult::NoRecord);
     };
@@ -651,6 +801,12 @@ fn settle_locked(
             record.status = ExecutionControlStatus::Blocked;
             record.blocked_reason = Some(reason);
             record.missing_verification = missing_verification;
+            record.required_recovery_commands_hash = if required_recovery_commands.is_empty() {
+                String::new()
+            } else {
+                compute_required_recovery_commands_hash(&required_recovery_commands)
+            };
+            record.required_recovery_commands = required_recovery_commands;
         }
     }
     record.settled_at = Some(Utc::now());
@@ -756,15 +912,26 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
     }
     match record.status {
         ExecutionControlStatus::Completed => None,
-        ExecutionControlStatus::Blocked => Some(format!(
-            "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. In the same owning session, resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run it through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
-            kind = record.owner_kind.as_str(),
-            number = record.owner_number,
-            reason = record
-                .blocked_reason
-                .as_deref()
-                .unwrap_or("no reason recorded"),
-        )),
+        ExecutionControlStatus::Blocked => {
+            let recovery_guidance = if record.required_recovery_commands.is_empty() {
+                "This record has a Legacy Requirement Gap: no Required Recovery Command Set was captured at block time, so same-session recovery is unavailable. Use a fresh linked-owner launch, or leave the blocked report as the outcome."
+                    .to_string()
+            } else {
+                format!(
+                    "Its immutable Required Recovery Command Set contains {} command(s). In the same owning session, resolve the blocker, derive the exact matrix with `verify.plan` (`params.derive:true`; this adds the machine-owned Non-Vacuous No-Change Floor when only bookkeeping changed), run an exact-plan-covering matrix through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
+                    record.required_recovery_commands.len()
+                )
+            };
+            Some(format!(
+                "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. {recovery_guidance}",
+                kind = record.owner_kind.as_str(),
+                number = record.owner_number,
+                reason = record
+                    .blocked_reason
+                    .as_deref()
+                    .unwrap_or("no reason recorded"),
+            ))
+        }
         ExecutionControlStatus::Active if ready_handoff => {
             let status = crate::cli::verification_record::evaluate_evidence(
                 &worktree,
@@ -792,6 +959,7 @@ pub enum ExecutionCommand {
     Blocked {
         reason: String,
         missing_verification: Option<String>,
+        required_recovery_commands: Option<Vec<RequiredRecoveryCommand>>,
     },
     /// P9a (T-117): take over the worktree's active record for the current
     /// session with an audited reason (crash recovery, window handoff).
@@ -850,21 +1018,36 @@ pub(super) fn run<E: CliEnv>(
         ExecutionCommand::Blocked {
             reason,
             missing_verification,
+            required_recovery_commands,
         } => {
             if reason.trim().is_empty() {
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     "execution.blocked requires a non-empty params.reason".to_string(),
                 )));
             }
-            settle(
-                &worktree,
-                &session_id,
-                ExecutionSettlement::Blocked {
+            if let Some(required_recovery_commands) = required_recovery_commands {
+                settle_blocked_with_required_commands(
+                    &worktree,
+                    &session_id,
                     reason,
                     missing_verification,
-                },
-            )
-            .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+                    required_recovery_commands,
+                )
+                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+            } else {
+                // Audit-only terminal blocks remain valid without a recovery
+                // set. They intentionally form a Legacy Requirement Gap and
+                // cannot use same-session no-change recovery.
+                settle(
+                    &worktree,
+                    &session_id,
+                    ExecutionSettlement::Blocked {
+                        reason,
+                        missing_verification,
+                    },
+                )
+                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+            }
         }
     };
     match result {
@@ -1153,6 +1336,12 @@ fn run_reopen_locked(
         );
         return Ok(2);
     }
+    if let Err(error) =
+        crate::cli::verify_derivation::validate_recovery_plan(worktree, &record, &plan)
+    {
+        out.push_str(&format!("execution: reopen refused — {error}\n"));
+        return Ok(2);
+    }
 
     let reopened_at = Utc::now();
     record.recoveries.push(ExecutionRecovery {
@@ -1324,6 +1513,8 @@ mod tests {
             status: ExecutionControlStatus::Active,
             blocked_reason: None,
             missing_verification: None,
+            required_recovery_commands: Vec::new(),
+            required_recovery_commands_hash: String::new(),
             launched_at: Utc::now(),
             settled_at: None,
             transfers: Vec::new(),
@@ -1994,15 +2185,49 @@ mod tests {
             run_collect(&mut env, CliCommand::Execution(command))
         }
 
+        fn ensure_recovery_worktree(repo: &Path) {
+            let is_git = gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "--git-dir"])
+                .current_dir(repo)
+                .output()
+                .is_ok_and(|output| output.status.success());
+            if !is_git {
+                crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            }
+            let update = gwt_core::process::hidden_command("git")
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .current_dir(repo)
+                .status()
+                .unwrap();
+            assert!(update.success());
+            let branch = gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+            if matches!(branch.as_str(), "main" | "master" | "develop") {
+                let checkout = gwt_core::process::hidden_command("git")
+                    .args(["checkout", "-q", "-b", "work/recovery-fixture"])
+                    .current_dir(repo)
+                    .status()
+                    .unwrap();
+                assert!(checkout.success());
+            }
+        }
+
         fn settle_blocked(repo: &Path, session: &str) -> ExecutionControlRecord {
+            ensure_recovery_worktree(repo);
             save(repo, &active_record(session)).unwrap();
-            let result = settle(
+            let result = settle_blocked_with_required_commands(
                 repo,
                 session,
-                ExecutionSettlement::Blocked {
-                    reason: "verification dependency unresolved".to_string(),
-                    missing_verification: Some("full pre-PR matrix".to_string()),
-                },
+                "verification dependency unresolved".to_string(),
+                Some("full pre-PR matrix".to_string()),
+                vec![RequiredRecoveryCommand {
+                    execution_root: RecoveryExecutionRoot::Worktree,
+                    command: "git --version".to_string(),
+                }],
             )
             .unwrap();
             let SettleResult::Settled(record) = result else {
@@ -2011,23 +2236,219 @@ mod tests {
             record
         }
 
-        fn save_covering_evidence(repo: &Path, session: &str, derived: bool) -> String {
-            use crate::cli::verification_record as vr;
-            vr::save_plan(
-                repo,
-                &vr::VerificationPlanRecord {
-                    session_id: session.to_string(),
-                    owner_number: Some(3248),
-                    commands: vec!["git --version".to_string()],
-                    derived,
-                    worktree_fingerprint: String::new(),
-                    created_at: Utc::now(),
-                    content_hash: String::new(),
+        // T-325 / FR-200: execution.blocked captures a non-empty,
+        // execution-root-bound recovery set. Commands are outer-trimmed and
+        // exact duplicates are removed in first-seen order; the extension is
+        // independently integrity-bound so rolling readers can ignore it
+        // without weakening modern readers.
+        #[test]
+        fn blocked_command_persists_normalized_integrity_bound_recovery_set() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-blocked");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-blocked")).unwrap();
+
+            let command = RequiredRecoveryCommand {
+                execution_root: RecoveryExecutionRoot::Worktree,
+                command: "  cargo test -p gwt --lib  ".to_string(),
+            };
+            let (code, output) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "runner unavailable".to_string(),
+                    missing_verification: Some("gwt lib suite".to_string()),
+                    required_recovery_commands: Some(vec![
+                        command.clone(),
+                        command,
+                        RequiredRecoveryCommand {
+                            execution_root: RecoveryExecutionRoot::Worktree,
+                            command: "cargo test -p gwt-core".to_string(),
+                        },
+                        RequiredRecoveryCommand {
+                            execution_root: RecoveryExecutionRoot::Worktree,
+                            command: r#"git show --format="%H""#.to_string(),
+                        },
+                        RequiredRecoveryCommand {
+                            execution_root: RecoveryExecutionRoot::Worktree,
+                            command: "git show --format %H".to_string(),
+                        },
+                    ]),
                 },
             )
             .unwrap();
-            let (record, _) =
-                vr::run_verification(repo, session, &["git --version".to_string()]).unwrap();
+            assert_eq!(code, 0, "{output}");
+
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(
+                record.required_recovery_commands,
+                vec![
+                    RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "cargo test -p gwt --lib".to_string(),
+                    },
+                    RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "cargo test -p gwt-core".to_string(),
+                    },
+                    RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: r#"git show --format="%H""#.to_string(),
+                    },
+                    RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "git show --format %H".to_string(),
+                    },
+                ]
+            );
+            assert!(!record.required_recovery_commands_hash.is_empty());
+            assert!(integrity_ok(&record));
+            let refusal = pr_handoff_refusal(dir.path(), true).unwrap();
+            assert!(
+                refusal.contains("Required Recovery Command Set"),
+                "{refusal}"
+            );
+            assert!(refusal.contains("4 command(s)"), "{refusal}");
+
+            let raw = fs::read_to_string(state_path(dir.path())).unwrap();
+            let raw_json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert!(raw_json.get("required_recovery_commands").is_some());
+            assert!(raw_json
+                .get("required_recovery_commands_hash")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|hash| !hash.is_empty()));
+
+            // A pre-extension typed writer can still validate/reserialize the
+            // old-schema portion. If it drops the unknown extension, a new
+            // reader sees an integrity-valid audit record but an explicit
+            // Legacy Requirement Gap — never inferred requirements.
+            let old: PreRecoveryControlRecord = serde_json::from_str(&raw).unwrap();
+            let downgraded: ExecutionControlRecord =
+                serde_json::from_slice(&serde_json::to_vec(&old).unwrap()).unwrap();
+            assert!(integrity_ok(&downgraded));
+            assert!(downgraded.required_recovery_commands.is_empty());
+            assert!(downgraded.required_recovery_commands_hash.is_empty());
+
+            let mut forged = record.clone();
+            forged.required_recovery_commands[0].command = "git --version".to_string();
+            assert!(
+                !integrity_ok(&forged),
+                "recovery requirements must be integrity-bound"
+            );
+
+            let mut rewritten = record;
+            rewritten
+                .required_recovery_commands
+                .push(RequiredRecoveryCommand {
+                    execution_root: RecoveryExecutionRoot::Worktree,
+                    command: "cargo test -p gwt-skills".to_string(),
+                });
+            rewritten.required_recovery_commands_hash =
+                compute_required_recovery_commands_hash(&rewritten.required_recovery_commands);
+            assert!(
+                save(dir.path(), &rewritten)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("immutable"),
+                "a blocker snapshot cannot be rewritten in the same blocked lifetime"
+            );
+        }
+
+        #[test]
+        fn blocked_command_rejects_empty_or_ambiguous_recovery_sets() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-blocked");
+
+            let empty = tempfile::tempdir().unwrap();
+            save(empty.path(), &active_record("sess-blocked")).unwrap();
+            let err = run_cmd(
+                empty.path(),
+                ExecutionCommand::Blocked {
+                    reason: "runner unavailable".to_string(),
+                    missing_verification: None,
+                    required_recovery_commands: Some(Vec::new()),
+                },
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("required_recovery_commands"));
+
+            let ambiguous = tempfile::tempdir().unwrap();
+            save(ambiguous.path(), &active_record("sess-blocked")).unwrap();
+            let err = run_cmd(
+                ambiguous.path(),
+                ExecutionCommand::Blocked {
+                    reason: "runner unavailable".to_string(),
+                    missing_verification: None,
+                    required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "cargo test && cargo fmt".to_string(),
+                    }]),
+                },
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("plain command"), "{err}");
+            assert_eq!(
+                load(ambiguous.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "invalid requirements must not partially settle the record"
+            );
+
+            for invalid in ["''", "\"\" --version", "git \"\0\""] {
+                let dir = tempfile::tempdir().unwrap();
+                save(dir.path(), &active_record("sess-blocked")).unwrap();
+                let err = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Blocked {
+                        reason: "runner unavailable".to_string(),
+                        missing_verification: None,
+                        required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                            execution_root: RecoveryExecutionRoot::Worktree,
+                            command: invalid.to_string(),
+                        }]),
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    err.to_string().contains("plain command"),
+                    "{invalid:?}: {err}"
+                );
+                assert_eq!(
+                    load(dir.path()).unwrap().unwrap().status,
+                    ExecutionControlStatus::Active,
+                    "invalid command {invalid:?} must not settle the record"
+                );
+            }
+        }
+
+        fn save_covering_evidence(repo: &Path, session: &str, derived: bool) -> String {
+            use crate::cli::verification_record as vr;
+            let commands = if derived {
+                vr::derive_and_register_plan(repo, session)
+                    .unwrap()
+                    .1
+                    .commands
+            } else {
+                let commands = vec!["git --version".to_string()];
+                vr::save_plan(
+                    repo,
+                    &vr::VerificationPlanRecord {
+                        session_id: session.to_string(),
+                        owner_number: Some(3248),
+                        commands: commands.clone(),
+                        derived: false,
+                        worktree_fingerprint: String::new(),
+                        no_change_evidence: None,
+                        created_at: Utc::now(),
+                        content_hash: String::new(),
+                    },
+                )
+                .unwrap();
+                commands
+            };
+            let (record, _) = vr::run_verification(repo, session, &commands).unwrap();
             record.record_id
         }
 
@@ -2154,8 +2575,29 @@ mod tests {
             );
 
             let pre_block = tempfile::tempdir().unwrap();
+            ensure_recovery_worktree(pre_block.path());
             save(pre_block.path(), &active_record("sess-reopen")).unwrap();
-            save_covering_evidence(pre_block.path(), "sess-reopen", true);
+            use crate::cli::verification_record as vr;
+            vr::save_plan(
+                pre_block.path(),
+                &vr::VerificationPlanRecord {
+                    session_id: "sess-reopen".to_string(),
+                    owner_number: Some(3248),
+                    commands: vec!["git --version".to_string()],
+                    derived: true,
+                    worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            vr::run_verification(
+                pre_block.path(),
+                "sess-reopen",
+                &["git --version".to_string()],
+            )
+            .unwrap();
             settle(
                 pre_block.path(),
                 "sess-reopen",
@@ -2190,6 +2632,64 @@ mod tests {
             let unchanged = load(non_derived.path()).unwrap().unwrap();
             assert_eq!(unchanged.status, ExecutionControlStatus::Blocked);
             assert!(unchanged.recoveries.is_empty());
+        }
+
+        #[test]
+        fn reopen_refuses_legacy_requirement_gap_after_other_evidence_passes() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-legacy");
+            let dir = tempfile::tempdir().unwrap();
+            ensure_recovery_worktree(dir.path());
+            save(dir.path(), &active_record("sess-legacy")).unwrap();
+            settle(
+                dir.path(),
+                "sess-legacy",
+                ExecutionSettlement::Blocked {
+                    reason: "legacy blocker".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            let before = load(dir.path()).unwrap().unwrap();
+            fs::write(dir.path().join("ordinary.txt"), "changed surface\n").unwrap();
+
+            use crate::cli::verification_record as vr;
+            let commands = vec!["git --version".to_string()];
+            vr::save_plan(
+                dir.path(),
+                &vr::VerificationPlanRecord {
+                    session_id: "sess-legacy".to_string(),
+                    owner_number: Some(3248),
+                    commands: commands.clone(),
+                    derived: true,
+                    worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            vr::run_verification(dir.path(), "sess-legacy", &commands).unwrap();
+
+            let (code, output) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Reopen {
+                    reason: "resolved".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 2, "{output}");
+            assert!(output.contains("Legacy Requirement Gap"), "{output}");
+            assert!(output.contains("fresh linked-owner launch"), "{output}");
+            assert_eq!(load(dir.path()).unwrap().unwrap(), before);
+            let refusal = pr_handoff_refusal(dir.path(), true).unwrap();
+            assert!(refusal.contains("Legacy Requirement Gap"), "{refusal}");
+            assert!(refusal.contains("fresh linked-owner launch"), "{refusal}");
         }
 
         // FR-194 / AS-174: terminal completion is immutable and a different
@@ -2275,6 +2775,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2301,6 +2802,7 @@ mod tests {
                     commands: vec!["git --exec-path".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2390,9 +2892,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             plan.content_hash.clear();
-            fs::write(
-                crate::cli::verification_record::plan_state_path(hashless_plan.path()),
-                serde_json::to_vec_pretty(&plan).unwrap(),
+            crate::cli::trusted_store::write(
+                hashless_plan.path(),
+                "verification-plan.json",
+                &serde_json::to_vec_pretty(&plan).unwrap(),
             )
             .unwrap();
             let (code, out) = run_cmd(
@@ -2412,9 +2915,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             run.content_hash.clear();
-            fs::write(
-                crate::cli::verification_record::state_path(hashless_run.path()),
-                serde_json::to_vec_pretty(&run).unwrap(),
+            crate::cli::trusted_store::write(
+                hashless_run.path(),
+                "verification-run.json",
+                &serde_json::to_vec_pretty(&run).unwrap(),
             )
             .unwrap();
             let (code, out) = run_cmd(
@@ -2589,11 +3093,16 @@ mod tests {
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
             let dir = tempfile::tempdir().unwrap();
             settle_blocked(dir.path(), "sess-reopen");
-            let path = state_path(dir.path());
-            let tampered = fs::read_to_string(&path)
+            let tampered = crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+                .unwrap()
                 .unwrap()
                 .replace("verification dependency unresolved", "forged blocker");
-            fs::write(&path, tampered).unwrap();
+            crate::cli::trusted_store::write(
+                dir.path(),
+                "execution-control.json",
+                tampered.as_bytes(),
+            )
+            .unwrap();
 
             let refusal = pr_handoff_refusal(dir.path(), true).unwrap();
             assert!(
@@ -2611,6 +3120,10 @@ mod tests {
                 ExecutionCommand::Blocked {
                     reason: "still blocked".to_string(),
                     missing_verification: None,
+                    required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "git --version".to_string(),
+                    }]),
                 },
             )
             .unwrap();
@@ -2646,6 +3159,7 @@ mod tests {
                     commands: vec![failing_command.clone()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2674,6 +3188,7 @@ mod tests {
                     commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2721,11 +3236,16 @@ mod tests {
             settle_blocked(tampered.path(), "sess-reopen");
             let tampered_before = load(tampered.path()).unwrap().unwrap();
             save_covering_evidence(tampered.path(), "sess-reopen", true);
-            let run_path = vr::state_path(tampered.path());
-            let forged = fs::read_to_string(&run_path)
+            let forged = crate::cli::trusted_store::read(tampered.path(), "verification-run.json")
+                .unwrap()
                 .unwrap()
                 .replace("git --version", "git --exec-path");
-            fs::write(run_path, forged).unwrap();
+            crate::cli::trusted_store::write(
+                tampered.path(),
+                "verification-run.json",
+                forged.as_bytes(),
+            )
+            .unwrap();
             let (code, out) = run_cmd(
                 tampered.path(),
                 ExecutionCommand::Reopen {
@@ -2799,13 +3319,15 @@ mod tests {
             assert_eq!(after_first.recoveries.len(), 1);
             let first_recovery = after_first.recoveries[0].clone();
 
-            settle(
+            settle_blocked_with_required_commands(
                 dir.path(),
                 "sess-reopen",
-                ExecutionSettlement::Blocked {
-                    reason: "second genuine blocker".to_string(),
-                    missing_verification: Some("second matrix".to_string()),
-                },
+                "second genuine blocker".to_string(),
+                Some("second matrix".to_string()),
+                vec![RequiredRecoveryCommand {
+                    execution_root: RecoveryExecutionRoot::Worktree,
+                    command: "git --version".to_string(),
+                }],
             )
             .unwrap();
             save_covering_evidence(dir.path(), "sess-reopen", true);
@@ -2866,6 +3388,10 @@ mod tests {
                 ExecutionCommand::Blocked {
                     reason: "verification runner unavailable".to_string(),
                     missing_verification: None,
+                    required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "git --version".to_string(),
+                    }]),
                 },
             )
             .unwrap();
@@ -2962,6 +3488,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -3013,6 +3540,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -3059,6 +3587,10 @@ mod tests {
                 ExecutionCommand::Blocked {
                     reason: "verification cannot pass in this environment".to_string(),
                     missing_verification: Some("full cargo matrix".to_string()),
+                    required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "git --version".to_string(),
+                    }]),
                 },
             )
             .unwrap();
@@ -3083,6 +3615,10 @@ mod tests {
                 ExecutionCommand::Blocked {
                     reason: "   ".to_string(),
                     missing_verification: None,
+                    required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "git --version".to_string(),
+                    }]),
                 }
             )
             .is_err());
@@ -3092,6 +3628,10 @@ mod tests {
                 ExecutionCommand::Blocked {
                     reason: "environment blocker".to_string(),
                     missing_verification: None,
+                    required_recovery_commands: Some(vec![RequiredRecoveryCommand {
+                        execution_root: RecoveryExecutionRoot::Worktree,
+                        command: "git --version".to_string(),
+                    }]),
                 },
             )
             .unwrap();
@@ -3219,6 +3759,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -3289,6 +3830,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    no_change_evidence: None,
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },

@@ -294,6 +294,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
                 reason: required_string(params, "reason")?,
                 missing_verification: optional_string(params, "missing_verification")?,
+                required_recovery_commands: required_recovery_commands(params)?,
             })
         }
         "execution.adopt" => {
@@ -1067,6 +1068,37 @@ fn optional_string_vec(
     }
 }
 
+fn required_recovery_commands(
+    params: &Map<String, Value>,
+) -> Result<Option<Vec<crate::cli::execution_state::RequiredRecoveryCommand>>, CliParseError> {
+    const KEY: &str = "required_recovery_commands";
+    let Some(value) = params.get(KEY) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Value::Array(items) = value else {
+        return Err(CliParseError::InvalidJson(format!(
+            "{KEY} must be a non-empty array of command objects"
+        )));
+    };
+    if items.is_empty() {
+        return Err(CliParseError::InvalidJson(format!(
+            "{KEY} must not be empty when supplied"
+        )));
+    }
+    items
+        .iter()
+        .cloned()
+        .map(|item| {
+            serde_json::from_value(item)
+                .map_err(|err| CliParseError::InvalidJson(format!("invalid {KEY} entry: {err}")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 fn optional_json_array(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1544,12 +1576,49 @@ mod tests {
             ok("execution.complete", json!({})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
         ));
+        let blocked = ok(
+            "execution.blocked",
+            json!({
+                "reason": "E2E runner unavailable",
+                "missing_verification": "lifecycle E2E",
+                "required_recovery_commands": [
+                    {"execution_root": "worktree", "command": "cargo test -p gwt --lib"}
+                ]
+            }),
+        );
+        let CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
+            required_recovery_commands,
+            ..
+        }) = blocked
+        else {
+            panic!("expected execution.blocked");
+        };
+        let required_recovery_commands = required_recovery_commands.unwrap();
+        assert_eq!(required_recovery_commands.len(), 1);
+        assert_eq!(
+            required_recovery_commands[0].execution_root,
+            crate::cli::execution_state::RecoveryExecutionRoot::Worktree
+        );
+        assert_eq!(
+            required_recovery_commands[0].command,
+            "cargo test -p gwt --lib"
+        );
         assert!(matches!(
             ok(
                 "execution.blocked",
-                json!({"reason": "E2E runner unavailable", "missing_verification": "lifecycle E2E"})
+                json!({"reason": "audit-only terminal blocker"})
             ),
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked { .. })
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
+                required_recovery_commands: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            err(
+                "execution.blocked",
+                json!({"reason": "invalid recovery set", "required_recovery_commands": []})
+            ),
+            CliParseError::InvalidJson(_)
         ));
         assert!(matches!(
             err("execution.blocked", json!({})),

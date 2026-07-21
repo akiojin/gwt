@@ -85,7 +85,7 @@ pub fn handle_with_input(
         "Execution for {owner} is still active (execution control record, entrypoint {entrypoint}).\n\
          Continue the execution workflow until the owner's scope is implemented, verified, and handed off. Settle the execution before stopping:\n\
          - done and verified: run JSON operation `execution.complete` (a successful `build.complete` with `params.spec:<n>` also settles it for gwt-build-spec flows), or\n\
-         - blocked by the environment or missing verification: run JSON operation `execution.blocked` with a non-empty `params.reason` and optional `params.missing_verification`. Blocked is not done — report the blocker.\n\
+         - blocked by the environment or missing verification: run JSON operation `execution.blocked` with a non-empty `params.reason`, optional `params.missing_verification`, and—when same-session recovery is intended—a non-empty `params.required_recovery_commands` array of exact `{{\"execution_root\":\"worktree\",\"command\":\"<blocker verifier>\"}}` entries. Omitting that array records an audit-only Legacy Requirement Gap; same-session recovery is unavailable and requires a fresh linked-owner launch. Blocked is not done — report the blocker.\n\
          Do not settle as complete without the verification evidence the owner requires.",
         entrypoint = record.entrypoint,
     ))
@@ -131,6 +131,8 @@ mod tests {
         assert!(reason.contains("issue #42"), "{reason}");
         assert!(reason.contains("execution.complete"), "{reason}");
         assert!(reason.contains("execution.blocked"), "{reason}");
+        assert!(reason.contains("required_recovery_commands"), "{reason}");
+        assert!(reason.contains("execution_root"), "{reason}");
         assert!(reason.contains("build.complete"), "{reason}");
     }
 

@@ -868,6 +868,10 @@ mod tests {
                 "execution.reopen",
                 "temporary question",
                 "params.derive:true",
+                "required_recovery_commands",
+                "execution_root",
+                "Non-Vacuous No-Change Floor",
+                "Legacy Requirement Gap",
                 "cannot be repaired in the same execution lifetime",
                 "fresh linked-owner launch",
             ] {

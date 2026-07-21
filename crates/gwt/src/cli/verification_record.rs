@@ -132,6 +132,11 @@ pub struct VerificationPlanRecord {
     /// change requires deriving and registering a new plan.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub worktree_fingerprint: String,
+    /// Present only for the canonical bookkeeping-only recovery derivation.
+    /// The plan hash binds classifier/base/requirement provenance in addition
+    /// to the derivation-time worktree fingerprint above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_change_evidence: Option<crate::cli::verify_derivation::NoChangeDerivationEvidence>,
     pub created_at: DateTime<Utc>,
     /// Integrity hash (P9a convention).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -211,7 +216,7 @@ fn register_plan(
 ) -> io::Result<VerificationPlanRecord> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let fingerprint = worktree_fingerprint(worktree);
-        register_plan_unleased(worktree, session_id, commands, derived, fingerprint)
+        register_plan_unleased(worktree, session_id, commands, derived, fingerprint, None)
     })
 }
 
@@ -221,6 +226,7 @@ fn register_plan_unleased(
     commands: Vec<String>,
     derived: bool,
     worktree_fingerprint: String,
+    no_change_evidence: Option<crate::cli::verify_derivation::NoChangeDerivationEvidence>,
 ) -> io::Result<VerificationPlanRecord> {
     let owner_number = execution_state::load(worktree)?.map(|record| record.owner_number);
     let mut plan = VerificationPlanRecord {
@@ -229,6 +235,7 @@ fn register_plan_unleased(
         commands,
         derived,
         worktree_fingerprint,
+        no_change_evidence,
         created_at: Utc::now(),
         content_hash: String::new(),
     };
@@ -237,7 +244,7 @@ fn register_plan_unleased(
     Ok(plan)
 }
 
-fn derive_and_register_plan(
+pub(crate) fn derive_and_register_plan(
     worktree: &Path,
     session_id: &str,
 ) -> Result<
@@ -264,6 +271,7 @@ fn derive_and_register_plan(
             derived.commands.clone(),
             true,
             fingerprint_after,
+            derived.no_change_evidence.clone(),
         )?;
         Ok((derived, plan))
     })
@@ -505,6 +513,9 @@ pub fn run_verification(
             Ok((owner_number, plan, worktree_fingerprint(worktree)))
         })
         .map_err(|err| format!("failed to snapshot verification state: {err}"))?;
+    let plan_provenance_valid_before = plan_snapshot.as_ref().is_none_or(|plan| {
+        crate::cli::verify_derivation::validate_no_change_plan(worktree, plan).is_ok()
+    });
     let started_at = Utc::now();
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
@@ -527,7 +538,8 @@ pub fn run_verification(
                 if !plan.content_hash.is_empty()
                     && plan_integrity_ok(plan)
                     && plan.session_id == session_id
-                    && plan.owner_number == owner_number =>
+                    && plan.owner_number == owner_number
+                    && plan_provenance_valid_before =>
             {
                 let ran: std::collections::HashSet<&str> =
                     commands.iter().map(String::as_str).collect();
@@ -591,6 +603,14 @@ pub fn run_verification(
         if !same_plan {
             transcript.push_str(
                 "warning: the verification plan changed while verification ran — the record is invalidated; rerun `verify.run` against the current plan\n",
+            );
+            record.plan_covered = false;
+        }
+        if current_plan.as_ref().is_some_and(|plan| {
+            crate::cli::verify_derivation::validate_no_change_plan(worktree, plan).is_err()
+        }) {
+            transcript.push_str(
+                "warning: the no-change derivation provenance is stale or invalid — derive and run a fresh plan\n",
             );
             record.plan_covered = false;
         }
@@ -709,6 +729,9 @@ pub fn evaluate_evidence_snapshot(
             || record.verification_plan_hash != plan.content_hash
             || record.plan_derived != plan.derived
         {
+            return EvidenceStatus::PlanChanged;
+        }
+        if crate::cli::verify_derivation::validate_no_change_plan(worktree, plan).is_err() {
             return EvidenceStatus::PlanChanged;
         }
     }
@@ -847,6 +870,81 @@ mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
 
+    fn git(worktree: &Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn write(worktree: &Path, rel: &str, contents: &str) {
+        let path = worktree.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn blocked_recovery_fixture(
+        worktree: &Path,
+        session: &str,
+        required_commands: Vec<execution_state::RequiredRecoveryCommand>,
+        tracked_event: bool,
+    ) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        if tracked_event {
+            write(worktree, ".gwt/work/events.jsonl", "{\"event\":\"base\"}\n");
+            write(
+                worktree,
+                ".gwt/work/board-remote-roots.jsonl",
+                "{\"root\":\"base\"}\n",
+            );
+            git(
+                worktree,
+                &[
+                    "add",
+                    "-f",
+                    ".gwt/work/events.jsonl",
+                    ".gwt/work/board-remote-roots.jsonl",
+                ],
+            );
+            git(worktree, &["commit", "-qm", "chore(work): seed event"]);
+        }
+        git(
+            worktree,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(worktree, &["checkout", "-q", "-b", "work/recovery"]);
+        execution_state::materialize_at_launch(
+            worktree,
+            execution_state::ExecutionOwnerKind::Spec,
+            3248,
+            session,
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(execution_state::ExecutionCommand::Blocked {
+                reason: "external verifier unavailable".to_string(),
+                missing_verification: Some("required recovery verifier".to_string()),
+                required_recovery_commands: Some(required_commands),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+    }
+
+    fn worktree_command(command: &str) -> execution_state::RequiredRecoveryCommand {
+        execution_state::RequiredRecoveryCommand {
+            execution_root: execution_state::RecoveryExecutionRoot::Worktree,
+            command: command.to_string(),
+        }
+    }
+
     /// Register a plan for the commands, then run them (the standard
     /// T-130-lite flow used everywhere Fresh evidence is needed).
     fn plan_and_run(
@@ -866,12 +964,415 @@ mod tests {
                 commands: commands.to_vec(),
                 derived: false,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
         )
         .unwrap();
         run_verification(worktree, session, commands).unwrap()
+    }
+
+    // T-327 / AS-180: a clean blocked worktree derives a real floor first,
+    // then the immutable blocker requirements. The exact plan executes and
+    // remains covered; a run may add commands without changing membership.
+    #[test]
+    fn clean_recovery_derives_exact_non_vacuous_floor_and_requirements() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-recovery");
+        let dir = tempfile::tempdir().unwrap();
+        blocked_recovery_fixture(
+            dir.path(),
+            "sess-recovery",
+            vec![
+                worktree_command("git --version"),
+                worktree_command("git --version"),
+                worktree_command("git --exec-path"),
+            ],
+            false,
+        );
+
+        let (derived, plan) = derive_and_register_plan(dir.path(), "sess-recovery").unwrap();
+        let evidence = plan
+            .no_change_evidence
+            .as_ref()
+            .expect("clean recovery must bind no-change evidence");
+        assert_eq!(
+            evidence.classifier_version,
+            crate::cli::verify_derivation::BOOKKEEPING_CLASSIFIER_VERSION
+        );
+        assert!(!evidence.integration_base.is_empty());
+        assert_eq!(plan.commands, derived.commands);
+        assert_eq!(plan.commands.len(), 3, "floor + two exact requirements");
+        assert_eq!(
+            plan.commands[0],
+            crate::cli::verify_derivation::no_change_floor_command(&evidence.integration_base)
+        );
+        assert_eq!(&plan.commands[1..], ["git --version", "git --exec-path"]);
+
+        let mut ran = plan.commands.clone();
+        ran.push("git --html-path".to_string());
+        let (run, transcript) = run_verification(dir.path(), "sess-recovery", &ran).unwrap();
+        assert!(run.all_passed, "{transcript}");
+        assert!(run.plan_covered, "{transcript}");
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-recovery", Some(3248)),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    // FR-200 / AS-172: adding an ordinary source surface must not bypass the
+    // blocker-specific verifier. Canonical derivation appends every missing
+    // required command, and reopen validation rejects an omitted command.
+    #[test]
+    fn ordinary_recovery_matrix_still_requires_blocker_commands() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ordinary");
+        let dir = tempfile::tempdir().unwrap();
+        blocked_recovery_fixture(
+            dir.path(),
+            "sess-ordinary",
+            vec![worktree_command("git --version")],
+            false,
+        );
+        write(
+            dir.path(),
+            "crates/gwt-core/src/lib.rs",
+            "pub fn changed() {}\n",
+        );
+
+        let (_, plan) = derive_and_register_plan(dir.path(), "sess-ordinary").unwrap();
+        assert!(plan.no_change_evidence.is_none());
+        assert_eq!(
+            plan.commands.last().map(String::as_str),
+            Some("git --version")
+        );
+
+        let record = execution_state::load(dir.path()).unwrap().unwrap();
+        let mut omitted = plan;
+        omitted
+            .commands
+            .retain(|command| command != "git --version");
+        let error =
+            crate::cli::verify_derivation::validate_recovery_plan(dir.path(), &record, &omitted)
+                .unwrap_err();
+        assert!(error.contains("Required Recovery Command Set"), "{error}");
+    }
+
+    // T-328 / AS-180: a blocker-specific verifier is not replaceable by a
+    // passing generic command. The same immutable plan fails before the
+    // external state changes, passes afterward, and alone authorizes reopen.
+    #[test]
+    fn external_blocker_must_really_clear_before_same_session_reopen() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-external");
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("runner-ready");
+        let required = format!("test -f {}", sentinel.display());
+        blocked_recovery_fixture(
+            dir.path(),
+            "sess-external",
+            vec![worktree_command(&required)],
+            false,
+        );
+
+        let (_, exact_plan) = derive_and_register_plan(dir.path(), "sess-external").unwrap();
+        let blocked_before_substitution = execution_state::load(dir.path()).unwrap().unwrap();
+        let mut substituted = exact_plan.clone();
+        substituted.commands = vec![exact_plan.commands[0].clone(), "git --version".to_string()];
+        save_plan(dir.path(), &substituted).unwrap();
+        let (substituted_run, substituted_transcript) =
+            run_verification(dir.path(), "sess-external", &substituted.commands).unwrap();
+        assert!(substituted_run.all_passed, "{substituted_transcript}");
+        assert!(!substituted_run.plan_covered, "{substituted_transcript}");
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(execution_state::ExecutionCommand::Reopen {
+                reason: "always-green substitute passed".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 2, "{output}");
+        assert_eq!(
+            execution_state::load(dir.path()).unwrap().unwrap(),
+            blocked_before_substitution,
+            "substituted evidence must leave the Blocked record unchanged"
+        );
+
+        let (_, plan) = derive_and_register_plan(dir.path(), "sess-external").unwrap();
+        let (before, before_transcript) =
+            run_verification(dir.path(), "sess-external", &plan.commands).unwrap();
+        assert!(!before.all_passed, "{before_transcript}");
+        assert!(before.plan_covered, "{before_transcript}");
+
+        std::fs::write(&sentinel, "ready\n").unwrap();
+        let (after, after_transcript) =
+            run_verification(dir.path(), "sess-external", &plan.commands).unwrap();
+        assert!(after.all_passed, "{after_transcript}");
+        assert!(after.plan_covered, "{after_transcript}");
+
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(execution_state::ExecutionCommand::Reopen {
+                reason: "external runner became available".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let record = execution_state::load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            record.status,
+            execution_state::ExecutionControlStatus::Active
+        );
+        assert_eq!(record.recoveries.len(), 1);
+        assert_eq!(record.recoveries[0].verification_record_id, after.record_id);
+
+        // A later Active -> Blocked transition starts a new blocked lifetime:
+        // the prior lifetime stayed immutable, but the new blocker must bind
+        // its own verifier instead of being forced to reuse stale semantics.
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(execution_state::ExecutionCommand::Blocked {
+                reason: "a different verifier became unavailable".to_string(),
+                missing_verification: None,
+                required_recovery_commands: Some(vec![worktree_command("git --exec-path")]),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let record = execution_state::load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            record.status,
+            execution_state::ExecutionControlStatus::Blocked
+        );
+        assert_eq!(
+            record.required_recovery_commands,
+            vec![worktree_command("git --exec-path")]
+        );
+    }
+
+    // T-327: both working-tree and committed work journals are classified
+    // before filtering and still produce the same no-change floor.
+    #[test]
+    fn tracked_events_only_states_derive_no_change_evidence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-events");
+
+        for committed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            blocked_recovery_fixture(
+                dir.path(),
+                "sess-events",
+                vec![worktree_command("git --version")],
+                true,
+            );
+            write(
+                dir.path(),
+                ".gwt/work/events.jsonl",
+                "{\"event\":\"base\"}\n{\"event\":\"settled\"}\n",
+            );
+            write(
+                dir.path(),
+                ".gwt/work/board-remote-roots.jsonl",
+                "{\"root\":\"base\"}\n{\"root\":\"settled\"}\n",
+            );
+            if committed {
+                git(
+                    dir.path(),
+                    &[
+                        "add",
+                        "-f",
+                        ".gwt/work/events.jsonl",
+                        ".gwt/work/board-remote-roots.jsonl",
+                    ],
+                );
+                git(dir.path(), &["commit", "-qm", "chore(work): settle event"]);
+            }
+
+            let (_, plan) = derive_and_register_plan(dir.path(), "sess-events").unwrap();
+            assert!(plan.no_change_evidence.is_some(), "committed={committed}");
+            assert_eq!(plan.commands.len(), 2, "committed={committed}");
+
+            let (run, transcript) =
+                run_verification(dir.path(), "sess-events", &plan.commands).unwrap();
+            assert!(run.all_passed, "committed={committed}: {transcript}");
+            assert!(run.plan_covered, "committed={committed}: {transcript}");
+
+            let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+            let (code, output) = crate::cli::run_collect(
+                &mut env,
+                crate::cli::CliCommand::Execution(execution_state::ExecutionCommand::Reopen {
+                    reason: "work journals settled".to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(code, 0, "committed={committed}: {output}");
+            assert_eq!(
+                execution_state::load(dir.path()).unwrap().unwrap().status,
+                execution_state::ExecutionControlStatus::Active,
+                "committed={committed}"
+            );
+        }
+    }
+
+    // T-327 / AS-181: legacy terminal blocks cannot gain requirements at
+    // derive time; current no-change recovery must direct a fresh launch.
+    #[test]
+    fn legacy_requirement_gap_refuses_no_change_derivation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-legacy");
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(dir.path(), &["checkout", "-q", "-b", "work/legacy"]);
+        execution_state::materialize_at_launch(
+            dir.path(),
+            execution_state::ExecutionOwnerKind::Spec,
+            3248,
+            "sess-legacy",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::settle(
+            dir.path(),
+            "sess-legacy",
+            execution_state::ExecutionSettlement::Blocked {
+                reason: "legacy blocker".to_string(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+
+        let err = derive_and_register_plan(dir.path(), "sess-legacy").unwrap_err();
+        assert!(err.contains("Legacy Requirement Gap"), "{err}");
+        assert!(err.contains("fresh linked-owner launch"), "{err}");
+    }
+
+    // T-327 / FR-201: plan membership is an exact union. A plan-level
+    // superset is rejected even though verify.run itself may execute a
+    // superset, and integration-base drift invalidates provenance without a
+    // worktree-content change.
+    #[test]
+    fn no_change_plan_rejects_membership_substitution_and_base_drift() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-exact");
+        let dir = tempfile::tempdir().unwrap();
+        blocked_recovery_fixture(
+            dir.path(),
+            "sess-exact",
+            vec![worktree_command("git --version")],
+            false,
+        );
+        git(
+            dir.path(),
+            &["commit", "--allow-empty", "-qm", "chore: second base"],
+        );
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        let (_, plan) = derive_and_register_plan(dir.path(), "sess-exact").unwrap();
+        let record = execution_state::load(dir.path()).unwrap().unwrap();
+
+        let mut floor_only = plan.clone();
+        floor_only.commands.truncate(1);
+        let err =
+            crate::cli::verify_derivation::validate_recovery_plan(dir.path(), &record, &floor_only)
+                .unwrap_err();
+        assert!(err.contains("exact canonical"), "{err}");
+
+        let mut requirement_only = plan.clone();
+        requirement_only.commands.remove(0);
+        assert!(crate::cli::verify_derivation::validate_recovery_plan(
+            dir.path(),
+            &record,
+            &requirement_only,
+        )
+        .is_err());
+
+        let mut plan_superset = plan.clone();
+        plan_superset.commands.push("git --exec-path".to_string());
+        assert!(crate::cli::verify_derivation::validate_recovery_plan(
+            dir.path(),
+            &record,
+            &plan_superset,
+        )
+        .is_err());
+
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD^"],
+        );
+        let err = crate::cli::verify_derivation::validate_recovery_plan(dir.path(), &record, &plan)
+            .unwrap_err();
+        assert!(err.contains("integration-base identity changed"), "{err}");
+    }
+
+    #[test]
+    fn no_change_plan_rejects_post_derivation_non_bookkeeping_untracked_file() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-drift");
+        let dir = tempfile::tempdir().unwrap();
+        blocked_recovery_fixture(
+            dir.path(),
+            "sess-drift",
+            vec![worktree_command("git --version")],
+            false,
+        );
+        let (_, plan) = derive_and_register_plan(dir.path(), "sess-drift").unwrap();
+        write(dir.path(), "post-plan.rs", "fn drift() {}\n");
+
+        let (run, transcript) = run_verification(dir.path(), "sess-drift", &plan.commands).unwrap();
+        assert!(run.all_passed, "the floor itself may pass: {transcript}");
+        assert!(
+            !run.plan_covered,
+            "provenance drift must invalidate coverage"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-drift", Some(3248)),
+            EvidenceStatus::PlanNotCovered
+        );
     }
 
     fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
@@ -924,6 +1425,7 @@ mod tests {
             commands: vec!["cargo test -p gwt --lib".to_string()],
             derived: false,
             worktree_fingerprint: String::new(),
+            no_change_evidence: None,
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -998,6 +1500,7 @@ mod tests {
             commands: vec!["git --version".to_string()],
             derived: false,
             worktree_fingerprint: String::new(),
+            no_change_evidence: None,
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -1141,6 +1644,7 @@ mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: true,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1307,6 +1811,7 @@ mod tests {
                 commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1347,6 +1852,7 @@ mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1371,6 +1877,7 @@ mod tests {
                 commands: commands.clone(),
                 derived: true,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1396,6 +1903,7 @@ mod tests {
                 commands: vec!["git --exec-path".to_string()],
                 derived: true,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1423,6 +1931,7 @@ mod tests {
                 commands: commands.clone(),
                 derived: true,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
