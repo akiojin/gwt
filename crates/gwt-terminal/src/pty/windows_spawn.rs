@@ -9,7 +9,7 @@ use gwt_core::process::{
     ProcessResolveFailureKind, ResolvedProcessPlan, WINDOWS_CMD_WRAPPER_EXPRESSION_ENV,
 };
 
-use super::SpawnConfig;
+use super::{NormalizedWindowsHostShellCommand, SpawnConfig};
 
 pub(super) fn normalize_spawn_config(
     mut config: SpawnConfig,
@@ -47,16 +47,26 @@ pub(super) fn normalize_host_shell_command(
     args: &[String],
     env: &HashMap<String, String>,
     remove_env: &[String],
-) -> Result<(String, Vec<String>), ProcessResolveFailure> {
+) -> Result<NormalizedWindowsHostShellCommand, ProcessResolveFailure> {
     let command = normalize_command_token(command);
     let plan = resolve_process_plan_for_platform(
         process_plan_request(&command, args, None, env, remove_env),
         ProcessPlatform::Windows,
     )?;
-    Ok((
-        plan.program.to_string_lossy().into_owned(),
-        os_args_to_strings(&plan.args),
-    ))
+    Ok(NormalizedWindowsHostShellCommand {
+        command: plan.program.to_string_lossy().into_owned(),
+        args: os_args_to_strings(&plan.args),
+        env: plan
+            .env
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect(),
+    })
 }
 
 fn process_plan_request(
@@ -463,7 +473,43 @@ mod tests {
             pty.args,
             vec![wrapper.display().to_string(), "--version".to_string()]
         );
-        assert_eq!(host, (pty.command, pty.args));
+        assert_eq!(host.command, pty.command);
+        assert_eq!(host.args, pty.args);
+        assert_eq!(host.env, pty.env);
+    }
+
+    #[test]
+    fn host_shell_preserves_resolver_owned_cmd_expression_env() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = temp.path().join("Program Files").join("npm bin");
+        fs::create_dir_all(&bin).expect("create cmd shim directory");
+        let shim = bin.join("npx.cmd");
+        fs::write(&shim, "@echo off\r\n").expect("write cmd shim");
+        let comspec = temp.path().join("cmd.exe");
+        write_valid_pe(&comspec);
+        let env = HashMap::from([
+            ("PATH".to_string(), windows_path(&[&bin])),
+            ("PATHEXT".to_string(), ".CMD".to_string()),
+            ("ComSpec".to_string(), comspec.display().to_string()),
+        ]);
+
+        let host = normalize_host_shell_command("npx", &["a&b".to_string()], &env, &[])
+            .expect("normalize host-shell command");
+
+        assert_eq!(host.command, comspec.display().to_string());
+        assert_eq!(
+            host.args,
+            vec![
+                "/D".to_string(),
+                "/V:OFF".to_string(),
+                "/C".to_string(),
+                format!("%{WINDOWS_CMD_WRAPPER_EXPRESSION_ENV}%"),
+            ]
+        );
+        assert_eq!(
+            host.env.get(WINDOWS_CMD_WRAPPER_EXPRESSION_ENV),
+            Some(&format!("\"{}\" \"a&b\"", shim.display()))
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ impl AgentDetector {
     /// Detect a single agent by its command name.
     pub fn detect_by_command(command: &str) -> Option<DetectedAgent> {
         let descriptor = builtin_agent_descriptor_for_command(command);
-        let version = match descriptor {
+        let (version, resolved_path) = match descriptor {
             Some(descriptor) => Self::fetch_version(
                 command,
                 descriptor.version_flag,
@@ -63,11 +63,6 @@ impl AgentDetector {
             None => Self::fetch_version(command, "--version", &[]),
         }
         .ok()?;
-        let resolved_path = gwt_core::process::resolve_process_plan(
-            gwt_core::process::ProcessPlanRequest::new(command),
-        )
-        .ok()?
-        .program;
         let path = if cfg!(windows) {
             resolved_path
         } else {
@@ -85,11 +80,8 @@ impl AgentDetector {
     }
 
     fn detect_one(probe: &AgentProbe) -> Option<DetectedAgent> {
-        let resolved_path = gwt_core::process::resolve_process_plan(
-            gwt_core::process::ProcessPlanRequest::new(probe.command),
-        )
-        .ok()?
-        .program;
+        let (version, resolved_path) =
+            Self::fetch_version(probe.command, probe.version_flag, probe.prefix_args).ok()?;
         let path = if cfg!(windows) {
             resolved_path
         } else {
@@ -100,8 +92,6 @@ impl AgentDetector {
             path = %path.display(),
             "Found agent binary"
         );
-        let version =
-            Self::fetch_version(probe.command, probe.version_flag, probe.prefix_args).ok()?;
         Some(DetectedAgent {
             agent_id: probe.id.clone(),
             version,
@@ -113,7 +103,7 @@ impl AgentDetector {
         command: &str,
         version_flag: &str,
         prefix_args: &[&str],
-    ) -> Result<Option<String>, String> {
+    ) -> Result<(Option<String>, PathBuf), String> {
         let request = gwt_core::process::ProcessPlanRequest::new(command)
             .args(prefix_args)
             .arg(version_flag);
@@ -121,17 +111,19 @@ impl AgentDetector {
             debug!(command, error = %error, "Agent version probe resolution failed");
             error.to_string()
         })?;
+        let resolved_path = PathBuf::from(cmd.get_program());
         let output = cmd.output().map_err(|error| error.to_string())?;
-        if output.status.success() {
+        let version = if output.status.success() {
             let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if raw.is_empty() {
-                Ok(None)
+                None
             } else {
-                Ok(Some(raw))
+                Some(raw)
             }
         } else {
-            Ok(None)
-        }
+            None
+        };
+        Ok((version, resolved_path))
     }
 }
 
@@ -202,6 +194,15 @@ mod tests {
         if let Some(detected) = AgentDetector::detect_by_command("git") {
             assert_eq!(detected.agent_id, AgentId::Custom("git".to_string()));
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_by_command_preserves_the_absolute_which_path_off_windows() {
+        let expected = which::which("git").expect("git must be available to the test runner");
+        let detected = AgentDetector::detect_by_command("git").expect("git must be detected");
+
+        assert_eq!(detected.path, expected);
     }
 
     #[test]

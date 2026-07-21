@@ -157,7 +157,10 @@ pub fn resolve_process_plan_for_platform(
         args.extend(request.args.iter().cloned());
     }
     let mut env = request.env;
-    env.extend(target.env);
+    for (key, value) in target.env {
+        env.retain(|(candidate, _)| !os_keys_eq_ignore_ascii_case(candidate, &key));
+        env.push((key, value));
+    }
     Ok(ResolvedProcessPlan {
         program: target.program,
         args,
@@ -357,13 +360,34 @@ fn os_eq_ignore_ascii_case(value: &OsStr, expected: &str) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
+fn os_keys_eq_ignore_ascii_case(left: &OsStr, right: &OsStr) -> bool {
+    match (left.to_str(), right.to_str()) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => left == right,
+    }
+}
+
 fn split_windows_paths(raw: &OsStr) -> Vec<PathBuf> {
-    raw.to_string_lossy()
-        .split(';')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(PathBuf::from)
-        .collect()
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut push_current = |current: &mut String| {
+        let entry = current.trim();
+        if !entry.is_empty() {
+            paths.push(PathBuf::from(entry));
+        }
+        current.clear();
+    };
+
+    for character in raw.to_string_lossy().chars() {
+        match character {
+            '"' => quoted = !quoted,
+            ';' if !quoted => push_current(&mut current),
+            _ => current.push(character),
+        }
+    }
+    push_current(&mut current);
+    paths
 }
 
 fn windows_path_extensions(request: &ProcessPlanRequest) -> Vec<String> {

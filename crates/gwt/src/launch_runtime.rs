@@ -436,24 +436,24 @@ pub fn apply_windows_host_shell_wrapper(
         return Ok(());
     };
 
-    let (normalized_command, normalized_args) =
-        gwt_terminal::pty::normalize_command_for_windows_host_shell(
-            &config.command,
-            &config.args,
-            &config.env_vars,
-            &config.remove_env,
-        )?;
+    let normalized = gwt_terminal::pty::normalize_command_for_windows_host_shell(
+        &config.command,
+        &config.args,
+        &config.env_vars,
+        &config.remove_env,
+    )?;
+    config.env_vars = normalized.env;
     // Share the PTY path's pre-spawn backstop: if resolution still landed on a
     // non-PE placeholder stub (no cli-wrapper/native to redirect to), refuse here
     // rather than embed it into the shell expression and surface the Windows
     // 16-bit dialog from inside cmd/PowerShell.
-    if let Some(reason) = gwt_terminal::pty::reject_non_pe_executable(&normalized_command) {
+    if let Some(reason) = gwt_terminal::pty::reject_non_pe_executable(&normalized.command) {
         return Err(reason);
     }
     let (command, args) = wrap_windows_host_shell_command(
         shell,
-        &normalized_command,
-        &normalized_args,
+        &normalized.command,
+        &normalized.args,
         &mut config.env_vars,
     );
     config.command = command;
@@ -2041,6 +2041,43 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn command_prompt_agent_wrapper_preserves_inner_cmd_expression_env() {
+        let temp = tempdir().expect("tempdir");
+        let bin = temp.path().join("Program Files").join("npm bin");
+        fs::create_dir_all(&bin).expect("cmd shim directory");
+        let shim = bin.join("npx.cmd");
+        fs::write(&shim, "@echo off\r\n").expect("cmd shim");
+
+        let mut config = sample_versioned_launch_config();
+        config.command = "npx".to_string();
+        config.args = vec!["a&b".to_string()];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
+        config
+            .env_vars
+            .insert("PATH".to_string(), bin.display().to_string());
+        config
+            .env_vars
+            .insert("PATHEXT".to_string(), ".CMD".to_string());
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap command prompt");
+
+        let inner = config
+            .env_vars
+            .get(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV)
+            .expect("resolver-owned inner cmd expression");
+        assert_eq!(inner, &format!("\"{}\" \"a&b\"", shim.display()));
+        let outer = config
+            .env_vars
+            .get(WINDOWS_HOST_SHELL_EXPRESSION_ENV)
+            .expect("outer host-shell expression");
+        assert!(
+            outer.contains(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV),
+            "{outer}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn command_prompt_agent_wrapper_rejects_unredirectable_placeholder_stub() {
         // A placeholder bin with NO cli-wrapper.cjs and NO *-win32-x64 native:
         // resolution cannot redirect, so the host-shell wrapper must refuse with
@@ -2078,7 +2115,7 @@ mod tests {
             Err(e) => e,
         };
         assert!(
-            err.contains("not a valid Windows executable"),
+            err.contains("native-binary placeholder without a safe wrapper"),
             "expected actionable non-PE error, got: {err}"
         );
     }

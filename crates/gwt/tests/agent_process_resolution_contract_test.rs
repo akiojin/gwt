@@ -41,7 +41,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
-    let marker = format!("fn {name}");
+    let marker = format!("fn {name}(");
     let start = source
         .find(&marker)
         .unwrap_or_else(|| panic!("missing function {name}"));
@@ -63,6 +63,16 @@ fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
         }
     }
     panic!("unterminated body for {name}");
+}
+
+#[test]
+fn function_source_requires_an_exact_function_name() {
+    let source = "fn probe_helper() { bypass(); }\nfn probe() { resolved_command(); }";
+
+    assert_eq!(
+        function_source(source, "probe"),
+        "fn probe() { resolved_command(); }"
+    );
 }
 
 #[test]
@@ -96,6 +106,21 @@ fn agent_and_package_runner_probes_use_the_shared_resolved_process_adapter() {
 }
 
 #[test]
+fn agent_detector_reuses_the_version_probe_resolution() {
+    let path = repo_root().join("crates/gwt-agent/src/detect.rs");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+
+    for function_name in ["detect_by_command", "detect_one"] {
+        let function = function_source(&source, function_name);
+        assert!(
+            !function.contains("resolve_process_plan("),
+            "{function_name} must reuse the program resolved by fetch_version"
+        );
+    }
+}
+
+#[test]
 fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
     let workflow_path = repo_root().join(".github/workflows/test.yml");
     let workflow = fs::read_to_string(&workflow_path)
@@ -108,6 +133,7 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
         "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
         "cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary",
         "cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture",
+        "cargo test -p gwt --bin gwt command_prompt_agent_wrapper",
         "cargo test -p gwt-terminal --lib pty::windows_spawn::tests",
         "cargo test -p gwt --test agent_process_resolution_contract_test",
     ] {

@@ -135,6 +135,23 @@ fn windows_resolver_redirects_unicode_bun_placeholder_to_cli_wrapper() {
 }
 
 #[test]
+fn windows_resolver_finds_command_in_quoted_path_entry() {
+    let temp = tempfile::tempdir().expect("create fixture root");
+    let quoted_dir = temp.path().join("Program; Files").join("Bun");
+    let executable = quoted_dir.join("claude.exe");
+    write_valid_pe(&executable);
+
+    let request = ProcessPlanRequest::new("claude")
+        .inherit_env(false)
+        .env("PATH", format!(r#""{}";C:\missing"#, quoted_dir.display()))
+        .env("PATHEXT", ".EXE");
+    let plan = resolve_process_plan_for_platform(request, ProcessPlatform::Windows)
+        .expect("quoted Windows PATH entry must resolve");
+
+    assert_eq!(plan.program, executable);
+}
+
+#[test]
 fn windows_resolver_redirects_placeholder_to_optional_native() {
     let fixture = BunClaudeFixture::new();
     fs::remove_file(&fixture.wrapper).expect("remove wrapper");
@@ -261,7 +278,11 @@ fn windows_resolver_wraps_an_opaque_cmd_shim_with_validated_comspec() {
         .inherit_env(false)
         .env("PATH", windows_path(&[&bin]))
         .env("PATHEXT", ".CMD")
-        .env("ComSpec", &comspec);
+        .env("ComSpec", &comspec)
+        .env(
+            "gwt_windows_cmd_wrapper_expression",
+            "caller-controlled expression",
+        );
 
     let plan = resolve_process_plan_for_platform(request, ProcessPlatform::Windows)
         .expect("opaque cmd shims must become a spawn-ready ComSpec plan");
@@ -276,10 +297,22 @@ fn windows_resolver_wraps_an_opaque_cmd_shim_with_validated_comspec() {
             OsString::from("%GWT_WINDOWS_CMD_WRAPPER_EXPRESSION%"),
         ]
     );
-    assert!(plan.env.contains(&(
-        OsString::from("GWT_WINDOWS_CMD_WRAPPER_EXPRESSION"),
-        OsString::from(format!("\"{}\" \"first value\" \"a&b\"", shim.display())),
-    )));
+    let wrapper_env = plan
+        .env
+        .iter()
+        .filter(|(key, _)| {
+            key.to_string_lossy()
+                .eq_ignore_ascii_case("GWT_WINDOWS_CMD_WRAPPER_EXPRESSION")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(wrapper_env.len(), 1, "{wrapper_env:?}");
+    assert_eq!(
+        wrapper_env[0],
+        &(
+            OsString::from("GWT_WINDOWS_CMD_WRAPPER_EXPRESSION"),
+            OsString::from(format!("\"{}\" \"first value\" \"a&b\"", shim.display())),
+        )
+    );
 }
 
 #[test]

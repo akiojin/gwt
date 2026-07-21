@@ -352,12 +352,22 @@ pub fn reject_non_pe_executable(command: &str) -> Option<String> {
 /// Resolve a Windows command exactly as the PTY spawn path would, without
 /// applying PTY-specific shell wrappers. Host-shell launchers use this before
 /// embedding the command into `cmd.exe` / PowerShell scripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedWindowsHostShellCommand {
+    /// Resolved native program consumed by the outer host shell.
+    pub command: String,
+    /// Resolver-owned prefix followed by the caller arguments.
+    pub args: Vec<String>,
+    /// Effective caller environment plus resolver-owned wrapper values.
+    pub env: HashMap<String, String>,
+}
+
 pub fn normalize_command_for_windows_host_shell(
     command: &str,
     args: &[String],
     env: &HashMap<String, String>,
     remove_env: &[String],
-) -> Result<(String, Vec<String>), String> {
+) -> Result<NormalizedWindowsHostShellCommand, String> {
     #[cfg(windows)]
     {
         windows_spawn::normalize_host_shell_command(command, args, env, remove_env)
@@ -366,8 +376,12 @@ pub fn normalize_command_for_windows_host_shell(
 
     #[cfg(not(windows))]
     {
-        let _ = (env, remove_env);
-        Ok((command.to_string(), args.to_vec()))
+        let _ = remove_env;
+        Ok(NormalizedWindowsHostShellCommand {
+            command: command.to_string(),
+            args: args.to_vec(),
+            env: env.clone(),
+        })
     }
 }
 
