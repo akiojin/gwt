@@ -144,17 +144,27 @@ pub fn resolve_claude_creds(home: &Path) -> Option<ClaudeCreds> {
 
 /// Build the `User-Agent` from the installed `claude --version`
 /// (`"2.1.159 (Claude Code)"` → `claude-code/2.1.159`).
-pub fn claude_user_agent() -> String {
-    let version = crate::process::hidden_command("claude")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.split_whitespace().next().map(str::to_string));
-    match version {
-        Some(v) if !v.is_empty() => format!("claude-code/{v}"),
-        _ => "claude-code/unknown".to_string(),
+pub fn claude_user_agent() -> Result<String, String> {
+    let request = crate::process::ProcessPlanRequest::new("claude").arg("--version");
+    let mut command =
+        crate::process::resolved_command(request).map_err(|error| error.to_string())?;
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("claude --version exited with {}", output.status));
     }
+    let raw = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    claude_user_agent_from_version_text(&raw)
+}
+
+fn claude_user_agent_from_version_text(raw: &str) -> Result<String, String> {
+    let token = raw
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "claude --version returned empty output".to_string())?;
+    let token = token.strip_prefix('v').unwrap_or(token);
+    let version = semver::Version::parse(token)
+        .map_err(|_| format!("claude --version returned invalid semver: {token}"))?;
+    Ok(format!("claude-code/{version}"))
 }
 
 /// Map a non-success HTTP status to a degraded [`UsageState`].
@@ -388,6 +398,55 @@ pub fn read_claude_session(home: &Path, session_id: &str) -> Option<SessionUsage
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_agent_requires_a_valid_claude_semver() {
+        assert_eq!(
+            claude_user_agent_from_version_text("2.1.159 (Claude Code)"),
+            Ok("claude-code/2.1.159".to_string())
+        );
+        assert!(claude_user_agent_from_version_text("").is_err());
+        assert!(claude_user_agent_from_version_text(
+            "echo Native binary not installed. Run the package postinstall."
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_user_agent_probe_resolves_real_bun_global_placeholder_fixture() {
+        let _env = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = crate::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+            .expect("create real Windows Bun fixture");
+        let _path = crate::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = crate::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = crate::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+
+        assert_eq!(claude_user_agent(), Ok("claude-code/2.1.210".to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_user_agent_probe_rejects_real_bun_global_placeholder_fixture_without_safe_target() {
+        let _env = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = crate::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+            .expect("create real Windows Bun fixture");
+        fixture
+            .remove_safe_targets()
+            .expect("remove safe redirect targets");
+        let _path = crate::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = crate::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = crate::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+
+        let error = claude_user_agent().expect_err("unsafe placeholder must be rejected");
+        assert!(error.contains("native-binary placeholder"));
+    }
 
     // Verbatim shape returned by the live `/api/oauth/usage` endpoint
     // (2026-06-02): RFC3339 `+00:00` offsets, many null sub-windows, and a

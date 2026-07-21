@@ -5,11 +5,12 @@ cognitive-complexity-threshold = 25
 # `windows_subsystem = "windows"`, so any console subprocess spawned without
 # CREATE_NO_WINDOW flashes a console window on Windows. This suppression was
 # implemented twice and lost twice to refactors; this gate makes the third
-# loss a CI error. Spawn through `gwt_core::process::hidden_command` /
-# `configure_hidden_command` (std) or `configure_hidden_tokio_command`
-# (tokio). Intentional exceptions (build scripts, macOS-only paths, PTY)
-# carry an explicit `#[allow(clippy::disallowed_methods)]` with a reason.
+# loss a CI error. Spawn through `gwt_core::process::resolved_command` (std)
+# or `resolved_tokio_command` (tokio) so window hiding and executable safety
+# share one process plan. Canonical adapter internals and intentional
+# exceptions (build scripts, macOS-only paths, PTY) carry an explicit
+# `#[allow(clippy::disallowed_methods)]` with a reason.
 disallowed-methods = [
-    { path = "std::process::Command::new", reason = "spawns a visible console window on Windows GUI; use gwt_core::process::hidden_command (Issue #3293)" },
-    { path = "tokio::process::Command::new", reason = "spawns a visible console window on Windows GUI; apply gwt_core::process::configure_hidden_tokio_command (Issue #3293)" },
+    { path = "std::process::Command::new", reason = "bypasses Windows window hiding and safe executable resolution; use gwt_core::process::resolved_command (Issues #3290, #3293)" },
+    { path = "tokio::process::Command::new", reason = "bypasses Windows window hiding and safe executable resolution; use gwt_core::process::resolved_tokio_command (Issues #3290, #3293)" },
 ]

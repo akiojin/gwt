@@ -12,9 +12,10 @@
 //! - [`ExecutionMode::Capture`] — `Command::output()`: wait for the process
 //!   to exit and capture stdout/stderr (`kill -0` process probe).
 //!
-//! [`SystemProcessExecutor`] is the production implementation backed by
-//! `std::process::Command` (reusing [`crate::process::hidden_command`] for
-//! Windows window hiding when [`ProcessRequest::hide_window`] is set).
+//! [`SystemProcessExecutor`] is the production implementation backed by the
+//! shared [`crate::process::resolved_command`] adapter. Windows callers retain
+//! explicit control over window visibility through
+//! [`ProcessRequest::hide_window`].
 //! [`MockProcessExecutor`] records every request and returns scripted outputs
 //! so platform-specific flows can be unit-tested on any OS without spawning
 //! real processes (FR-003). The mock is a plain `pub` type (no `cfg(test)`
@@ -50,6 +51,10 @@ pub struct ProcessRequest {
     pub cwd: Option<PathBuf>,
     /// Additional environment variables (`Command::env`).
     pub env: Vec<(String, String)>,
+    /// Environment variables removed before spawning (`Command::env_remove`).
+    pub remove_env: Vec<OsString>,
+    /// Whether the child inherits the parent environment.
+    pub inherit_env: bool,
     /// Execution idiom; defaults to [`ExecutionMode::Status`].
     pub mode: ExecutionMode,
     /// Apply the Windows window-hiding creation flags
@@ -65,6 +70,8 @@ impl ProcessRequest {
             args: Vec::new(),
             cwd: None,
             env: Vec::new(),
+            remove_env: Vec::new(),
+            inherit_env: true,
             mode: ExecutionMode::Status,
             hide_window: false,
         }
@@ -100,6 +107,20 @@ impl ProcessRequest {
     #[must_use]
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Remove an inherited environment variable.
+    #[must_use]
+    pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Self {
+        self.remove_env.push(key.as_ref().to_os_string());
+        self
+    }
+
+    /// Configure whether the child inherits the parent environment.
+    #[must_use]
+    pub fn inherit_env(mut self, inherit: bool) -> Self {
+        self.inherit_env = inherit;
         self
     }
 
@@ -219,24 +240,34 @@ pub struct SystemProcessExecutor;
 
 impl ProcessExecutor for SystemProcessExecutor {
     fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, String> {
-        // The else branch is the sanctioned visible-window path: callers opt out
-        // of window hiding via ProcessRequest::hide_window, so it deliberately
-        // uses std::process::Command::new without CREATE_NO_WINDOW.
-        #[allow(clippy::disallowed_methods)]
-        let mut command = if request.hide_window {
-            crate::process::hidden_command(&request.program)
-        } else {
-            std::process::Command::new(&request.program)
-        };
-        command.args(&request.args);
-        if let Some(cwd) = &request.cwd {
-            command.current_dir(cwd);
-        }
-        for (key, value) in &request.env {
-            command.env(key, value);
-        }
+        let ProcessRequest {
+            program,
+            args,
+            cwd,
+            env,
+            remove_env,
+            inherit_env,
+            mode,
+            hide_window,
+        } = request;
 
-        match request.mode {
+        let mut plan = crate::process::ProcessPlanRequest::new(&program)
+            .args(&args)
+            .inherit_env(inherit_env);
+        if let Some(cwd) = cwd {
+            plan = plan.current_dir(cwd);
+        }
+        for (key, value) in env {
+            plan = plan.env(key, value);
+        }
+        for key in remove_env {
+            plan = plan.env_remove(key);
+        }
+        let mut command =
+            crate::process::resolved_command(plan).map_err(|error| error.to_string())?;
+        configure_request_visibility(&mut command, hide_window);
+
+        match mode {
             ExecutionMode::Spawn => {
                 command.spawn().map_err(|e| e.to_string())?;
                 Ok(ProcessOutput::spawned())
@@ -256,6 +287,21 @@ impl ProcessExecutor for SystemProcessExecutor {
         }
     }
 }
+
+#[cfg(windows)]
+fn configure_request_visibility(command: &mut std::process::Command, hide_window: bool) {
+    if !hide_window {
+        use std::os::windows::process::CommandExt;
+
+        // `resolved_command` is hidden by default. A caller that explicitly
+        // requests a visible process keeps that legacy contract while still
+        // consuming the shared, pre-spawn-safe process plan.
+        command.creation_flags(0);
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_request_visibility(_command: &mut std::process::Command, _hide_window: bool) {}
 
 fn output_from_status(
     status: std::process::ExitStatus,
@@ -505,6 +551,8 @@ mod tests {
             .args(["b"])
             .cwd("/tmp")
             .env("KEY", "VALUE")
+            .env_remove("REMOVED")
+            .inherit_env(false)
             .mode(ExecutionMode::Capture)
             .hide_window(true);
 
@@ -512,6 +560,8 @@ mod tests {
         assert_eq!(request.args_lossy(), vec!["a", "b"]);
         assert_eq!(request.cwd.as_deref(), Some(Path::new("/tmp")));
         assert_eq!(request.env, vec![("KEY".to_string(), "VALUE".to_string())]);
+        assert_eq!(request.remove_env, vec![OsString::from("REMOVED")]);
+        assert!(!request.inherit_env);
         assert_eq!(request.mode, ExecutionMode::Capture);
         assert!(request.hide_window);
     }
@@ -616,6 +666,46 @@ mod tests {
         assert!(
             stdout_has_dir,
             "cwd must reach the child; got {}",
+            output.stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_executor_can_clear_inherited_environment() {
+        let output = SystemProcessExecutor
+            .run(
+                ProcessRequest::new("/usr/bin/env")
+                    .env("GWT_PROCESS_KEEP", "preserved")
+                    .inherit_env(false)
+                    .mode(ExecutionMode::Capture),
+            )
+            .expect("run env with a cleared inherited environment");
+
+        assert!(output.success);
+        assert!(output.stdout.contains("GWT_PROCESS_KEEP=preserved"));
+        assert!(
+            !output.stdout.lines().any(|line| line.starts_with("PATH=")),
+            "inherited PATH must not leak into the child: {}",
+            output.stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_executor_can_remove_one_inherited_environment_variable() {
+        let output = SystemProcessExecutor
+            .run(
+                ProcessRequest::new("/usr/bin/env")
+                    .env_remove("PATH")
+                    .mode(ExecutionMode::Capture),
+            )
+            .expect("run env with PATH removed");
+
+        assert!(output.success);
+        assert!(
+            !output.stdout.lines().any(|line| line.starts_with("PATH=")),
+            "removed PATH must not reach the child: {}",
             output.stdout
         );
     }
