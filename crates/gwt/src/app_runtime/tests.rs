@@ -17130,6 +17130,43 @@ fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
 }
 
 #[test]
+fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    fs::write(&prefs_path, b"{").expect("seed malformed prefs");
+    let mut current = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            merged_issues: vec![88],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+
+    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut current, |monitor| {
+        monitor.set_max_active_agents(4)
+    });
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("recovered GUI prefs");
+    assert!(persisted.enabled);
+    assert_eq!(persisted.max_active_agents, 4);
+    assert_eq!(persisted.merged_issues, vec![88]);
+    let quarantines = fs::read_dir(temp.path())
+        .expect("read prefs directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("issue-monitor.json.corrupt-")
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(quarantines.len(), 1);
+    assert_eq!(fs::read(&quarantines[0]).expect("read quarantine"), b"{");
+}
+
+#[test]
 fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let temp = tempdir().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");

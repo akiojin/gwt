@@ -241,7 +241,7 @@ fn local_branches_resolving_to_commits(
         .output()
         .map_err(|error| format!("git for-each-ref {pattern}: {error}"))?;
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() || !stderr.is_empty() {
+    if !output.status.success() {
         return Err(format!(
             "git for-each-ref {pattern} in {} failed with status {}: {}",
             repo_path.display(),
@@ -432,9 +432,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        refallback_start_work_base_branch_with, remote_tracking_ref,
-        reserve_start_work_branch_name_with, reserve_start_work_branch_name_with_reservations,
-        resolve_start_work_base_branch_with, StartWorkError, START_WORK_BASE_BRANCH_CANDIDATES,
+        local_branches_resolving_to_commits, refallback_start_work_base_branch_with,
+        remote_tracking_ref, reserve_start_work_branch_name_with,
+        reserve_start_work_branch_name_with_reservations, resolve_start_work_base_branch_with,
+        StartWorkError, START_WORK_BASE_BRANCH_CANDIDATES,
     };
 
     fn ok_existing(existing: &HashSet<String>) -> HashSet<String> {
@@ -474,6 +475,20 @@ mod tests {
         assert_eq!(
             crate::start_work::resolve_launch_agent_base_branch(&repo),
             Ok("feature/current".to_string())
+        );
+    }
+
+    #[test]
+    fn local_branch_lookup_ignores_nonfatal_broken_ref_warning() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_committed_repo(&repo, "main");
+        fs::write(repo.join(".git/refs/heads/broken"), b"broken\n")
+            .expect("write broken ref fixture");
+
+        assert_eq!(
+            local_branches_resolving_to_commits(&repo, "refs/heads/"),
+            Ok(vec!["main".to_string()])
         );
     }
 

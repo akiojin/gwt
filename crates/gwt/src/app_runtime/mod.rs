@@ -635,16 +635,20 @@ fn load_mutate_and_persist_issue_monitor_state<T>(
     let mut mutation = Some(mutation);
     let mut monitor = None;
     let mut result = None;
-    let transaction = gwt::mutate_issue_monitor_prefs(prefs_path, |prefs| {
-        let mut latest =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
-        let apply = mutation
-            .take()
-            .expect("issue monitor prefs mutation runs once");
-        result = Some(apply(&mut latest));
-        *prefs = latest.prefs();
-        monitor = Some(latest);
-    });
+    let recovery_baseline = gwt::IssueMonitorPrefs::default();
+    let transaction =
+        gwt::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |prefs| {
+            let mut latest = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let apply = mutation
+                .take()
+                .expect("issue monitor prefs mutation runs once");
+            result = Some(apply(&mut latest));
+            *prefs = latest.prefs();
+            monitor = Some(latest);
+        });
     if let Err(error) = transaction {
         tracing::warn!(
             error = %error,
@@ -670,14 +674,16 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
 ) -> T {
     let mut mutation = Some(mutation);
     let mut result = None;
-    let transaction = gwt::mutate_issue_monitor_prefs(prefs_path, |disk| {
-        monitor.rebase_gui_observer_prefs(disk);
-        let apply = mutation
-            .take()
-            .expect("issue monitor prefs mutation runs once");
-        result = Some(apply(monitor));
-        *disk = monitor.prefs();
-    });
+    let recovery_baseline = monitor.prefs();
+    let transaction =
+        gwt::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+            monitor.rebase_gui_observer_prefs(disk);
+            let apply = mutation
+                .take()
+                .expect("issue monitor prefs mutation runs once");
+            result = Some(apply(monitor));
+            *disk = monitor.prefs();
+        });
     if let Err(error) = transaction {
         tracing::warn!(
             error = %error,

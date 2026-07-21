@@ -402,12 +402,14 @@ fn apply_issue_monitor_control_with_disk_migration(
     control: IssueMonitorControl,
 ) -> bool {
     let mut applied = None;
-    let transaction = crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
-        monitor.rebase_daemon_driver_prefs(disk);
-        let should_scan = apply_issue_monitor_control(monitor, control.clone());
-        applied = Some(should_scan);
-        *disk = monitor.prefs();
-    });
+    let recovery_baseline = monitor.prefs();
+    let transaction =
+        crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+            monitor.rebase_daemon_driver_prefs(disk);
+            let should_scan = apply_issue_monitor_control(monitor, control.clone());
+            applied = Some(should_scan);
+            *disk = monitor.prefs();
+        });
     if let Err(error) = transaction {
         tracing::warn!(
             error = %error,
@@ -586,10 +588,13 @@ async fn scan_and_persist_issue_monitor(
 }
 
 fn persist_daemon_issue_monitor_state(prefs_path: &Path, monitor: &mut crate::IssueMonitorState) {
-    if let Err(error) = crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
-        monitor.rebase_daemon_driver_prefs(disk);
-        *disk = monitor.prefs();
-    }) {
+    let recovery_baseline = monitor.prefs();
+    if let Err(error) =
+        crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+            monitor.rebase_daemon_driver_prefs(disk);
+            *disk = monitor.prefs();
+        })
+    {
         tracing::warn!(
             error = %error,
             "issue monitor daemon prefs transaction failed"
@@ -2312,6 +2317,151 @@ exit 0
             persisted.failed_issues.is_empty(),
             "a stale daemon cannot restore the failure removed by the GUI"
         );
+    }
+
+    #[test]
+    fn daemon_persist_adopts_newer_marker_without_dropping_local_needs_human_failure() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed newer disk migration");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            legacy_failed_prefs(temp.path()),
+        );
+        daemon.escalate_to_needs_human(100, "local terminal failure");
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(
+            persisted
+                .failed_issues
+                .iter()
+                .all(|failed| failed.issue_number != 43),
+            "the newer marker still removes the legacy failure"
+        );
+        assert_eq!(
+            persisted
+                .failed_issues
+                .iter()
+                .find(|failed| failed.issue_number == 100)
+                .map(|failed| failed.message.as_str()),
+            Some("local terminal failure")
+        );
+        assert!(persisted.autonomous_records.iter().any(|record| {
+            record.issue_number == 100 && record.phase == crate::AutonomousPhase::NeedsHuman
+        }));
+
+        let mut restored =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        crate::scan_issue_monitor_candidates(
+            &mut restored,
+            &[sample_issue_monitor_issue(100)],
+            "2026-07-21T00:01:00Z",
+        );
+        assert_eq!(
+            restored.inbox_item(100).map(|item| item.state),
+            Some(crate::MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn daemon_persist_adopts_newer_marker_without_dropping_local_failed_window() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed newer disk migration");
+        let mut local = legacy_failed_prefs(temp.path());
+        local.failed_issues.push(crate::IssueMonitorFailedIssue {
+            issue_number: 100,
+            message: "local windowed failure".to_string(),
+            window_id: Some("window-100".to_string()),
+        });
+        let mut daemon =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), local);
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(
+            persisted
+                .failed_issues
+                .iter()
+                .all(|failed| failed.issue_number != 43),
+            "the newer marker still removes the legacy failure"
+        );
+        assert!(persisted.failed_issues.iter().any(|failed| {
+            failed.issue_number == 100
+                && failed.message == "local windowed failure"
+                && failed.window_id.as_deref() == Some("window-100")
+        }));
+    }
+
+    #[test]
+    fn daemon_persist_recovers_malformed_prefs_from_in_memory_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        fs::write(&prefs_path, b"{").expect("seed malformed prefs");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        daemon.record_merged(42);
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("recovered prefs");
+        assert!(persisted.enabled);
+        assert_eq!(persisted.merged_issues, vec![42]);
+        let quarantines = fs::read_dir(temp.path())
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("issue-monitor.json.corrupt-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(quarantines.len(), 1, "malformed source is quarantined once");
+        assert_eq!(
+            fs::read(&quarantines[0]).expect("read quarantine"),
+            b"{",
+            "quarantine preserves the malformed source bytes"
+        );
+    }
+
+    #[test]
+    fn daemon_control_recovers_malformed_prefs_before_persisting_mutation() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        fs::write(&prefs_path, b"{").expect("seed malformed prefs");
+        let mut daemon = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut daemon,
+            IssueMonitorControl::Enabled(true),
+        ));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("recovered prefs");
+        assert!(persisted.enabled);
+        let quarantine_count = fs::read_dir(temp.path())
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("issue-monitor.json.corrupt-")
+            })
+            .count();
+        assert_eq!(quarantine_count, 1, "malformed source is quarantined once");
     }
 
     #[test]

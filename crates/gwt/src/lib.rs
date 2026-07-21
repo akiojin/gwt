@@ -92,7 +92,7 @@ pub use issue_monitor::{
     is_auto_improve_candidate, is_legacy_git_launch_failure_for_project, issue_monitor_launch_plan,
     issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
     issue_monitor_prefs_path_for_repo_path, load_issue_monitor_prefs, mutate_issue_monitor_prefs,
-    save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    mutate_issue_monitor_prefs_recovering, save_issue_monitor_prefs, scan_issue_monitor_candidates,
     scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
     AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorCandidateSource,
     IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue,

@@ -907,6 +907,22 @@ fn unique_prefs_tmp_path(path: &Path) -> std::path::PathBuf {
     ))
 }
 
+fn unique_corrupt_prefs_path(path: &Path) -> std::path::PathBuf {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("issue-monitor.json");
+    parent.join(format!(
+        "{file_name}.corrupt-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -954,8 +970,10 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
 
 /// Replace a complete prefs snapshot while holding the stable writer lock.
 /// Production read-modify-write callers should use
-/// [`mutate_issue_monitor_prefs`] so their mutation is based on the latest
-/// committed snapshot under the same lock.
+/// [`mutate_issue_monitor_prefs_recovering`] so their mutation is based on the
+/// latest committed snapshot under the same lock and malformed JSON cannot
+/// permanently block future writes. [`mutate_issue_monitor_prefs`] remains
+/// available for deliberately fail-closed callers and tests.
 pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     with_issue_monitor_prefs_lock(path, || save_issue_monitor_prefs_unlocked(path, prefs))
 }
@@ -972,6 +990,42 @@ pub fn mutate_issue_monitor_prefs<T>(
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let result = mutation(&mut prefs);
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, result))
+    })
+}
+
+/// Serialize one prefs transaction while recovering a malformed JSON snapshot.
+///
+/// Only parse failures are recoverable. The malformed bytes are copied to a
+/// unique sibling quarantine file while the stable writer lock is held, then
+/// `recovery_baseline` is mutated and atomically committed. Other I/O errors
+/// remain fail-closed. Callers should pass their latest valid in-memory prefs;
+/// callers without one may explicitly pass [`IssueMonitorPrefs::default`].
+pub fn mutate_issue_monitor_prefs_recovering<T>(
+    path: &Path,
+    recovery_baseline: &IssueMonitorPrefs,
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock(path, || {
+        let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
+            Ok(prefs) => (prefs, None),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                let quarantine = unique_corrupt_prefs_path(path);
+                fs::copy(path, &quarantine)?;
+                (recovery_baseline.clone(), Some((quarantine, error)))
+            }
+            Err(error) => return Err(error),
+        };
+        let result = mutation(&mut prefs);
+        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        if let Some((quarantine, error)) = recovery {
+            tracing::warn!(
+                path = %path.display(),
+                quarantine = %quarantine.display(),
+                error = %error,
+                "recovered malformed issue monitor prefs"
+            );
+        }
         Ok((prefs, result))
     })
 }
@@ -1589,6 +1643,36 @@ impl IssueMonitorState {
                     && record.phase == AutonomousPhase::NeedsHuman
             }) {
                 disk_needs_human.insert(failed.issue_number, record.clone());
+            }
+        }
+        // A newer marker proves only that the exact legacy launch-failure
+        // migration ran. Failures carrying a real window or a terminal
+        // NeedsHuman state are explicitly outside that migration's target set,
+        // so they may have been created locally after the newer disk snapshot.
+        // Preserve those local companions without reviving an unqualified
+        // legacy failure that the other process intentionally removed.
+        for (issue_number, message) in &old_failures {
+            let local_needs_human = self
+                .autonomous_records
+                .get(issue_number)
+                .filter(|record| record.phase == AutonomousPhase::NeedsHuman);
+            let inbox_needs_human = self
+                .inbox_item(*issue_number)
+                .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman);
+            let failed_window = self.failed_windows.get(issue_number);
+            if (local_needs_human.is_none() && !inbox_needs_human && failed_window.is_none())
+                || disk_failures.contains_key(issue_number)
+                || self.launched_windows.contains_key(issue_number)
+                || self.merged_issues.contains(issue_number)
+            {
+                continue;
+            }
+            disk_failures.insert(*issue_number, message.clone());
+            if let Some(window_id) = failed_window {
+                disk_windows.insert(*issue_number, window_id.clone());
+            }
+            if let Some(record) = local_needs_human {
+                disk_needs_human.insert(*issue_number, record.clone());
             }
         }
         let removed = old_failures
