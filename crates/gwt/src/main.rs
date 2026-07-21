@@ -5301,19 +5301,29 @@ mod tests {
                 "%GWT_WINDOWS_HOST_SHELL_EXPRESSION%".to_string()
             ]
         );
-        assert_eq!(
-            config
-                .env_vars
-                .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
-                .map(|value| value.contains(
-                    r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space""#
-                )),
-            Some(true)
-        );
         let expression = config
             .env_vars
             .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
             .expect("cmd wrapper expression");
+        #[cfg(not(windows))]
+        assert!(expression.contains(
+            r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space""#
+        ));
+        #[cfg(windows)]
+        {
+            let inner = config
+                .env_vars
+                .get(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV)
+                .expect("resolver-owned inner cmd expression");
+            assert_eq!(
+                inner,
+                r#""C:\Program Files\nodejs\npx.cmd" "--yes" "@anthropic-ai/claude-code@latest" "value with space""#
+            );
+            assert!(
+                expression.contains(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV),
+                "{expression}"
+            );
+        }
         assert!(expression.contains("[gwt] launching agent"));
         assert!(expression.contains("[gwt] command:"));
         assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));

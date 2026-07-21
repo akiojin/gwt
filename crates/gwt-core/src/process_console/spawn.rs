@@ -47,6 +47,10 @@ pub struct SpawnOptions {
     pub current_dir: Option<PathBuf>,
     /// Extra env entries to set / override.
     pub envs: Vec<(OsString, OsString)>,
+    /// Environment variables removed before spawning.
+    pub remove_env: Vec<OsString>,
+    /// Whether the child inherits the parent environment.
+    pub inherit_env: bool,
     /// Whether to pipe and forward stdout. Disable for `Stdio::null()`
     /// callers that only need lifecycle summary.
     pub capture_stdout: bool,
@@ -62,6 +66,8 @@ impl SpawnOptions {
             label: label.into(),
             current_dir: None,
             envs: Vec::new(),
+            remove_env: Vec::new(),
+            inherit_env: true,
             capture_stdout: true,
             capture_stderr: true,
             forward_output: true,
@@ -75,6 +81,16 @@ impl SpawnOptions {
 
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.envs.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        self.remove_env.push(key.into());
+        self
+    }
+
+    pub fn inherit_env(mut self, inherit: bool) -> Self {
+        self.inherit_env = inherit;
         self
     }
 
@@ -206,18 +222,26 @@ async fn spawn_logged_inner(
         options.current_dir.as_deref(),
     );
 
-    // Sanctioned tokio construction point: immediately wrapped by
-    // configure_hidden_tokio_command to apply CREATE_NO_WINDOW on Windows.
-    #[allow(clippy::disallowed_methods)]
-    let mut command = TokioCommand::new(&program);
-    crate::process::configure_hidden_tokio_command(&mut command);
-    command.args(args.iter().map(|a| a.as_ref()));
+    let mut request = crate::process::ProcessPlanRequest::new(&program)
+        .args(args.iter().map(|arg| arg.as_ref()))
+        .inherit_env(options.inherit_env);
     if let Some(dir) = &options.current_dir {
-        command.current_dir(dir);
+        request = request.current_dir(dir);
     }
     for (key, value) in &options.envs {
-        command.env(key, value);
+        request = request.env(key, value);
     }
+    for key in &options.remove_env {
+        request = request.env_remove(key);
+    }
+    let mut command = match crate::process::resolved_tokio_command(request) {
+        Ok(command) => command,
+        Err(error) => {
+            let error = process_resolution_io_error(error);
+            finish_failed_launch(hub, kind, spawn_id, &options.label, started_at, &error);
+            return Err(error);
+        }
+    };
     command.stdin(Stdio::null());
     command.stdout(if options.capture_stdout {
         Stdio::piped()
@@ -234,7 +258,13 @@ async fn spawn_logged_inner(
         configure_deadline_command(&mut command);
     }
 
-    let mut child = command.spawn()?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            finish_failed_launch(hub, kind, spawn_id, &options.label, started_at, &error);
+            return Err(error);
+        }
+    };
     let mut process_tree = ChildProcessTree::new(deadline.and_then(|_| child.id()));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -322,6 +352,7 @@ async fn spawn_logged_inner(
                     "process cleanup exceeded its grace period"
                 );
             }
+            finish_failed_launch(hub, kind, spawn_id, &options.label, started_at, &error);
             return Err(error);
         }
     };
@@ -353,6 +384,53 @@ async fn spawn_logged_inner(
         stdout_lines,
         stderr_lines,
     })
+}
+
+fn finish_failed_launch(
+    hub: &ProcessConsoleHub,
+    kind: ProcessKind,
+    spawn_id: u64,
+    label: &str,
+    started_at: Instant,
+    error: &std::io::Error,
+) {
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    hub.push(ProcessLine::new(
+        kind,
+        spawn_id,
+        ProcessStream::Stderr,
+        redact::redact_line(&format!("process launch failed: {error}")),
+    ));
+    hub.push(ProcessLine::new(
+        kind,
+        spawn_id,
+        ProcessStream::Stdout,
+        format!("→ exit=? ({duration_ms}ms)"),
+    ));
+    tracing::info!(
+        target: SUMMARY_TARGET,
+        kind = kind.as_str(),
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "end",
+        exit_code = Option::<i64>::None,
+        duration_ms = duration_ms,
+        stdout_lines = 0_u64,
+        stderr_lines = 1_u64,
+        success = false,
+        error = %error,
+        "process end",
+    );
+}
+
+fn process_resolution_io_error(error: crate::process::ProcessResolveFailure) -> std::io::Error {
+    let kind = match error.kind {
+        crate::process::ProcessResolveFailureKind::NotFound => std::io::ErrorKind::NotFound,
+        crate::process::ProcessResolveFailureKind::UnsafeExecutable => {
+            std::io::ErrorKind::PermissionDenied
+        }
+    };
+    std::io::Error::new(kind, error)
 }
 
 fn deadline_error() -> std::io::Error {
@@ -530,6 +608,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::time::Duration;
 
     use super::*;
@@ -691,6 +770,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_logged_closes_the_console_lifecycle_when_launch_fails() {
+        let hub = ProcessConsoleHub::new();
+        let error = spawn_logged(
+            &hub,
+            ProcessKind::AgentBootstrap,
+            "this-binary-does-not-exist-gwt-process-console-test",
+            &[] as &[&str],
+            SpawnOptions::new("missing executable"),
+        )
+        .await
+        .expect_err("missing executable must fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let lines = hub.snapshot_kind(ProcessKind::AgentBootstrap);
+        assert_eq!(lines.len(), 2, "diagnostic plus footer must be emitted");
+        assert_eq!(lines[0].stream, ProcessStream::Stderr);
+        assert!(lines[0].message.contains("process launch failed"));
+        assert_eq!(lines[1].stream, ProcessStream::Stdout);
+        assert!(lines[1].message.starts_with("→ exit=?"));
+    }
+
+    #[tokio::test]
     async fn spawn_logged_redacts_secrets_in_hub_but_keeps_raw_for_caller() {
         let hub = ProcessConsoleHub::new();
         let token = "ghp_abcdef0123456789ABCDEF";
@@ -745,6 +846,66 @@ mod tests {
         assert_eq!(out.stdout_lines, 0);
         let lines = hub.snapshot_kind(ProcessKind::Git);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn spawn_options_capture_environment_contract() {
+        let options = SpawnOptions::new("env contract")
+            .env("KEEP", "preserved")
+            .env_remove("DROP")
+            .inherit_env(false);
+
+        assert_eq!(
+            options.envs,
+            vec![(OsString::from("KEEP"), OsString::from("preserved"))]
+        );
+        assert_eq!(options.remove_env, vec![OsString::from("DROP")]);
+        assert!(!options.inherit_env);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_logged_can_clear_inherited_environment() {
+        let output = spawn_logged(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Git,
+            "/usr/bin/env",
+            &[] as &[&str],
+            SpawnOptions::new("cleared environment")
+                .env("GWT_PROCESS_KEEP", "preserved")
+                .inherit_env(false),
+        )
+        .await
+        .expect("spawn env with a cleared inherited environment");
+
+        assert!(output.success());
+        assert!(output.stdout.contains("GWT_PROCESS_KEEP=preserved"));
+        assert!(
+            !output.stdout.lines().any(|line| line.starts_with("PATH=")),
+            "inherited PATH must not leak into the child: {}",
+            output.stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_logged_can_remove_one_inherited_environment_variable() {
+        let output = spawn_logged(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Git,
+            "/usr/bin/env",
+            &[] as &[&str],
+            SpawnOptions::new("removed environment").env_remove("PATH"),
+        )
+        .await
+        .expect("spawn env with PATH removed");
+
+        assert!(output.success());
+        assert!(
+            !output.stdout.lines().any(|line| line.starts_with("PATH=")),
+            "removed PATH must not reach the child: {}",
+            output.stdout
+        );
     }
 
     #[tokio::test]

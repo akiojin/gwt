@@ -101,10 +101,18 @@ fn detect_claude_workflows_enabled() -> bool {
 /// spawns a subprocess): the Launch Wizard captures this once at open time,
 /// not on every render.
 pub fn detect_claude_version_raw() -> Option<String> {
-    let output = gwt_core::process::hidden_command("claude")
-        .arg("--version")
-        .output()
-        .ok()?;
+    let request = gwt_core::process::ProcessPlanRequest::new("claude").arg("--version");
+    let output = match gwt_core::process::resolved_command(request) {
+        Ok(mut command) => command.output().ok()?,
+        Err(error) => {
+            tracing::warn!(
+                command = "claude",
+                error = %error,
+                "Claude capability probe could not resolve a safe executable"
+            );
+            return None;
+        }
+    };
     if !output.status.success() {
         return None;
     }
@@ -247,6 +255,46 @@ mod tests {
     fn rejects_garbage_version() {
         assert_eq!(parse_claude_semver("unknown"), None);
         assert_eq!(parse_claude_semver(""), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_version_probe_resolves_real_bun_global_placeholder_fixture() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+                .expect("create real Windows Bun fixture");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+
+        assert_eq!(
+            detect_claude_version_raw().as_deref(),
+            Some("2.1.210 (Claude Code)")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_version_probe_rejects_real_bun_global_placeholder_fixture_without_safe_target() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+                .expect("create real Windows Bun fixture");
+        fixture
+            .remove_safe_targets()
+            .expect("remove safe redirect targets");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+
+        assert_eq!(detect_claude_version_raw(), None);
     }
 
     #[test]

@@ -53,15 +53,20 @@ impl AgentDetector {
 
     /// Detect a single agent by its command name.
     pub fn detect_by_command(command: &str) -> Option<DetectedAgent> {
-        let path = which::which(command).ok()?;
         let descriptor = builtin_agent_descriptor_for_command(command);
-        let version = match descriptor {
+        let (version, resolved_path) = match descriptor {
             Some(descriptor) => Self::fetch_version(
                 command,
                 descriptor.version_flag,
                 descriptor.version_prefix_args,
             ),
             None => Self::fetch_version(command, "--version", &[]),
+        }
+        .ok()?;
+        let path = if cfg!(windows) {
+            resolved_path
+        } else {
+            which::which(command).ok()?
         };
         // Map known commands to AgentIds, fall back to Custom
         let agent_id = descriptor
@@ -75,13 +80,18 @@ impl AgentDetector {
     }
 
     fn detect_one(probe: &AgentProbe) -> Option<DetectedAgent> {
-        let path = which::which(probe.command).ok()?;
+        let (version, resolved_path) =
+            Self::fetch_version(probe.command, probe.version_flag, probe.prefix_args).ok()?;
+        let path = if cfg!(windows) {
+            resolved_path
+        } else {
+            which::which(probe.command).ok()?
+        };
         debug!(
             agent = %probe.id,
             path = %path.display(),
             "Found agent binary"
         );
-        let version = Self::fetch_version(probe.command, probe.version_flag, probe.prefix_args);
         Some(DetectedAgent {
             agent_id: probe.id.clone(),
             version,
@@ -89,14 +99,21 @@ impl AgentDetector {
         })
     }
 
-    fn fetch_version(command: &str, version_flag: &str, prefix_args: &[&str]) -> Option<String> {
-        let mut cmd = gwt_core::process::hidden_command(command);
-        for arg in prefix_args {
-            cmd.arg(arg);
-        }
-        cmd.arg(version_flag);
-        let output = cmd.output().ok()?;
-        if output.status.success() {
+    fn fetch_version(
+        command: &str,
+        version_flag: &str,
+        prefix_args: &[&str],
+    ) -> Result<(Option<String>, PathBuf), String> {
+        let request = gwt_core::process::ProcessPlanRequest::new(command)
+            .args(prefix_args)
+            .arg(version_flag);
+        let mut cmd = gwt_core::process::resolved_command(request).map_err(|error| {
+            debug!(command, error = %error, "Agent version probe resolution failed");
+            error.to_string()
+        })?;
+        let resolved_path = PathBuf::from(cmd.get_program());
+        let output = cmd.output().map_err(|error| error.to_string())?;
+        let version = if output.status.success() {
             let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if raw.is_empty() {
                 None
@@ -105,7 +122,8 @@ impl AgentDetector {
             }
         } else {
             None
-        }
+        };
+        Ok((version, resolved_path))
     }
 }
 
@@ -128,12 +146,63 @@ mod tests {
         assert!(AgentDetector::detect_by_command("gwt_nonexistent_agent_xyz").is_none());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn detector_resolves_real_bun_global_placeholder_fixture() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+                .expect("create real Windows Bun fixture");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+
+        let detected = AgentDetector::detect_by_command("claude")
+            .expect("safe fixture must be detected as Claude Code");
+
+        assert_eq!(detected.agent_id, AgentId::ClaudeCode);
+        assert_eq!(detected.version.as_deref(), Some("2.1.210 (Claude Code)"));
+        assert_eq!(detected.path, fixture.bun_exe);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detector_rejects_real_bun_global_placeholder_fixture_without_safe_target() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+                .expect("create real Windows Bun fixture");
+        fixture
+            .remove_safe_targets()
+            .expect("remove safe redirect targets");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+
+        assert!(AgentDetector::detect_by_command("claude").is_none());
+    }
+
     #[test]
     fn detect_by_command_maps_known() {
         // Use a command that definitely exists
         if let Some(detected) = AgentDetector::detect_by_command("git") {
             assert_eq!(detected.agent_id, AgentId::Custom("git".to_string()));
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_by_command_preserves_the_absolute_which_path_off_windows() {
+        let expected = which::which("git").expect("git must be available to the test runner");
+        let detected = AgentDetector::detect_by_command("git").expect("git must be detected");
+
+        assert_eq!(detected.path, expected);
     }
 
     #[test]

@@ -19,7 +19,6 @@ nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(windows)'.dependencies]
 gwt-core.workspace = true
-serde_json.workspace = true
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -28,6 +27,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+gwt-core.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
