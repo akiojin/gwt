@@ -217,13 +217,26 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
 
 /// Reap orphaned ephemeral intake worktrees at startup (SPEC-3214 T-006).
 ///
-/// A crash between an intake launch and its session-end cleanup leaves a
-/// detached `.intake-*` worktree behind. On startup no intake session is live,
-/// so every `.intake-*` worktree is an orphan: remove the clean ones and keep
-/// the dirty ones (uncommitted work is never destroyed). Bounded by
-/// `max_removals` so a pathological pile-up cannot stall startup. Returns the
-/// number removed. Never errors — best-effort recovery.
+/// A crash between an intake launch and its session-end cleanup can leave a
+/// detached `.intake-*` worktree behind. Remove clean worktrees not protected
+/// by the caller's Session reconciliation and keep dirty ones (uncommitted work
+/// is never destroyed). Bounded by `max_removals` so a pathological pile-up
+/// cannot stall startup. Returns the number removed. Never errors — best-effort
+/// recovery.
+#[cfg(test)]
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
+    prune_orphan_intake_worktrees_except(repo_path, max_removals, &HashSet::new())
+}
+
+/// Reap clean detached Intake worktrees except those reconciled to a current
+/// recoverable Session. Callers must build `protected_paths` from the Session
+/// ledger before pruning; absence from in-memory runtime state alone does not
+/// prove orphanhood after a crash.
+pub fn prune_orphan_intake_worktrees_except(
+    repo_path: &Path,
+    max_removals: usize,
+    protected_paths: &HashSet<PathBuf>,
+) -> usize {
     let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
         return 0;
     };
@@ -238,6 +251,9 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
             break;
         }
         if !is_ephemeral_intake_worktree(&worktree.path) {
+            continue;
+        }
+        if worktree_path_is_protected(&worktree.path, protected_paths) {
             continue;
         }
         // codex #3236 P2: only reap the branchless intake worktrees this feature
@@ -268,6 +284,19 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
         let _ = manager.prune();
     }
     removed
+}
+
+fn worktree_path_is_protected(path: &Path, protected_paths: &HashSet<PathBuf>) -> bool {
+    if protected_paths.contains(path) {
+        return true;
+    }
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    protected_paths
+        .iter()
+        .filter_map(|candidate| candidate.canonicalize().ok())
+        .any(|candidate| candidate == path)
 }
 
 pub fn resolve_launch_worktree(

@@ -279,6 +279,11 @@ impl AppRuntime {
         let session = gwt_agent::Session::load_and_migrate(&session_path).map_err(|error| {
             format!("Board origin session {origin_session_id} could not be loaded: {error}")
         })?;
+        if !session.supports_exact_session_resume() {
+            return Err(format!(
+                "Board origin session {origin_session_id} does not support exact resume"
+            ));
+        }
         let resume_session_id = session.exact_resume_session_id().ok_or_else(|| {
             format!("Board origin session {origin_session_id} has no agent session id")
         })?;

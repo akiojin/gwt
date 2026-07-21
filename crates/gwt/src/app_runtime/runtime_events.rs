@@ -176,7 +176,6 @@ impl AppRuntime {
             }
         }
         if should_auto_close {
-            self.clear_agent_window_startup_restore(&id);
             self.stop_window_runtime(&id);
             self.remove_window_state_tracking(&id);
             // SPEC-3214 FR-002: `stop_window_runtime` above killed and joined
@@ -312,7 +311,6 @@ impl AppRuntime {
             &composed_state,
         );
         if should_auto_close {
-            self.clear_agent_window_startup_restore(&window_id);
             self.stop_window_runtime(&window_id);
             self.remove_window_state_tracking(&window_id);
             // SPEC-3214 FR-002: PTY killed and joined above — safe to destroy

@@ -50,6 +50,35 @@ pub struct AgentSessionHistoryEntry {
     pub started_at: DateTime<Utc>,
 }
 
+/// Where a persisted Session record originated.
+///
+/// Current records are written by the per-launch Session ledger. Legacy JSON
+/// records are compatibility imports whose old format carried no explicit
+/// close evidence, so startup must never infer restore intent from them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    #[default]
+    Current,
+    LegacyJson,
+}
+
+/// Persistent launch lane. Restore eligibility is intentionally independent
+/// of this value; Intake only changes how its ephemeral worktree is prepared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLane {
+    #[default]
+    Execution,
+    Intake,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionCreateOutcome {
+    Created,
+    Unchanged,
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -68,6 +97,14 @@ pub struct Session {
     pub branch: String,
     pub agent_id: AgentId,
     pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub origin: SessionOrigin,
+    #[serde(default)]
+    pub lane: SessionLane,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_base_oid: Option<String>,
     /// Forward-only history of agent-tool conversation sessions (the Session
     /// level of Workspace → Work → Session). Appended by
     /// [`persist_agent_session_id`] the first time a new `agent_session_id` is
@@ -111,6 +148,11 @@ pub struct Session {
     /// history alone must not reopen a window after the user closed it.
     #[serde(default)]
     pub restore_window_on_startup: bool,
+    /// Durable proof that the user explicitly stopped or closed this Session.
+    /// Kept separate from `status` so a natural provider stop or process crash
+    /// remains recoverable in both Intake and Execution lanes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicitly_closed_at: Option<DateTime<Utc>>,
     /// Active backend override id, if any (SPEC-1921 FR-102).
     /// `None` means the agent launched against its default upstream
     /// (no env override). Set only for built-in agents that support
@@ -161,7 +203,7 @@ impl Session {
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
-    pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
     /// Create a new session with a generated UUID.
     pub fn new(
@@ -182,6 +224,10 @@ impl Session {
             branch: branch.into(),
             agent_id,
             agent_session_id: None,
+            origin: SessionOrigin::Current,
+            lane: SessionLane::Execution,
+            intake_base_ref: None,
+            intake_base_oid: None,
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
             tool_version: None,
@@ -200,6 +246,7 @@ impl Session {
             launch_command: String::new(),
             launch_args: Vec::new(),
             restore_window_on_startup: false,
+            explicitly_closed_at: None,
             backend_id: None,
             windows_shell: None,
             schema_version: Self::CURRENT_SCHEMA_VERSION,
@@ -239,6 +286,11 @@ impl Session {
         session.launch_command = config.command.clone();
         session.launch_args = config.args.clone();
         session.windows_shell = config.windows_shell;
+        if config.is_ephemeral {
+            session.lane = SessionLane::Intake;
+            session.intake_base_ref = config.ephemeral_base_ref.clone();
+            session.intake_base_oid = head_oid(&session.worktree_path);
+        }
         session.update_status(AgentStatus::Running);
         session
     }
@@ -300,15 +352,29 @@ impl Session {
     }
 
     pub fn exact_auto_resume_candidate(&self) -> bool {
-        matches!(
+        if self.origin == SessionOrigin::LegacyJson || self.explicitly_closed_at.is_some() {
+            return false;
+        }
+        (matches!(
             self.status,
             AgentStatus::Running
                 | AgentStatus::Idle
                 | AgentStatus::WaitingInput
                 | AgentStatus::Interrupted
-        ) && self.has_lifecycle_recovery_evidence()
-            && self.worktree_path.exists()
-            && self.has_exact_resume_session_id()
+        ) || (self.status == AgentStatus::Stopped && self.restore_window_on_startup))
+            && self.has_lifecycle_recovery_evidence()
+            && self.exact_resume_worktree_materializable()
+            && self.supports_exact_session_resume()
+    }
+
+    pub fn exact_resume_worktree_materializable(&self) -> bool {
+        self.worktree_path.exists()
+            || (self.lane == SessionLane::Intake
+                && self
+                    .intake_base_oid
+                    .as_deref()
+                    .or(self.intake_base_ref.as_deref())
+                    .is_some_and(|value| !value.trim().is_empty()))
     }
 
     fn has_lifecycle_recovery_evidence(&self) -> bool {
@@ -325,22 +391,28 @@ impl Session {
             })
     }
 
-    fn has_exact_resume_session_id(&self) -> bool {
-        self.exact_resume_session_id().is_some()
+    /// Whether gwt can hand this Session's exact provider conversation id to
+    /// the selected agent CLI. Keeping provider capability and id validity in
+    /// one gate prevents restore paths from silently starting a new
+    /// conversation for agents whose CLI cannot consume an exact id.
+    pub fn supports_exact_session_resume(&self) -> bool {
+        self.agent_id.supports_resume_session_id() && self.exact_resume_session_id().is_some()
     }
 
     /// True when `id` is a conversation handle gwt can hand the agent CLI as a
     /// `--resume` target — non-empty and not the Codex placeholder. Used to gate
-    /// per-Session Resume: a Session row whose conversation is not resumable
-    /// shows no Resume control (history-only) instead of a button that silently
-    /// fails. gwt deliberately does not read the agent tool's conversation store
-    /// (no format coupling), so this only rejects ids that are structurally
-    /// unusable; a handle that the agent CLI no longer has still launches and
-    /// surfaces its own error.
+    /// per-Session Resume: a Session row whose provider cannot consume an exact
+    /// id, or whose id is structurally unusable, shows no Resume control
+    /// (history-only) instead of a button that silently starts a different
+    /// conversation. gwt deliberately does not read the agent tool's
+    /// conversation store (no format coupling), so a structurally valid handle
+    /// that the supported CLI no longer has still launches and surfaces its own
+    /// error.
     pub fn is_resumable_conversation(&self, id: &str) -> bool {
         let id = id.trim();
-        !(id.is_empty()
-            || (matches!(self.agent_id, AgentId::Codex) && id == CODEX_PLACEHOLDER_SESSION_ID))
+        self.agent_id.supports_resume_session_id()
+            && !(id.is_empty()
+                || (matches!(self.agent_id, AgentId::Codex) && id == CODEX_PLACEHOLDER_SESSION_ID))
     }
 
     /// Resolve the agent-side resume handle for a Workspace → Work → Session
@@ -351,6 +423,9 @@ impl Session {
     /// Codex-placeholder requests are ignored so they fall back to the latest
     /// handle instead of trying to resume an unusable id.
     pub fn resume_session_id_for(&self, requested: Option<&str>) -> Option<String> {
+        if !self.agent_id.supports_resume_session_id() {
+            return None;
+        }
         if let Some(requested) = requested.filter(|value| self.is_resumable_conversation(value)) {
             return Some(requested.trim().to_string());
         }
@@ -374,6 +449,29 @@ impl Session {
         let content = serialize_session_toml(self)?;
         with_session_lock(dir, &self.id, || {
             write_session_toml_atomic(&session_file_path(dir, &self.id), &content)
+        })
+    }
+
+    /// Publish a new immutable Session record without replacing an existing
+    /// ledger entry. Repeating the exact same normalized record is an
+    /// idempotent no-op; the same id with different content fails closed.
+    pub fn save_if_absent(&self, dir: &Path) -> io::Result<SessionCreateOutcome> {
+        let content = serialize_session_toml(self)?;
+        with_session_lock(dir, &self.id, || {
+            let path = session_file_path(dir, &self.id);
+            if path.exists() {
+                let existing = fs::read_to_string(&path)?;
+                return if existing == content {
+                    Ok(SessionCreateOutcome::Unchanged)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("session id collision: {}", self.id),
+                    ))
+                };
+            }
+            write_session_toml_atomic(&path, &content)?;
+            Ok(SessionCreateOutcome::Created)
         })
     }
 
@@ -422,6 +520,20 @@ impl Session {
             }
             self.schema_version = 3;
         }
+
+        if self.schema_version < 4 {
+            if is_bounded_canonical_intake_path(&self.worktree_path)
+                || (gwt_skills::lane_file_path(&self.worktree_path).exists()
+                    && gwt_skills::read_lane_profile(&self.worktree_path).id == "intake")
+            {
+                self.lane = SessionLane::Intake;
+            }
+            self.schema_version = 4;
+        }
+
+        if self.schema_version < 5 {
+            self.schema_version = 5;
+        }
     }
 
     fn normalize_fast_mode_fields(&mut self) {
@@ -433,6 +545,29 @@ impl Session {
     pub fn fast_mode_enabled(&self) -> bool {
         self.fast_mode || self.codex_fast_mode
     }
+}
+
+fn is_bounded_canonical_intake_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if name == ".intake" {
+        return true;
+    }
+    name.strip_prefix(".intake-").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn head_oid(worktree_path: &Path) -> Option<String> {
+    let output =
+        gwt_core::process::run_git_logged(&["rev-parse", "HEAD"], Some(worktree_path)).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let oid = String::from_utf8(output.stdout).ok()?;
+    let oid = oid.trim();
+    (!oid.is_empty()).then(|| oid.to_string())
 }
 
 fn session_file_path(dir: &Path, session_id: &str) -> PathBuf {
@@ -754,10 +889,19 @@ pub fn persist_session_restore_window_on_startup(
     restore: bool,
 ) -> std::io::Result<()> {
     update_session(sessions_dir, session_id, |session| {
-        if session.restore_window_on_startup == restore {
-            return Ok(());
+        if restore {
+            if session.restore_window_on_startup && session.explicitly_closed_at.is_none() {
+                return Ok(());
+            }
+            session.restore_window_on_startup = true;
+            session.explicitly_closed_at = None;
+        } else {
+            if !session.restore_window_on_startup && session.explicitly_closed_at.is_some() {
+                return Ok(());
+            }
+            session.restore_window_on_startup = false;
+            session.explicitly_closed_at = Some(Utc::now());
         }
-        session.restore_window_on_startup = restore;
         session.updated_at = Utc::now();
         Ok(())
     })
@@ -1222,6 +1366,13 @@ display_name = "Claude Code"
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert!(!loaded.restore_window_on_startup);
+        assert!(loaded.explicitly_closed_at.is_some());
+
+        persist_session_restore_window_on_startup(dir.path(), &session_id, true).unwrap();
+
+        let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
+        assert!(loaded.restore_window_on_startup);
+        assert!(loaded.explicitly_closed_at.is_none());
     }
 
     #[test]
@@ -1739,6 +1890,50 @@ display_name = "Claude Code"
     }
 
     #[test]
+    fn session_from_ephemeral_launch_persists_intake_lane_and_base_ref() {
+        let config = crate::AgentLaunchBuilder::new(AgentId::Codex)
+            .ephemeral(Some("origin/develop".to_string()))
+            .build();
+
+        let session = Session::from_launch_config("/tmp/.intake-1", "work", &config);
+
+        assert_eq!(session.lane, SessionLane::Intake);
+        assert_eq!(session.intake_base_ref.as_deref(), Some("origin/develop"));
+    }
+
+    #[test]
+    fn session_without_lane_fields_defaults_to_execution() {
+        let session = Session::new("/tmp/worktree", "main", AgentId::Codex);
+        let mut value = toml::Value::try_from(&session).expect("serialize session value");
+        let table = value.as_table_mut().expect("session table");
+        table.remove("lane");
+        table.remove("intake_base_ref");
+        let parsed: Session = value.try_into().expect("legacy session");
+
+        assert_eq!(parsed.lane, SessionLane::Execution);
+        assert!(parsed.intake_base_ref.is_none());
+    }
+
+    #[test]
+    fn legacy_current_session_infers_only_bounded_canonical_intake_paths() {
+        for path in ["/tmp/.intake", "/tmp/.intake-2"] {
+            let mut session = Session::new(path, "work", AgentId::Codex);
+            session.schema_version = 3;
+
+            session.migrate_legacy_launch_args();
+
+            assert_eq!(session.lane, SessionLane::Intake, "path={path}");
+        }
+
+        let mut named_execution = Session::new("/tmp/.intake-custom", "main", AgentId::Codex);
+        named_execution.schema_version = 3;
+
+        named_execution.migrate_legacy_launch_args();
+
+        assert_eq!(named_execution.lane, SessionLane::Execution);
+    }
+
+    #[test]
     fn session_from_launch_config_persists_windows_shell_choice() {
         let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir("/tmp/worktree")
@@ -1827,6 +2022,68 @@ display_name = "Claude Code"
         std::fs::create_dir_all(&worktree).unwrap();
         session.update_status(AgentStatus::Stopped);
         assert!(!session.exact_auto_resume_candidate());
+        session.restore_window_on_startup = true;
+        assert!(session.exact_auto_resume_candidate());
+    }
+
+    #[test]
+    fn missing_intake_worktree_with_persisted_base_remains_materializable() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_worktree = dir.path().join(".intake-2");
+        let mut session = Session::new(&missing_worktree, "work", AgentId::Codex);
+        session.lane = SessionLane::Intake;
+        session.intake_base_oid = Some("0123456789abcdef".to_string());
+        session.agent_session_id = Some("codex-native-session".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+
+        assert!(session.exact_resume_worktree_materializable());
+        assert!(session.exact_auto_resume_candidate());
+    }
+
+    #[test]
+    fn exact_auto_resume_decision_is_identical_for_intake_and_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        for lane in [SessionLane::Execution, SessionLane::Intake] {
+            let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+            session.lane = lane;
+            session.agent_session_id = Some(format!("native-{lane:?}"));
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            assert!(session.exact_auto_resume_candidate(), "lane={lane:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_json_unknown_close_is_never_an_exact_auto_resume_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+        session.origin = SessionOrigin::LegacyJson;
+        session.agent_session_id = Some("legacy-native".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+
+        assert!(!session.exact_auto_resume_candidate());
+    }
+
+    #[test]
+    fn durable_explicit_close_disables_exact_auto_resume_for_both_lanes() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        for lane in [SessionLane::Execution, SessionLane::Intake] {
+            let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+            session.lane = lane;
+            session.agent_session_id = Some(format!("native-{lane:?}"));
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            session.explicitly_closed_at = Some(Utc::now());
+            assert!(!session.exact_auto_resume_candidate(), "lane={lane:?}");
+        }
     }
 
     #[test]
@@ -1844,6 +2101,22 @@ display_name = "Claude Code"
             !session.exact_auto_resume_candidate(),
             "Codex hook placeholder ids are not valid `codex resume <id>` targets"
         );
+    }
+
+    #[test]
+    fn provider_without_exact_id_resume_support_remains_history_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Gemini);
+        session.agent_session_id = Some("gemini-observation-id".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+
+        assert!(!session.supports_exact_session_resume());
+        assert!(!session.exact_auto_resume_candidate());
+        assert!(!session.is_resumable_conversation("gemini-observation-id"));
+        assert_eq!(session.resume_session_id_for(None), None);
     }
 
     #[test]

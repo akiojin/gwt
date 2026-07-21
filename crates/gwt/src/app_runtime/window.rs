@@ -405,7 +405,9 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        self.clear_agent_window_startup_restore(id);
+        if let Err(error) = self.mark_agent_window_explicitly_closed(id) {
+            return self.explicit_close_persistence_failure_events(id, &error);
+        }
         self.stop_window_runtime(id);
         self.remove_window_state_tracking(id);
         self.profile_selections.remove(id);
@@ -437,6 +439,9 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
+        if let Err(error) = self.mark_agent_window_explicitly_closed(id) {
+            return self.explicit_close_persistence_failure_events(id, &error);
+        }
         // Tear down the live runtime (kills the PTY + joins reader/status
         // threads + deregisters the writer). This reuses the exact same stop
         // primitive that `close_window_events` uses, so no PTY management is

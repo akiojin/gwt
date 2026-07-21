@@ -162,7 +162,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         display_name: "Codex",
         package_name: Some("@openai/codex"),
         color: AgentColor::Cyan,
-        aliases: &["codex"],
+        aliases: &["codex", "codex-cli", "codex cli", "codexcli"],
         cache_key: "codex",
         version_flag: "--version",
         version_prefix_args: &[],
@@ -473,6 +473,11 @@ mod tests {
                 descriptor.command
             );
         }
+    }
+
+    #[test]
+    fn legacy_writer_codex_cli_id_resolves_to_builtin_codex() {
+        assert_eq!(resolve_agent_id("codex-cli"), Some(AgentId::Codex));
     }
 
     #[test]
