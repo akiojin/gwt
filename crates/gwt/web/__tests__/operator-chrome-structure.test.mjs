@@ -5421,6 +5421,30 @@ test("Terminal output decode is deferred out of the receive path", () => {
   );
 });
 
+test("Terminal input arms one-shot output priority before sending", () => {
+  function assertPriorityBeforeSend(functionName, message) {
+    const body = extractFunctionBody(appSource, functionName);
+    const priorityIndex = body.indexOf(
+      "terminalOutputBatcher.prioritize(windowId);",
+    );
+    const sendIndex = body.indexOf(
+      'send({ kind: "terminal_input", id: windowId, data });',
+    );
+    assert.notEqual(priorityIndex, -1, `${message} must arm output priority`);
+    assert.notEqual(sendIndex, -1, `${message} must send terminal input`);
+    assert.ok(
+      priorityIndex < sendIndex,
+      `${message} must arm priority before the wire send`,
+    );
+  }
+
+  assertPriorityBeforeSend(
+    "attachTerminalContainerBindings",
+    "wheel fallback input",
+  );
+  assertPriorityBeforeSend("createTerminalRuntime", "xterm onData input");
+});
+
 test("Terminal output writes are gated while windows are hidden", () => {
   const batcherConfig = appSource.match(
     /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,

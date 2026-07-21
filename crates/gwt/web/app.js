@@ -3560,6 +3560,7 @@
               return;
             }
             terminal.focus();
+            terminalOutputBatcher.prioritize(windowId);
             send({ kind: "terminal_input", id: windowId, data });
           },
         });
@@ -3657,6 +3658,7 @@
             dataLen: data.length,
             wsState,
           });
+          terminalOutputBatcher.prioritize(windowId);
           send({ kind: "terminal_input", id: windowId, data });
         });
         const runtime = {

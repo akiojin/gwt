@@ -67,6 +67,49 @@ function cursorScheduler() {
   };
 }
 
+function continuouslyPendingFixture({
+  windowIds,
+  maxCharsPerFlush,
+  maxWindowsPerFlush,
+  maxTotalCharsPerFlush,
+}) {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const firstServicedFrame = new Map();
+  let frame = 0;
+  let batcher;
+  batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush,
+    maxWindowsPerFlush,
+    maxTotalCharsPerFlush,
+    write: (windowId, text, done) => {
+      writes.push({ frame, windowId, text });
+      if (!firstServicedFrame.has(windowId)) {
+        firstServicedFrame.set(windowId, frame);
+      }
+      batcher.enqueue(windowId, ".");
+      done();
+    },
+  });
+  for (const windowId of windowIds) {
+    batcher.enqueue(windowId, "a");
+    batcher.enqueue(windowId, "b");
+  }
+  return {
+    batcher,
+    firstServicedFrame,
+    runFrame(priorityWindowId) {
+      frame += 1;
+      if (priorityWindowId !== undefined) {
+        batcher.prioritize(priorityWindowId);
+      }
+      scheduler.runOnce();
+    },
+    writes,
+  };
+}
+
 test("same-window terminal chunks batch into one ordered xterm write", () => {
   const scheduler = manualScheduler();
   const writes = [];
@@ -200,6 +243,504 @@ test("multi-window terminal bursts respect the per-frame window budget", () => {
   assert.equal(scheduler.pendingCount(), 0);
   assert.equal(batcher.pendingWindowCount(), 0);
 });
+
+test("continuously busy windows do not starve a ninth active echo", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const busyWindowIds = Array.from({ length: 8 }, (_, index) => `busy-${index}`);
+  let frame = 0;
+  let activeEchoFrame = null;
+  let batcher;
+  batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 8,
+    write: (windowId, text, done) => {
+      writes.push({ frame, windowId, text });
+      if (busyWindowIds.includes(windowId)) {
+        batcher.enqueue(windowId, ".");
+      } else if (windowId === "active" && activeEchoFrame === null) {
+        activeEchoFrame = frame;
+      }
+      done();
+    },
+  });
+
+  for (const windowId of busyWindowIds) {
+    // Keep each Map entry alive while write() replenishes its tail. This
+    // reproduces the production failure where the first eight keys never
+    // leave the scheduler and a later active window cannot advance.
+    batcher.enqueue(windowId, "a");
+    batcher.enqueue(windowId, "b");
+  }
+  batcher.enqueue("active", "e");
+
+  while (frame < 2) {
+    frame += 1;
+    scheduler.runOnce();
+  }
+
+  assert.ok(
+    activeEchoFrame !== null && activeEchoFrame <= 2,
+    "the ninth active echo must reach xterm within two frames",
+  );
+  assert.equal(batcher.pendingCount("active"), 0);
+  assert.ok(
+    writes.some((entry) => entry.windowId === "busy-7"),
+    "the fairness fix must retain service for the existing busy windows",
+  );
+});
+
+test("continuously pending windows are serviced within the round-robin frame bound", () => {
+  const scheduler = manualScheduler();
+  const windowIds = Array.from({ length: 17 }, (_, index) => `agent-${index}`);
+  const servicedFrame = new Map();
+  let frame = 0;
+  let batcher;
+  batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 4,
+    write: (windowId, _text, done) => {
+      if (!servicedFrame.has(windowId)) {
+        servicedFrame.set(windowId, frame);
+      }
+      batcher.enqueue(windowId, ".");
+      done();
+    },
+  });
+
+  for (const windowId of windowIds) {
+    batcher.enqueue(windowId, "a");
+    batcher.enqueue(windowId, "b");
+  }
+
+  const frameBound = Math.ceil(windowIds.length / 4);
+  while (frame < frameBound) {
+    frame += 1;
+    scheduler.runOnce();
+  }
+
+  assert.equal(
+    servicedFrame.size,
+    windowIds.length,
+    "every continuously pending window must receive service within ceil(N / budget) frames",
+  );
+  for (const windowId of windowIds) {
+    assert.ok(
+      servicedFrame.get(windowId) <= frameBound,
+      `${windowId} exceeded the round-robin frame bound`,
+    );
+  }
+});
+
+test("input priority is one-shot without resetting the round-robin cursor", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const windowIds = Array.from({ length: 5 }, (_, index) => `agent-${index}`);
+  let batcher;
+  batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 2,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      batcher.enqueue(windowId, ".");
+      done();
+    },
+  });
+
+  for (const windowId of windowIds.slice(0, 2)) {
+    batcher.enqueue(windowId, "a");
+    batcher.enqueue(windowId, "b");
+  }
+
+  assert.equal(
+    typeof batcher.prioritize,
+    "function",
+    "the batcher must expose the input-priority hint used by app.js",
+  );
+  batcher.prioritize("agent-2");
+  // The hint is armed before the echo arrives, matching terminal input send
+  // followed by asynchronous PTY output.
+  batcher.enqueue("agent-2", "e");
+  batcher.enqueue("agent-2", "f");
+  for (const windowId of windowIds.slice(3)) {
+    batcher.enqueue(windowId, "a");
+    batcher.enqueue(windowId, "b");
+  }
+
+  scheduler.runOnce();
+  assert.deepEqual(
+    writes.slice(0, 2).map(({ windowId }) => windowId),
+    ["agent-2", "agent-0"],
+    "priority service must preserve the independent normal fairness cursor",
+  );
+
+  scheduler.runOnce();
+  assert.deepEqual(
+    writes.slice(2, 4).map(({ windowId }) => windowId),
+    ["agent-1", "agent-2"],
+    "normal service must advance the round-robin cursor across frames",
+  );
+});
+
+test("one-shot priority yields the next single-window frame to a peer", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 1,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("active", "a");
+  batcher.enqueue("active", "b");
+  batcher.enqueue("peer", "p");
+  batcher.enqueue("peer", "q");
+  batcher.prioritize("active");
+
+  scheduler.runOnce();
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    writes.slice(0, 2).map(({ windowId }) => windowId),
+    ["active", "peer"],
+    "the serviced priority window must remain excluded for one fairness frame without re-arm",
+  );
+});
+
+test("one-shot priority yields after saturating the aggregate character budget", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 2,
+    maxTotalCharsPerFlush: 1,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("active", "a");
+  batcher.enqueue("active", "b");
+  batcher.enqueue("peer", "p");
+  batcher.enqueue("peer", "q");
+  batcher.prioritize("active");
+
+  scheduler.runOnce();
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    writes.slice(0, 2).map(({ windowId }) => windowId),
+    ["active", "peer"],
+    "aggregate saturation must preserve the serviced priority window across the yield",
+  );
+});
+
+test("hidden-only peers do not defer a later active echo", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const eligibility = new Map([
+    ["active", true],
+    ["hidden", false],
+  ]);
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 1,
+    canWrite: (windowId) => eligibility.get(windowId) !== false,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("active", "a");
+  batcher.enqueue("hidden", "h");
+  batcher.prioritize("active");
+  scheduler.runOnce();
+  assert.equal(
+    scheduler.pendingCount(),
+    0,
+    "hidden-only pending output must not schedule a fairness frame",
+  );
+
+  batcher.enqueue("active", "b");
+  batcher.prioritize("active");
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    writes.map(({ windowId }) => windowId),
+    ["active", "active"],
+    "a hidden-only peer must not leave stale defer state for a later echo",
+  );
+});
+
+test("a different priority target replaces input priority without inheriting defer", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 1,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-a", "a");
+  batcher.enqueue("agent-a", "b");
+  batcher.enqueue("agent-b", "c");
+  batcher.enqueue("agent-b", "d");
+  batcher.prioritize("agent-a");
+  scheduler.runOnce();
+  batcher.prioritize("agent-b");
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    writes.slice(0, 2).map(({ windowId }) => windowId),
+    ["agent-a", "agent-b"],
+    "a new target must receive priority while the prior target pays its fairness yield",
+  );
+});
+
+test("clear removes stale priority defer state", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 1,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-a", "a");
+  batcher.enqueue("agent-a", "b");
+  batcher.enqueue("agent-b", "c");
+  batcher.prioritize("agent-a");
+  scheduler.runOnce();
+  batcher.clear("agent-a");
+  batcher.enqueue("agent-a", "fresh");
+  batcher.prioritize("agent-a");
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    writes.map(({ windowId }) => windowId),
+    ["agent-a", "agent-a"],
+    "a fresh target generation must not inherit defer state cleared with the old queue",
+  );
+});
+
+test("flushNow removes stale priority defer state", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 1,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-a", "a");
+  batcher.enqueue("agent-a", "b");
+  batcher.enqueue("agent-a", "c");
+  batcher.enqueue("agent-b", "d");
+  batcher.prioritize("agent-a");
+  scheduler.runOnce();
+  batcher.flushNow("agent-a");
+  batcher.enqueue("agent-a", "fresh");
+  batcher.prioritize("agent-a");
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    writes.map(({ windowId }) => windowId),
+    ["agent-a", "agent-a", "agent-a", "agent-a"],
+    "a fresh echo must not inherit defer state from a synchronously drained queue",
+  );
+});
+
+test("repeated input priority preserves bounded round-robin service", () => {
+  const windowIds = Array.from({ length: 5 }, (_, index) => `agent-${index}`);
+  const activeWindowId = "agent-2";
+  const maxWindowsPerFlush = 2;
+  const fixture = continuouslyPendingFixture({
+    windowIds,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush,
+  });
+  const fairnessFrameBound = Math.ceil(
+    (windowIds.length - 1) / (maxWindowsPerFlush - 1),
+  );
+
+  for (let frame = 0; frame < fairnessFrameBound; frame += 1) {
+    fixture.runFrame(activeWindowId);
+  }
+
+  assert.equal(
+    fixture.firstServicedFrame.size,
+    windowIds.length,
+    "re-arming the same active window must not reset the normal fairness cursor",
+  );
+  const activeFrames = fixture.writes
+    .filter(({ windowId }) => windowId === activeWindowId)
+    .map(({ frame }) => frame);
+  assert.deepEqual(
+    activeFrames,
+    Array.from({ length: fairnessFrameBound }, (_, index) => index + 1),
+    "with a spare frame slot, each re-armed active echo remains prioritized",
+  );
+});
+
+test("repeated input priority stays fair with default flush budgets", () => {
+  const windowIds = Array.from({ length: 10 }, (_, index) => `agent-${index}`);
+  const activeWindowId = "agent-5";
+  const fixture = continuouslyPendingFixture({ windowIds });
+  const fairnessFrameBound = Math.ceil(
+    (windowIds.length - 1) / (DEFAULT_MAX_WINDOWS_PER_FLUSH - 1),
+  );
+
+  for (let frame = 0; frame < fairnessFrameBound; frame += 1) {
+    fixture.runFrame(activeWindowId);
+  }
+
+  assert.equal(
+    fixture.firstServicedFrame.size,
+    windowIds.length,
+    "default budgets must service every continuously pending window while priority repeats",
+  );
+});
+
+test("single-window frame budget alternates repeated priority with fairness service", () => {
+  const windowIds = Array.from({ length: 4 }, (_, index) => `agent-${index}`);
+  const activeWindowId = "agent-1";
+  const fixture = continuouslyPendingFixture({
+    windowIds,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 1,
+  });
+  const fairnessFrameBound = 2 * (windowIds.length - 1);
+
+  for (let frame = 0; frame < fairnessFrameBound; frame += 1) {
+    fixture.runFrame(activeWindowId);
+  }
+
+  assert.equal(
+    fixture.firstServicedFrame.size,
+    windowIds.length,
+    "a one-window frame budget must not let repeated priority starve peers",
+  );
+  const activeFrames = fixture.writes
+    .filter(({ windowId }) => windowId === activeWindowId)
+    .map(({ frame }) => frame);
+  assert.ok(
+    activeFrames[0] <= 2,
+    "the first active echo must stay within two frames",
+  );
+  for (let index = 1; index < activeFrames.length; index += 1) {
+    assert.ok(
+      activeFrames[index] - activeFrames[index - 1] <= 2,
+      "repeated active echoes must stay within the two-frame latency bound",
+    );
+  }
+});
+
+test("aggregate-budget saturation alternates repeated priority with fairness service", () => {
+  const windowIds = Array.from({ length: 3 }, (_, index) => `agent-${index}`);
+  const activeWindowId = "agent-1";
+  const fixture = continuouslyPendingFixture({
+    windowIds,
+    maxCharsPerFlush: 1,
+    maxWindowsPerFlush: 2,
+    maxTotalCharsPerFlush: 1,
+  });
+  const fairnessFrameBound = 2 * (windowIds.length - 1);
+
+  for (let frame = 0; frame < fairnessFrameBound; frame += 1) {
+    fixture.runFrame(activeWindowId);
+  }
+
+  assert.equal(
+    fixture.firstServicedFrame.size,
+    windowIds.length,
+    "priority must yield a frame when it consumes the aggregate budget alone",
+  );
+});
+
+for (const scenario of [
+  {
+    name: "single-window frame budget",
+    options: {
+      maxCharsPerFlush: 16,
+      maxWindowsPerFlush: 1,
+    },
+  },
+  {
+    name: "aggregate character budget",
+    options: {
+      maxCharsPerFlush: 1,
+      maxWindowsPerFlush: 2,
+      maxTotalCharsPerFlush: 1,
+    },
+  },
+]) {
+  test(`fresh one-chunk priority cannot starve a peer under ${scenario.name}`, () => {
+    const scheduler = manualScheduler();
+    const writes = [];
+    let frame = 0;
+    let batcher;
+    batcher = createTerminalOutputBatcher({
+      schedule: scheduler.schedule,
+      ...scenario.options,
+      write: (windowId, text, done) => {
+        writes.push({ frame, windowId, text });
+        if (windowId === "peer") {
+          batcher.enqueue("peer", "p");
+        }
+        done();
+      },
+    });
+
+    batcher.enqueue("peer", "p");
+    batcher.enqueue("peer", "q");
+    for (frame = 1; frame <= 6; frame += 1) {
+      batcher.enqueue("active", "a");
+      batcher.prioritize("active");
+      scheduler.runOnce();
+    }
+
+    const peerFrames = writes
+      .filter(({ windowId }) => windowId === "peer")
+      .map((entry) => entry.frame);
+    assert.ok(
+      peerFrames.length > 0 && peerFrames[0] <= 2,
+      "a continuously pending peer must receive service within two frames",
+    );
+    const activeFrames = writes
+      .filter(({ windowId }) => windowId === "active")
+      .map((entry) => entry.frame);
+    assert.equal(activeFrames[0], 1);
+    for (let index = 1; index < activeFrames.length; index += 1) {
+      assert.ok(
+        activeFrames[index] - activeFrames[index - 1] <= 2,
+        "fresh active echoes must stay within the two-frame latency bound",
+      );
+    }
+  });
+}
 
 test("large terminal output queues drain without per-chunk Array.shift", () => {
   const scheduler = cursorScheduler();

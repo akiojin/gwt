@@ -84,6 +84,12 @@ export function createTerminalOutputBatcher({
   const pendingByWindow = new Map();
   const quiescedWindows = new Set();
   let scheduled = false;
+  let roundRobinNextWindowId = null;
+  let priorityWindowId = null;
+  // When priority alone consumes a frame, exclude that exact window from the
+  // next normal scan once. Keeping the serviced id (instead of a boolean)
+  // preserves one-shot hints and lets a different input target replace them.
+  let priorityYieldWindowId = null;
 
   function entryFor(windowId) {
     let entry = pendingByWindow.get(windowId);
@@ -153,37 +159,107 @@ export function createTerminalOutputBatcher({
     }
   }
 
+  function flushEligibleWindow(windowId, maxChars) {
+    if (!pendingByWindow.has(windowId) || quiescedWindows.has(windowId)) {
+      return { serviced: false, flushed: false, chars: 0 };
+    }
+    if (!canWriteImpl(windowId)) {
+      quiescedWindows.add(windowId);
+      return { serviced: false, flushed: false, chars: 0 };
+    }
+    const result = flushWindow(windowId, maxChars);
+    return { serviced: true, ...result };
+  }
+
+  function hasSchedulablePeer(windowIds, excludedWindowId) {
+    for (const windowId of windowIds) {
+      if (
+        windowId === excludedWindowId
+        || !pendingByWindow.has(windowId)
+        || quiescedWindows.has(windowId)
+      ) {
+        continue;
+      }
+      if (canWriteImpl(windowId)) {
+        return true;
+      }
+      quiescedWindows.add(windowId);
+    }
+    return false;
+  }
+
   function flushPending() {
     scheduled = false;
     if (pendingByWindow.size === 0) {
       return false;
     }
+    const windowIds = Array.from(pendingByWindow.keys());
     let flushed = false;
     let windowsFlushed = 0;
     let charsFlushed = 0;
-    for (const windowId of Array.from(pendingByWindow.keys())) {
+    let normalWindowsFlushed = 0;
+    let servicedPriorityWindowId = null;
+    const pendingYieldWindowId = priorityYieldWindowId;
+    priorityYieldWindowId = null;
+    const deferredPriorityWindowId =
+      pendingYieldWindowId !== null
+      && hasSchedulablePeer(windowIds, pendingYieldWindowId)
+        ? pendingYieldWindowId
+        : null;
+
+    if (
+      priorityWindowId !== null
+      && priorityWindowId !== deferredPriorityWindowId
+      && pendingByWindow.has(priorityWindowId)
+    ) {
+      const priorityResult = flushEligibleWindow(
+        priorityWindowId,
+        Math.max(1, totalCharsPerFlush - charsFlushed),
+      );
+      if (priorityResult.serviced) {
+        servicedPriorityWindowId = priorityWindowId;
+        priorityWindowId = null;
+        flushed = priorityResult.flushed || flushed;
+        charsFlushed += priorityResult.chars;
+        windowsFlushed += 1;
+      }
+    }
+
+    const requestedStartIndex = windowIds.indexOf(roundRobinNextWindowId);
+    const startIndex = requestedStartIndex >= 0 ? requestedStartIndex : 0;
+    for (let offset = 0; offset < windowIds.length; offset += 1) {
+      const windowIndex = (startIndex + offset) % windowIds.length;
+      const windowId = windowIds[windowIndex];
       if (windowsFlushed >= windowsPerFlush) {
         break;
       }
       if (windowsFlushed > 0 && charsFlushed >= totalCharsPerFlush) {
         break;
       }
-      if (!pendingByWindow.has(windowId)) {
-        continue;
-      }
-      if (quiescedWindows.has(windowId)) {
-        continue;
-      }
-      if (!canWriteImpl(windowId)) {
-        quiescedWindows.add(windowId);
+      if (
+        windowId === servicedPriorityWindowId
+        || windowId === deferredPriorityWindowId
+      ) {
         continue;
       }
       const remainingChars = Math.max(1, totalCharsPerFlush - charsFlushed);
-      const result = flushWindow(windowId, remainingChars);
+      const result = flushEligibleWindow(windowId, remainingChars);
+      if (!result.serviced) {
+        continue;
+      }
       flushed = result.flushed || flushed;
       charsFlushed += result.chars;
       windowsFlushed += 1;
+      normalWindowsFlushed += 1;
+      roundRobinNextWindowId =
+        windowIds[(windowIndex + 1) % windowIds.length];
     }
+    priorityYieldWindowId =
+      servicedPriorityWindowId !== null
+      && normalWindowsFlushed === 0
+      && hasSchedulablePeer(windowIds, servicedPriorityWindowId)
+        ? servicedPriorityWindowId
+        : null;
     if (hasSchedulablePendingWindow()) {
       scheduleFlush();
     }
@@ -238,6 +314,12 @@ export function createTerminalOutputBatcher({
   function flushNow(windowId) {
     let flushed = false;
     quiescedWindows.delete(windowId);
+    if (priorityWindowId === windowId) {
+      priorityWindowId = null;
+    }
+    if (priorityYieldWindowId === windowId) {
+      priorityYieldWindowId = null;
+    }
     while (pendingByWindow.has(windowId)) {
       const result = flushWindow(windowId);
       if (!result.flushed) {
@@ -250,7 +332,24 @@ export function createTerminalOutputBatcher({
 
   function clear(windowId) {
     quiescedWindows.delete(windowId);
+    if (priorityWindowId === windowId) {
+      priorityWindowId = null;
+    }
+    if (priorityYieldWindowId === windowId) {
+      priorityYieldWindowId = null;
+    }
     return pendingByWindow.delete(windowId);
+  }
+
+  function prioritize(windowId) {
+    if (windowId === null || windowId === undefined) {
+      return false;
+    }
+    priorityWindowId = windowId;
+    if (pendingByWindow.has(windowId) && !quiescedWindows.has(windowId)) {
+      scheduleFlush();
+    }
+    return true;
   }
 
   function schedulePending(windowId) {
@@ -280,6 +379,7 @@ export function createTerminalOutputBatcher({
 
   return {
     enqueue,
+    prioritize,
     flushNow,
     clear,
     schedulePending,
