@@ -1,15 +1,656 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use gwt_agent::Session;
+use gwt_agent::{LaunchRuntimeTarget, Session};
 use gwt_core::{
-    error::Result,
+    error::{GwtError, Result},
     paths::normalize_windows_child_process_path,
     workspace_projection::{
-        load_workspace_projection, mutate_existing_workspace_projection, WorkspaceAgentSummary,
+        load_workspace_projection, load_workspace_projection_from_path,
+        load_workspace_work_items_from_path, mutate_existing_workspace_projection,
+        WorkspaceAgentSummary,
     },
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionWorkMutationTarget {
+    pub(crate) project_state_root: PathBuf,
+    pub(crate) work_event_root: PathBuf,
+    pub(crate) session_id: String,
+    pub(crate) branch_identity: String,
+    pub(crate) worktree_identity: PathBuf,
+    pub(crate) work_id: String,
+}
+
+pub(crate) fn resolve_session_work_mutation_target(
+    invocation_cwd: &Path,
+    session_id: &str,
+) -> Result<SessionWorkMutationTarget> {
+    let session = load_session_for_mutation(session_id)?;
+    if session.id != session_id {
+        return Err(mutation_error(format!(
+            "Session ledger id mismatch: requested {session_id}, loaded {}",
+            session.id
+        )));
+    }
+
+    let docker = session.runtime_target == LaunchRuntimeTarget::Docker;
+    let invocation_raw = canonicalize_mutation_path(invocation_cwd, "cwd")?;
+    let session_worktree_normalized = normalize_mutation_path(&session.worktree_path);
+    let session_worktree = match canonicalize_mutation_path(&session.worktree_path, "worktree") {
+        Ok(path) => Some(path),
+        Err(_) if docker => None,
+        Err(error) => return Err(error),
+    };
+    let session_git_root = session_worktree
+        .as_deref()
+        .map(|path| git_toplevel(path, "worktree"))
+        .transpose()?;
+    let declared_repo_hash = session
+        .repo_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            mutation_error(format!(
+                "Session repo hash is missing for Session {session_id}; relaunch the Session"
+            ))
+        })?;
+    if let Some(root) = session_git_root.as_deref() {
+        let observed = repo_hash_for_mutation(root, "repo hash")?;
+        if observed != declared_repo_hash {
+            return Err(mutation_error(format!(
+                "Session repo hash mismatch for Session {session_id}: ledger={declared_repo_hash}, worktree={observed}"
+            )));
+        }
+    }
+
+    let configured_project_state_root = strict_project_state_root(&session)?;
+    let mut invocation_git_root = None;
+    let project_state_root = match canonicalize_mutation_path(
+        &configured_project_state_root,
+        "canonical repository",
+    ) {
+        Ok(path) => path,
+        Err(_) if docker => {
+            let root = git_toplevel(&invocation_raw, "cwd")?;
+            let observed = repo_hash_for_mutation(&root, "repo hash")?;
+            if observed != declared_repo_hash {
+                return Err(mutation_error(format!(
+                    "Session repo hash mismatch for Session {session_id}: ledger={declared_repo_hash}, cwd={observed}"
+                )));
+            }
+            invocation_git_root = Some(root.clone());
+            root
+        }
+        Err(error) => return Err(error),
+    };
+    let project_anchor = canonical_repository_anchor(&project_state_root).map_err(|error| {
+        mutation_error(format!(
+            "canonical repository mismatch for Session {session_id}: {error}"
+        ))
+    })?;
+    let project_repo_hash = repo_hash_for_mutation(&project_anchor, "canonical repository")
+        .map_err(|error| {
+            mutation_error(format!(
+                "canonical repository mismatch for Session {session_id}: {error}"
+            ))
+        })?;
+    if project_repo_hash != declared_repo_hash {
+        return Err(mutation_error(format!(
+            "canonical repository mismatch for Session {session_id}: expected repo hash {declared_repo_hash}, got {project_repo_hash}"
+        )));
+    }
+    validate_project_state_anchor(&project_state_root, &project_anchor, session_id)?;
+
+    let branch_identity = canonical_branch_identity(&session.branch);
+    if branch_identity.is_empty() {
+        return Err(mutation_error(format!(
+            "Session branch mismatch for Session {session_id}: ledger branch is empty"
+        )));
+    }
+    if let Some(root) = session_git_root.as_deref() {
+        let session_branch = git_branch(root, "worktree")?;
+        if canonical_branch_identity(&session_branch) != branch_identity {
+            return Err(mutation_error(format!(
+                "Session branch mismatch for Session {session_id}: ledger={}, worktree={session_branch}",
+                session.branch
+            )));
+        }
+    }
+    if let Some(root) = session_git_root.as_deref() {
+        let session_anchor = canonical_repository_anchor(root).map_err(|error| {
+            mutation_error(format!(
+                "Session worktree mismatch for Session {session_id}: {error}"
+            ))
+        })?;
+        if session_anchor != project_anchor {
+            return Err(mutation_error(format!(
+                "Session worktree mismatch for Session {session_id}: {} does not belong to canonical repository {}",
+                root.display(),
+                project_anchor.display()
+            )));
+        }
+    }
+
+    let invocation_git_root = match invocation_git_root {
+        Some(root) => root,
+        None => git_toplevel(&invocation_raw, "cwd")?,
+    };
+    let invocation_repo_hash = repo_hash_for_mutation(&invocation_git_root, "repo hash")?;
+    if declared_repo_hash != invocation_repo_hash {
+        return Err(mutation_error(format!(
+            "Session repo hash mismatch for Session {session_id}: ledger={declared_repo_hash}, cwd={invocation_repo_hash}"
+        )));
+    }
+    let invocation_branch = git_branch(&invocation_git_root, "cwd")?;
+    if canonical_branch_identity(&invocation_branch) != branch_identity {
+        return Err(mutation_error(format!(
+            "Session branch mismatch for Session {session_id}: ledger={}, cwd={invocation_branch}",
+            session.branch
+        )));
+    }
+
+    if docker {
+        validate_docker_invocation_alias(
+            &session,
+            &invocation_raw,
+            &invocation_git_root,
+            session_id,
+        )?;
+    } else {
+        let session_worktree = session_worktree
+            .as_ref()
+            .expect("Host worktree is canonicalized");
+        if &invocation_raw != session_worktree {
+            return Err(mutation_error(format!(
+                "Session cwd mismatch for Session {session_id}: expected {}, got {}",
+                session_worktree.display(),
+                invocation_raw.display()
+            )));
+        }
+    }
+
+    let event_identity_matches = if docker {
+        invocation_raw == invocation_git_root
+    } else {
+        session_worktree
+            .as_ref()
+            .zip(session_git_root.as_ref())
+            .is_some_and(|(worktree, git_root)| worktree == git_root)
+    };
+    if !event_identity_matches {
+        return Err(mutation_error(format!(
+            "Session event root mismatch for Session {session_id}: workspace.update must run at the validated Git toplevel"
+        )));
+    }
+
+    let worktree_identity = session_worktree.unwrap_or(session_worktree_normalized);
+    let work_id = resolve_unique_existing_work_id(
+        &project_state_root,
+        &invocation_git_root,
+        &session.id,
+        &branch_identity,
+        &worktree_identity,
+        docker,
+    )?;
+
+    Ok(SessionWorkMutationTarget {
+        project_state_root,
+        work_event_root: invocation_git_root,
+        session_id: session.id,
+        branch_identity,
+        worktree_identity,
+        work_id,
+    })
+}
+
+fn mutation_error(message: impl Into<String>) -> GwtError {
+    GwtError::Other(message.into())
+}
+
+fn load_session_for_mutation(session_id: &str) -> Result<Session> {
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    if !path.try_exists().map_err(|error| {
+        mutation_error(format!(
+            "failed to inspect Session ledger for Session {session_id} at {}: {error}",
+            path.display()
+        ))
+    })? {
+        return Err(mutation_error(format!(
+            "Session ledger is missing for Session {session_id} at {}",
+            path.display()
+        )));
+    }
+    Session::load(&path).map_err(|error| {
+        mutation_error(format!(
+            "invalid or corrupt Session ledger for Session {session_id} at {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn normalize_mutation_path(path: &Path) -> PathBuf {
+    let path = normalize_windows_child_process_path(path);
+    let path = dunce::canonicalize(&path).unwrap_or(path);
+    normalize_windows_child_process_path(&path)
+}
+
+fn canonicalize_mutation_path(path: &Path, identity: &str) -> Result<PathBuf> {
+    let normalized = normalize_windows_child_process_path(path);
+    let canonical = dunce::canonicalize(&normalized).map_err(|error| {
+        mutation_error(format!(
+            "Session {identity} mismatch: cannot canonicalize {}: {error}",
+            normalized.display()
+        ))
+    })?;
+    Ok(normalize_windows_child_process_path(&canonical))
+}
+
+fn git_toplevel(path: &Path, identity: &str) -> Result<PathBuf> {
+    let output = gwt_core::process::run_git_logged(&["rev-parse", "--show-toplevel"], Some(path))
+        .map_err(|error| {
+        mutation_error(format!(
+            "Session {identity} mismatch: git rev-parse failed at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(mutation_error(format!(
+            "Session {identity} mismatch: {} is not a Git worktree: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    canonicalize_mutation_path(&root, identity)
+}
+
+fn git_branch(path: &Path, identity: &str) -> Result<String> {
+    let output = gwt_core::process::run_git_logged(
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        Some(path),
+    )
+    .map_err(|error| {
+        mutation_error(format!(
+            "Session branch mismatch: git symbolic-ref failed for {identity} {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(mutation_error(format!(
+            "Session branch mismatch: {identity} {} has no attached branch",
+            path.display()
+        )));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Err(mutation_error(format!(
+            "Session branch mismatch: {identity} {} returned an empty branch",
+            path.display()
+        )));
+    }
+    Ok(branch)
+}
+
+fn repo_hash_for_mutation(path: &Path, identity: &str) -> Result<String> {
+    gwt_core::repo_hash::detect_repo_hash(path)
+        .map(|hash| hash.as_str().to_string())
+        .ok_or_else(|| {
+            mutation_error(format!(
+                "Session {identity} mismatch: origin repo hash is unavailable at {}",
+                path.display()
+            ))
+        })
+}
+
+fn strict_project_state_root(session: &Session) -> Result<PathBuf> {
+    if let Some(root) = session
+        .project_state_root
+        .as_deref()
+        .filter(|root| !root.as_os_str().is_empty())
+    {
+        return Ok(root.to_path_buf());
+    }
+    derive_legacy_project_state_root(&session.worktree_path).ok_or_else(|| {
+        mutation_error(format!(
+            "canonical repository mismatch for Session {}: project_state_root is missing and the legacy root cannot be derived",
+            session.id
+        ))
+    })
+}
+
+fn canonical_repository_anchor(path: &Path) -> Result<PathBuf> {
+    let anchor = gwt_git::worktree::main_worktree_root(path)
+        .map_err(|error| mutation_error(error.to_string()))?;
+    canonicalize_mutation_path(&anchor, "canonical repository")
+}
+
+fn validate_project_state_anchor(
+    project_state_root: &Path,
+    project_anchor: &Path,
+    session_id: &str,
+) -> Result<()> {
+    if project_state_root == project_anchor {
+        return Ok(());
+    }
+    let is_workspace_home = is_bare_child_common_dir(project_anchor)
+        && project_anchor.parent() == Some(project_state_root);
+    if is_workspace_home {
+        return Ok(());
+    }
+    Err(mutation_error(format!(
+        "canonical repository mismatch for Session {session_id}: Project State root {} is neither the repository anchor nor the parent of its bare common-dir {}",
+        project_state_root.display(),
+        project_anchor.display()
+    )))
+}
+
+fn canonical_branch_identity(branch: &str) -> String {
+    let branch = branch.trim();
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    let branch = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
+    branch.strip_prefix("origin/").unwrap_or(branch).to_string()
+}
+
+fn validate_docker_invocation_alias(
+    session: &Session,
+    invocation_raw: &Path,
+    invocation_git_root: &Path,
+    session_id: &str,
+) -> Result<()> {
+    let selected_service = session
+        .docker_service
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            docker_mismatch(session_id, "Session ledger has no selected docker_service")
+        })?;
+    let files = gwt_docker::detect_docker_files(invocation_git_root);
+    let devcontainer_path = files
+        .devcontainer_dir
+        .as_ref()
+        .map(|dir| dir.join("devcontainer.json"));
+    let devcontainer = devcontainer_path
+        .as_deref()
+        .filter(|path| path.is_file())
+        .map(gwt_docker::DevContainerConfig::load)
+        .transpose()
+        .map_err(|error| docker_mismatch(session_id, error))?;
+    if let Some(configured_service) = devcontainer
+        .as_ref()
+        .and_then(|config| config.service.as_deref())
+    {
+        if configured_service != selected_service {
+            return Err(docker_mismatch(
+                session_id,
+                format!("selected service {selected_service} conflicts with devcontainer service {configured_service}"),
+            ));
+        }
+    }
+
+    let compose_files = docker_compose_paths(&files, devcontainer.as_ref());
+    if compose_files.is_empty() {
+        return Err(docker_mismatch(
+            session_id,
+            "no compose launch plan is available",
+        ));
+    }
+    let service = merged_docker_service(&compose_files, selected_service)
+        .map_err(|error| docker_mismatch(session_id, error))?;
+
+    let host_worktree = normalize_windows_child_process_path(&session.worktree_path);
+    let mapped_targets = service
+        .volumes
+        .iter()
+        .filter(|mount| docker_mount_source_matches_session(&mount.source, &host_worktree))
+        .map(|mount| mount.target.trim().to_string())
+        .filter(|target| !target.is_empty())
+        .collect::<Vec<_>>();
+    if mapped_targets.len() != 1 {
+        return Err(docker_mismatch(
+            session_id,
+            format!("selected service {selected_service} must map the host Session worktree to exactly one container target"),
+        ));
+    }
+    let mapped_target = &mapped_targets[0];
+
+    let configured_cwds = [
+        devcontainer
+            .as_ref()
+            .and_then(|config| config.workspace_folder.as_deref()),
+        service.working_dir.as_deref(),
+    ];
+    for configured in configured_cwds.into_iter().flatten().map(str::trim) {
+        if !configured.is_empty() && configured != mapped_target {
+            return Err(docker_mismatch(
+                session_id,
+                "compose/devcontainer container cwd values conflict",
+            ));
+        }
+    }
+    let expected_cwd = PathBuf::from(mapped_target);
+    if !expected_cwd.is_absolute() {
+        return Err(docker_mismatch(
+            session_id,
+            format!("container cwd {} is not absolute", expected_cwd.display()),
+        ));
+    }
+    let expected_cwd = canonicalize_mutation_path(&expected_cwd, "Docker cwd")?;
+    if invocation_raw != expected_cwd || invocation_git_root != expected_cwd {
+        return Err(docker_mismatch(
+            session_id,
+            format!(
+                "launch plan targets {}, actual Git root is {}",
+                expected_cwd.display(),
+                invocation_git_root.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn docker_mismatch(session_id: &str, reason: impl std::fmt::Display) -> GwtError {
+    mutation_error(format!(
+        "Docker cwd mismatch for Session {session_id}: {reason}"
+    ))
+}
+
+fn docker_compose_paths(
+    files: &gwt_docker::DockerFiles,
+    devcontainer: Option<&gwt_docker::DevContainerConfig>,
+) -> Vec<PathBuf> {
+    let mut compose_files = devcontainer
+        .and_then(|config| config.docker_compose_file.as_ref())
+        .zip(files.devcontainer_dir.as_ref())
+        .map(|(value, dir)| {
+            value
+                .to_vec()
+                .into_iter()
+                .map(|candidate| normalize_mutation_path(&dir.join(candidate)))
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if compose_files.is_empty() {
+        if let Some(compose_file) = files.compose_file.as_ref() {
+            compose_files.push(normalize_mutation_path(compose_file));
+        }
+    }
+    compose_files
+}
+
+fn merged_docker_service(
+    compose_files: &[PathBuf],
+    selected_service: &str,
+) -> Result<gwt_docker::ComposeService> {
+    let mut merged: Option<gwt_docker::ComposeService> = None;
+    for compose_file in compose_files {
+        let services = gwt_docker::parse_compose_file(compose_file)
+            .map_err(|error| mutation_error(error.to_string()))?;
+        for service in services
+            .into_iter()
+            .filter(|service| service.name == selected_service)
+        {
+            if let Some(existing) = merged.as_mut() {
+                if service.working_dir.is_some() {
+                    existing.working_dir = service.working_dir;
+                }
+                if !service.volumes.is_empty() {
+                    existing.volumes = service.volumes;
+                }
+            } else {
+                merged = Some(service);
+            }
+        }
+    }
+    merged.ok_or_else(|| {
+        mutation_error(format!(
+            "selected Docker service {selected_service} was not found in the launch plan"
+        ))
+    })
+}
+
+fn docker_mount_source_matches_session(source: &str, session_worktree: &Path) -> bool {
+    let source = source.trim().trim_end_matches(['/', '\\']);
+    if source.is_empty() || source.starts_with('$') && !matches!(source, "$PWD" | "${PWD}") {
+        return false;
+    }
+    let resolved = if matches!(source, "." | "$PWD" | "${PWD}") {
+        session_worktree.to_path_buf()
+    } else if Path::new(source).is_absolute() {
+        PathBuf::from(source)
+    } else {
+        session_worktree.join(source)
+    };
+    normalize_mutation_path(&resolved) == normalize_mutation_path(session_worktree)
+}
+
+fn resolve_unique_existing_work_id(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    docker: bool,
+) -> Result<String> {
+    let current_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_state_root);
+    let projection = load_workspace_projection_from_path(&current_path)
+        .map_err(|error| {
+            workspace_ensure_error(
+                session_id,
+                &format!("canonical Session assignment cannot be read: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            workspace_ensure_error(session_id, "canonical Session assignment is missing")
+        })?;
+    let agent = projection
+        .latest_agent_for_session(session_id)
+        .ok_or_else(|| {
+            workspace_ensure_error(session_id, "canonical Session assignment is missing")
+        })?;
+    if !agent.is_assigned() {
+        return Err(workspace_ensure_error(
+            session_id,
+            "latest canonical Session assignment is Unassigned",
+        ));
+    }
+    let work_id = agent
+        .workspace_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            workspace_ensure_error(
+                session_id,
+                "latest canonical Session assignment has no Work id",
+            )
+        })?
+        .to_string();
+
+    let assigned_branch = agent
+        .branch
+        .as_deref()
+        .map(canonical_branch_identity)
+        .filter(|branch| !branch.is_empty());
+    let assigned_worktree = agent.worktree_path.as_deref().map(normalize_mutation_path);
+    if assigned_branch.as_deref() != Some(branch_identity)
+        || assigned_worktree.as_deref() != Some(worktree_identity)
+    {
+        return Err(workspace_ensure_error(
+            session_id,
+            "canonical Session assignment container does not match the validated branch/worktree",
+        ));
+    }
+
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let work_items = load_workspace_work_items_from_path(&work_items_path)
+        .map_err(|error| {
+            workspace_ensure_error(
+                session_id,
+                &format!("assigned WorkItems projection cannot be read: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            workspace_ensure_error(session_id, "assigned WorkItems projection is missing")
+        })?;
+    let matches = work_items
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_id)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Err(workspace_ensure_error(
+            session_id,
+            &format!("assigned Work {work_id} is missing"),
+        ));
+    }
+    if matches.len() > 1 {
+        return Err(workspace_ensure_error(
+            session_id,
+            &format!("assigned Work {work_id} is ambiguous"),
+        ));
+    }
+    let item = matches[0];
+    if item.is_terminal() {
+        return Err(workspace_ensure_error(
+            session_id,
+            &format!("assigned Work {work_id} is terminal"),
+        ));
+    }
+    let container_matches = item.execution_containers.iter().any(|container| {
+        let branch_matches = container
+            .branch
+            .as_deref()
+            .map(canonical_branch_identity)
+            .as_deref()
+            == Some(branch_identity);
+        let worktree_matches = container
+            .worktree_path
+            .as_deref()
+            .map(normalize_mutation_path)
+            .is_some_and(|path| path == worktree_identity || docker && path == work_event_root);
+        branch_matches && worktree_matches
+    });
+    if !container_matches {
+        return Err(workspace_ensure_error(
+            session_id,
+            &format!("assigned Work {work_id} has no matching execution container"),
+        ));
+    }
+    Ok(work_id)
+}
+
+fn workspace_ensure_error(session_id: &str, reason: &str) -> GwtError {
+    mutation_error(format!(
+        "Session-bound Work target for Session {session_id} is invalid: {reason}; run workspace.ensure for this Session before retrying workspace.update"
+    ))
+}
+
+#[allow(dead_code)] // Legacy non-mutation callers may still use fail-open root lookup.
 pub(crate) fn project_state_root_for_agent_session_or_fallback(
     fallback_repo_path: &Path,
     session_id: &str,
@@ -19,6 +660,7 @@ pub(crate) fn project_state_root_for_agent_session_or_fallback(
         .unwrap_or_else(|| normalize_project_state_root(fallback_repo_path))
 }
 
+#[allow(dead_code)] // Legacy non-mutation callers may still use fail-open root lookup.
 pub(crate) fn work_event_root_for_agent_session_or_fallback(
     fallback_repo_path: &Path,
     session_id: &str,
@@ -107,6 +749,7 @@ pub(crate) fn repair_split_agent_state_if_needed(
     .map(Option::unwrap_or_default)
 }
 
+#[allow(dead_code)] // Shared by the retained legacy fail-open root helpers.
 fn load_session(session_id: &str) -> Option<Session> {
     match try_load_session(session_id) {
         Ok(session) => session,
@@ -306,6 +949,84 @@ mod tests {
             .expect("save Session ledger fixture");
     }
 
+    fn assigned_session_agent(
+        session: &Session,
+        work_id: &str,
+        updated_at: chrono::DateTime<Utc>,
+    ) -> WorkspaceAgentSummary {
+        let mut agent = agent_summary(&session.id, None, None, updated_at);
+        agent.worktree_path = Some(session.worktree_path.clone());
+        agent.branch = Some(session.branch.clone());
+        agent.workspace_id = Some(work_id.to_string());
+        agent
+    }
+
+    fn save_project_assignments(project_state_root: &Path, agents: Vec<WorkspaceAgentSummary>) {
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                project_state_root,
+            );
+        projection.agents = agents;
+        gwt_core::workspace_projection::save_workspace_projection(project_state_root, &projection)
+            .expect("save canonical Session assignments");
+    }
+
+    fn mutation_work_items(
+        work_event_root: &Path,
+        session: &Session,
+        work_id: &str,
+    ) -> gwt_core::workspace_projection::WorkItemsProjection {
+        let now = Utc::now();
+        let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            now,
+        );
+        event.title = Some("Session-bound Work".to_string());
+        event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        event.agent_session_id = Some(session.id.clone());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(session.branch.clone()),
+                worktree_path: Some(work_event_root.to_path_buf()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        projection.apply_event(event);
+        projection
+    }
+
+    fn save_mutation_work_items(
+        work_event_root: &Path,
+        projection: &gwt_core::workspace_projection::WorkItemsProjection,
+    ) {
+        let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &path, projection,
+        )
+        .expect("save WorkItems projection");
+    }
+
+    fn seed_unique_mutation_target(
+        project_state_root: &Path,
+        work_event_root: &Path,
+        session: &Session,
+        work_id: &str,
+    ) {
+        save_project_assignments(
+            project_state_root,
+            vec![assigned_session_agent(session, work_id, Utc::now())],
+        );
+        save_mutation_work_items(
+            work_event_root,
+            &mutation_work_items(work_event_root, session, work_id),
+        );
+    }
+
     #[derive(Debug)]
     enum SessionLedgerFixture {
         Missing { session_id: String },
@@ -445,6 +1166,199 @@ mod tests {
         }
     }
 
+    fn assert_workspace_ensure_error(error: gwt_core::GwtError, expected: &str) {
+        let message = error.to_string();
+        assert!(
+            message.contains("workspace.ensure"),
+            "target-resolution error must provide the recovery operation: {message}"
+        );
+        assert!(
+            message.to_ascii_lowercase().contains(expected),
+            "target-resolution error must identify {expected}: {message}"
+        );
+    }
+
+    fn with_strict_target_fixture(test: impl FnOnce(&Path, &Session)) {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let branch = "work/strict-target";
+        let repo = init_git_repo(
+            temp.path(),
+            "repo",
+            "https://example.invalid/acme/strict-target.git",
+            branch,
+        );
+        let session = session_fixture("strict-target-session", &repo, branch);
+        save_session_fixture(&session);
+        test(&repo, &session);
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_resolves_canonical_path_aliases() {
+        with_strict_target_fixture(|repo, session| {
+            let work_id = "work-strict-target";
+            seed_unique_mutation_target(repo, repo, session, work_id);
+
+            let target = resolve_session_work_mutation_target(repo, &session.id)
+                .expect("resolve unique Session-bound Work target");
+            assert_eq!(target.project_state_root, repo);
+            assert_eq!(target.work_event_root, repo);
+            assert_eq!(target.session_id, session.id);
+            assert_eq!(target.branch_identity, session.branch);
+            assert_eq!(target.worktree_identity, session.worktree_path);
+            assert_eq!(target.work_id, work_id);
+
+            let provider_path = PathBuf::from(format!(
+                "Microsoft.PowerShell.Core\\FileSystem::{}",
+                repo.display()
+            ));
+            resolve_session_work_mutation_target(&provider_path, &session.id)
+                .expect("PowerShell provider path must resolve to the canonical Git root");
+
+            #[cfg(unix)]
+            {
+                let symlink = repo.parent().expect("repo parent").join("repo-link");
+                std::os::unix::fs::symlink(repo, &symlink).expect("create worktree symlink");
+                resolve_session_work_mutation_target(&symlink, &session.id)
+                    .expect("symlink must resolve to the canonical Git root");
+            }
+        });
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_requires_latest_assignment_and_unique_active_work() {
+        with_strict_target_fixture(|repo, session| {
+            let work_id = "work-required";
+            let empty =
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+            gwt_core::workspace_projection::save_workspace_projection(repo, &empty)
+                .expect("save empty assignment projection");
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("missing assignment"),
+                "missing",
+            );
+
+            let older = Utc::now();
+            let mut unassigned =
+                assigned_session_agent(session, work_id, older + chrono::Duration::seconds(1));
+            unassigned.affiliation_status =
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+            unassigned.workspace_id = None;
+            save_project_assignments(
+                repo,
+                vec![assigned_session_agent(session, work_id, older), unassigned],
+            );
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("latest Unassigned state"),
+                "unassigned",
+            );
+
+            save_project_assignments(
+                repo,
+                vec![assigned_session_agent(session, work_id, Utc::now())],
+            );
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("missing WorkItems projection"),
+                "missing",
+            );
+
+            save_mutation_work_items(repo, &mutation_work_items(repo, session, "work-other"));
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("missing assigned Work"),
+                "missing",
+            );
+
+            let mut terminal = mutation_work_items(repo, session, work_id);
+            terminal.work_items[0].status_category =
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+            save_mutation_work_items(repo, &terminal);
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("terminal assigned Work"),
+                "terminal",
+            );
+
+            let mut no_container = mutation_work_items(repo, session, work_id);
+            no_container.work_items[0].execution_containers.clear();
+            save_mutation_work_items(repo, &no_container);
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("missing execution container"),
+                "container",
+            );
+
+            let mut duplicate = mutation_work_items(repo, session, work_id);
+            let mut terminal_duplicate = duplicate.work_items[0].clone();
+            terminal_duplicate.status_category =
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+            duplicate.work_items.push(terminal_duplicate);
+            save_mutation_work_items(repo, &duplicate);
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("duplicate Work id must be ambiguous before terminal filtering"),
+                "ambiguous",
+            );
+        });
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_requires_trusted_docker_mapping() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let branch = "work/docker-target";
+        let remote = "https://example.invalid/acme/docker-target.git";
+        let host_worktree = init_git_repo(temp.path(), "host-repo", remote, branch);
+        let container_worktree = init_git_repo(temp.path(), "container-repo", remote, branch);
+        std::fs::write(
+            container_worktree.join("docker-compose.yml"),
+            format!(
+                "services:\n  app:\n    image: test\n    working_dir: '{}'\n    volumes:\n      - '{}:{}'\n",
+                container_worktree.display(),
+                host_worktree.display(),
+                container_worktree.display()
+            ),
+        )
+        .expect("write trusted Docker launch mapping");
+        let mut session = session_fixture("docker-target-session", &host_worktree, branch);
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("app".to_string());
+        save_session_fixture(&session);
+        seed_unique_mutation_target(
+            &host_worktree,
+            &container_worktree,
+            &session,
+            "work-docker-target",
+        );
+
+        let target = resolve_session_work_mutation_target(&container_worktree, &session.id)
+            .expect("trusted Docker mapping must authorize the container Git root");
+
+        assert_eq!(target.project_state_root, host_worktree);
+        assert_eq!(target.work_event_root, container_worktree);
+        assert_eq!(target.worktree_identity, session.worktree_path);
+        assert_eq!(target.branch_identity, branch);
+        let arbitrary_clone = init_git_repo(temp.path(), "arbitrary-clone", remote, branch);
+        let error = resolve_session_work_mutation_target(&arbitrary_clone, &session.id)
+            .expect_err("repo hash and branch alone must not authorize an arbitrary Docker clone");
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(message.contains("docker"), "{message}");
+        assert!(message.contains("cwd"), "{message}");
+    }
+
     #[test]
     fn strict_agent_session_roots_reject_missing_ledger_without_fallback() {
         let _guard = crate::env_test_lock()
@@ -461,7 +1375,7 @@ mod tests {
             "work/strict-session",
         );
 
-        let error = agent_session_roots_or_fallback(&repo, "missing-session-ledger")
+        let error = resolve_session_work_mutation_target(&repo, "missing-session-ledger")
             .expect_err("missing Session ledger must fail closed instead of using cwd fallback");
         let message = error.to_string();
         assert!(message.contains("missing-session-ledger"), "{message}");
@@ -492,7 +1406,7 @@ mod tests {
         let ledger_path = sessions_dir.join(format!("{session_id}.toml"));
         std::fs::write(&ledger_path, "broken = [").expect("write corrupt Session ledger");
 
-        let error = agent_session_roots_or_fallback(&repo, session_id)
+        let error = resolve_session_work_mutation_target(&repo, session_id)
             .expect_err("corrupt Session ledger must fail closed");
         let message = error.to_string();
         assert!(
@@ -576,11 +1490,11 @@ mod tests {
 
         for (expected_mismatch, session, invocation_cwd) in cases {
             save_session_fixture(&session);
-            match agent_session_roots_or_fallback(&invocation_cwd, &session.id) {
-                Ok((project_state_root, work_event_root)) => failures.push(format!(
+            match resolve_session_work_mutation_target(&invocation_cwd, &session.id) {
+                Ok(target) => failures.push(format!(
                     "{expected_mismatch}: unexpectedly resolved project={} event={}",
-                    project_state_root.display(),
-                    work_event_root.display()
+                    target.project_state_root.display(),
+                    target.work_event_root.display()
                 )),
                 Err(error) => {
                     let message = error.to_string();
@@ -818,6 +1732,18 @@ mod tests {
         let mut provider_present = session_fixture("provider-present", &repo, branch);
         provider_present.agent_session_id = Some(RAW_PROVIDER_ACTOR_ID.to_string());
         let provider_absent = session_fixture("provider-absent", &repo, branch);
+        let work_id = "work-provider-neutral";
+        save_project_assignments(
+            &repo,
+            vec![
+                assigned_session_agent(&provider_present, work_id, Utc::now()),
+                assigned_session_agent(&provider_absent, work_id, Utc::now()),
+            ],
+        );
+        save_mutation_work_items(
+            &repo,
+            &mutation_work_items(&repo, &provider_present, work_id),
+        );
 
         for session in [&provider_present, &provider_absent] {
             save_session_fixture(session);

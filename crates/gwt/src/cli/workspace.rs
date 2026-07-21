@@ -332,32 +332,40 @@ pub(super) fn run<E: CliEnv>(
             current_focus,
             title_summary,
         } => {
-            let project_state_root = agent_session
-                .as_deref()
-                .map(|session_id| {
-                    crate::agent_project_state::project_state_root_for_agent_session_or_fallback(
-                        env.repo_path(),
-                        session_id,
+            let session_id = std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    string_error(
+                        "workspace.update requires ambient GWT_SESSION_ID for mutation".to_string(),
                     )
-                })
-                .unwrap_or_else(|| env.repo_path().to_path_buf());
-            let work_event_root = agent_session
-                .as_deref()
-                .map(|session_id| {
-                    crate::agent_project_state::work_event_root_for_agent_session_or_fallback(
-                        env.repo_path(),
-                        session_id,
-                    )
-                })
-                .unwrap_or_else(|| env.repo_path().to_path_buf());
-            if let Some(session_id) = agent_session.as_deref() {
-                crate::agent_project_state::repair_split_agent_state_if_needed(
-                    &project_state_root,
-                    env.repo_path(),
-                    session_id,
-                )
-                .map_err(core_error)?;
+                })?;
+            if agent_session.as_deref() != Some(session_id.as_str()) {
+                return Err(string_error(
+                    "workspace.update agent Session must exactly match ambient GWT_SESSION_ID"
+                        .to_string(),
+                ));
             }
+            let target = crate::agent_project_state::resolve_session_work_mutation_target(
+                env.repo_path(),
+                &session_id,
+            )
+            .map_err(core_error)?;
+            tracing::debug!(
+                session_id = %target.session_id,
+                work_id = %target.work_id,
+                branch = %target.branch_identity,
+                worktree = %target.worktree_identity.display(),
+                project_state_root = %target.project_state_root.display(),
+                work_event_root = %target.work_event_root.display(),
+                "resolved Session-bound workspace.update target"
+            );
+            crate::agent_project_state::repair_split_agent_state_if_needed(
+                &target.project_state_root,
+                &target.work_event_root,
+                &target.session_id,
+            )
+            .map_err(core_error)?;
             let update = WorkspaceProjectionUpdate {
                 title,
                 status_category: status
@@ -370,17 +378,17 @@ pub(super) fn run<E: CliEnv>(
                 next_action,
                 summary,
                 progress_summary,
-                agent_session_id: agent_session,
+                agent_session_id: Some(target.session_id.clone()),
                 agent_current_focus: current_focus,
                 agent_title_summary: title_summary,
             };
             let entry = update_workspace_projection_with_journal_for_work_event_root(
-                &project_state_root,
-                &work_event_root,
+                &target.project_state_root,
+                &target.work_event_root,
                 update,
             )
             .map_err(|error| string_error(error.to_string()))?;
-            publish_workspace_change(&project_state_root);
+            publish_workspace_change(&target.project_state_root);
             out.push_str(&format!("workspace updated: {}\n", entry.id));
             Ok(0)
         }
@@ -1233,7 +1241,7 @@ fn string_error(error: String) -> SpecOpsError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cli::env::TestEnv;
     use gwt_core::workspace_projection::{
@@ -1293,8 +1301,51 @@ mod tests {
         agent.current_focus = None;
         agent.title_summary = None;
         agent.worktree_path = Some(worktree_path.to_path_buf());
+        agent.branch = Some("work/20260601-0934".to_string());
         agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent.workspace_id = Some("work-session".to_string());
         agent
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) {
+        let output = gwt_core::process::run_git_logged(args, Some(cwd)).expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn initialize_session_git_layout(project_state_root: &Path, worktree_path: &Path) {
+        const BRANCH: &str = "work/20260601-0934";
+        const REMOTE: &str = "https://example.invalid/acme/workspace-update.git";
+        std::fs::create_dir_all(project_state_root).expect("project root");
+        if project_state_root == worktree_path {
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree_path);
+            run_git(&["checkout", "-b", BRANCH], worktree_path);
+            run_git(&["remote", "set-url", "origin", REMOTE], worktree_path);
+            return;
+        }
+
+        let bootstrap = project_state_root.join("bootstrap");
+        std::fs::create_dir_all(&bootstrap).expect("bootstrap");
+        crate::cli::trusted_store::init_git_repo_with_origin(&bootstrap);
+        run_git(&["checkout", "-b", BRANCH], &bootstrap);
+        let bare = project_state_root.join("gwt.git");
+        let bare_arg = bare.to_str().expect("bare path");
+        let bootstrap_arg = bootstrap.to_str().expect("bootstrap path");
+        run_git(
+            &["clone", "--bare", bootstrap_arg, bare_arg],
+            project_state_root,
+        );
+        run_git(&["remote", "set-url", "origin", REMOTE], &bare);
+        if worktree_path.exists() {
+            std::fs::remove_dir(worktree_path).expect("remove empty worktree placeholder");
+        }
+        std::fs::create_dir_all(worktree_path.parent().expect("worktree parent"))
+            .expect("worktree parent");
+        let worktree_arg = worktree_path.to_str().expect("worktree path");
+        run_git(&["worktree", "add", worktree_arg, BRANCH], &bare);
     }
 
     fn write_session_with_project_state_root(
@@ -1302,6 +1353,7 @@ mod tests {
         worktree_path: &Path,
         project_state_root: &Path,
     ) {
+        initialize_session_git_layout(project_state_root, worktree_path);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let mut session = gwt_agent::Session::new(
             worktree_path,
@@ -1311,6 +1363,29 @@ mod tests {
         session.id = session_id.to_string();
         session.project_state_root = Some(project_state_root.to_path_buf());
         session.save(&sessions_dir).expect("write session");
+
+        let mut event = WorkEvent::new(WorkEventKind::Start, "work-session", Utc::now());
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        event.agent_session_id = Some(session_id.to_string());
+        event.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260601-0934".to_string()),
+            worktree_path: Some(worktree_path.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        record_workspace_work_event(worktree_path, event).expect("save active Work fixture");
+    }
+
+    pub(crate) fn seed_valid_update_target(repo: &Path, session_id: &str) {
+        write_session_with_project_state_root(session_id, repo, repo);
+        let mut projection = WorkspaceProjection::default_for_project(repo);
+        projection.agents.push(assigned_agent_with_window(
+            session_id,
+            "project::agent-1",
+            repo,
+        ));
+        save_workspace_projection(repo, &projection).expect("save assigned Session fixture");
     }
 
     #[test]
@@ -1572,6 +1647,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-status");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-status",
+        );
         let mut env = TestEnv::new(repo.clone());
 
         let mut out = String::new();
@@ -1585,7 +1665,7 @@ mod tests {
                 progress_summary: None,
                 next_action: Some("Post Board request".to_string()),
                 owner: Some("SPEC-2359".to_string()),
-                agent_session: None,
+                agent_session: Some("session-status".to_string()),
                 current_focus: None,
                 title_summary: None,
             },
@@ -1608,11 +1688,14 @@ mod tests {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
-        let _session =
-            crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-progress");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-progress",
+        );
         let mut env = TestEnv::new(repo.clone());
         env.stdin = serde_json::json!({
             "schema_version": 1,
@@ -1660,6 +1743,10 @@ mod tests {
         let worktree = project_root.join("work").join("20260601-0934");
         std::fs::create_dir_all(&worktree).expect("worktree");
         write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
 
         let mut canonical = WorkspaceProjection::default_for_project(&project_root);
         canonical.agents.push(assigned_agent_with_window(
@@ -1794,6 +1881,10 @@ mod tests {
         let worktree = project_root.join("work").join("20260601-0934");
         std::fs::create_dir_all(&worktree).expect("worktree");
         write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
 
         let mut canonical = WorkspaceProjection::default_for_project(&project_root);
         canonical.agents.push(assigned_agent_with_window(

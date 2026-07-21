@@ -366,10 +366,7 @@ fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         super::validate_title_summary_work_name("params.purpose", value)?;
     }
     let current_focus = optional_string(params, "current_focus")?;
-    let agent_session = agent_session_or_env(params)?;
-    if agent_session.is_none() && (purpose.is_some() || current_focus.is_some()) {
-        return Err(CliParseError::MissingFlag("agent_session"));
-    }
+    let agent_session = Some(workspace_update_session(params)?);
     Ok(CliCommand::Workspace(WorkspaceCommand::Update {
         title: optional_string(params, "title")?,
         status: optional_string(params, "status")?,
@@ -903,6 +900,22 @@ fn agent_session_or_env(params: &Map<String, Value>) -> Result<Option<String>, C
         .filter(|value| !value.trim().is_empty()))
 }
 
+fn workspace_update_session(params: &Map<String, Value>) -> Result<String, CliParseError> {
+    let ambient = std::env::var(GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(CliParseError::MissingFlag("GWT_SESSION_ID"))?;
+    if let Some(explicit) = optional_string(params, "agent_session")? {
+        if explicit != ambient {
+            return Err(CliParseError::InvalidValue {
+                flag: "agent_session",
+                reason: "must exactly match ambient GWT_SESSION_ID",
+            });
+        }
+    }
+    Ok(ambient)
+}
+
 fn reject_key(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1197,6 +1210,13 @@ mod tests {
 
     #[test]
     fn workspace_update_maps_purpose_to_title_summary() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
         let command = ok(
             "workspace.update",
             json!({
@@ -1385,6 +1405,11 @@ mod tests {
     /// being a bare activity label stay valid purposes.
     #[test]
     fn workspace_update_accepts_work_purpose_mentioning_activity_domain() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::session::GWT_SESSION_ID_ENV, "s");
         for label in [
             "browser-check purpose overwrite guard",
             "Fix browser check",
@@ -1416,16 +1441,14 @@ mod tests {
     }
 
     #[test]
-    fn workspace_update_requires_agent_session_when_setting_purpose() {
-        // No agent_session in params; rely on env being unset for the work fields.
-        // When purpose/current_focus omitted, agent_session is optional, so test the
-        // explicit error path by providing current_focus without agent_session only
-        // when the env var is absent.
-        if std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV).is_ok() {
-            return;
-        }
+    fn workspace_update_requires_ambient_session_when_setting_purpose() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
         match err("workspace.update", json!({"current_focus": "x"})) {
-            CliParseError::MissingFlag(flag) => assert_eq!(flag, "agent_session"),
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "GWT_SESSION_ID"),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -2245,6 +2268,11 @@ mod tests {
     #[test]
     fn null_values_fall_back_to_defaults() {
         // Null optionals should behave as absent.
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::session::GWT_SESSION_ID_ENV, "s");
         let command = ok(
             "workspace.update",
             json!({"agent_session": "s", "summary": Value::Null, "status": Value::Null}),

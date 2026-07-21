@@ -545,7 +545,8 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = tempfile::tempdir().expect("home tempdir");
     let _home = crate::cli::test_support::ScopedEnvVar::set("HOME", home.path());
-    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    crate::cli::workspace::tests::seed_valid_update_target(temp.path(), "session-json");
+    let _session = crate::cli::test_support::ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-json");
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = r#"{
         "schema_version": 1,
