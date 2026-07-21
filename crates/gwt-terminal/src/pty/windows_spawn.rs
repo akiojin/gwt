@@ -545,6 +545,7 @@ mod tests {
         let reader = handle.reader().expect("PTY reader");
         let output = read_until_contains(reader, Duration::from_secs(5), "GWT_ARG3")
             .expect("read cmd shim output");
+        let output = String::from_utf8_lossy(&output);
 
         assert!(output.contains("GWT_ARG1:\"a&b\""), "{output:?}");
         assert!(output.contains("GWT_ARG2:\"%PATH%\""), "{output:?}");
