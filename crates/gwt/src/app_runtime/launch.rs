@@ -503,11 +503,24 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
 fn detect_installed_codex_hook_discovery_mode(
     config: &gwt_agent::LaunchConfig,
 ) -> Option<gwt_skills::CodexHookDiscoveryMode> {
-    let mut command = gwt_core::process::hidden_command(&config.command);
-    command.arg("--version").envs(&config.env_vars);
+    let mut request = gwt_core::process::ProcessPlanRequest::new(&config.command).arg("--version");
     for key in &config.remove_env {
-        command.env_remove(key);
+        request = request.env_remove(key);
     }
+    for (key, value) in &config.env_vars {
+        request = request.env(key, value);
+    }
+    let mut command = match gwt_core::process::resolved_command(request) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(
+                command = %config.command,
+                error = %error,
+                "installed Codex version probe could not resolve a safe executable"
+            );
+            return None;
+        }
+    };
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;

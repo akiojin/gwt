@@ -1401,6 +1401,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+ "windows 0.62.2",
  "zip",
 ]
 
@@ -1471,7 +1472,6 @@ dependencies = [
  "libc",
  "nix 0.31.3",
  "portable-pty",
- "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
