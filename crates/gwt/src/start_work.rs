@@ -103,6 +103,198 @@ pub fn resolve_start_work_base_branch_in(git_root: &Path) -> Result<String, Star
     resolve_start_work_base_branch_with(|candidates| lookup_short_refs(git_root, candidates))
 }
 
+/// Resolve the existing local branch that Launch Agent should use as its base.
+///
+/// Normal repositories preserve their current branch. Container workspaces
+/// resolve through their canonical main repository and prefer a checked-out
+/// `develop`, then `main`, before falling back to the main repository's
+/// symbolic `HEAD`. Every candidate must resolve to a commit.
+pub fn resolve_launch_agent_base_branch(project_root: &Path) -> Result<String, String> {
+    const NO_BRANCHES_ERROR: &str =
+        "No branches exist in this repository; create an initial commit first";
+    const NO_SELECTED_BRANCH_ERROR: &str = "Current branch is unavailable: repository has local \
+        branches, but no current or checked-out develop/main base branch could be resolved";
+
+    let existing_branch = |repo_path: &Path, branch: &str| -> Result<Option<String>, String> {
+        let branch = normalize_launch_branch_name(branch);
+        if branch.is_empty() || !local_branch_resolves_to_commit(repo_path, &branch)? {
+            Ok(None)
+        } else {
+            Ok(Some(branch))
+        }
+    };
+    let mut deferred_error = None;
+
+    if is_git_worktree(project_root) {
+        match symbolic_head_branch(project_root) {
+            Ok(Some(branch)) => match existing_branch(project_root, &branch) {
+                Ok(Some(branch)) => return Ok(branch),
+                Ok(None) => {}
+                Err(error) => {
+                    deferred_error = Some(error);
+                }
+            },
+            Ok(None) => {}
+            Err(error) => deferred_error = Some(error),
+        }
+    }
+
+    let remember_error = |slot: &mut Option<String>, error: String| {
+        if slot.is_none() {
+            *slot = Some(error);
+        }
+    };
+
+    let main_repo_path = gwt_git::worktree::main_worktree_root(project_root)
+        .map_err(|error| format!("Current branch is unavailable: {error}"))?;
+    let worktrees = gwt_git::WorktreeManager::new(&main_repo_path)
+        .list()
+        .map_err(|error| format!("Current branch is unavailable: {error}"))?;
+    for branch in ["develop", "main"] {
+        if !has_usable_worktree_for_branch(&worktrees, branch) {
+            continue;
+        }
+        match existing_branch(&main_repo_path, branch) {
+            Ok(Some(branch)) => return Ok(branch),
+            Ok(None) => {}
+            Err(error) => remember_error(&mut deferred_error, error),
+        }
+    }
+
+    match symbolic_head_branch(&main_repo_path) {
+        Ok(Some(branch)) => match existing_branch(&main_repo_path, &branch) {
+            Ok(Some(branch)) => return Ok(branch),
+            Ok(None) => {}
+            Err(error) => remember_error(&mut deferred_error, error),
+        },
+        Ok(None) => {}
+        Err(error) => remember_error(&mut deferred_error, error),
+    }
+
+    match local_branches_resolving_to_commits(&main_repo_path, "refs/heads/") {
+        Ok(branches) if branches.is_empty() => {
+            if let Some(error) = deferred_error {
+                Err(error)
+            } else {
+                Err(NO_BRANCHES_ERROR.to_string())
+            }
+        }
+        Ok(_) => Err(deferred_error.unwrap_or_else(|| NO_SELECTED_BRANCH_ERROR.to_string())),
+        Err(error) => Err(error),
+    }
+}
+
+fn normalize_launch_branch_name(branch_name: &str) -> String {
+    if let Some(name) = branch_name.strip_prefix("refs/remotes/") {
+        return name.strip_prefix("origin/").unwrap_or(name).to_string();
+    }
+    if let Some(name) = branch_name.strip_prefix("origin/") {
+        return name.to_string();
+    }
+    branch_name.to_string()
+}
+
+fn local_branch_resolves_to_commit(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
+    let ref_name = format!("refs/heads/{branch_name}");
+    Ok(local_branches_resolving_to_commits(repo_path, &ref_name)?
+        .iter()
+        .any(|branch| branch == branch_name))
+}
+
+fn symbolic_head_branch(repo_path: &Path) -> Result<Option<String>, String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("git symbolic-ref HEAD: {error}"))?;
+    match output.status.code() {
+        Some(0) => {
+            let raw_branch = String::from_utf8_lossy(&output.stdout);
+            let branch = normalize_launch_branch_name(raw_branch.trim());
+            if branch.is_empty() {
+                Err(format!(
+                    "git symbolic-ref HEAD in {} returned an empty branch",
+                    repo_path.display()
+                ))
+            } else {
+                Ok(Some(branch))
+            }
+        }
+        Some(1) => Ok(None),
+        _ => Err(format!(
+            "git symbolic-ref HEAD in {} failed with status {}: {}",
+            repo_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+fn local_branches_resolving_to_commits(
+    repo_path: &Path,
+    pattern: &str,
+) -> Result<Vec<String>, String> {
+    let format = "--format=%(refname)\t%(objecttype)\t%(*objecttype)";
+    let output = gwt_core::process::hidden_command("git")
+        .args(["for-each-ref", format, pattern])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("git for-each-ref {pattern}: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() || !stderr.is_empty() {
+        return Err(format!(
+            "git for-each-ref {pattern} in {} failed with status {}: {}",
+            repo_path.display(),
+            output.status,
+            stderr
+        ));
+    }
+
+    let mut branches = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.splitn(3, '\t');
+        let (Some(ref_name), Some(object_type), Some(peeled_object_type)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(format!(
+                "git for-each-ref {pattern} in {} returned malformed output",
+                repo_path.display()
+            ));
+        };
+        let Some(branch) = ref_name.strip_prefix("refs/heads/") else {
+            return Err(format!(
+                "git for-each-ref {pattern} in {} returned non-local ref {ref_name}",
+                repo_path.display()
+            ));
+        };
+        if object_type == "commit" || peeled_object_type == "commit" {
+            branches.push(branch.to_string());
+        }
+    }
+    Ok(branches)
+}
+
+fn is_git_worktree(repo_path: &Path) -> bool {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_path)
+        .output();
+    output.is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+    })
+}
+
+fn has_usable_worktree_for_branch(worktrees: &[gwt_git::WorktreeInfo], branch_name: &str) -> bool {
+    worktrees.iter().any(|worktree| {
+        worktree.branch.as_deref() == Some(branch_name)
+            && !worktree.prunable
+            && worktree.path.exists()
+    })
+}
+
 /// Wrap [`gwt_git::list_existing_refs`] to translate short candidate names
 /// (for example `origin/develop`) into the fully qualified refs needed by
 /// `for-each-ref`, then translate the existing-set back to short names.
@@ -235,7 +427,7 @@ fn remote_tracking_ref(remote_ref: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashSet, rc::Rc};
+    use std::{cell::RefCell, collections::HashSet, fs, path::Path, rc::Rc};
 
     use chrono::{TimeZone, Utc};
 
@@ -247,6 +439,42 @@ mod tests {
 
     fn ok_existing(existing: &HashSet<String>) -> HashSet<String> {
         existing.clone()
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} in {} failed: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_committed_repo(repo: &Path, branch: &str) {
+        fs::create_dir_all(repo).expect("create repository");
+        run_git(repo, &["init", "-q", "-b", branch]);
+        run_git(repo, &["config", "user.name", "Test User"]);
+        run_git(repo, &["config", "user.email", "test@example.com"]);
+        fs::write(repo.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-qm", "fixture"]);
+    }
+
+    #[test]
+    fn launch_agent_base_branch_public_api_preserves_normal_current_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_committed_repo(&repo, "feature/current");
+
+        assert_eq!(
+            crate::start_work::resolve_launch_agent_base_branch(&repo),
+            Ok("feature/current".to_string())
+        );
     }
 
     #[test]
