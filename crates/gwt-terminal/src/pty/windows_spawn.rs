@@ -476,7 +476,12 @@ mod tests {
         let real = temp.path().join("real.exe");
         write_valid_pe(&real);
 
-        assert!(reject_non_pe_executable(stub.to_string_lossy().as_ref()).is_some());
+        let placeholder_error = reject_non_pe_executable(stub.to_string_lossy().as_ref())
+            .expect("placeholder must be rejected");
+        assert!(
+            placeholder_error.contains("native-binary placeholder without a safe wrapper"),
+            "{placeholder_error}"
+        );
         assert!(reject_non_pe_executable(corrupt.to_string_lossy().as_ref()).is_some());
         assert!(reject_non_pe_executable(real.to_string_lossy().as_ref()).is_none());
     }
@@ -501,7 +506,10 @@ mod tests {
             Ok(_) => panic!("spawning a non-PE placeholder stub must fail"),
             Err(error) => error.to_string(),
         };
-        assert!(message.contains("not a valid Windows executable"));
+        assert!(
+            message.contains("native-binary placeholder without a safe wrapper"),
+            "{message}"
+        );
     }
 
     #[cfg(windows)]
@@ -509,7 +517,7 @@ mod tests {
     fn pty_spawns_a_real_cmd_shim_from_a_spaced_path_with_quoted_arguments() {
         use std::time::Duration;
 
-        use crate::test_util::{lock_pty_test, read_until_contains};
+        use crate::test_util::{answer_cursor_position_query, lock_pty_test, read_until_contains};
 
         let _lock = lock_pty_test();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -542,6 +550,7 @@ mod tests {
             cwd: None,
         })
         .expect("spawn real cmd shim through PTY");
+        answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("PTY reader");
         let output = read_until_contains(reader, Duration::from_secs(5), "GWT_ARG3")
             .expect("read cmd shim output");
