@@ -23519,14 +23519,18 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
 
     let temp = tempdir().expect("tempdir");
     let root = temp.path().join("repo");
+    let mut branch_backed = row(
+        "work-work-x-aaaa",
+        Some("work/x"),
+        "2026-06-11T10:00:00Z",
+        0,
+        "paused",
+    );
+    branch_backed.pr_number = Some(3327);
+    branch_backed.pr_url = Some("https://github.com/akiojin/gwt/pull/3327".to_string());
+    branch_backed.pr_state = Some("MERGED".to_string());
     let mut works = vec![
-        row(
-            "work-session-aaaa",
-            Some("work/x"),
-            "2026-06-11T10:00:00Z",
-            0,
-            "paused",
-        ),
+        branch_backed,
         row(
             "work-session-bbbb",
             Some("origin/work/x"),
@@ -23563,6 +23567,16 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
     );
     assert_eq!(group.active_agents, 2, "agent counts sum");
     assert_eq!(group.session_agent_total, 2, "session totals sum");
+    assert_eq!(group.pr_number, Some(3327));
+    assert_eq!(
+        group.pr_url.as_deref(),
+        Some("https://github.com/akiojin/gwt/pull/3327")
+    );
+    assert_eq!(
+        group.pr_state.as_deref(),
+        Some("MERGED"),
+        "a newer session row must not erase branch-backed PR metadata"
+    );
     assert!(group.workspace_key.is_some());
     assert_eq!(
         group.works.len(),
@@ -23575,13 +23589,13 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             .iter()
             .map(|work| work.id.as_str())
             .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from(["work-session-aaaa", "work-session-bbbb"]),
+        std::collections::BTreeSet::from(["work-session-bbbb", "work-work-x-aaaa"]),
         "each child Work keeps its stable identity"
     );
     let paused = group
         .works
         .iter()
-        .find(|work| work.id == "work-session-aaaa")
+        .find(|work| work.id == "work-work-x-aaaa")
         .expect("paused child Work");
     assert_eq!(paused.lifecycle_state, "paused");
     assert!(paused.manual_close_allowed);
@@ -23600,6 +23614,41 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
     assert_eq!(
         legacy.workspace_key.as_deref(),
         Some("workspace-1748822400000")
+    );
+
+    let mut older_pr = row(
+        "work-pr-precedence",
+        Some("work/pr-precedence"),
+        "2026-06-11T10:00:00Z",
+        0,
+        "paused",
+    );
+    older_pr.pr_number = Some(100);
+    older_pr.pr_url = Some("https://example.test/pull/100".to_string());
+    older_pr.pr_state = Some("MERGED".to_string());
+    let mut newer_pr = row(
+        "work-session-pr-precedence",
+        Some("work/pr-precedence"),
+        "2026-06-12T10:00:00Z",
+        1,
+        "active",
+    );
+    newer_pr.pr_number = Some(200);
+    newer_pr.pr_url = Some("https://example.test/pull/200".to_string());
+    newer_pr.pr_state = Some("OPEN".to_string());
+    let mut pr_precedence = vec![older_pr, newer_pr];
+
+    super::assign_and_merge_workspace_groups(&mut pr_precedence, &root);
+
+    assert_eq!(pr_precedence[0].pr_number, Some(200));
+    assert_eq!(
+        pr_precedence[0].pr_url.as_deref(),
+        Some("https://example.test/pull/200")
+    );
+    assert_eq!(
+        pr_precedence[0].pr_state.as_deref(),
+        Some("OPEN"),
+        "newer representative PR metadata must win when it is present"
     );
 }
 
