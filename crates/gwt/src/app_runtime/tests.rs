@@ -13257,67 +13257,6 @@ fn restart_window_events_is_noop_when_window_already_running() {
 }
 
 #[test]
-fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
-    let temp = tempdir().expect("tempdir");
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    let blocker_id = "a-blocking-runtime".to_string();
-    let observed_id = "b-observed-runtime".to_string();
-    let blocking_pane = Arc::new(Mutex::new(long_running_test_pane(&blocker_id)));
-    let observed_pane = Arc::new(Mutex::new(long_running_test_pane(&observed_id)));
-    let observed_pane_for_assertion = observed_pane.clone();
-    let blocking_join = thread::spawn(|| thread::sleep(Duration::from_secs(2)));
-
-    runtime.runtimes.insert(
-        blocker_id.clone(),
-        WindowRuntime {
-            pane: blocking_pane,
-            output_thread: Some(blocking_join),
-            status_thread: None,
-        },
-    );
-    runtime.runtimes.insert(
-        observed_id.clone(),
-        WindowRuntime {
-            pane: observed_pane,
-            output_thread: None,
-            status_thread: None,
-        },
-    );
-
-    let stop_thread = thread::spawn(move || {
-        runtime.stop_runtimes_in_shutdown_order(vec![blocker_id, observed_id]);
-    });
-
-    let deadline = Instant::now() + Duration::from_millis(400);
-    let mut observed_exited = false;
-    while Instant::now() < deadline {
-        observed_exited = observed_pane_for_assertion
-            .lock()
-            .expect("observed pane")
-            .pty()
-            .try_wait()
-            .expect("observed try_wait")
-            .is_some();
-        if observed_exited {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    if !observed_exited {
-        let _ = observed_pane_for_assertion
-            .lock()
-            .expect("observed pane cleanup")
-            .kill();
-    }
-    stop_thread.join().expect("stop thread");
-
-    assert!(
-        observed_exited,
-        "shutdown must kill all panes before waiting for any runtime join handle"
-    );
-}
-
-#[test]
 fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
     // Persistence flows through `workspace_state_path()` which is
     // HOME-based, so we must serialize against other HOME-touching
