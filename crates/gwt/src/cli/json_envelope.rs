@@ -905,6 +905,12 @@ fn workspace_update_session(params: &Map<String, Value>) -> Result<String, CliPa
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or(CliParseError::MissingFlag("GWT_SESSION_ID"))?;
+    gwt_agent::validate_session_id_path_component(&ambient).map_err(|_| {
+        CliParseError::InvalidValue {
+            flag: "GWT_SESSION_ID",
+            reason: "must be a safe Session id path component",
+        }
+    })?;
     if let Some(explicit) = optional_string(params, "agent_session")? {
         if explicit != ambient {
             return Err(CliParseError::InvalidValue {
@@ -1285,6 +1291,33 @@ mod tests {
                 assert!(reason.contains("match"), "{reason}");
             }
             other => panic!("expected explicit/ambient Session mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_rejects_unsafe_ambient_session_before_dispatch() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "../escaped-session",
+        );
+
+        match err(
+            "workspace.update",
+            json!({
+                "summary": "unsafe Session must not reach proxy or ledger lookup",
+            }),
+        ) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "GWT_SESSION_ID");
+                assert!(
+                    reason.contains("unsafe") || reason.contains("path component"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected unsafe ambient Session error, got {other:?}"),
         }
     }
 

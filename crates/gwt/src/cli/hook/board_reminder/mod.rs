@@ -533,7 +533,10 @@ pub fn compute_plan(
     // fast-path and then execution (FR-009). Replaces the SPEC-3247 ad-hoc
     // `SessionKind::from_env()` branch.
     let lane = super::context::HookContext::for_worktree(&session.worktree_path).lane;
-    let emit_work_state_reminders = lane.policy_flags.emit_work_state_reminders;
+    let suppress_work_state_reminders =
+        terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
+    let emit_work_state_reminders =
+        lane.policy_flags.emit_work_state_reminders && !suppress_work_state_reminders;
 
     let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
@@ -547,6 +550,10 @@ pub fn compute_plan(
         language: language.clone(),
         self_workspace_id,
     });
+    if suppress_work_state_reminders {
+        plan.output =
+            replace_with_terminal_settlement_reminder(plan.output, intent_event, &language);
+    }
 
     if emit_work_state_reminders {
         plan.output = append_title_summary_required_context(
@@ -629,6 +636,60 @@ pub fn compute_plan(
     }
 
     Ok(Some(plan))
+}
+
+fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -> bool {
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
+    match crate::cli::verification_record::load_work_event_settlement_record(&resolved) {
+        Ok(Some(record)) if record.session_id == session_id => return true,
+        Err(_) => return true,
+        Ok(Some(_)) | Ok(None) => {}
+    }
+    crate::cli::execution_state::load(&resolved)
+        .ok()
+        .flatten()
+        .is_some_and(|record| {
+            record.primary_session_id == session_id
+                && record.status != crate::cli::execution_state::ExecutionControlStatus::Active
+        })
+}
+
+fn replace_with_terminal_settlement_reminder(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    language: &str,
+) -> HookOutput {
+    let replacement = match (texts::reminder_language(language), event) {
+        (texts::ReminderLanguage::Ja, IntentBoundaryEvent::Stop) => {
+            texts::TERMINAL_SETTLEMENT_STOP_REMINDER_JA
+        }
+        (texts::ReminderLanguage::En, IntentBoundaryEvent::Stop) => {
+            texts::TERMINAL_SETTLEMENT_STOP_REMINDER
+        }
+        (texts::ReminderLanguage::Ja, _) => texts::TERMINAL_SETTLEMENT_REMINDER_JA,
+        (texts::ReminderLanguage::En, _) => texts::TERMINAL_SETTLEMENT_REMINDER,
+    };
+    let replace_base = |text: String| {
+        [
+            texts::USER_PROMPT_REMINDER,
+            texts::USER_PROMPT_REMINDER_SHORT,
+            texts::USER_PROMPT_REMINDER_JA,
+            texts::USER_PROMPT_REMINDER_SHORT_JA,
+            texts::STOP_REMINDER,
+            texts::STOP_REMINDER_SHORT,
+            texts::STOP_REMINDER_JA,
+            texts::STOP_REMINDER_SHORT_JA,
+        ]
+        .into_iter()
+        .fold(text, |text, base| text.replace(base, replacement))
+    };
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, replace_base(text))
+        }
+        HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
+        other => other,
+    }
 }
 
 /// SPEC-3248 P7A: true when the current session already recorded a fresh,
@@ -2211,6 +2272,88 @@ mod tests {
         assert!(text.contains("Progress Summary Reminder"));
         assert!(text.contains("progress_summary"));
         assert!(!text.contains("StopBlock"));
+    }
+
+    #[test]
+    fn terminal_settlement_replaces_work_update_reminders_at_every_boundary() {
+        for event in [
+            IntentBoundaryEvent::SessionStart,
+            IntentBoundaryEvent::UserPromptSubmit,
+            IntentBoundaryEvent::Stop,
+        ] {
+            let planned = plan_reminder(ReminderInputs {
+                event,
+                now: Utc::now(),
+                self_session_id: "session-terminal".to_string(),
+                display_name: "Codex".to_string(),
+                self_match_keys: vec![],
+                recent_entries: vec![],
+                reminders: RemindersState::default(),
+                has_recent_own_status: false,
+                language: "en".to_string(),
+                self_workspace_id: None,
+            });
+            let replaced = replace_with_terminal_settlement_reminder(planned.output, event, "en");
+            let text = match &replaced {
+                HookOutput::HookSpecificAdditionalContext { text, .. }
+                | HookOutput::SystemMessage(text) => text,
+                other => panic!("unexpected terminal reminder output: {other:?}"),
+            };
+            assert!(!text.contains("workspace.update"), "{event:?}: {text}");
+            assert!(!text.contains("progress_summary"), "{event:?}: {text}");
+            for required in ["commit", "push", "verification", "PR", "completion"] {
+                assert!(
+                    text.contains(required),
+                    "{event:?} missing {required}: {text}"
+                );
+            }
+            assert!(text.contains("chore(work):"), "{event:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn terminal_work_reminder_suppression_is_session_scoped_and_survives_settlement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        fixture.append_event("terminal-update-awaiting-delivery");
+        crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            "session-a",
+            true,
+        )
+        .expect("open terminal settlement obligation");
+
+        assert!(terminal_work_state_reminders_suppressed(
+            &fixture.repo,
+            "session-a"
+        ));
+        assert!(!terminal_work_state_reminders_suppressed(
+            &fixture.repo,
+            "session-b"
+        ));
+
+        fixture.stage_events();
+        fixture.commit("chore(work): settle terminal update");
+        fixture.push();
+        crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            "session-b",
+            false,
+        )
+        .expect("settle terminal obligation from a foreign refresh");
+        assert!(terminal_work_state_reminders_suppressed(
+            &fixture.repo,
+            "session-a"
+        ));
+        assert!(!terminal_work_state_reminders_suppressed(
+            &fixture.repo,
+            "session-b"
+        ));
     }
 
     #[test]

@@ -23,9 +23,8 @@ use gwt::{
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
     workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
     BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset,
-    WindowProcessStatus, APP_NAME,
+    FrontendEvent, KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
+    UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -86,6 +85,7 @@ pub(crate) use docker_launch::{
     mount_source_matches_project_root, normalize_docker_launch_action, DockerLaunchServiceAction,
     PackageRunnerProgram,
 };
+pub(crate) use embedded_server::AgentCapabilityIssuer;
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 use embedded_server::{ClientHub, EmbeddedServer};
@@ -2476,7 +2476,7 @@ mod tests {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
-            hook_forward_target: None,
+            agent_capability_issuer: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
@@ -5380,11 +5380,13 @@ mod tests {
     fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
-        let content = docker_bundle_override_content("app", &bundle);
+        let content = docker_bundle_override_content("app", &bundle, "docker")
+            .expect("Docker managed override");
 
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+        assert!(content.contains("host.docker.internal:host-gateway"));
 
         let parsed: serde_yaml::Value =
             serde_yaml::from_str(&content).expect("override must parse as YAML");
@@ -6746,10 +6748,12 @@ mod tests {
             .env_vars
             .insert("EXTRA_FLAG".to_string(), "1".to_string());
 
-        super::finalize_docker_agent_launch_config(&project, &mut config)
-            .expect("finalize docker launch");
+        let runtime_worktree = super::finalize_docker_agent_launch_config(&project, &mut config)
+            .expect("finalize docker launch")
+            .expect("Docker runtime worktree");
 
         assert_eq!(config.command, super::docker_binary_for_launch());
+        assert_eq!(runtime_worktree, "/workspace/app");
         assert_eq!(
             config.args,
             vec![
@@ -6795,7 +6799,7 @@ mod tests {
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
 
-        super::finalize_docker_agent_launch_config(&project, &mut config)
+        let _runtime_worktree = super::finalize_docker_agent_launch_config(&project, &mut config)
             .expect("finalize docker launch");
 
         assert_eq!(
@@ -7316,7 +7320,7 @@ fn main() -> std::io::Result<()> {
             server.bound_port()
         );
     }
-    app.set_hook_forward_target(server.hook_forward_target());
+    app.set_agent_capability_issuer(server.agent_capability_issuer());
     // SPEC #2920 Phase 4: own the browser URL so it can survive the
     // tao event_loop closure's 'static requirement (the closure moves
     // `server`, which the previous `&str` borrow blocked).
