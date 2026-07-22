@@ -844,6 +844,14 @@ pub(super) fn run<E: CliEnv>(
     if let ExecutionCommand::Reopen { reason } = &command {
         return run_reopen(&worktree, &session_id, reason, out);
     }
+    if matches!(&command, ExecutionCommand::Complete) {
+        if let Some(refusal) =
+            crate::cli::verification_record::work_event_settlement_refusal(&worktree)
+        {
+            out.push_str(&format!("execution: completion refused — {refusal}\n"));
+            return Ok(2);
+        }
+    }
     let result = match command {
         ExecutionCommand::Adopt { .. } | ExecutionCommand::Reopen { .. } => {
             unreachable!("handled above")
@@ -3048,6 +3056,34 @@ mod tests {
             );
         }
 
+        #[test]
+        fn complete_op_refuses_dirty_work_event_before_terminal_mutation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+            fixture.append_event("terminal-update-awaiting-delivery");
+
+            let (code, out) =
+                run_cmd(&fixture.repo, ExecutionCommand::Complete).expect("run completion gate");
+
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
+            assert!(out.contains("commit"), "{out}");
+            assert!(out.contains("push"), "{out}");
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "the execution record must stay active when Work delivery is unsettled"
+            );
+        }
+
         // T-111: a failing verification run never unlocks completion, while
         // execution.blocked stays available without evidence.
         #[test]
@@ -3144,6 +3180,8 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();
             let mut record = active_record("sess-op");
@@ -3251,6 +3289,58 @@ mod tests {
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed,
                 "a real matching finalize with fresh evidence must settle the execution"
+            );
+        }
+
+        #[test]
+        fn build_complete_refuses_dirty_work_event_before_finalizing_state() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            gwt_core::skill_state::save(
+                &fixture.repo,
+                "build-spec",
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(3248),
+                    started_at: Utc::now(),
+                    phase: None,
+                    session_id: "sess-op".to_string(),
+                },
+            )
+            .unwrap();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+            fixture.append_event("terminal-update-awaiting-delivery");
+
+            let mut env = TestEnv::new(fixture.repo.clone());
+            let (code, out) = run_collect(
+                &mut env,
+                CliCommand::Build(crate::cli::SkillStateAction::Complete { spec: 3248 }),
+            )
+            .expect("run build completion gate");
+
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
+            assert!(out.contains("commit"), "{out}");
+            assert!(out.contains("push"), "{out}");
+            assert!(
+                gwt_core::skill_state::load(&fixture.repo, "build-spec")
+                    .unwrap()
+                    .unwrap()
+                    .active,
+                "build state must remain active while Work delivery is unsettled"
+            );
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "execution state must remain active while Work delivery is unsettled"
             );
         }
 

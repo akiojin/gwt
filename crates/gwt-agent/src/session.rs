@@ -37,6 +37,11 @@ pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
 pub const GWT_HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
 /// Bearer token paired with [`GWT_HOOK_FORWARD_URL_ENV`].
 pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
+/// Browser-listener WebSocket endpoint used by `gwtd pane.*` operations.
+///
+/// This is intentionally separate from [`GWT_HOOK_FORWARD_URL_ENV`], whose
+/// listener exposes capability-authenticated agent routes only.
+pub const GWT_PANE_WS_URL_ENV: &str = "GWT_PANE_WS_URL";
 
 /// One agent-tool conversation session observed for a gwt session (a Work, in
 /// the Workspace → Work → Session model). Claude Code / Codex can split a
@@ -48,6 +53,18 @@ pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 pub struct AgentSessionHistoryEntry {
     pub agent_session_id: String,
     pub started_at: DateTime<Utc>,
+}
+
+/// Durable launch-time binding for a Docker-backed Session.
+///
+/// The runtime worktree path is the exact container cwd passed to
+/// `docker compose exec -w`. The Project State scope hash identifies the
+/// canonical host-side `~/.gwt/projects/<scope>/project-state` directory
+/// without requiring that host path to be visible inside the container.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DockerRuntimeBinding {
+    pub runtime_worktree_path: PathBuf,
+    pub project_state_scope_hash: String,
 }
 
 /// Represents a single agent session.
@@ -93,6 +110,8 @@ pub struct Session {
     pub runtime_target: LaunchRuntimeTarget,
     #[serde(default)]
     pub docker_service: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_runtime_binding: Option<DockerRuntimeBinding>,
     #[serde(default)]
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
@@ -193,6 +212,7 @@ impl Session {
             codex_fast_mode: false,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
+            docker_runtime_binding: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             workflow_bypass: None,
@@ -241,6 +261,25 @@ impl Session {
         session.windows_shell = config.windows_shell;
         session.update_status(AgentStatus::Running);
         session
+    }
+
+    /// Bind this Docker Session to the exact runtime cwd used by
+    /// `docker compose exec -w` and to the canonical host Project State
+    /// scope selected at launch.
+    pub fn bind_docker_runtime(
+        &mut self,
+        runtime_worktree_path: impl Into<PathBuf>,
+        project_state_root: &Path,
+    ) -> Result<(), String> {
+        let runtime_worktree_path = runtime_worktree_path.into();
+        validate_docker_runtime_worktree_path(&runtime_worktree_path)?;
+        self.docker_runtime_binding = Some(DockerRuntimeBinding {
+            runtime_worktree_path,
+            project_state_scope_hash: gwt_core::paths::project_scope_hash(project_state_root)
+                .as_str()
+                .to_string(),
+        });
+        Ok(())
     }
 
     /// Update the session status and touch timestamps.
@@ -371,6 +410,8 @@ impl Session {
     /// Save the session to a TOML file under the given directory.
     /// File is written to `<dir>/<session_id>.toml`.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let content = serialize_session_toml(self)?;
         with_session_lock(dir, &self.id, || {
             write_session_toml_atomic(&session_file_path(dir, &self.id), &content)
@@ -433,6 +474,55 @@ impl Session {
     pub fn fast_mode_enabled(&self) -> bool {
         self.fast_mode || self.codex_fast_mode
     }
+}
+
+/// Validate the exact container cwd stored for a Docker-backed Session.
+///
+/// Container paths are POSIX paths on every host platform, including Windows.
+/// Validate their string form instead of relying on host-native `Path`
+/// semantics.
+pub fn validate_docker_runtime_worktree_path(path: &Path) -> Result<(), String> {
+    let Some(path) = path.to_str() else {
+        return Err("Docker runtime worktree must be an absolute POSIX path".to_string());
+    };
+    let contains_unsafe_component = path
+        .split('/')
+        .skip(1)
+        .any(|component| component.is_empty() || matches!(component, "." | ".."));
+    if !path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
+        || contains_unsafe_component
+    {
+        return Err(format!(
+            "Docker runtime worktree must be an absolute POSIX path without traversal components: {path:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a Session id before using it as one filesystem path component.
+///
+/// Existing opaque ids remain valid; this only rejects values that are empty,
+/// special directory entries, separators, NUL-containing, or absolute/drive
+/// paths on either POSIX or Windows.
+pub fn validate_session_id_path_component(session_id: &str) -> Result<(), String> {
+    let bytes = session_id.as_bytes();
+    let is_windows_drive_path =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if session_id.is_empty()
+        || matches!(session_id, "." | "..")
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains('\0')
+        || is_windows_drive_path
+    {
+        return Err(format!(
+            "Session id must be a safe path component: {session_id:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn session_file_path(dir: &Path, session_id: &str) -> PathBuf {
@@ -531,6 +621,8 @@ pub fn update_session<F>(sessions_dir: &Path, session_id: &str, mutate: F) -> io
 where
     F: FnOnce(&mut Session) -> io::Result<()>,
 {
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     with_session_lock(sessions_dir, session_id, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
@@ -801,6 +893,7 @@ mod tests {
         assert!(!session.codex_fast_mode);
         assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
         assert!(session.docker_service.is_none());
+        assert!(session.docker_runtime_binding.is_none());
         assert_eq!(
             session.docker_lifecycle_intent,
             DockerLifecycleIntent::Connect
@@ -809,6 +902,184 @@ mod tests {
         assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn docker_runtime_binding_roundtrips_without_schema_bump() {
+        let session = Session::new("/host/worktree", "work/docker-binding", AgentId::Codex);
+        let schema_version = session.schema_version;
+        let mut persisted = toml::to_string(&session).expect("serialize Session");
+        persisted.push_str(
+            "\n[docker_runtime_binding]\nruntime_worktree_path = \"/workspace/repo\"\nproject_state_scope_hash = \"0123456789abcdef\"\n",
+        );
+
+        let loaded: Session = toml::from_str(&persisted).expect("deserialize Docker binding");
+        let loaded_binding = loaded
+            .docker_runtime_binding
+            .as_ref()
+            .expect("deserialize Docker runtime binding");
+        assert_eq!(
+            loaded_binding.runtime_worktree_path,
+            PathBuf::from("/workspace/repo")
+        );
+        assert_eq!(loaded_binding.project_state_scope_hash, "0123456789abcdef");
+        let roundtrip = toml::to_string(&loaded).expect("reserialize Session");
+        let value: toml::Value = toml::from_str(&roundtrip).expect("parse roundtrip TOML");
+        let binding = value
+            .get("docker_runtime_binding")
+            .and_then(toml::Value::as_table)
+            .expect("Docker runtime binding must remain persisted");
+
+        assert_eq!(
+            binding
+                .get("runtime_worktree_path")
+                .and_then(toml::Value::as_str),
+            Some("/workspace/repo")
+        );
+        assert_eq!(
+            binding
+                .get("project_state_scope_hash")
+                .and_then(toml::Value::as_str),
+            Some("0123456789abcdef")
+        );
+        assert_eq!(loaded.schema_version, schema_version);
+    }
+
+    #[test]
+    fn legacy_and_host_sessions_omit_docker_runtime_binding() {
+        let legacy = r#"
+id = "1d3d2d2d-3333-4444-5555-777777777778"
+worktree_path = "/tmp/wt"
+branch = "main"
+agent_id = { type = "Codex" }
+status = "WaitingInput"
+created_at = "2026-05-18T00:00:00Z"
+updated_at = "2026-05-18T00:00:00Z"
+last_activity_at = "2026-05-18T00:00:00Z"
+display_name = "Codex"
+"#;
+        let loaded: Session = toml::from_str(legacy).expect("deserialize legacy Session");
+        assert!(loaded.docker_runtime_binding.is_none());
+        let roundtrip = toml::to_string(&loaded).expect("serialize legacy Session");
+        let host = toml::to_string(&Session::new("/tmp/wt", "main", AgentId::Codex))
+            .expect("serialize Host Session");
+
+        assert!(!roundtrip.contains("docker_runtime_binding"));
+        assert!(!host.contains("docker_runtime_binding"));
+    }
+
+    #[test]
+    fn docker_runtime_binding_uses_host_project_state_scope_and_persists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work/repo");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-q", "-b", "work/docker-binding"])
+            .current_dir(&worktree)
+            .status()
+            .expect("git init");
+        assert!(init.success());
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/docker-binding.git",
+            ])
+            .current_dir(&worktree)
+            .status()
+            .expect("git remote add");
+        assert!(remote.success());
+
+        let mut session = Session::new(&worktree, "work/docker-binding", AgentId::Codex);
+        session.runtime_target = LaunchRuntimeTarget::Docker;
+        session
+            .bind_docker_runtime("/workspace/repo", &project_root)
+            .expect("bind absolute POSIX Docker worktree");
+        let binding = session
+            .docker_runtime_binding
+            .as_ref()
+            .expect("Docker runtime binding");
+        assert_eq!(
+            binding.runtime_worktree_path,
+            PathBuf::from("/workspace/repo")
+        );
+        assert_eq!(
+            binding.project_state_scope_hash,
+            gwt_core::paths::project_scope_hash(&project_root)
+                .as_str()
+                .to_string()
+        );
+        assert_ne!(
+            Some(binding.project_state_scope_hash.as_str()),
+            session.repo_hash.as_deref(),
+            "workspace-home Project State scope must remain distinct from the repository hash"
+        );
+
+        let sessions_dir = temp.path().join("sessions");
+        session.save(&sessions_dir).expect("save Session");
+        let loaded = Session::load(&sessions_dir.join(format!("{}.toml", session.id)))
+            .expect("reload Session");
+        assert_eq!(
+            loaded.docker_runtime_binding,
+            session.docker_runtime_binding
+        );
+    }
+
+    #[test]
+    fn docker_runtime_binding_rejects_non_absolute_or_non_posix_worktree_paths() {
+        let project_root = Path::new("/host/workspace-home");
+        let mut session = Session::new("/host/worktree", "work/demo", AgentId::Codex);
+
+        for path in [
+            "workspace/repo",
+            r"C:\workspace\repo",
+            r"\workspace\repo",
+            "/workspace/../repo",
+            "/workspace//repo",
+            "/workspace/repo/",
+            "/",
+            "/workspace\\repo",
+        ] {
+            let error = session
+                .bind_docker_runtime(path, project_root)
+                .expect_err("invalid Docker runtime worktree must fail closed");
+            assert!(
+                error.contains("absolute POSIX"),
+                "unexpected error for {path:?}: {error}"
+            );
+            assert!(session.docker_runtime_binding.is_none());
+        }
+    }
+
+    #[test]
+    fn session_id_path_component_validation_is_platform_neutral() {
+        for session_id in [
+            "591d5d2a-9226-4584-a475-15952c49b37d",
+            "legacy.session_opaque-id@v1",
+            "opaque id retained for compatibility",
+        ] {
+            validate_session_id_path_component(session_id)
+                .unwrap_or_else(|error| panic!("safe legacy id {session_id:?}: {error}"));
+        }
+
+        for session_id in [
+            "",
+            ".",
+            "..",
+            "nested/session",
+            r"nested\session",
+            "nul\0session",
+            "/absolute/session",
+            r"C:\absolute\session",
+            "C:drive-relative-session",
+        ] {
+            assert!(
+                validate_session_id_path_component(session_id).is_err(),
+                "unsafe Session id must be rejected: {session_id:?}"
+            );
+        }
     }
 
     #[test]
