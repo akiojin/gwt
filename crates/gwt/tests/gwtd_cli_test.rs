@@ -14,6 +14,26 @@ use gwt_core::{
 };
 use tempfile::TempDir;
 
+fn isolated_gwtd_command() -> std::process::Command {
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+    for key in [
+        "GWT_BIN_PATH",
+        "GWT_BROWSER_URL_FILE",
+        "GWT_HOOK_BIN",
+        "GWT_HOOK_FORWARD_TOKEN",
+        "GWT_HOOK_FORWARD_URL",
+        "GWT_PROJECT_ROOT",
+        "GWT_REPO_HASH",
+        "GWT_SESSION_ID",
+        "GWT_SESSION_KIND",
+        "GWT_SESSION_RUNTIME_PATH",
+        "GWT_WORKTREE_HASH",
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
+
 fn prepared_hook_session() -> (TempDir, TempDir, String) {
     let home = tempfile::tempdir().expect("home tempdir");
     let worktree = tempfile::tempdir().expect("worktree tempdir");
@@ -27,7 +47,7 @@ fn prepared_hook_session() -> (TempDir, TempDir, String) {
 
 #[test]
 fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .args(["__internal", "daemon-hook", "forward"])
         .stdin(Stdio::null())
         .output()
@@ -47,7 +67,7 @@ fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
 
 #[test]
 fn gwtd_help_describes_the_headless_cli_surface() {
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .arg("--help")
         .output()
         .expect("run gwtd --help");
@@ -157,7 +177,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     append_workspace_work_event_to_path(&tracked_events_path, &event)
         .expect("save tracked Work event fixture");
 
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = isolated_gwtd_command()
         .current_dir(&project_root)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
@@ -219,7 +239,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
         ["index", "--help"].as_slice(),
         ["workspace", "update", "--title-summary", "legacy"].as_slice(),
     ] {
-        let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        let output = isolated_gwtd_command()
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -242,7 +262,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
 
 #[test]
 fn gwtd_index_help_lists_every_rebuild_scope() {
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .args(["--help", "index"])
         .output()
         .expect("run gwtd --help index");
@@ -268,7 +288,8 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         None => std::env::remove_var("GWT_HOOK_BIN"),
     }
 
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
+        .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -320,7 +341,7 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
 #[test]
 fn gwtd_managed_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .current_dir(worktree.path())
         .args(["hook", "event", "SessionStart"])
         .env("HOME", home.path())
@@ -346,7 +367,7 @@ fn gwtd_managed_hook_event_remains_argv_transport_exception() {
 #[test]
 fn gwtd_provider_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = isolated_gwtd_command()
         .current_dir(worktree.path())
         .args(["hook", "provider-event", "opencode", "session.created"])
         .env("HOME", home.path())
@@ -402,7 +423,7 @@ fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
         .expect("git remote add")
         .success());
 
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .current_dir(repo.path())
         .args(["hook", "gwt-self-improvement-stop"])
         .env("HOME", home.path())
@@ -453,7 +474,7 @@ fn gwtd_direct_self_improvement_stop_bypasses_repo_coordinate_bootstrap() {
     )
     .expect("compose PATH");
 
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .current_dir(repo.path())
         .args(["hook", "gwt-self-improvement-stop"])
         .env("HOME", home.path())
@@ -562,7 +583,7 @@ fn generated_hook_subcommands(corpus: &str) -> BTreeSet<String> {
 fn gwtd_hook_argv_rejected(args: &[&str], stdin: &str) -> (bool, String) {
     let home = tempfile::tempdir().expect("home tempdir");
     let cwd = tempfile::tempdir().expect("cwd tempdir");
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = isolated_gwtd_command()
         .current_dir(cwd.path())
         .args(args)
         .env("HOME", home.path())
