@@ -350,6 +350,21 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
     Ok(Some(hydrate_recovery_envelopes(record)))
 }
 
+/// Whether the execution for `worktree` has settled as `Completed`.
+///
+/// A completed execution means the Work's final commit / push / PR handoff is
+/// done, so a coordination-only `workspace.update` (the kind a post-merge stale
+/// reminder triggers) must stop appending to the git-tracked `events.jsonl`
+/// (Issue #3278). A missing or unreadable record is treated as *not* completed
+/// so unlinked / standalone launches keep their existing append behavior.
+#[must_use]
+pub fn is_completed(worktree: &Path) -> bool {
+    matches!(
+        load(worktree),
+        Ok(Some(record)) if record.status == ExecutionControlStatus::Completed
+    )
+}
+
 fn same_execution_lifetime(left: &ExecutionControlRecord, right: &ExecutionControlRecord) -> bool {
     left.owner_kind == right.owner_kind
         && left.owner_number == right.owner_number
