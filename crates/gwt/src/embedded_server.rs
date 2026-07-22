@@ -1745,8 +1745,8 @@ mod tests {
     }
 
     // Issue #3315: coalescing is keyed by operation_id — different attachment
-    // operations must never clobber one another, and a terminal `Failed` is as
-    // durable as `Attached`.
+    // operations in the same pane must never clobber one another, and a
+    // terminal `Failed` is as durable as `Attached`.
     #[test]
     fn client_queue_keeps_distinct_attachment_operations_independent() {
         let queue = ClientQueue::default();
@@ -1757,7 +1757,7 @@ mod tests {
             AttachmentProgressPhase::Queued,
         )));
         queue.enqueue(&prepare_outbound(&attachment_progress(
-            "tab-1::agent-2",
+            "tab-1::agent-1",
             "op-b",
             AttachmentProgressPhase::Staging,
         )));
@@ -1767,7 +1767,7 @@ mod tests {
             AttachmentProgressPhase::Attached,
         )));
         queue.enqueue(&prepare_outbound(&attachment_progress(
-            "tab-1::agent-2",
+            "tab-1::agent-1",
             "op-b",
             AttachmentProgressPhase::Failed,
         )));
