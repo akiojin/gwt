@@ -177,6 +177,29 @@ pub fn apply_authenticated_workspace_update(
     authenticated_session_id: &str,
     request: AgentWorkspaceUpdateRequest,
 ) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
+    apply_authenticated_workspace_update_inner(
+        authenticated_project_root,
+        authenticated_session_id,
+        request,
+        |worktree, session_id| {
+            crate::cli::verification_record::save_work_event_settlement_record(
+                worktree, session_id, true,
+            )
+        },
+    )
+}
+
+fn apply_authenticated_workspace_update_inner(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    request: AgentWorkspaceUpdateRequest,
+    refresh_settlement: impl FnOnce(
+        &Path,
+        &str,
+    ) -> std::io::Result<
+        crate::cli::verification_record::WorkEventSettlementRecord,
+    >,
+) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
     if request.schema_version != AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION {
         return Err(AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::InvalidRequest,
@@ -220,6 +243,7 @@ pub fn apply_authenticated_workspace_update(
         agent_title_summary: request.intent.title_summary,
     };
     let mut revalidation_error_code = None;
+    let mut settlement_prepare_failed = false;
     let entry = update_workspace_projection_with_journal_for_resolved_work_target(
         &persistence_target,
         update,
@@ -244,25 +268,45 @@ pub fn apply_authenticated_workspace_update(
             }
             Ok(())
         },
+        |event, journal_entry| {
+            if !opens_work_settlement {
+                return Ok(());
+            }
+            crate::cli::verification_record::prepare_work_event_settlement_record(
+                &target.work_event_root,
+                &target.session_id,
+                event,
+                journal_entry,
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                settlement_prepare_failed = true;
+                GwtError::Other(format!(
+                    "Host could not reserve the terminal Work event settlement obligation: {error}"
+                ))
+            })
+        },
     )
     .map_err(|error| {
-        revalidation_error_code.map_or_else(
-            || classify_workspace_transaction_error(&error),
-            workspace_revalidation_error,
-        )
-    })?;
-    if opens_work_settlement {
-        crate::cli::verification_record::save_work_event_settlement_record(
-            &target.work_event_root,
-            &target.session_id,
-            true,
-        )
-        .map_err(|_| {
+        if settlement_prepare_failed {
             AgentWorkspaceUpdateError::new(
                 AgentWorkspaceUpdateErrorCode::Internal,
-                "Host persisted the terminal Work event but could not open its settlement obligation",
+                "Host could not reserve the terminal Work event settlement obligation before mutation",
             )
-        })?;
+        } else {
+            revalidation_error_code.map_or_else(
+                || classify_workspace_transaction_error(&error),
+                workspace_revalidation_error,
+            )
+        }
+    })?;
+    if opens_work_settlement {
+        if let Err(error) = refresh_settlement(&target.work_event_root, &target.session_id) {
+            tracing::warn!(
+                ?error,
+                "terminal Work event persisted; retaining the write-ahead settlement receipt after refresh failure"
+            );
+        }
     }
     Ok(AgentWorkspaceUpdateReceipt {
         schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
@@ -1799,6 +1843,105 @@ mod tests {
                 .expect("Host terminal update must create a settlement obligation");
             assert!(record.obligation_open);
             assert_eq!(record.session_id, session.id);
+        });
+    }
+
+    #[test]
+    fn authenticated_terminal_workspace_update_refuses_before_mutation_when_settlement_store_is_unwritable(
+    ) {
+        with_strict_target_fixture(|repo, session| {
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(
+                repo,
+                repo,
+                session,
+                "work-authenticated-terminal-store-failure",
+            );
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
+                .expect("strict fixture has a trusted-store path");
+            std::fs::create_dir_all(trusted_dir.parent().expect("trusted-store parent"))
+                .expect("create trusted-store parent");
+            std::fs::write(&trusted_dir, b"block trusted-store directory creation")
+                .expect("make trusted-store path unwritable");
+
+            let error = apply_authenticated_workspace_update(
+                repo,
+                &session.id,
+                AgentWorkspaceUpdateRequest {
+                    schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                    claimed_session_id: session.id.clone(),
+                    observation: observe_agent_runtime(repo).expect("runtime observation"),
+                    intent: AgentWorkspaceUpdateIntent {
+                        status_category: Some(
+                            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+                        ),
+                        summary: Some("must not persist without settlement authority".to_string()),
+                        ..AgentWorkspaceUpdateIntent::default()
+                    },
+                },
+            )
+            .expect_err("unwritable settlement store must reject the terminal update");
+
+            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::Internal);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before,
+                "settlement authority must be reserved before any terminal Work surface mutates"
+            );
+        });
+    }
+
+    #[test]
+    fn authenticated_terminal_workspace_update_succeeds_when_post_persist_refresh_fails() {
+        with_strict_target_fixture(|repo, session| {
+            seed_unique_mutation_target(
+                repo,
+                repo,
+                session,
+                "work-authenticated-terminal-refresh-failure",
+            );
+
+            let receipt = apply_authenticated_workspace_update_inner(
+                repo,
+                &session.id,
+                AgentWorkspaceUpdateRequest {
+                    schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                    claimed_session_id: session.id.clone(),
+                    observation: observe_agent_runtime(repo).expect("runtime observation"),
+                    intent: AgentWorkspaceUpdateIntent {
+                        status_category: Some(
+                            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+                        ),
+                        summary: Some("terminal mutation is already durable".to_string()),
+                        ..AgentWorkspaceUpdateIntent::default()
+                    },
+                },
+                |_, _| {
+                    Err(std::io::Error::other(
+                        "synthetic post-persist refresh failure",
+                    ))
+                },
+            )
+            .expect("a prepared receipt makes post-persist refresh best-effort");
+
+            assert_eq!(
+                receipt.work_id,
+                "work-authenticated-terminal-refresh-failure"
+            );
+            let record = crate::cli::verification_record::load_work_event_settlement_record(repo)
+                .expect("load write-ahead settlement receipt")
+                .expect("write-ahead settlement receipt exists");
+            assert!(record.obligation_open);
+            assert!(matches!(
+                record.status,
+                crate::cli::verification_record::WorkEventSettlementStatus::PendingMutation { .. }
+            ));
+            assert!(
+                crate::cli::verification_record::work_event_settlement_refusal(repo)
+                    .is_some_and(|message| message.contains("dirty")),
+                "a later Stop refresh must discover the persisted event and retain the obligation"
+            );
         });
     }
 

@@ -981,12 +981,16 @@ impl std::fmt::Debug for SessionBoundWorkspaceMutationTarget {
 /// assignment/Work/container preconditions have been reloaded. The gwt layer
 /// uses it to reload the Session ledger and runtime binding; core-only callers
 /// can validate any additional authority source without moving that authority
-/// into the request payload.
+/// into the request payload. `before_persist` runs after the complete update
+/// has been constructed and validated in memory, but before any transaction
+/// marker, journal, event, or projection is written. Callers use that narrow
+/// boundary for write-ahead obligations that must exist before Work mutation.
 pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     target: &SessionBoundWorkspaceMutationTarget,
     update: WorkspaceProjectionUpdate,
     tracked_event_policy: TrackedWorkEventPolicy,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+    before_persist: impl FnOnce(&WorkEvent, &WorkspaceJournalEntry) -> Result<()>,
 ) -> Result<WorkspaceJournalEntry> {
     validate_session_bound_target_shape(target, &update)?;
 
@@ -1082,6 +1086,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
                     .to_string(),
             ));
         }
+        before_persist(&event, &entry)?;
 
         let events = events_path.as_ref().map_or_else(Vec::new, |_| vec![event]);
         let transaction = PendingWorkspaceStateTransaction {
@@ -3195,17 +3200,14 @@ fn recover_unprojected_workspace_work_events_locked(
     projection: &mut WorkItemsProjection,
     events_path: &Path,
 ) -> Result<bool> {
-    let records = read_workspace_work_event_records_from_path(events_path)?;
+    let events = read_machine_local_workspace_work_events_from_path(events_path)?;
     let seen_event_ids = projection
         .work_items
         .iter()
         .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
         .collect::<HashSet<_>>();
     let mut durable_events = Vec::new();
-    for record in records {
-        let Some(event) = record.into_known_event() else {
-            continue;
-        };
+    for event in events {
         if seen_event_ids.contains(&event.id) {
             continue;
         }
@@ -3826,8 +3828,10 @@ fn decode_workspace_work_event_record(line: &[u8]) -> Result<WorkEventLogRecord>
     }
 }
 
+// Shared/tracked history is an immutable rebuild input. Unknown release-B
+// records stay opaque, while an incomplete tail fails without repairing or
+// truncating the source file.
 fn read_workspace_work_event_records_from_path(path: &Path) -> Result<Vec<WorkEventLogRecord>> {
-    repair_jsonl_tail(path)?;
     let content = match fs::read(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -3837,6 +3841,27 @@ fn read_workspace_work_event_records_from_path(path: &Path) -> Result<Vec<WorkEv
         .split(|byte| *byte == b'\n')
         .filter(|line| !trim_ascii_json_line(line).is_empty())
         .map(decode_workspace_work_event_record)
+        .collect()
+}
+
+// The machine-local close log owns lifecycle truth, so recovery must reject
+// every schema that this release cannot apply. Tail repair remains local to
+// this writer-owned log and never runs for shared/tracked rebuild input.
+fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec<WorkEvent>> {
+    repair_jsonl_tail(path)?;
+    let content = match fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    content
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !trim_ascii_json_line(line).is_empty())
+        .map(|line| {
+            serde_json::from_slice(trim_ascii_json_line(line)).map_err(|error| {
+                GwtError::Other(format!("machine-local close event json: {error}"))
+            })
+        })
         .collect()
 }
 

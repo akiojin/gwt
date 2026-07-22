@@ -446,19 +446,38 @@ pub(super) fn run<E: CliEnv>(
                     }
                     Ok(())
                 },
+                |event, journal_entry| {
+                    if !opens_work_settlement {
+                        return Ok(());
+                    }
+                    crate::cli::verification_record::prepare_work_event_settlement_record(
+                        &target.work_event_root,
+                        &target.session_id,
+                        event,
+                        journal_entry,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| {
+                        GwtError::Other(format!(
+                            "workspace.update could not reserve the terminal Work event settlement obligation before mutation: {error}"
+                        ))
+                    })
+                },
             )
             .map_err(|error| string_error(error.to_string()))?;
             if opens_work_settlement {
-                crate::cli::verification_record::save_work_event_settlement_record(
-                    &target.work_event_root,
-                    &target.session_id,
-                    true,
-                )
-                .map_err(|error| {
-                    string_error(format!(
-                        "workspace.update persisted the terminal Work event but could not open its settlement obligation: {error}"
-                    ))
-                })?;
+                if let Err(error) =
+                    crate::cli::verification_record::save_work_event_settlement_record(
+                        &target.work_event_root,
+                        &target.session_id,
+                        true,
+                    )
+                {
+                    tracing::warn!(
+                        ?error,
+                        "terminal Work event persisted; retaining the write-ahead settlement receipt after refresh failure"
+                    );
+                }
             }
             publish_workspace_change(&target.project_state_root);
             out.push_str(&format!("workspace updated: {}\n", entry.id));
@@ -1846,6 +1865,67 @@ pub(crate) mod tests {
                 crate::cli::verification_record::WorkEventSettlementBlocker::PathDirty { .. }
             )
         ));
+    }
+
+    #[test]
+    fn terminal_workspace_update_refuses_before_mutation_when_settlement_store_is_unwritable() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-terminal-store-failure");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-terminal-store-failure",
+        );
+        let surface_paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+        ];
+        let before = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("fixture has a trusted-store path");
+        std::fs::create_dir_all(trusted_dir.parent().expect("trusted-store parent"))
+            .expect("create trusted-store parent");
+        std::fs::write(&trusted_dir, b"block trusted-store directory creation")
+            .expect("make trusted-store path unwritable");
+        let mut env = TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let error = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: Some("done".to_string()),
+                status_text: Some("must not persist".to_string()),
+                summary: Some("settlement authority is unavailable".to_string()),
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: None,
+                current_focus: None,
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect_err("unwritable settlement store must reject the terminal update");
+
+        assert!(error.to_string().contains("settlement"), "{error}");
+        let after = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "settlement authority must be reserved before any terminal Work surface mutates"
+        );
     }
 
     #[test]

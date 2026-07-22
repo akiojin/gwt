@@ -348,6 +348,53 @@ fn mixed_version_event_log_keeps_known_projection_stable() {
 }
 
 #[test]
+fn tracked_event_rebuild_never_repairs_or_truncates_source_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let known_event = r#"{"id":"event-byte-preserving","work_item_id":"work-byte-preserving","kind":"start","updated_at":"2026-07-22T02:00:00Z"}"#;
+
+    let unterminated_events = temp.path().join("unterminated-events.jsonl");
+    let unterminated_works = temp.path().join("unterminated-works.json");
+    let unterminated_marker = temp.path().join("unterminated-marker.json");
+    fs::write(&unterminated_events, known_event.as_bytes()).expect("write unterminated event");
+    let unterminated_original = fs::read(&unterminated_events).expect("snapshot unterminated log");
+
+    assert_eq!(
+        rebuild_work_items_from_events_paths(
+            &unterminated_works,
+            &unterminated_events,
+            &unterminated_marker,
+        )
+        .expect("a complete final JSON record does not require a newline"),
+        WorkItemsRebuildOutcome::Applied
+    );
+    assert_eq!(
+        fs::read(&unterminated_events).expect("read unterminated log"),
+        unterminated_original,
+        "a projection rebuild must not append a newline to tracked input"
+    );
+
+    let partial_events = temp.path().join("partial-events.jsonl");
+    let partial_works = temp.path().join("partial-works.json");
+    let partial_marker = temp.path().join("partial-marker.json");
+    let partial_body = format!("{known_event}\n{{\"id\":\"partial-tail\"");
+    fs::write(&partial_events, partial_body.as_bytes()).expect("write partial event log");
+    let partial_original = fs::read(&partial_events).expect("snapshot partial log");
+
+    assert!(
+        rebuild_work_items_from_events_paths(&partial_works, &partial_events, &partial_marker)
+            .is_err(),
+        "a partial tracked record must fail without silently discarding evidence"
+    );
+    assert_eq!(
+        fs::read(&partial_events).expect("read partial log"),
+        partial_original,
+        "a failed projection rebuild must preserve the partial tracked record byte-for-byte"
+    );
+    assert!(!partial_works.exists());
+    assert!(!partial_marker.exists());
+}
+
+#[test]
 fn release_a_typed_writer_cannot_construct_a_correction_event() {
     const {
         assert!(
@@ -2236,6 +2283,7 @@ fn t812_apply_resolved_workspace_update(
         update,
         TrackedWorkEventPolicy::Persist,
         |_, _| Ok(()),
+        |_, _| Ok(()),
     )
 }
 
@@ -2424,6 +2472,51 @@ fn session_bound_update_rejects_explicit_owner_conflict_without_mutation() {
     let after = fixture.state_bytes();
 
     t812_assert_rejected_without_mutation(&result, &before, &after, "explicit owner conflict");
+}
+
+#[test]
+fn session_bound_update_runs_pre_persist_hook_before_any_surface_mutation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let before = fixture.state_bytes();
+
+    let result = update_workspace_projection_with_journal_for_resolved_work_target(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("must remain in memory only".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+        |event, entry| {
+            assert_eq!(event.kind, WorkEventKind::Done);
+            assert_eq!(event.work_item_id, T812_TARGET_WORK_ID);
+            assert_eq!(event.agent_session_id.as_deref(), Some(T812_SESSION_ID));
+            assert_eq!(entry.status_category, Some(WorkspaceStatusCategory::Done));
+            Err(GwtError::Other(
+                "synthetic write-ahead reservation failure".to_string(),
+            ))
+        },
+    );
+    let after = fixture.state_bytes();
+
+    t812_assert_rejected_without_mutation(
+        &result,
+        &before,
+        &after,
+        "pre-persist reservation failure",
+    );
 }
 
 #[test]
@@ -3482,6 +3575,63 @@ fn terminal_retry_refolds_durable_close_before_a_later_saved_heartbeat() {
                 .count(),
             1,
             "retry must not append a replacement {label}"
+        );
+    }
+}
+
+#[test]
+fn terminal_retry_rejects_unknown_or_additive_machine_local_event_schema() {
+    let cases = [
+        (
+            "unknown-kind",
+            concat!(
+                r#"{"id":"evt-local-correction","work_item_id":"work-local-strict","kind":"correction","updated_at":"2026-07-22T02:00:00Z"}"#,
+                "\n"
+            ),
+        ),
+        (
+            "additive-field",
+            concat!(
+                r#"{"id":"evt-local-done","work_item_id":"work-local-strict","kind":"done","future_event_field":true,"updated_at":"2026-07-22T02:01:00Z"}"#,
+                "\n"
+            ),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/works.json");
+        let shared_events_path = temp.path().join("shared/events.jsonl");
+        let close_events_path = temp.path().join("local/work-events-closed.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 7, 22, 1, 0, 0).unwrap();
+        let retry_at = Utc.with_ymd_and_hms(2026, 7, 22, 3, 0, 0).unwrap();
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-local-strict", started_at);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &shared_events_path, start).unwrap();
+        fs::create_dir_all(close_events_path.parent().unwrap()).expect("create local state dir");
+        fs::write(&close_events_path, body.as_bytes()).expect("write future lifecycle event");
+        let original_projection = fs::read(&work_items_path).expect("snapshot projection");
+        let original_close_log = fs::read(&close_events_path).expect("snapshot close log");
+
+        assert!(
+            emit_workspace_done_event_if_absent_paths(
+                &work_items_path,
+                &close_events_path,
+                "work-local-strict",
+                retry_at,
+            )
+            .is_err(),
+            "machine-local {label} schema must fail closed during terminal recovery"
+        );
+        assert_eq!(
+            fs::read(&work_items_path).expect("read preserved projection"),
+            original_projection,
+            "failed recovery must not mutate the saved projection"
+        );
+        assert_eq!(
+            fs::read(&close_events_path).expect("read preserved close log"),
+            original_close_log,
+            "failed recovery must not append a conflicting terminal event"
         );
     }
 }

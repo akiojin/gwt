@@ -704,15 +704,30 @@ impl AgentCapabilityRegistry {
 #[derive(Clone)]
 pub(crate) struct AgentCapabilityIssuer {
     hook_forward_url: String,
+    pane_websocket_url: String,
     registry: AgentCapabilityRegistry,
 }
 
 impl AgentCapabilityIssuer {
-    fn new(hook_forward_url: String, registry: AgentCapabilityRegistry) -> Self {
+    fn new(
+        hook_forward_url: String,
+        pane_websocket_url: String,
+        registry: AgentCapabilityRegistry,
+    ) -> Self {
         Self {
             hook_forward_url,
+            pane_websocket_url,
             registry,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(hook_forward_url: &str, pane_websocket_url: &str) -> Self {
+        Self::new(
+            hook_forward_url.to_string(),
+            pane_websocket_url.to_string(),
+            AgentCapabilityRegistry::default(),
+        )
     }
 
     pub(crate) fn issue(
@@ -729,6 +744,10 @@ impl AgentCapabilityIssuer {
     pub(crate) fn revoke(&self, project_root: &Path, session_id: &str) -> Result<bool, String> {
         self.registry.revoke(project_root, session_id)
     }
+
+    pub(crate) fn pane_websocket_url(&self) -> &str {
+        &self.pane_websocket_url
+    }
 }
 
 impl std::fmt::Debug for AgentCapabilityIssuer {
@@ -736,6 +755,7 @@ impl std::fmt::Debug for AgentCapabilityIssuer {
         formatter
             .debug_struct("AgentCapabilityIssuer")
             .field("hook_forward_url", &self.hook_forward_url)
+            .field("pane_websocket_url", &self.pane_websocket_url)
             .field("registered_sessions", &self.registry.session_count())
             .finish()
     }
@@ -830,6 +850,11 @@ impl EmbeddedServer {
         let agent_capabilities = AgentCapabilityRegistry::default();
         let agent_capability_issuer = AgentCapabilityIssuer::new(
             format!("http://127.0.0.1:{}/internal/hook-live", agent_addr.port()),
+            format!(
+                "ws://{}:{}/ws",
+                display_host(local_browser_client_ip(addr.ip())),
+                addr.port()
+            ),
             agent_capabilities.clone(),
         );
         let attachment_upload_token = Uuid::new_v4().to_string();
@@ -1247,10 +1272,20 @@ fn display_host(ip: IpAddr) -> String {
     }
 }
 
+fn local_browser_client_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ip => ip,
+    }
+}
+
 fn agent_bridge_bind_ip() -> IpAddr {
     // Docker Desktop and Podman Machine proxy their host aliases to host
     // loopback. Native Linux host-gateway aliases target a bridge interface,
-    // so only the capability-gated listener accepts that bridge traffic.
+    // so this wildcard bind is intentional and applies only to the
+    // capability-only router protected by an opaque two-UUID bearer; browser
+    // routes stay on the independently configured listener.
     if cfg!(target_os = "linux") {
         IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
     } else {
@@ -1931,6 +1966,7 @@ mod tests {
         let registry = AgentCapabilityRegistry::default();
         let issuer = AgentCapabilityIssuer::new(
             "http://127.0.0.1:43123/internal/hook-live".to_string(),
+            "ws://127.0.0.1:43124/ws".to_string(),
             registry,
         );
         let target = issuer
@@ -1969,6 +2005,7 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
         let issuer = server.agent_capability_issuer();
+        let pane_websocket_url = issuer.pane_websocket_url().to_string();
         let stale = issuer
             .issue(project.path(), "session-1")
             .expect("stale target");
@@ -1983,6 +2020,22 @@ mod tests {
         assert_ne!(
             reqwest::Url::parse(server.url())
                 .expect("browser URL")
+                .port_or_known_default(),
+            reqwest::Url::parse(&current.url)
+                .expect("agent URL")
+                .port_or_known_default(),
+        );
+        assert_eq!(
+            reqwest::Url::parse(&pane_websocket_url)
+                .expect("pane WebSocket URL")
+                .port_or_known_default(),
+            reqwest::Url::parse(server.url())
+                .expect("browser URL")
+                .port_or_known_default(),
+        );
+        assert_ne!(
+            reqwest::Url::parse(&pane_websocket_url)
+                .expect("pane WebSocket URL")
                 .port_or_known_default(),
             reqwest::Url::parse(&current.url)
                 .expect("agent URL")
@@ -2078,10 +2131,13 @@ mod tests {
         let current = issuer
             .issue(project.path(), "session-1")
             .expect("current target");
-        let foreign =
-            AgentCapabilityIssuer::new(current.url.clone(), AgentCapabilityRegistry::default())
-                .issue(foreign_project.path(), "session-1")
-                .expect("foreign-registry target");
+        let foreign = AgentCapabilityIssuer::new(
+            current.url.clone(),
+            issuer.pane_websocket_url().to_string(),
+            AgentCapabilityRegistry::default(),
+        )
+        .issue(foreign_project.path(), "session-1")
+        .expect("foreign-registry target");
         let mut workspace_update_url = reqwest::Url::parse(&current.url).expect("agent hook URL");
         workspace_update_url.set_path("/internal/workspace-update");
         let request = serde_json::json!({
@@ -3144,6 +3200,13 @@ mod tests {
             server.url().starts_with("http://0.0.0.0:"),
             "0.0.0.0 bind must surface 0.0.0.0 url, got {}",
             server.url(),
+        );
+        assert!(
+            server
+                .agent_capability_issuer()
+                .pane_websocket_url()
+                .starts_with("ws://127.0.0.1:"),
+            "pane clients must receive a connectable loopback URL for a wildcard browser bind"
         );
         server.shutdown();
     }

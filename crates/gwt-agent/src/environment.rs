@@ -9,8 +9,8 @@ use std::{
 
 use crate::{
     session::{
-        GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
-        GWT_SESSION_RUNTIME_PATH_ENV,
+        GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
+        GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::LaunchRuntimeTarget,
 };
@@ -23,6 +23,7 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     GWT_BIN_PATH_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
     GWT_HOOK_FORWARD_URL_ENV,
+    GWT_PANE_WS_URL_ENV,
     GWT_PROJECT_ROOT_ENV,
     GWT_REPO_HASH_ENV,
     GWT_SESSION_ID_ENV,
@@ -849,6 +850,10 @@ mod tests {
                 GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
                 "secret-token".to_string(),
             ),
+            (
+                GWT_PANE_WS_URL_ENV.to_string(),
+                "ws://127.0.0.1:45123/ws".to_string(),
+            ),
             (GWT_PROJECT_ROOT_ENV.to_string(), "/old/project".to_string()),
         ]);
 
@@ -861,6 +866,7 @@ mod tests {
         assert!(!env.contains_key(GWT_SESSION_ID_ENV));
         assert!(!env.contains_key(GWT_SESSION_RUNTIME_PATH_ENV));
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
+        assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
     }
 

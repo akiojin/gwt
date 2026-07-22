@@ -113,6 +113,11 @@ fn install_agent_capability_env(
     let Some(issuer) = issuer else {
         return Ok(());
     };
+    let pane_websocket_url = gwt_agent::pane_websocket_url_for_launch_runtime(
+        issuer.pane_websocket_url(),
+        runtime_target,
+        container_runtime_binary,
+    )?;
     let target = issuer.issue(project_root, session_id)?;
     let forward_url = gwt_agent::hook_forward_url_for_launch_runtime(
         &target.url,
@@ -123,6 +128,10 @@ fn install_agent_capability_env(
     env.insert(
         gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
         target.token,
+    );
+    env.insert(
+        gwt_agent::GWT_PANE_WS_URL_ENV.to_string(),
+        pane_websocket_url,
     );
     Ok(())
 }
@@ -2355,6 +2364,65 @@ mod docker_session_persistence_tests {
                 .to_string()
         );
         assert!(runtime_path.exists(), "runtime state must be persisted");
+    }
+}
+
+#[cfg(test)]
+mod agent_endpoint_env_tests {
+    use super::*;
+
+    #[test]
+    fn launch_injects_browser_pane_websocket_separately_from_capability_listener() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+        );
+        let mut env = HashMap::new();
+
+        install_agent_capability_env(
+            &mut env,
+            Some(&issuer),
+            project.path(),
+            "session-pane-env",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            "unused-host-runtime",
+        )
+        .expect("install agent launch endpoints");
+
+        assert_eq!(
+            env.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://127.0.0.1:45123/internal/hook-live")
+        );
+        assert_eq!(
+            env.get(gwt_agent::GWT_PANE_WS_URL_ENV).map(String::as_str),
+            Some("ws://127.0.0.1:46234/ws")
+        );
+
+        let mut docker_env = HashMap::new();
+        install_agent_capability_env(
+            &mut docker_env,
+            Some(&issuer),
+            project.path(),
+            "session-pane-env-docker",
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            "docker",
+        )
+        .expect("install Docker agent launch endpoints");
+
+        assert_eq!(
+            docker_env
+                .get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        assert_eq!(
+            docker_env
+                .get(gwt_agent::GWT_PANE_WS_URL_ENV)
+                .map(String::as_str),
+            Some("ws://host.docker.internal:46234/ws")
+        );
     }
 }
 

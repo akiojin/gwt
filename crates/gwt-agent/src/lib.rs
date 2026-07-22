@@ -46,8 +46,8 @@ pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, M
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
-    install_launch_gwt_bin_env_with_lookup, prepare_agent_launch,
-    register_codex_managed_hook_trust_in_docker, resolve_launch_worktree,
+    install_launch_gwt_bin_env_with_lookup, pane_websocket_url_for_launch_runtime,
+    prepare_agent_launch, register_codex_managed_hook_trust_in_docker, resolve_launch_worktree,
     resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup, HookForwardEnv,
     PreparedAgentLaunch, PreparedProcessLaunch,
 };
@@ -63,7 +63,7 @@ pub use session::{
     validate_docker_runtime_worktree_path, validate_session_id_path_component,
     AgentSessionHistoryEntry, DockerRuntimeBinding, PendingDiscussionResume, Session,
     SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-    GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

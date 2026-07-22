@@ -48,6 +48,16 @@ pub fn handle_with_input(
         return HookOutput::Silent;
     }
     let reason = match &refreshed.status {
+        crate::cli::verification_record::WorkEventSettlementStatus::PendingMutation {
+            event_id,
+            work_id,
+            journal_entry_id,
+            ..
+        } => crate::cli::verification_record::work_event_settlement_pending_description(
+            event_id,
+            work_id,
+            journal_entry_id,
+        ),
         crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
             crate::cli::verification_record::work_event_settlement_blocker_description(blocker)
         }
@@ -64,9 +74,62 @@ pub fn handle_with_input(
 mod tests {
     use super::*;
     use crate::cli::verification_record::{
-        load_work_event_settlement_record, save_work_event_settlement_record,
+        load_work_event_settlement_record, prepare_work_event_settlement_record,
+        save_work_event_settlement_record,
     };
-    use gwt_core::test_support::ScopedEnvVar;
+    use gwt_core::{
+        test_support::ScopedEnvVar,
+        workspace_projection::{
+            WorkEvent, WorkEventKind, WorkspaceJournalEntry, WorkspaceStatusCategory,
+        },
+    };
+
+    #[test]
+    fn pending_mutation_blocks_stop_before_the_tracked_event_exists() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let updated_at = chrono::Utc::now();
+        let mut event = WorkEvent::new(WorkEventKind::Done, "work-pending-stop", updated_at);
+        event.agent_session_id = Some("session-pending-stop".to_string());
+        let journal_entry = WorkspaceJournalEntry {
+            id: "journal-pending-stop".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-pending-stop".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-pending-stop",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare settlement receipt");
+
+        let blocked = handle_with_input(
+            &fixture.repo,
+            r#"{"stop_hook_active":false}"#,
+            Some("session-pending-stop"),
+        );
+        let HookOutput::StopBlock { reason } = blocked else {
+            panic!("a pending terminal mutation must block Stop: {blocked:?}");
+        };
+        assert!(reason.contains("has not been persisted"), "{reason}");
+        assert!(reason.contains(&event.id), "{reason}");
+    }
 
     #[test]
     fn open_obligation_blocks_until_commit_and_push_readback() {

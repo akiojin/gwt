@@ -159,6 +159,55 @@ pub fn hook_forward_url_for_launch_runtime(
     Ok(url.into())
 }
 
+/// Translate the browser listener's pane WebSocket endpoint for the selected
+/// launch runtime. Unlike the capability-only hook endpoint, non-loopback
+/// browser binds remain directly addressable and are preserved.
+pub fn pane_websocket_url_for_launch_runtime(
+    host_url: &str,
+    runtime_target: LaunchRuntimeTarget,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    if runtime_target == LaunchRuntimeTarget::Host {
+        return Ok(host_url.to_string());
+    }
+
+    let mut url =
+        Url::parse(host_url).map_err(|error| format!("invalid pane WebSocket URL: {error}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(format!(
+            "container pane access requires a WebSocket URL scheme, got '{}'",
+            url.scheme()
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("container pane WebSocket URL must not contain user credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "container pane WebSocket URL is missing a host".to_string())?;
+    if url.port().is_none() {
+        return Err(
+            "container pane WebSocket URL requires an explicit port before bridge translation"
+                .to_string(),
+        );
+    }
+    if url.path() != "/ws" || url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "container pane WebSocket URL must use the exact /ws path without query or fragment, got '{}'",
+            url.path()
+        ));
+    }
+
+    if is_loopback_hook_forward_host(host) {
+        let bridge_host =
+            gwt_docker::container_runtime_kind(container_runtime_binary)?.host_bridge_name();
+        url.set_host(Some(bridge_host)).map_err(|_| {
+            format!("failed to install container host bridge name '{bridge_host}' in pane URL")
+        })?;
+    }
+    Ok(url.into())
+}
+
 fn is_loopback_hook_forward_host(host: &str) -> bool {
     let normalized = host
         .strip_prefix('[')
@@ -1910,6 +1959,64 @@ mod tests {
                 hook_forward_url_for_launch_runtime(source, LaunchRuntimeTarget::Docker, "docker",)
                     .is_err(),
                 "container endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_keeps_browser_listener_separate_from_hook_bridge() {
+        let source = "ws://127.0.0.1:46234/ws";
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                source,
+                LaunchRuntimeTarget::Host,
+                "unknown-host-runtime-is-ignored",
+            )
+            .expect("host pane URL"),
+            source
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(source, LaunchRuntimeTarget::Docker, "docker",)
+                .expect("Docker pane URL"),
+            "ws://host.docker.internal:46234/ws"
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                "wss://[::1]:46234/ws",
+                LaunchRuntimeTarget::Docker,
+                "/usr/bin/podman-remote",
+            )
+            .expect("Podman pane URL"),
+            "wss://host.containers.internal:46234/ws"
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                "wss://192.0.2.10:46234/ws",
+                LaunchRuntimeTarget::Docker,
+                "docker",
+            )
+            .expect("directly addressable browser bind"),
+            "wss://192.0.2.10:46234/ws"
+        );
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_rejects_noncanonical_container_endpoints() {
+        for source in [
+            "http://127.0.0.1:46234/ws",
+            "ws://127.0.0.1/ws",
+            "ws://127.0.0.1:46234/internal/hook-live",
+            "ws://127.0.0.1:46234/ws?generation=7",
+            "ws://127.0.0.1:46234/ws#fragment",
+        ] {
+            assert!(
+                pane_websocket_url_for_launch_runtime(
+                    source,
+                    LaunchRuntimeTarget::Docker,
+                    "docker",
+                )
+                .is_err(),
+                "container pane endpoint should fail closed: {source}"
             );
         }
     }
