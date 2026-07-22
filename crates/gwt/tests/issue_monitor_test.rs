@@ -1,10 +1,11 @@
 use gwt::issue_monitor::{
     github_auth_setup_message, is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
-    issue_monitor_launch_prompt, load_issue_monitor_prefs, save_issue_monitor_prefs,
-    scan_issue_monitor_candidates, scan_issue_monitor_candidates_with_provenance,
-    AutonomousIssueRecord, AutonomousPhase, IssueMonitorCandidateSource, IssueMonitorConfig,
-    IssueMonitorFailedIssue, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorPrefs,
-    IssueMonitorState, MonitorInboxState, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    issue_monitor_launch_prompt, load_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
+    save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
+    IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorIssue,
+    IssueMonitorIssueState, IssueMonitorPrefs, IssueMonitorState, MonitorInboxState,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 use gwt::issue_monitor_worker::{
     scan_loaded_issue_monitor_candidates, LoadedIssueMonitorCandidates,
@@ -14,7 +15,10 @@ use gwt_github::issue_auto_claim::{render_claim_comment, ClaimComment, ClaimStat
 use gwt_github::{
     CommentId, CommentSnapshot, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn issue(number: u64, labels: &[&str]) -> IssueMonitorIssue {
     IssueMonitorIssue {
@@ -320,6 +324,37 @@ fn monitor_prefs_persist_priority_and_max_active_agents() {
     let loaded = load_issue_monitor_prefs(&path).expect("load prefs");
 
     assert_eq!(loaded, prefs);
+}
+
+#[test]
+fn schema_data_errors_are_not_recovered_or_overwritten() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("issue_monitor.json");
+    let mut schema_invalid =
+        serde_json::to_value(IssueMonitorPrefs::default()).expect("serialize prefs");
+    schema_invalid["enabled"] = serde_json::Value::String("future-schema-value".to_string());
+    let original = serde_json::to_vec_pretty(&schema_invalid).expect("encode invalid schema");
+    fs::write(&path, &original).expect("seed schema-invalid prefs");
+    let mut mutation_ran = false;
+
+    let result =
+        mutate_issue_monitor_prefs_recovering(&path, &IssueMonitorPrefs::default(), |_| {
+            mutation_ran = true
+        });
+
+    assert!(result.is_err(), "schema data errors must fail closed");
+    assert!(!mutation_ran, "a rejected snapshot must not be mutated");
+    assert_eq!(fs::read(&path).expect("read original prefs"), original);
+    assert!(
+        fs::read_dir(dir.path())
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("issue_monitor.json.corrupt-")),
+        "schema data errors are not torn JSON and must not be quarantined"
+    );
 }
 
 #[test]

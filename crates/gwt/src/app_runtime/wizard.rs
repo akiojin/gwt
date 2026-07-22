@@ -2468,7 +2468,7 @@ impl AppRuntime {
         let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
         if let Err(error) = gwt::mutate_issue_monitor_prefs_recovering(
             &prefs_path,
-            &gwt::IssueMonitorPrefs::default(),
+            &gwt::IssueMonitorPrefs::recovery_default(),
             |prefs| {
                 prefs.launch_profile = Some(launch_profile);
             },

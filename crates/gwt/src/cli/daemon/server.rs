@@ -222,7 +222,8 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
         let mut control_rx =
             hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL);
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path)
+            .unwrap_or_else(|_| crate::IssueMonitorPrefs::recovery_default());
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
@@ -2441,7 +2442,10 @@ exit 0
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         fs::write(&prefs_path, b"{").expect("seed malformed prefs");
-        let mut daemon = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::recovery_default(),
+        );
 
         assert!(super::apply_issue_monitor_control_with_disk_migration(
             &prefs_path,
@@ -2451,6 +2455,10 @@ exit 0
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("recovered prefs");
         assert!(persisted.enabled);
+        assert_eq!(
+            persisted.legacy_git_launch_failure_migration_version, 0,
+            "daemon startup recovery must wait for a successful live scan"
+        );
         let quarantine_count = fs::read_dir(temp.path())
             .expect("read prefs directory")
             .filter_map(Result::ok)

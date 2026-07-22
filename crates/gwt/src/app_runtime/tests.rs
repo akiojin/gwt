@@ -17167,6 +17167,26 @@ fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
 }
 
 #[test]
+fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    fs::write(&prefs_path, b"{").expect("seed malformed prefs");
+
+    let (monitor, ()) =
+        super::load_mutate_and_persist_issue_monitor_state(&prefs_path, |monitor| {
+            monitor.set_enabled(true)
+        });
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("recovered GUI prefs");
+    assert!(persisted.enabled);
+    assert!(monitor.prefs().enabled);
+    assert_eq!(
+        persisted.legacy_git_launch_failure_migration_version, 0,
+        "recovery without a valid in-memory snapshot must wait for a successful live scan"
+    );
+}
+
+#[test]
 fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
     let temp = tempdir().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");
@@ -17755,7 +17775,7 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
 }
 
 #[test]
-fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
+fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launching() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -17766,6 +17786,9 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    fs::create_dir_all(prefs_path.parent().expect("prefs parent")).expect("create prefs directory");
+    fs::write(&prefs_path, b"{").expect("seed malformed prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -17877,8 +17900,11 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
         "saving Issue Monitor settings must not spawn an agent window"
     );
 
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
-        .expect("load issue monitor prefs");
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load issue monitor prefs");
+    assert_eq!(
+        prefs.legacy_git_launch_failure_migration_version, 0,
+        "saving settings after recovery cannot mark the live-scan migration complete"
+    );
     let profile = prefs.launch_profile.expect("saved launch profile");
     assert_eq!(profile.agent_id, "codex");
     assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));

@@ -201,6 +201,17 @@ impl Default for IssueMonitorPrefs {
 }
 
 impl IssueMonitorPrefs {
+    /// Fallback for an existing prefs file that could not be decoded and for
+    /// which the caller has no valid in-memory snapshot. Unlike [`Default`],
+    /// the compatibility migration remains unapplied until a complete live
+    /// scan and the Launch Agent resolver both succeed.
+    pub fn recovery_default() -> Self {
+        Self {
+            legacy_git_launch_failure_migration_version: 0,
+            ..Self::default()
+        }
+    }
+
     /// Adopt another process's completed migration only when its marker is
     /// strictly newer. A launch already owned by this process remains
     /// authoritative over a stale disk failure, while an adopted failure
@@ -878,8 +889,16 @@ fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPref
         return Ok(IssueMonitorPrefs::default());
     }
     let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    serde_json::from_str(&content).map_err(|error| {
+        let kind = match error.classify() {
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                io::ErrorKind::InvalidData
+            }
+            serde_json::error::Category::Data => io::ErrorKind::InvalidInput,
+            serde_json::error::Category::Io => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, error)
+    })
 }
 
 /// Per-process-unique scratch path for the atomic prefs write, placed in the
@@ -996,11 +1015,12 @@ pub fn mutate_issue_monitor_prefs<T>(
 
 /// Serialize one prefs transaction while recovering a malformed JSON snapshot.
 ///
-/// Only parse failures are recoverable. The malformed bytes are copied to a
-/// unique sibling quarantine file while the stable writer lock is held, then
-/// `recovery_baseline` is mutated and atomically committed. Other I/O errors
-/// remain fail-closed. Callers should pass their latest valid in-memory prefs;
-/// callers without one may explicitly pass [`IssueMonitorPrefs::default`].
+/// Only JSON syntax/EOF failures are recoverable. The malformed bytes are
+/// copied to a unique sibling quarantine file while the stable writer lock is
+/// held, then `recovery_baseline` is mutated and atomically committed. Schema
+/// data errors and other I/O errors remain fail-closed. Callers should pass
+/// their latest valid in-memory prefs; callers without one should explicitly
+/// pass [`IssueMonitorPrefs::recovery_default`].
 pub fn mutate_issue_monitor_prefs_recovering<T>(
     path: &Path,
     recovery_baseline: &IssueMonitorPrefs,
@@ -1675,6 +1695,16 @@ impl IssueMonitorState {
                 disk_needs_human.insert(*issue_number, record.clone());
             }
         }
+        let needs_human_issue_numbers = disk_needs_human
+            .keys()
+            .copied()
+            .chain(
+                self.inbox
+                    .iter()
+                    .filter(|item| item.state == MonitorInboxState::NeedsHuman)
+                    .map(|item| item.issue.number),
+            )
+            .collect::<BTreeSet<_>>();
         let removed = old_failures
             .keys()
             .filter(|issue_number| !disk_failures.contains_key(issue_number))
@@ -1713,7 +1743,7 @@ impl IssueMonitorState {
             ) {
                 continue;
             }
-            if disk_needs_human.contains_key(&item.issue.number) {
+            if needs_human_issue_numbers.contains(&item.issue.number) {
                 item.state = MonitorInboxState::NeedsHuman;
             } else if item.state != MonitorInboxState::LaunchFailed {
                 item.state = MonitorInboxState::AgentFailed;
@@ -5392,6 +5422,43 @@ mod tests {
         assert!(
             monitor.failed_issues.contains_key(&42),
             "an equal marker cannot erase a newly recorded same-text failure"
+        );
+    }
+
+    #[test]
+    fn newer_migration_marker_preserves_inbox_only_needs_human_failure() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                legacy_git_launch_failure_migration_version: 0,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.record_agent_issue_failed(42, "manual intervention required");
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .expect("failed inbox item")
+            .state = MonitorInboxState::NeedsHuman;
+        assert!(
+            monitor.autonomous_record(42).is_none(),
+            "the regression requires an inbox-only terminal state"
+        );
+
+        assert!(
+            monitor.adopt_newer_legacy_git_launch_failure_migration_from_prefs(
+                &IssueMonitorPrefs::default()
+            )
+        );
+
+        assert!(monitor.failed_issues.contains_key(&42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "adopting a newer marker must not downgrade a terminal inbox row"
         );
     }
 }

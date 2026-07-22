@@ -635,7 +635,7 @@ fn load_mutate_and_persist_issue_monitor_state<T>(
     let mut mutation = Some(mutation);
     let mut monitor = None;
     let mut result = None;
-    let recovery_baseline = gwt::IssueMonitorPrefs::default();
+    let recovery_baseline = gwt::IssueMonitorPrefs::recovery_default();
     let transaction =
         gwt::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |prefs| {
             let mut latest = gwt::IssueMonitorState::with_prefs(
@@ -656,7 +656,8 @@ fn load_mutate_and_persist_issue_monitor_state<T>(
         );
     }
     let mut monitor = monitor.unwrap_or_else(|| {
-        let prefs = gwt::load_issue_monitor_prefs(prefs_path).unwrap_or_default();
+        let prefs = gwt::load_issue_monitor_prefs(prefs_path)
+            .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
         gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
     });
     let result = result.unwrap_or_else(|| {
@@ -1367,7 +1368,8 @@ impl AppRuntime {
                 return Vec::new();
             };
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-            let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+            let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+                .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
             let monitor =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
             window_ids
@@ -1546,7 +1548,8 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         let mut issues =
@@ -1763,7 +1766,8 @@ impl AppRuntime {
         };
 
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
 
@@ -2354,8 +2358,8 @@ impl AppRuntime {
                         if let Some(project_root) = project_root {
                             let prefs_path =
                                 gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-                            let prefs =
-                                gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+                            let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
+                                .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
                             let monitor = gwt::IssueMonitorState::with_prefs(
                                 gwt::IssueMonitorConfig::default(),
                                 prefs,
