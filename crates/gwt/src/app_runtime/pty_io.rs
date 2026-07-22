@@ -28,6 +28,15 @@ use super::{
     Read as _, RuntimeStopThreads, UserEvent, WindowProcessStatus,
 };
 
+fn stop_all_before_join<Id, Threads>(
+    ids: impl IntoIterator<Item = Id>,
+    mut stop: impl FnMut(Id) -> Threads,
+    mut join: impl FnMut(Threads),
+) {
+    let threads: Vec<Threads> = ids.into_iter().map(&mut stop).collect();
+    threads.into_iter().for_each(&mut join);
+}
+
 impl AppRuntime {
     /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
     /// streamed output was dropped under client queue pressure, restoring
@@ -293,13 +302,11 @@ impl AppRuntime {
     }
 
     pub(super) fn stop_runtimes_in_shutdown_order(&mut self, ids: Vec<String>) {
-        let mut threads = Vec::new();
-        for id in ids {
-            threads.push(self.start_window_runtime_stop(&id, false));
-        }
-        for runtime_threads in threads {
-            Self::join_runtime_stop_threads(runtime_threads);
-        }
+        stop_all_before_join(
+            ids,
+            |id| self.start_window_runtime_stop(&id, false),
+            Self::join_runtime_stop_threads,
+        );
     }
 
     pub(crate) fn spawn_output_thread(
@@ -463,5 +470,31 @@ impl AppRuntime {
                 Some(message.clone()),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_order_tests {
+    use std::cell::RefCell;
+
+    use super::stop_all_before_join;
+
+    #[test]
+    fn every_runtime_is_stopped_before_any_join_begins() {
+        let events = RefCell::new(Vec::new());
+
+        stop_all_before_join(
+            ["a", "b"],
+            |id| {
+                events.borrow_mut().push(format!("stop:{id}"));
+                id
+            },
+            |id| events.borrow_mut().push(format!("join:{id}")),
+        );
+
+        assert_eq!(
+            events.into_inner(),
+            ["stop:a", "stop:b", "join:a", "join:b"]
+        );
     }
 }
