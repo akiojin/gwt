@@ -431,7 +431,10 @@ impl WorkItemsProjection {
             && event.status_category.is_some();
         let preserve_terminal = item.discarded
             || (item.status_category == WorkspaceStatusCategory::Done && !explicit_done_resume);
-        if !preserve_terminal {
+        let preserve_sparse_update_status = existing_index.is_some()
+            && event.kind == WorkEventKind::Update
+            && event.status_category.is_none();
+        if !preserve_terminal && !preserve_sparse_update_status {
             item.status_category = new_status;
         }
         if event.kind == WorkEventKind::Discard

@@ -52,6 +52,15 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
 }
 
+#[doc(hidden)]
+pub use agent_project_state::{
+    apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
+    observe_agent_runtime, AgentRuntimeObservation, AgentWorkTerminalKind,
+    AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
+    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
+    AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+};
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
     cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,

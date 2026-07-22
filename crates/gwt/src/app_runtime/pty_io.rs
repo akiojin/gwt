@@ -28,13 +28,18 @@ use super::{
     Read as _, RuntimeStopThreads, UserEvent, WindowProcessStatus,
 };
 
-fn stop_all_before_join<Id, Threads>(
-    ids: impl IntoIterator<Item = Id>,
-    mut stop: impl FnMut(Id) -> Threads,
-    mut join: impl FnMut(Threads),
-) {
-    let threads: Vec<Threads> = ids.into_iter().map(&mut stop).collect();
-    threads.into_iter().for_each(&mut join);
+/// Complete the stop phase for every runtime before any join can block.
+fn stop_all_before_joining<I, T>(
+    ids: I,
+    mut stop: impl FnMut(I::Item) -> T,
+    mut join: impl FnMut(T),
+) where
+    I: IntoIterator,
+{
+    let stopped = ids.into_iter().map(&mut stop).collect::<Vec<_>>();
+    for threads in stopped {
+        join(threads);
+    }
 }
 
 impl AppRuntime {
@@ -302,7 +307,7 @@ impl AppRuntime {
     }
 
     pub(super) fn stop_runtimes_in_shutdown_order(&mut self, ids: Vec<String>) {
-        stop_all_before_join(
+        stop_all_before_joining(
             ids,
             |id| self.start_window_runtime_stop(&id, false),
             Self::join_runtime_stop_threads,
@@ -477,13 +482,13 @@ impl AppRuntime {
 mod shutdown_order_tests {
     use std::cell::RefCell;
 
-    use super::stop_all_before_join;
+    use super::stop_all_before_joining;
 
     #[test]
-    fn every_runtime_is_stopped_before_any_join_begins() {
+    fn stops_every_runtime_before_joining_any_runtime() {
         let events = RefCell::new(Vec::new());
 
-        stop_all_before_join(
+        stop_all_before_joining(
             ["a", "b"],
             |id| {
                 events.borrow_mut().push(format!("stop:{id}"));

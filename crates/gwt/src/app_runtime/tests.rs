@@ -55,6 +55,35 @@ use crate::{
 };
 
 #[test]
+fn process_launch_debug_redacts_agent_capability_and_session_identity() {
+    let secret = "agent-capability-secret-sentinel";
+    let launch = ProcessLaunch {
+        command: "docker".to_string(),
+        args: vec![
+            format!("{}={secret}", gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            format!("{}=session-private", gwt_agent::GWT_SESSION_ID_ENV),
+        ],
+        env: HashMap::from([
+            (
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                secret.to_string(),
+            ),
+            (
+                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                "session-private".to_string(),
+            ),
+        ]),
+        remove_env: Vec::new(),
+        cwd: None,
+    };
+
+    let debug = format!("{launch:?}");
+    assert!(!debug.contains(secret));
+    assert!(!debug.contains("session-private"));
+    assert!(debug.contains("<redacted>"));
+}
+
+#[test]
 fn improvement_action_error_message_explains_missing_github_auth() {
     let message = super::improvement_action_error_message("network error: authentication required");
 
@@ -2376,7 +2405,7 @@ fn sample_runtime_with_events(
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         recoverable_agent_error_windows: HashSet::new(),
-        hook_forward_target: None,
+        agent_capability_issuer: None,
         issue_link_cache_dir: gwt_cache_dir(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
@@ -15835,7 +15864,7 @@ fn app_runtime_post_board_entry_accepts_reply_to_history_parent() {
 }
 
 #[test]
-fn app_runtime_post_board_entry_updates_workspace_projection_current_state() {
+fn app_runtime_post_board_entry_without_origin_remains_board_only() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15874,43 +15903,22 @@ fn app_runtime_post_board_entry_updates_workspace_projection_current_state() {
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("load projection")
         .expect("projection");
-    let board_entry_id = projection
-        .board_refs
-        .first()
-        .expect("workspace board ref")
-        .clone();
-
-    assert_eq!(
-        projection.next_action.as_deref(),
-        Some("Run final verification")
+    assert_eq!(projection.next_action, None);
+    assert_eq!(projection.owner, None);
+    assert!(projection.board_refs.is_empty());
+    assert!(
+        gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .is_none(),
+        "an originless Board entry must not create Work history"
     );
-    assert_eq!(projection.owner.as_deref(), Some("SPEC-2359"));
-    assert_eq!(projection.board_refs.len(), 1);
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-        .expect("load work items")
-        .expect("work items");
-    assert_eq!(
-        work_items.work_items[0].board_refs,
-        vec![board_entry_id.clone()]
-    );
-    assert_eq!(
-        work_items.work_items[0].events[0].kind,
-        gwt_core::workspace_projection::WorkEventKind::Update
-    );
-    let projected_event = events
-        .iter()
-        .find_map(|event| match event {
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::ActiveWorkProjection { projection },
-            } => Some(projection),
-            _ => None,
-        })
-        .expect("active work projection broadcast");
-    assert_eq!(projected_event.board_refs, vec![board_entry_id.clone()]);
-    assert_eq!(projected_event.active_agents, 0);
-    assert_eq!(projected_event.status_category, "idle");
-    assert_eq!(projected_event.next_action, None);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::BoardEntries { .. },
+        } if client_id == "client-1"
+    )));
 }
 
 #[test]
@@ -16008,6 +16016,8 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let old_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     let current_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let current_worktree = repo.join("feature-current");
+    fs::create_dir_all(&current_worktree).expect("create current Work worktree");
     let stale = gwt_core::workspace_projection::WorkspaceAgentSummary {
         session_id: "session-duplicate-assigned".to_string(),
         window_id: None,
@@ -16029,6 +16039,7 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
     let mut assigned = stale.clone();
     assigned.current_focus = Some("current".to_string());
     assigned.branch = Some("feature/current".to_string());
+    assigned.worktree_path = Some(current_worktree.clone());
     assigned.affiliation_status =
         gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned;
     assigned.workspace_id = Some("work-current-duplicate".to_string());
@@ -16045,7 +16056,15 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
         None,
         None,
         &[],
-        None,
+        Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("feature/current".to_string()),
+                worktree_path: Some(current_worktree),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        ),
         Some("session-duplicate-assigned"),
         current_at,
     )
@@ -16060,7 +16079,8 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
         vec!["workspace-assignment".to_string()],
         vec!["2359".to_string()],
     )
-    .with_origin_session_id("session-duplicate-assigned");
+    .with_origin_session_id("session-duplicate-assigned")
+    .with_origin_branch("feature/current");
 
     runtime.record_workspace_board_milestone_event("tab-1", &repo, &entry);
 
@@ -16178,10 +16198,13 @@ fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work_or_agent
         current_projection.status_category,
         gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown
     );
-    assert!(current_projection
-        .board_refs
-        .iter()
-        .any(|id| id == &replayed.id));
+    assert!(
+        !current_projection
+            .board_refs
+            .iter()
+            .any(|id| id == &replayed.id),
+        "a stale Board origin remains Board-only without a projection ref"
+    );
     let current_agent = current_projection
         .latest_agent_for_session("session-duplicate-assigned")
         .expect("current assigned Agent");
@@ -18695,16 +18718,12 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
             tab_id: "tab-1".to_string(),
         },
     );
-    save_start_work_workspace_projection(
+    save_assigned_workspace_projection_for_test(
         &repo,
         runtime
             .active_agent_sessions
             .get(&first_window_id)
             .expect("first session"),
-        "develop",
-        None,
-        None,
-        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(
@@ -18796,16 +18815,12 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
             tab_id: "tab-1".to_string(),
         },
     );
-    save_start_work_workspace_projection(
+    save_assigned_workspace_projection_for_test(
         &repo,
         runtime
             .active_agent_sessions
             .get(&window_id)
             .expect("session"),
-        "develop",
-        None,
-        None,
-        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(
@@ -18955,16 +18970,12 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
             tab_id: "tab-1".to_string(),
         },
     );
-    save_start_work_workspace_projection(
+    save_assigned_workspace_projection_for_test(
         &repo,
         runtime
             .active_agent_sessions
             .get(&window_id)
             .expect("session"),
-        "develop",
-        None,
-        None,
-        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(
@@ -19044,16 +19055,12 @@ fn app_runtime_board_milestone_ignores_legacy_title_summary_for_window_title() {
             tab_id: "tab-1".to_string(),
         },
     );
-    save_start_work_workspace_projection(
+    save_assigned_workspace_projection_for_test(
         &repo,
         runtime
             .active_agent_sessions
             .get(&window_id)
             .expect("session"),
-        "develop",
-        None,
-        None,
-        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let long_body = "Implementing the title-summary contract across Board, Workspace, runtime synchronization, CLI parsing, hook reminders, and frontend titlebar rendering";
@@ -19136,16 +19143,12 @@ fn app_runtime_board_milestone_without_title_summary_keeps_existing_agent_window
             tab_id: "tab-1".to_string(),
         },
     );
-    save_start_work_workspace_projection(
+    save_assigned_workspace_projection_for_test(
         &repo,
         runtime
             .active_agent_sessions
             .get(&window_id)
             .expect("session"),
-        "develop",
-        None,
-        None,
-        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(

@@ -32,6 +32,13 @@ fn canonical_discussions_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) -> i32 {
+    let standalone_build = operation.starts_with("build.");
+    let _forward_url =
+        standalone_build.then(|| ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV));
+    let _forward_token =
+        standalone_build.then(|| ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV));
+    let _runtime_path =
+        standalone_build.then(|| ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV));
     env.stdin = serde_json::json!({
         "schema_version": 1,
         "operation": operation,
@@ -228,6 +235,10 @@ fn plan_complete_with_mismatched_spec_is_rejected() {
 
 #[test]
 fn build_lifecycle_start_phase_complete_sequences_correctly() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
     let (mut env, dir) = new_env();
     assert_eq!(
         dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935})),
@@ -263,6 +274,10 @@ fn build_lifecycle_start_phase_complete_sequences_correctly() {
 
 #[test]
 fn build_abort_records_reason_in_phase_field() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
     let (mut env, dir) = new_env();
     dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935}));
     let code = dispatch_json(
@@ -1223,6 +1238,10 @@ fn plan_abort_without_active_state_exits_zero() {
 
 #[test]
 fn build_phase_with_mismatched_spec_is_rejected() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
     let (mut env, _dir) = new_env();
     dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935}));
     let code = dispatch_json(
@@ -1240,6 +1259,10 @@ fn build_phase_with_mismatched_spec_is_rejected() {
 
 #[test]
 fn build_abort_with_mismatched_spec_is_rejected() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
     let (mut env, dir) = new_env();
     dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935}));
     let code = dispatch_json(
