@@ -1196,6 +1196,9 @@ mod tests {
 
     #[test]
     fn agent_title_summary_missing_reads_workspace_projection() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
@@ -1239,6 +1242,9 @@ mod tests {
 
     #[test]
     fn agent_title_summary_missing_reads_canonical_project_state_root() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let project_root = temp.path().join("workspace-home");
         let worktree = project_root.join("work").join("20260601-0934");
