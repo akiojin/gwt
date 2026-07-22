@@ -520,11 +520,11 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         )
         .expect("valid regex");
     let streaming_enqueue = regex::Regex::new(
-            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\);",
+            r"(?s)function writeOutputToTerminal\(windowId, base64, traceMetadata\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64,\s*traceMetadata\s*\);",
         )
         .expect("valid regex");
     let streaming_hidden_pending = regex::Regex::new(
-            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\);\s*if \(!canRefreshTerminalViewport\(windowId\)\) \{\s*markTerminalViewportRefreshPending\(windowId\);",
+            r"(?s)function writeOutputToTerminal\(windowId, base64, traceMetadata\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64,\s*traceMetadata\s*\);\s*if \(!canRefreshTerminalViewport\(windowId\)\) \{\s*markTerminalViewportRefreshPending\(windowId\);",
         )
         .expect("valid regex");
     let streaming_write = regex::Regex::new(
@@ -675,7 +675,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     let write_gate = regex::Regex::new(
-            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+            r#"(?s)function writeOutputToTerminal\(windowId, base64, traceMetadata\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*runtime\.deferredWrites\.push\(\s*traceMetadata\s*\?\s*\{\s*base64,\s*traceMetadata\s*\}\s*:\s*base64,?\s*\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     let snapshot_gate = regex::Regex::new(
@@ -3039,7 +3039,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
-            r#"case\s*"terminal_output":\s*frontendUnits\.terminalHost\.writeOutput\(event\.id,\s*event\.data_base64\);\s*break;\s*case\s*"terminal_snapshot":\s*frontendUnits\.terminalHost\.replaceTerminalSnapshot\(event\.id,\s*event\.data_base64\);\s*break;"#,
+            r#"case\s*"terminal_output":\s*frontendUnits\.terminalHost\.writeOutput\(\s*event\.id,\s*event\.data_base64,\s*traceMetadata,?\s*\);\s*break;\s*case\s*"terminal_snapshot":\s*frontendUnits\.terminalHost\.replaceTerminalSnapshot\(event\.id,\s*event\.data_base64\);\s*break;"#,
         )
         .expect("valid regex");
     // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the

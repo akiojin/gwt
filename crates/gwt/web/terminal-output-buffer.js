@@ -16,6 +16,10 @@ function defaultSchedule(callback) {
   return setTimeout(callback, 0);
 }
 
+function queuedChunkText(chunk) {
+  return typeof chunk === "string" ? chunk : chunk.text;
+}
+
 function normalizeMaxCharsPerFlush(value) {
   if (!Number.isFinite(value) || value <= 0) {
     return DEFAULT_MAX_CHARS_PER_FLUSH;
@@ -62,8 +66,12 @@ function compactConsumedChunks(entry) {
 
 export function createTerminalOutputBatcher({
   schedule = defaultSchedule,
+  schedulePaint = defaultSchedule,
   write,
   onFlush,
+  onTrace,
+  shouldTrace,
+  readTraceEpoch,
   maxCharsPerFlush = DEFAULT_MAX_CHARS_PER_FLUSH,
   maxWindowsPerFlush = DEFAULT_MAX_WINDOWS_PER_FLUSH,
   maxTotalCharsPerFlush = DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
@@ -74,7 +82,13 @@ export function createTerminalOutputBatcher({
     throw new TypeError("createTerminalOutputBatcher requires a write callback");
   }
   const scheduleImpl = typeof schedule === "function" ? schedule : defaultSchedule;
+  const schedulePaintImpl =
+    typeof schedulePaint === "function" ? schedulePaint : defaultSchedule;
   const onFlushImpl = typeof onFlush === "function" ? onFlush : null;
+  const traceImpl = typeof onTrace === "function" ? onTrace : null;
+  const shouldTraceImpl = typeof shouldTrace === "function" ? shouldTrace : null;
+  const readTraceEpochImpl =
+    typeof readTraceEpoch === "function" ? readTraceEpoch : null;
   const charsPerFlush = normalizeMaxCharsPerFlush(maxCharsPerFlush);
   const windowsPerFlush = normalizeMaxWindowsPerFlush(maxWindowsPerFlush);
   const totalCharsPerFlush = normalizeMaxTotalCharsPerFlush(maxTotalCharsPerFlush);
@@ -90,6 +104,103 @@ export function createTerminalOutputBatcher({
   // next normal scan once. Keeping the serviced id (instead of a boolean)
   // preserves one-shot hints and lets a different input target replace them.
   let priorityYieldWindowId = null;
+
+  function traceActive() {
+    if (!traceImpl) {
+      return false;
+    }
+    if (!shouldTraceImpl) {
+      return true;
+    }
+    try {
+      return Boolean(shouldTraceImpl());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function normalizedTraceMetadata(metadata, windowId) {
+    if (!metadata || typeof metadata !== "object") {
+      return null;
+    }
+    try {
+      let epoch;
+      if (readTraceEpochImpl) {
+        epoch = readTraceEpochImpl();
+        if (
+          epoch === null
+          || epoch === undefined
+          || metadata.epoch !== epoch
+        ) {
+          return null;
+        }
+      }
+      if (metadata.sequence === undefined) {
+        return null;
+      }
+      const normalized = {
+        sequence: metadata.sequence,
+        window_id: windowId,
+      };
+      if (readTraceEpochImpl) {
+        normalized.epoch = epoch;
+      }
+      return Object.freeze(normalized);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function currentTraceFields(metadata) {
+    if (!metadata || !traceActive()) {
+      return null;
+    }
+    try {
+      if (readTraceEpochImpl) {
+        const epoch = readTraceEpochImpl();
+        if (
+          epoch === null
+          || epoch === undefined
+          || metadata.epoch !== epoch
+        ) {
+          return null;
+        }
+      }
+      return {
+        sequence: metadata.sequence,
+        window_id: metadata.window_id,
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function emitTerminalOutputTrace(kind, metadata) {
+    if (!traceImpl || !metadata) {
+      return false;
+    }
+    const fields = currentTraceFields(metadata);
+    if (!fields) {
+      return false;
+    }
+    try {
+      traceImpl(kind, fields);
+    } catch (_) {
+      // Diagnostics must never affect the terminal output path.
+    }
+    return true;
+  }
+
+  function emitTerminalOutputTraces(kind, metadataList) {
+    if (!metadataList) {
+      return false;
+    }
+    let emitted = false;
+    for (const metadata of metadataList) {
+      emitted = emitTerminalOutputTrace(kind, metadata) || emitted;
+    }
+    return emitted;
+  }
 
   function entryFor(windowId) {
     let entry = pendingByWindow.get(windowId);
@@ -108,7 +219,7 @@ export function createTerminalOutputBatcher({
     scheduleImpl(flushPending);
   }
 
-  function enqueue(windowId, text) {
+  function enqueue(windowId, text, metadata) {
     if (windowId === null || windowId === undefined || text === "") {
       return false;
     }
@@ -117,7 +228,17 @@ export function createTerminalOutputBatcher({
       return false;
     }
     const entry = entryFor(windowId);
-    entry.chunks.push(normalized);
+    const traceMetadata = traceActive()
+      ? normalizedTraceMetadata(metadata, windowId)
+      : null;
+    entry.chunks.push(
+      traceMetadata
+        ? Object.freeze({ text: normalized, traceMetadata })
+        : normalized,
+    );
+    if (traceMetadata) {
+      emitTerminalOutputTrace("terminal_output_enqueue", traceMetadata);
+    }
     if (!quiescedWindows.has(windowId) || hasSchedulablePendingWindow()) {
       scheduleFlush();
     }
@@ -133,12 +254,13 @@ export function createTerminalOutputBatcher({
         : charsPerFlush;
     while (entry.head < entry.chunks.length) {
       const next = entry.chunks[entry.head];
-      if (chunks.length > 0 && chars + next.length > charLimit) {
+      const nextText = queuedChunkText(next);
+      if (chunks.length > 0 && chars + nextText.length > charLimit) {
         break;
       }
       chunks.push(next);
       entry.head += 1;
-      chars += next.length;
+      chars += nextText.length;
       if (chars >= charLimit) {
         break;
       }
@@ -288,10 +410,35 @@ export function createTerminalOutputBatcher({
       quiescedWindows.delete(windowId);
       return { flushed: false, chars: 0 };
     }
-    const chunks = takeFlushChunks(entry, maxChars);
+    const queuedChunks = takeFlushChunks(entry, maxChars);
     if (pendingChunkCount(entry) === 0) {
       pendingByWindow.delete(windowId);
       quiescedWindows.delete(windowId);
+    }
+    let chunks = queuedChunks;
+    let traceMetadataList = null;
+    for (let index = 0; index < queuedChunks.length; index += 1) {
+      const chunk = queuedChunks[index];
+      if (typeof chunk === "string") {
+        if (chunks !== queuedChunks) {
+          chunks.push(chunk);
+        }
+        continue;
+      }
+      if (chunks === queuedChunks) {
+        chunks = queuedChunks.slice(0, index);
+      }
+      chunks.push(chunk.text);
+      if (chunk.traceMetadata) {
+        traceMetadataList ??= [];
+        traceMetadataList.push(chunk.traceMetadata);
+      }
+    }
+    if (traceMetadataList) {
+      emitTerminalOutputTraces(
+        "terminal_output_flush_start",
+        traceMetadataList,
+      );
     }
     let text = "";
     try {
@@ -304,7 +451,32 @@ export function createTerminalOutputBatcher({
       return { flushed: false, chars: 0 };
     }
     try {
-      write(windowId, text, () => notifyFlushed(windowId));
+      let writeCompleted = false;
+      write(windowId, text, () => {
+        if (writeCompleted) {
+          return;
+        }
+        writeCompleted = true;
+        if (traceMetadataList) {
+          const tracedCompletion = emitTerminalOutputTraces(
+            "terminal_output_write_complete",
+            traceMetadataList,
+          );
+          if (tracedCompletion) {
+            try {
+              schedulePaintImpl(() => {
+                emitTerminalOutputTraces(
+                  "terminal_output_next_paint",
+                  traceMetadataList,
+                );
+              });
+            } catch (_) {
+              // Diagnostics scheduling must never affect viewport maintenance.
+            }
+          }
+        }
+        notifyFlushed(windowId);
+      });
     } catch (error) {
       console.warn("[terminal-output-buffer] write failed for %s", windowId, error);
     }

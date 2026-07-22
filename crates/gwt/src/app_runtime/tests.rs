@@ -468,6 +468,441 @@ fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
     captured_events
 }
 
+fn assert_exact_captured_trace_fields(event: &CapturedTracingEvent, expected: &[&str]) {
+    let mut actual = event.fields.keys().map(String::as_str).collect::<Vec<_>>();
+    actual.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(actual, expected, "unexpected fields for {event:?}");
+}
+
+fn input_trace_macro_block<'a>(source: &'a str, stage: &str) -> &'a str {
+    let stage_needle = format!("stage = \"{stage}\"");
+    let stage_offset = source
+        .find(&stage_needle)
+        .unwrap_or_else(|| panic!("missing gwt_input_trace stage {stage}"));
+    let start = source[..stage_offset]
+        .rfind("tracing::")
+        .unwrap_or_else(|| panic!("missing tracing macro for stage {stage}"));
+    let end = source[stage_offset..]
+        .find(");")
+        .map(|offset| stage_offset + offset + 2)
+        .unwrap_or_else(|| panic!("unterminated tracing macro for stage {stage}"));
+    let block = &source[start..end];
+    assert!(
+        block.contains("target: \"gwt_input_trace\""),
+        "stage {stage} must target gwt_input_trace: {block}"
+    );
+    block
+}
+
+fn input_trace_macro_field_keys(block: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for line in block.lines().map(str::trim) {
+        if line.is_empty()
+            || line.starts_with("tracing::")
+            || line.starts_with("target:")
+            || line == ");"
+        {
+            continue;
+        }
+        if line.starts_with('"') {
+            keys.push("message".to_string());
+            continue;
+        }
+        let candidate = line.trim_end_matches(',');
+        let key = candidate
+            .split_once('=')
+            .map_or(candidate, |(key, _)| key)
+            .trim();
+        if !key.is_empty() {
+            keys.push(key.to_string());
+        }
+    }
+    keys.sort_unstable();
+    keys
+}
+
+#[test]
+fn pty_io_input_trace_callsites_use_stage_local_exact_allowlists() {
+    let source = include_str!("pty_io.rs");
+    let expected = [
+        (
+            "event_loop_runtime_missing",
+            &["message", "outcome", "stage", "window_id"][..],
+        ),
+        (
+            "pty_write",
+            &[
+                "lock_wait_us",
+                "message",
+                "outcome",
+                "stage",
+                "window_id",
+                "write_us",
+            ][..],
+        ),
+        (
+            "pane_lock_failed",
+            &["lock_wait_us", "message", "outcome", "stage", "window_id"][..],
+        ),
+        (
+            "registry_lock_poisoned",
+            &["message", "outcome", "stage", "window_id"][..],
+        ),
+        (
+            "registry_write_poisoned",
+            &["message", "outcome", "stage", "window_id"][..],
+        ),
+        (
+            "registry_deregister_poisoned",
+            &["message", "outcome", "stage", "window_id"][..],
+        ),
+        (
+            "pty_output_arrival",
+            &["message", "reader_id", "seq", "stage", "window_id"][..],
+        ),
+        (
+            "reader_pane_lock",
+            &[
+                "lock_wait_us",
+                "message",
+                "outcome",
+                "parse_us",
+                "reader_id",
+                "seq",
+                "stage",
+                "window_id",
+            ][..],
+        ),
+    ];
+
+    for (stage, expected_fields) in expected {
+        let block = input_trace_macro_block(source, stage);
+        let mut expected_fields = expected_fields
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect::<Vec<_>>();
+        expected_fields.sort_unstable();
+        assert_eq!(
+            input_trace_macro_field_keys(block),
+            expected_fields,
+            "unexpected exact field allowlist for stage {stage}: {block}"
+        );
+        for forbidden in [
+            "data_len",
+            "text_len",
+            "chunk_len",
+            "data_base64",
+            "credential",
+            "env_secret",
+            "error =",
+            "error = %",
+        ] {
+            assert!(
+                !block.contains(forbidden),
+                "stage {stage} contains forbidden trace input {forbidden}: {block}"
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_input_runtime_missing_trace_does_not_serialize_input_or_secrets() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let synthetic_input =
+        "typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL data_base64_SENTINEL";
+
+    let events = capture_tracing_events(|| {
+        assert!(runtime
+            .terminal_input_events("missing-window", synthetic_input)
+            .is_empty());
+    });
+    let event = events
+        .iter()
+        .find(|event| {
+            event.target == "gwt_input_trace"
+                && event.fields.get("stage").map(String::as_str)
+                    == Some("event_loop_runtime_missing")
+        })
+        .expect("runtime-missing input trace");
+
+    assert_exact_captured_trace_fields(event, &["message", "outcome", "stage", "window_id"]);
+    assert_eq!(
+        event.fields.get("outcome").map(String::as_str),
+        Some("runtime_missing")
+    );
+    let serialized = serde_json::to_string(&event.fields).expect("serialize captured trace fields");
+    for forbidden in [
+        "typed_text_SENTINEL",
+        "credential_SENTINEL",
+        "env_secret_SENTINEL",
+        "data_base64_SENTINEL",
+        "data_len",
+        "text_len",
+        "chunk_len",
+        "\"error\":",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "runtime-missing trace leaked {forbidden}: {serialized}"
+        );
+    }
+}
+
+#[test]
+fn terminal_input_pty_write_trace_uses_exact_content_free_allowlist() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let window_id = "trace-window";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let synthetic_input =
+        "typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL data_base64_SENTINEL";
+
+    let events = capture_tracing_events(|| {
+        assert!(runtime
+            .terminal_input_events(window_id, synthetic_input)
+            .is_empty());
+    });
+    let event = events
+        .iter()
+        .find(|event| {
+            event.target == "gwt_input_trace"
+                && event.fields.get("stage").map(String::as_str) == Some("pty_write")
+        })
+        .expect("PTY-write input trace");
+
+    assert_exact_captured_trace_fields(
+        event,
+        &[
+            "lock_wait_us",
+            "message",
+            "outcome",
+            "stage",
+            "window_id",
+            "write_us",
+        ],
+    );
+    assert_eq!(
+        event.fields.get("outcome").map(String::as_str),
+        Some("success")
+    );
+    let serialized = serde_json::to_string(&event.fields).expect("serialize PTY-write trace");
+    for forbidden in [
+        "typed_text_SENTINEL",
+        "credential_SENTINEL",
+        "env_secret_SENTINEL",
+        "data_base64_SENTINEL",
+        "data_len",
+        "text_len",
+        "chunk_len",
+        "\"error\":",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "PTY-write trace leaked {forbidden}: {serialized}"
+        );
+    }
+
+    runtime.stop_window_runtime(window_id);
+}
+
+#[test]
+fn pty_output_trace_reader_uses_local_sequence_and_exact_allowlists() {
+    let events = capture_tracing_events(|| {
+        let mut reader = super::pty_io::PtyOutputTraceReader::new();
+        reader
+            .record_successful_read("trace-window")
+            .expect("tracing is enabled for the captured first read");
+        let second_read = reader
+            .record_successful_read("trace-window")
+            .expect("tracing is enabled for the captured second read");
+        second_read.trace_slow_reader_pane_lock("trace-window", 701, 809);
+    });
+    let events = events
+        .iter()
+        .filter(|event| event.target == "gwt_input_trace")
+        .collect::<Vec<_>>();
+
+    let arrivals = events
+        .iter()
+        .filter(|event| event.fields.get("stage").map(String::as_str) == Some("pty_output_arrival"))
+        .collect::<Vec<_>>();
+    assert_eq!(arrivals.len(), 2, "each successful read emits one arrival");
+    for arrival in &arrivals {
+        assert_exact_captured_trace_fields(
+            arrival,
+            &["message", "reader_id", "seq", "stage", "window_id"],
+        );
+    }
+    let reader_id = arrivals[0]
+        .fields
+        .get("reader_id")
+        .expect("reader identity");
+    assert_ne!(reader_id, "0");
+    assert_eq!(
+        arrivals[1].fields.get("reader_id"),
+        Some(reader_id),
+        "one reader lifetime keeps one identity"
+    );
+    assert_eq!(arrivals[0].fields.get("seq").map(String::as_str), Some("1"));
+    assert_eq!(arrivals[1].fields.get("seq").map(String::as_str), Some("2"));
+
+    let slow_reader = events
+        .iter()
+        .find(|event| event.fields.get("stage").map(String::as_str) == Some("reader_pane_lock"))
+        .expect("slow reader pane-lock trace");
+    assert_exact_captured_trace_fields(
+        slow_reader,
+        &[
+            "lock_wait_us",
+            "message",
+            "outcome",
+            "parse_us",
+            "reader_id",
+            "seq",
+            "stage",
+            "window_id",
+        ],
+    );
+    assert_eq!(
+        slow_reader.fields.get("reader_id"),
+        Some(reader_id),
+        "slow-lock marker must correlate to its arrival"
+    );
+    assert_eq!(
+        slow_reader.fields.get("seq").map(String::as_str),
+        Some("2"),
+        "slow-lock marker must reuse the successful read sequence"
+    );
+    assert_eq!(
+        slow_reader.fields.get("outcome").map(String::as_str),
+        Some("slow_parse")
+    );
+
+    for event in events {
+        let serialized = serde_json::to_string(&event.fields).expect("serialize PTY output trace");
+        for forbidden in [
+            "data_len",
+            "text_len",
+            "chunk_len",
+            "data_base64",
+            "credential",
+            "env_secret",
+            "\"error\":",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "PTY output trace leaked {forbidden}: {serialized}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pty_output_trace_reader_skips_disabled_reads_and_rolls_over_without_panicking() {
+    let mut disabled_reader = super::pty_io::PtyOutputTraceReader::new();
+    let disabled_read =
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            disabled_reader.record_successful_read("trace-disabled")
+        });
+    assert!(
+        disabled_read.is_none(),
+        "disabled tracing must avoid marker and sequence work"
+    );
+    let enabled_after_disabled = capture_tracing_events(|| {
+        disabled_reader
+            .record_successful_read("trace-disabled")
+            .expect("captured tracing is enabled");
+    });
+    let enabled_after_disabled = enabled_after_disabled
+        .iter()
+        .find(|event| event.fields.get("stage").map(String::as_str) == Some("pty_output_arrival"))
+        .expect("arrival after disabled read");
+    assert_eq!(
+        enabled_after_disabled.fields.get("seq").map(String::as_str),
+        Some("1"),
+        "a disabled read must not advance the trace-only local sequence"
+    );
+
+    let mut rollover_reader = super::pty_io::PtyOutputTraceReader::new();
+    rollover_reader.set_seq_for_test(u64::MAX - 1);
+    let rollover_events = capture_tracing_events(|| {
+        rollover_reader
+            .record_successful_read("trace-rollover")
+            .expect("captured tracing is enabled before rollover");
+        rollover_reader
+            .record_successful_read("trace-rollover")
+            .expect("captured tracing is enabled at rollover");
+    });
+    let arrivals = rollover_events
+        .iter()
+        .filter(|event| event.fields.get("stage").map(String::as_str) == Some("pty_output_arrival"))
+        .collect::<Vec<_>>();
+    assert_eq!(arrivals.len(), 2);
+    assert_eq!(
+        arrivals[0]
+            .fields
+            .get("seq")
+            .and_then(|seq| seq.parse::<u64>().ok()),
+        Some(u64::MAX)
+    );
+    assert_eq!(arrivals[1].fields.get("seq").map(String::as_str), Some("1"));
+    assert_ne!(
+        arrivals[0].fields.get("reader_id"),
+        arrivals[1].fields.get("reader_id"),
+        "sequence rollover must rotate the reader identity"
+    );
+}
+
+#[test]
+fn pty_output_trace_reader_identity_does_not_collide_across_lifetimes() {
+    let events = capture_tracing_events(|| {
+        for _reader_lifetime in 0..2 {
+            let mut reader = super::pty_io::PtyOutputTraceReader::new();
+            reader
+                .record_successful_read("same-window")
+                .expect("captured tracing is enabled");
+        }
+    });
+    let identities = events
+        .iter()
+        .filter(|event| {
+            event.target == "gwt_input_trace"
+                && event.fields.get("stage").map(String::as_str) == Some("pty_output_arrival")
+                && event.fields.get("window_id").map(String::as_str) == Some("same-window")
+        })
+        .map(|event| {
+            let reader_id = event
+                .fields
+                .get("reader_id")
+                .expect("PTY output trace reader identity")
+                .parse::<u64>()
+                .expect("opaque reader identity is numeric");
+            let seq = event
+                .fields
+                .get("seq")
+                .expect("PTY output trace reader-local sequence")
+                .parse::<u64>()
+                .expect("reader-local sequence is numeric");
+            (reader_id, seq)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(identities.len(), 2);
+    assert!(
+        identities
+            .iter()
+            .all(|(reader_id, seq)| *reader_id != 0 && *seq == 1),
+        "each new reader starts its own nonzero identity at local sequence one: {identities:?}"
+    );
+    assert_ne!(
+        identities[0], identities[1],
+        "restarting a reader for the same window must not reuse its composite trace identity"
+    );
+}
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<OsString>,

@@ -1113,14 +1113,12 @@ async fn client_session(socket: WebSocket, state: ServerState) {
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
-                        let text_len = text.len();
                         match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
                             Ok(event) => {
                                 handle_frontend_message(
                                     &state,
                                     &client_id,
                                     &input_seq,
-                                    text_len,
                                     event,
                                 );
                             }
@@ -1147,7 +1145,6 @@ fn handle_frontend_message(
     state: &ServerState,
     client_id: &str,
     input_seq: &AtomicU64,
-    text_len: usize,
     event: FrontendEvent,
 ) {
     let (id, data) = match event {
@@ -1162,73 +1159,109 @@ fn handle_frontend_message(
     };
 
     let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let data_len = data.len();
+    route_terminal_input_with(state, client_id, seq, id, data, |id, data| {
+        terminal_input_fast_path(&state.pty_writers, id, data)
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FastPathOutcome {
+    Success,
+    MissingWriter,
+    RegistryLockFailed,
+    WriteFailed,
+}
+
+fn terminal_input_fast_path(
+    pty_writers: &PtyWriterRegistry,
+    id: &str,
+    data: &[u8],
+) -> (FastPathOutcome, Option<u64>) {
+    let pty_handle = match pty_writers.read() {
+        Ok(guard) => guard.get(id).cloned(),
+        Err(_) => return (FastPathOutcome::RegistryLockFailed, None),
+    };
+    let Some(pty) = pty_handle else {
+        return (FastPathOutcome::MissingWriter, None);
+    };
+    let write_started = Instant::now();
+    let outcome = match pty.write_input(data) {
+        Ok(()) => FastPathOutcome::Success,
+        Err(_) => FastPathOutcome::WriteFailed,
+    };
+    (outcome, Some(write_started.elapsed().as_micros() as u64))
+}
+
+fn route_terminal_input_with(
+    state: &ServerState,
+    client_id: &str,
+    seq: u64,
+    id: String,
+    data: String,
+    fast_path: impl FnOnce(&str, &[u8]) -> (FastPathOutcome, Option<u64>),
+) {
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_recv",
         client_id = %client_id,
         seq,
         window_id = %id,
-        data_len,
-        text_len,
         "terminal_input received over WebSocket"
     );
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "fast_path_attempt",
+        client_id = %client_id,
+        seq,
+        window_id = %id,
+        "terminal_input PTY fast-path attempt"
+    );
 
-    let pty_handle = match state.pty_writers.read() {
-        Ok(guard) => guard.get(&id).cloned(),
-        Err(error) => {
+    let (outcome, write_us) = fast_path(&id, data.as_bytes());
+    match outcome {
+        FastPathOutcome::Success => {
+            let write_us = write_us.unwrap_or_default();
+            tracing::debug!(
+                target: "gwt_input_trace",
+                stage = "fast_path_write",
+                client_id = %client_id,
+                seq,
+                window_id = %id,
+                write_us,
+                "terminal_input written to PTY via WS fast-path"
+            );
+            return;
+        }
+        FastPathOutcome::MissingWriter => {
+            tracing::debug!(
+                target: "gwt_input_trace",
+                stage = "fast_path_miss",
+                client_id = %client_id,
+                seq,
+                window_id = %id,
+                "pty_writers registry miss; falling back to event loop"
+            );
+        }
+        FastPathOutcome::RegistryLockFailed => {
             tracing::warn!(
                 target: "gwt_input_trace",
                 stage = "fast_path_lock_poisoned",
                 client_id = %client_id,
                 seq,
                 window_id = %id,
-                error = %error,
                 "pty_writers read lock poisoned; falling back to event loop"
             );
-            None
         }
-    };
-
-    if let Some(pty) = pty_handle {
-        let write_started = Instant::now();
-        match pty.write_input(data.as_bytes()) {
-            Ok(()) => {
-                tracing::debug!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write",
-                    client_id = %client_id,
-                    seq,
-                    window_id = %id,
-                    data_len,
-                    write_us = write_started.elapsed().as_micros() as u64,
-                    "terminal_input written to PTY via WS fast-path"
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write_err",
-                    client_id = %client_id,
-                    seq,
-                    window_id = %id,
-                    data_len,
-                    error = %error,
-                    "fast-path PTY write failed; forwarding to event loop for error handling"
-                );
-            }
+        FastPathOutcome::WriteFailed => {
+            tracing::warn!(
+                target: "gwt_input_trace",
+                stage = "fast_path_write_err",
+                client_id = %client_id,
+                seq,
+                window_id = %id,
+                "fast-path PTY write failed; forwarding to event loop for error handling"
+            );
         }
-    } else {
-        tracing::debug!(
-            target: "gwt_input_trace",
-            stage = "fast_path_miss",
-            client_id = %client_id,
-            seq,
-            window_id = %id,
-            data_len,
-            "pty_writers registry miss; falling back to event loop"
-        );
     }
 
     state.proxy.send(UserEvent::Frontend {
@@ -1244,7 +1277,6 @@ fn handle_frontend_message(
         client_id = %client_id,
         seq,
         window_id = %id,
-        data_len,
         ok = true,
         "terminal_input forwarded to event loop proxy (fallback)"
     );
@@ -1297,13 +1329,16 @@ mod tests {
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
     use tokio::runtime::Runtime;
+    use tracing::{field::Visit, Event, Subscriber};
+    use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     use crate::{AppEventProxy, AttachmentUploadStore, OutboundEvent, UserEvent};
 
     use super::{
-        handle_frontend_message, prepare_outbound, queue_class_for_kind,
-        websocket_origin_authorized, ClientHub, ClientQueue, DrainStep, EmbeddedServer, QueueClass,
-        ServerState, DRAIN_LOW_WATER, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        handle_frontend_message, prepare_outbound, queue_class_for_kind, route_terminal_input_with,
+        terminal_input_fast_path, websocket_origin_authorized, ClientHub, ClientQueue, DrainStep,
+        EmbeddedServer, FastPathOutcome, QueueClass, ServerState, DRAIN_LOW_WATER,
+        LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
@@ -1320,6 +1355,97 @@ mod tests {
             },
             events,
         )
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedInputTrace {
+        target: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct CaptureInputTraceLayer {
+        events: Arc<Mutex<Vec<CapturedInputTrace>>>,
+    }
+
+    impl<S> Layer<S> for CaptureInputTraceLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = CaptureInputTraceVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("captured input trace events")
+                .push(CapturedInputTrace {
+                    target: event.metadata().target().to_string(),
+                    fields: visitor.fields,
+                });
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureInputTraceVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl CaptureInputTraceVisitor {
+        fn insert(&mut self, field: &tracing::field::Field, value: impl ToString) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl Visit for CaptureInputTraceVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let raw = format!("{value:?}");
+            self.insert(field, raw.trim_matches('"'));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.insert(field, value);
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.insert(field, value);
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.insert(field, value);
+        }
+    }
+
+    fn capture_input_traces(run: impl FnOnce()) -> Vec<CapturedInputTrace> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureInputTraceLayer {
+            events: Arc::clone(&events),
+        });
+        tracing::subscriber::with_default(subscriber, run);
+        let captured = events.lock().expect("captured input trace events").clone();
+        captured
+    }
+
+    fn input_trace_stages(events: &[CapturedInputTrace]) -> Vec<&str> {
+        events
+            .iter()
+            .filter(|event| event.target == "gwt_input_trace")
+            .map(|event| {
+                event
+                    .fields
+                    .get("stage")
+                    .map(String::as_str)
+                    .expect("input trace stage")
+            })
+            .collect()
+    }
+
+    fn assert_exact_trace_fields(event: &CapturedInputTrace, expected: &[&str]) {
+        let mut actual = event.fields.keys().map(String::as_str).collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "unexpected fields for {event:?}");
     }
 
     fn sample_runtime_hook_event() -> RuntimeHookEvent {
@@ -1345,7 +1471,6 @@ mod tests {
             &state,
             "client-1",
             &AtomicU64::new(0),
-            32,
             FrontendEvent::FrontendReady,
         );
 
@@ -1367,7 +1492,6 @@ mod tests {
             &state,
             "client-1",
             &AtomicU64::new(0),
-            48,
             FrontendEvent::TerminalInput {
                 id: "tab-1::shell-1".to_string(),
                 data: "ls\n".to_string(),
@@ -1384,6 +1508,295 @@ mod tests {
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
         ));
+    }
+
+    #[test]
+    fn terminal_input_missing_writer_trace_uses_exact_content_free_allowlists() {
+        let (state, _events) = sample_server_state();
+        let synthetic_input =
+            "typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL data_base64_SENTINEL";
+
+        let traces = capture_input_traces(|| {
+            handle_frontend_message(
+                &state,
+                "client-1",
+                &AtomicU64::new(0),
+                FrontendEvent::TerminalInput {
+                    id: "tab-1::shell-1".to_string(),
+                    data: synthetic_input.to_string(),
+                },
+            );
+        });
+        let traces = traces
+            .into_iter()
+            .filter(|event| event.target == "gwt_input_trace")
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            input_trace_stages(&traces),
+            [
+                "ws_recv",
+                "fast_path_attempt",
+                "fast_path_miss",
+                "ws_dispatch",
+            ]
+        );
+        assert_exact_trace_fields(
+            &traces[0],
+            &["client_id", "message", "seq", "stage", "window_id"],
+        );
+        assert_exact_trace_fields(
+            &traces[1],
+            &["client_id", "message", "seq", "stage", "window_id"],
+        );
+        assert_exact_trace_fields(
+            &traces[2],
+            &["client_id", "message", "seq", "stage", "window_id"],
+        );
+        assert_exact_trace_fields(
+            &traces[3],
+            &["client_id", "message", "ok", "seq", "stage", "window_id"],
+        );
+        assert_eq!(traces[3].fields.get("ok").map(String::as_str), Some("true"));
+
+        let serialized = serde_json::to_string(
+            &traces
+                .iter()
+                .map(|event| (&event.target, &event.fields))
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize captured input traces");
+        for forbidden in [
+            "typed_text_SENTINEL",
+            "credential_SENTINEL",
+            "env_secret_SENTINEL",
+            "data_base64_SENTINEL",
+            "data_len",
+            "text_len",
+            "chunk_len",
+            "\"error\":",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "captured input trace leaked {forbidden}: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_input_fast_path_success_stops_before_fallback() {
+        let (state, events) = sample_server_state();
+
+        let traces = capture_input_traces(|| {
+            route_terminal_input_with(
+                &state,
+                "client-success",
+                41,
+                "tab-1::shell-1".to_string(),
+                "typed_text_SENTINEL credential_SENTINEL".to_string(),
+                |_id, _data| (FastPathOutcome::Success, Some(29)),
+            );
+        });
+        let traces = traces
+            .into_iter()
+            .filter(|event| event.target == "gwt_input_trace")
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            input_trace_stages(&traces),
+            ["ws_recv", "fast_path_attempt", "fast_path_write"]
+        );
+        for trace in &traces {
+            assert_eq!(
+                trace.fields.get("client_id").map(String::as_str),
+                Some("client-success")
+            );
+            assert_eq!(trace.fields.get("seq").map(String::as_str), Some("41"));
+            assert_eq!(
+                trace.fields.get("window_id").map(String::as_str),
+                Some("tab-1::shell-1")
+            );
+        }
+        assert_exact_trace_fields(
+            &traces[2],
+            &[
+                "client_id",
+                "message",
+                "seq",
+                "stage",
+                "window_id",
+                "write_us",
+            ],
+        );
+        assert_eq!(traces[2].fields.get("seq").map(String::as_str), Some("41"));
+        assert_eq!(
+            traces[2].fields.get("write_us").map(String::as_str),
+            Some("29")
+        );
+        assert!(
+            events
+                .lock()
+                .expect("proxy events after fast-path success")
+                .is_empty(),
+            "successful fast-path must not dispatch fallback"
+        );
+    }
+
+    #[test]
+    fn terminal_input_fast_path_failures_dispatch_exactly_one_fallback() {
+        for (outcome, expected_stage) in [
+            (FastPathOutcome::MissingWriter, "fast_path_miss"),
+            (
+                FastPathOutcome::RegistryLockFailed,
+                "fast_path_lock_poisoned",
+            ),
+            (FastPathOutcome::WriteFailed, "fast_path_write_err"),
+        ] {
+            let (state, events) = sample_server_state();
+            let traces = capture_input_traces(|| {
+                route_terminal_input_with(
+                    &state,
+                    "client-failure",
+                    73,
+                    "tab-1::shell-1".to_string(),
+                    "typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL".to_string(),
+                    |_id, _data| {
+                        (
+                            outcome,
+                            (outcome == FastPathOutcome::WriteFailed).then_some(31),
+                        )
+                    },
+                );
+            });
+            let traces = traces
+                .into_iter()
+                .filter(|event| event.target == "gwt_input_trace")
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                input_trace_stages(&traces),
+                [
+                    "ws_recv",
+                    "fast_path_attempt",
+                    expected_stage,
+                    "ws_dispatch"
+                ],
+                "wrong route stages for {outcome:?}"
+            );
+            for trace in &traces {
+                assert_eq!(
+                    trace.fields.get("client_id").map(String::as_str),
+                    Some("client-failure"),
+                    "{outcome:?} changed client correlation at {trace:?}"
+                );
+                assert_eq!(
+                    trace.fields.get("seq").map(String::as_str),
+                    Some("73"),
+                    "{outcome:?} changed sequence correlation at {trace:?}"
+                );
+                assert_eq!(
+                    trace.fields.get("window_id").map(String::as_str),
+                    Some("tab-1::shell-1"),
+                    "{outcome:?} changed window correlation at {trace:?}"
+                );
+            }
+            assert_exact_trace_fields(
+                &traces[2],
+                &["client_id", "message", "seq", "stage", "window_id"],
+            );
+            assert_eq!(
+                traces
+                    .iter()
+                    .filter(|event| {
+                        event.fields.get("stage").map(String::as_str) == Some("ws_dispatch")
+                    })
+                    .count(),
+                1,
+                "{outcome:?} must emit exactly one fallback marker"
+            );
+            let recorded = events.lock().expect("proxy events after fast-path failure");
+            assert!(matches!(
+                recorded.as_slice(),
+                [UserEvent::Frontend {
+                    client_id,
+                    event: FrontendEvent::TerminalInput { id, data },
+                }] if client_id == "client-failure"
+                    && id == "tab-1::shell-1"
+                    && data.contains("typed_text_SENTINEL")
+            ));
+
+            let serialized = serde_json::to_string(
+                &traces
+                    .iter()
+                    .map(|event| (&event.target, &event.fields))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("serialize failure traces");
+            for forbidden in [
+                "typed_text_SENTINEL",
+                "credential_SENTINEL",
+                "env_secret_SENTINEL",
+                "data_len",
+                "text_len",
+                "chunk_len",
+                "\"error\":",
+            ] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "{outcome:?} trace leaked {forbidden}: {serialized}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_input_fast_path_classifies_missing_and_poisoned_registry() {
+        let (state, _events) = sample_server_state();
+        assert_eq!(
+            terminal_input_fast_path(&state.pty_writers, "missing", b"synthetic-input").0,
+            FastPathOutcome::MissingWriter
+        );
+
+        let registry = Arc::clone(&state.pty_writers);
+        let poison = std::thread::spawn(move || {
+            let _guard = registry.write().expect("registry write lock before poison");
+            panic!("intentional registry poison for fast-path classification test");
+        });
+        assert!(poison.join().is_err(), "poison helper must panic");
+        assert_eq!(
+            terminal_input_fast_path(&state.pty_writers, "missing", b"synthetic-input").0,
+            FastPathOutcome::RegistryLockFailed
+        );
+    }
+
+    #[test]
+    fn terminal_input_sequence_is_monotonic_per_websocket_counter() {
+        let (state, _events) = sample_server_state();
+        let input_seq = AtomicU64::new(0);
+
+        let traces = capture_input_traces(|| {
+            for data in ["first", "second"] {
+                handle_frontend_message(
+                    &state,
+                    "client-sequence",
+                    &input_seq,
+                    FrontendEvent::TerminalInput {
+                        id: "tab-1::shell-1".to_string(),
+                        data: data.to_string(),
+                    },
+                );
+            }
+        });
+        let received_sequences = traces
+            .iter()
+            .filter(|event| {
+                event.target == "gwt_input_trace"
+                    && event.fields.get("stage").map(String::as_str) == Some("ws_recv")
+            })
+            .map(|event| event.fields.get("seq").cloned().expect("ws_recv seq"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(received_sequences, ["1", "2"]);
     }
 
     fn terminal_output(pane: &str, data: &str) -> BackendEvent {

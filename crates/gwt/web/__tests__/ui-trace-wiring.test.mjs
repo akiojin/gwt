@@ -182,6 +182,41 @@ test("UI trace wiring exposes profiler active state", () => {
   assert.equal(wiring.isTracing(), false);
 });
 
+test("UI trace wiring advances an opaque epoch across every trace start", () => {
+  const profiler = fakeProfiler();
+  const wiring = createUiTraceWiring({
+    profiler,
+    send: () => {},
+    alert: () => {},
+    log: () => {},
+  });
+
+  assert.equal(wiring.currentEpoch(), null, "inactive traces have no epoch");
+
+  wiring.start();
+  const firstEpoch = wiring.currentEpoch();
+  assert.notEqual(firstEpoch, null);
+  assert.equal(
+    wiring.currentEpoch(),
+    firstEpoch,
+    "one active trace keeps one process-local identity",
+  );
+
+  wiring.stop();
+  assert.equal(wiring.currentEpoch(), null, "stopped traces expose no stale epoch");
+
+  wiring.start();
+  const secondEpoch = wiring.currentEpoch();
+  assert.notEqual(secondEpoch, firstEpoch, "stop/start must advance the epoch");
+
+  wiring.start();
+  assert.notEqual(
+    wiring.currentEpoch(),
+    secondEpoch,
+    "restarting an already active trace must also advance the epoch",
+  );
+});
+
 test("app.js imports and instantiates the UI trace wiring module", () => {
   assert.match(
     appSource,
@@ -196,7 +231,16 @@ test("WebSocket dispatcher forwards timing trace events through the wiring facad
 });
 
 test("WebSocket dispatcher gates trace work through active UI trace state", () => {
-  assert.match(appSource, /shouldTrace:\s*uiTraceWiring\.isTracing/);
+  assert.match(
+    appSource,
+    /shouldTrace:\s*\(\)\s*=>\s*ownGeneration\s*===\s*socketReceiveDispatcherGeneration\s*&&\s*uiTraceWiring\.isTracing\(\)/,
+    "stale dispatchers must short-circuit before trace state, allocation, and markers",
+  );
+  assert.match(
+    appSource,
+    /readTraceEpoch:\s*uiTraceWiring\.currentEpoch/,
+    "dispatcher metadata must capture the current trace epoch",
+  );
 });
 
 test("pointer diagnostics use centralized event constants", () => {

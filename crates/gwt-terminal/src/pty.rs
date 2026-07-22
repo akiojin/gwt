@@ -148,7 +148,6 @@ impl PtyHandle {
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
-        let data_len = data.len();
         let lock_started = Instant::now();
         let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
@@ -169,7 +168,6 @@ impl PtyHandle {
         tracing::debug!(
             target: "gwt_input_trace",
             stage = "pty_writer",
-            data_len,
             lock_wait_us,
             write_us,
             flush_us,
@@ -479,7 +477,10 @@ impl Drop for PtyHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use super::*;
     use crate::test_util::{
@@ -487,6 +488,93 @@ mod tests {
         read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
         TestCommand,
     };
+    use tracing::{
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
+        Event, Metadata, Subscriber,
+    };
+
+    #[derive(Debug, Clone)]
+    struct CapturedInputTrace {
+        target: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct CaptureInputTraceSubscriber {
+        events: Arc<Mutex<Vec<CapturedInputTrace>>>,
+    }
+
+    impl Subscriber for CaptureInputTraceSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = CaptureInputTraceVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("captured input trace events")
+                .push(CapturedInputTrace {
+                    target: event.metadata().target().to_string(),
+                    fields: visitor.fields,
+                });
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[derive(Default)]
+    struct CaptureInputTraceVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl CaptureInputTraceVisitor {
+        fn insert(&mut self, field: &Field, value: impl ToString) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl Visit for CaptureInputTraceVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let raw = format!("{value:?}");
+            self.insert(field, raw.trim_matches('"'));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.insert(field, value);
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.insert(field, value);
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.insert(field, value);
+        }
+    }
+
+    fn capture_input_traces(run: impl FnOnce()) -> Vec<CapturedInputTrace> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CaptureInputTraceSubscriber {
+            events: Arc::clone(&events),
+        };
+        tracing::subscriber::with_default(subscriber, run);
+        let captured = events.lock().expect("captured input trace events").clone();
+        captured
+    }
 
     fn command_config(command: TestCommand) -> SpawnConfig {
         SpawnConfig {
@@ -623,6 +711,59 @@ mod tests {
             text.contains("test-input"),
             "Expected 'test-input' in: {text}"
         );
+    }
+
+    #[test]
+    fn pty_writer_trace_uses_exact_content_free_allowlist() {
+        let _pty_guard = lock_pty_test();
+        let config = command_config(stdin_echo_command());
+        let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
+        let synthetic_input =
+            b"typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL data_base64_SENTINEL\n";
+
+        let traces = capture_input_traces(|| {
+            handle
+                .write_input(synthetic_input)
+                .expect("synthetic PTY input write");
+        });
+        let event = traces
+            .iter()
+            .find(|event| {
+                event.target == "gwt_input_trace"
+                    && event.fields.get("stage").map(String::as_str) == Some("pty_writer")
+            })
+            .expect("pty_writer input trace");
+        let mut actual = event.fields.keys().map(String::as_str).collect::<Vec<_>>();
+        actual.sort_unstable();
+        assert_eq!(
+            actual,
+            [
+                "flush_us",
+                "lock_wait_us",
+                "message",
+                "ok",
+                "stage",
+                "write_us",
+            ]
+        );
+        let serialized = serde_json::to_string(&(&event.target, &event.fields))
+            .expect("serialize captured PTY writer trace as JSON");
+        for forbidden in [
+            "typed_text_SENTINEL",
+            "credential_SENTINEL",
+            "env_secret_SENTINEL",
+            "data_base64_SENTINEL",
+            "data_len",
+            "text_len",
+            "chunk_len",
+            "\"error\"",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "pty_writer trace leaked {forbidden}: {serialized}"
+            );
+        }
     }
 
     #[test]

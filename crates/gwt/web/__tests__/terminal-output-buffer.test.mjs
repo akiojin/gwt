@@ -1167,3 +1167,406 @@ test("defaults expose bounded per-frame budgets", () => {
   assert.equal(DEFAULT_MAX_WINDOWS_PER_FLUSH, 8);
   assert.equal(DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH, DEFAULT_MAX_CHARS_PER_FLUSH);
 });
+
+test("terminal output trace follows enqueue through the next paint", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  let completeWrite;
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (_windowId, _text, done) => {
+      completeWrite = done;
+    },
+  });
+
+  batcher.enqueue("agent-trace", "encoded-output", {
+    sequence: 41,
+    window_id: "agent-trace",
+  });
+  assert.deepEqual(
+    traces.map(({ kind }) => kind),
+    ["terminal_output_enqueue"],
+  );
+
+  flushScheduler.runOnce();
+  assert.deepEqual(
+    traces.map(({ kind }) => kind),
+    ["terminal_output_enqueue", "terminal_output_flush_start"],
+  );
+  assert.equal(paintScheduler.pendingCount(), 0);
+
+  completeWrite();
+  assert.deepEqual(
+    traces.map(({ kind }) => kind),
+    [
+      "terminal_output_enqueue",
+      "terminal_output_flush_start",
+      "terminal_output_write_complete",
+    ],
+  );
+  assert.equal(paintScheduler.pendingCount(), 1);
+
+  paintScheduler.runOnce();
+  assert.deepEqual(
+    traces.map(({ kind }) => kind),
+    [
+      "terminal_output_enqueue",
+      "terminal_output_flush_start",
+      "terminal_output_write_complete",
+      "terminal_output_next_paint",
+    ],
+  );
+  assert.ok(
+    traces.every(({ fields }) => (
+      fields.sequence === 41 && fields.window_id === "agent-trace"
+    )),
+    "every stage must preserve the same local sequence and window",
+  );
+});
+
+test("one merged xterm write retains every terminal output sequence", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-merged", "a", {
+    sequence: 7,
+    window_id: "agent-merged",
+  });
+  batcher.enqueue("agent-merged", "b", {
+    sequence: 8,
+    window_id: "agent-merged",
+  });
+  flushScheduler.runOnce();
+  paintScheduler.runOnce();
+
+  assert.deepEqual(writes, [{ windowId: "agent-merged", text: "ab" }]);
+  for (const kind of [
+    "terminal_output_enqueue",
+    "terminal_output_flush_start",
+    "terminal_output_write_complete",
+    "terminal_output_next_paint",
+  ]) {
+    assert.deepEqual(
+      traces
+        .filter((trace) => trace.kind === kind)
+        .map((trace) => trace.fields.sequence),
+      [7, 8],
+      `${kind} must retain both merged output sequences`,
+    );
+  }
+});
+
+test("hidden output from an earlier trace cannot emit stages after reveal", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  const writes = [];
+  const firstEpoch = Symbol("trace-a");
+  const secondEpoch = Symbol("trace-b");
+  let currentEpoch = firstEpoch;
+  let visible = false;
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    shouldTrace: () => true,
+    readTraceEpoch: () => currentEpoch,
+    canWrite: () => visible,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-hidden-epoch", "old-output", {
+    sequence: 1,
+    window_id: "agent-hidden-epoch",
+    epoch: firstEpoch,
+  });
+  assert.deepEqual(
+    traces.map(({ kind }) => kind),
+    ["terminal_output_enqueue"],
+  );
+
+  flushScheduler.runOnce();
+  traces.length = 0;
+  currentEpoch = secondEpoch;
+  visible = true;
+  batcher.schedulePending("agent-hidden-epoch");
+  flushScheduler.runOnce();
+  paintScheduler.runAll();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-hidden-epoch", text: "old-output" },
+  ]);
+  assert.deepEqual(
+    traces,
+    [],
+    "trace A metadata must not produce flush/write/paint markers in trace B",
+  );
+});
+
+test("pending and deferred stale metadata stays outside the current trace at enqueue", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  const writes = [];
+  const staleEpoch = Symbol("trace-a");
+  const currentEpoch = Symbol("trace-b");
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    shouldTrace: () => true,
+    readTraceEpoch: () => currentEpoch,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  for (const [sequence, text] of [
+    [11, "pending-output"],
+    [12, "deferred-output"],
+  ]) {
+    batcher.enqueue("agent-replay", text, {
+      sequence,
+      window_id: "agent-replay",
+      epoch: staleEpoch,
+    });
+  }
+  flushScheduler.runOnce();
+  paintScheduler.runAll();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-replay", text: "pending-outputdeferred-output" },
+  ]);
+  assert.deepEqual(traces, []);
+});
+
+test("mixed trace epochs preserve terminal stages only for current metadata", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  const writes = [];
+  const staleEpoch = Symbol("trace-a");
+  const currentEpoch = Symbol("trace-b");
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    shouldTrace: () => true,
+    readTraceEpoch: () => currentEpoch,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-mixed", "old", {
+    sequence: 21,
+    window_id: "agent-mixed",
+    epoch: staleEpoch,
+  });
+  batcher.enqueue("agent-mixed", "new", {
+    sequence: 22,
+    window_id: "agent-mixed",
+    epoch: currentEpoch,
+  });
+  flushScheduler.runOnce();
+  paintScheduler.runOnce();
+
+  assert.deepEqual(writes, [{ windowId: "agent-mixed", text: "oldnew" }]);
+  for (const kind of [
+    "terminal_output_enqueue",
+    "terminal_output_flush_start",
+    "terminal_output_write_complete",
+    "terminal_output_next_paint",
+  ]) {
+    assert.deepEqual(
+      traces
+        .filter((trace) => trace.kind === kind)
+        .map((trace) => trace.fields),
+      [{ sequence: 22, window_id: "agent-mixed" }],
+      `${kind} must retain only current-epoch metadata`,
+    );
+  }
+});
+
+test("trace epoch is rechecked at write completion and next paint", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  const firstEpoch = Symbol("trace-a");
+  const secondEpoch = Symbol("trace-b");
+  const thirdEpoch = Symbol("trace-c");
+  let currentEpoch = firstEpoch;
+  const completions = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    shouldTrace: () => true,
+    readTraceEpoch: () => currentEpoch,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (_windowId, _text, done) => completions.push(done),
+  });
+
+  batcher.enqueue("agent-stage", "first", {
+    sequence: 31,
+    window_id: "agent-stage",
+    epoch: firstEpoch,
+  });
+  flushScheduler.runOnce();
+  currentEpoch = secondEpoch;
+  completions.shift()();
+  assert.equal(paintScheduler.pendingCount(), 0);
+
+  batcher.enqueue("agent-stage", "second", {
+    sequence: 32,
+    window_id: "agent-stage",
+    epoch: secondEpoch,
+  });
+  flushScheduler.runOnce();
+  completions.shift()();
+  assert.equal(paintScheduler.pendingCount(), 1);
+  currentEpoch = thirdEpoch;
+  paintScheduler.runOnce();
+
+  assert.deepEqual(
+    traces
+      .filter(({ kind }) => kind === "terminal_output_write_complete")
+      .map(({ fields }) => fields.sequence),
+    [32],
+  );
+  assert.deepEqual(
+    traces.filter(({ kind }) => kind === "terminal_output_next_paint"),
+    [],
+  );
+});
+
+test("terminal output markers use exact fields and never serialize sentinels", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const traces = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (_windowId, _text, done) => done(),
+  });
+  const metadata = {
+    sequence: 99,
+    window_id: "agent-private",
+    typed_text: "sentinel-typed-text",
+    data_base64: "sentinel-base64",
+    output_bytes: "sentinel-output-bytes",
+    credential: "sentinel-credential",
+    env_secret: "sentinel-env-secret",
+  };
+
+  batcher.enqueue("agent-private", "sentinel-output-body", metadata);
+  flushScheduler.runOnce();
+  paintScheduler.runOnce();
+
+  assert.equal(traces.length, 4);
+  for (const trace of traces) {
+    assert.deepEqual(Object.keys(trace.fields).sort(), ["sequence", "window_id"]);
+  }
+  assert.equal(
+    new Set(traces.map(({ fields }) => fields)).size,
+    traces.length,
+    "each onTrace stage must receive a fresh exact-field projection",
+  );
+  const serialized = JSON.stringify(traces);
+  for (const sentinel of [
+    "sentinel-typed-text",
+    "sentinel-base64",
+    "sentinel-output-bytes",
+    "sentinel-credential",
+    "sentinel-env-secret",
+    "sentinel-output-body",
+  ]) {
+    assert.equal(serialized.includes(sentinel), false, `${sentinel} must not leak`);
+  }
+});
+
+test("disabled terminal tracing avoids metadata reads callbacks and paint scheduling", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const writes = [];
+  const traces = [];
+  const metadata = {};
+  for (const field of ["sequence", "window_id", "epoch", "credential", "env_secret"]) {
+    Object.defineProperty(metadata, field, {
+      get() {
+        throw new Error(`${field} must not be read while tracing is disabled`);
+      },
+    });
+  }
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    shouldTrace: () => false,
+    readTraceEpoch: () => {
+      throw new Error("inactive tracing must not read the trace epoch");
+    },
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  assert.doesNotThrow(() => {
+    batcher.enqueue("agent-inactive", "plain-output", metadata);
+    flushScheduler.runOnce();
+  });
+  assert.deepEqual(writes, [
+    { windowId: "agent-inactive", text: "plain-output" },
+  ]);
+  assert.deepEqual(traces, []);
+  assert.equal(paintScheduler.pendingCount(), 0);
+});
+
+test("terminal trace callback failures never interrupt xterm output", () => {
+  const flushScheduler = manualScheduler();
+  const paintScheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: flushScheduler.schedule,
+    schedulePaint: paintScheduler.schedule,
+    onTrace: () => {
+      throw new Error("diagnostics failed");
+    },
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  assert.doesNotThrow(() => {
+    batcher.enqueue("agent-safe", "still-rendered", {
+      sequence: 123,
+      window_id: "agent-safe",
+    });
+    flushScheduler.runOnce();
+    paintScheduler.runOnce();
+  });
+  assert.deepEqual(writes, [
+    { windowId: "agent-safe", text: "still-rendered" },
+  ]);
+});

@@ -536,11 +536,18 @@ test("dispatcher emits sanitized trace metadata for parse and receive timing", (
 
   assert.deepEqual(
     traces.map((trace) => trace.kind),
-    ["ws_message", "ws_flush_start", "ws_receive", "ws_flush_end"],
+    [
+      "ws_message",
+      "ws_flush_start",
+      "terminal_output_ws_receive",
+      "ws_receive",
+      "ws_flush_end",
+    ],
   );
   assert.equal(traces[0].event_kind, "terminal_output");
-  assert.equal(traces[2].event_kind, "terminal_output");
-  assert.equal(traces[2].duration_ms, 4);
+  const receiveTrace = traces.find((trace) => trace.kind === "ws_receive");
+  assert.equal(receiveTrace.event_kind, "terminal_output");
+  assert.equal(receiveTrace.duration_ms, 4);
   assert.equal(JSON.stringify(traces).includes("must-not-leak"), false);
 });
 
@@ -584,7 +591,379 @@ test("dispatcher skips trace callbacks while shouldTrace is false", () => {
 
   assert.deepEqual(
     traces.map((trace) => trace.kind),
-    ["ws_message", "ws_flush_start", "ws_receive", "ws_flush_end"],
+    [
+      "ws_message",
+      "ws_flush_start",
+      "terminal_output_ws_receive",
+      "ws_receive",
+      "ws_flush_end",
+    ],
     "trace events must resume once shouldTrace returns true",
   );
+});
+
+test("terminal output receives a browser-local sequence through internal metadata", () => {
+  const deliveries = [];
+  const traces = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (...args) => deliveries.push(args),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+  });
+  const parsed = {
+    kind: "terminal_output",
+    id: "agent-a",
+    data_base64: "c2VjcmV0LWE=",
+  };
+  const raw = {
+    kind: "terminal_output",
+    id: "agent-b",
+    data_base64: "c2VjcmV0LWI=",
+  };
+
+  dispatcher.enqueue(parsed);
+  dispatcher.handle({ data: JSON.stringify(raw) });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    deliveries.map(([event]) => event),
+    [parsed, raw],
+    "terminal output wire payloads must reach receive unchanged",
+  );
+  assert.equal(Object.hasOwn(parsed, "sequence"), false);
+  assert.equal(Object.hasOwn(raw, "sequence"), false);
+  assert.deepEqual(
+    deliveries.map(([, metadata]) => metadata),
+    [
+      { sequence: 1, window_id: "agent-a" },
+      { sequence: 2, window_id: "agent-b" },
+    ],
+  );
+  assert.ok(
+    deliveries.every(([, metadata]) => Object.isFrozen(metadata)),
+    "internal trace metadata must be immutable",
+  );
+  assert.deepEqual(
+    traces
+      .filter(({ kind }) => kind === "terminal_output_ws_receive")
+      .map(({ fields }) => fields),
+    [
+      { sequence: 1, window_id: "agent-a" },
+      { sequence: 2, window_id: "agent-b" },
+    ],
+  );
+});
+
+test("terminal output keeps the opaque trace epoch only in internal metadata", () => {
+  const deliveries = [];
+  const traces = [];
+  const scheduler = manualScheduler();
+  const epoch = Symbol("trace-a");
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (...args) => deliveries.push(args),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    readTraceEpoch: () => epoch,
+  });
+
+  dispatcher.enqueue({
+    kind: "terminal_output",
+    id: "agent-epoch",
+    data_base64: "c2VjcmV0",
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(deliveries[0][1], {
+    sequence: 1,
+    window_id: "agent-epoch",
+    epoch,
+  });
+  const marker = traces.find(
+    ({ kind }) => kind === "terminal_output_ws_receive",
+  );
+  assert.deepEqual(marker.fields, {
+    sequence: 1,
+    window_id: "agent-epoch",
+  });
+  assert.notEqual(
+    marker.fields,
+    deliveries[0][1],
+    "onTrace must receive a fresh exact-field projection, not internal metadata",
+  );
+  assert.equal(
+    Object.hasOwn(marker.fields, "epoch"),
+    false,
+    "opaque epoch must never cross the onTrace privacy boundary",
+  );
+});
+
+test("terminal output receive markers use an exact privacy allowlist", () => {
+  const traces = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: () => {},
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+  });
+
+  dispatcher.enqueue({
+    kind: "terminal_output",
+    id: "agent-private",
+    data_base64: "sentinel-base64",
+    typed_text: "sentinel-typed-text",
+    output_bytes: "sentinel-output-bytes",
+    credential: "sentinel-credential",
+    env_secret: "sentinel-env-secret",
+  });
+  scheduler.runOnce();
+
+  const marker = traces.find(
+    ({ kind }) => kind === "terminal_output_ws_receive",
+  );
+  assert.ok(marker, "terminal output must emit the receive stage marker");
+  assert.deepEqual(Object.keys(marker.fields).sort(), ["sequence", "window_id"]);
+  const serialized = JSON.stringify(marker);
+  for (const sentinel of [
+    "sentinel-base64",
+    "sentinel-typed-text",
+    "sentinel-output-bytes",
+    "sentinel-credential",
+    "sentinel-env-secret",
+  ]) {
+    assert.equal(serialized.includes(sentinel), false, `${sentinel} must not leak`);
+  }
+});
+
+test("disabled tracing avoids terminal metadata and sequence allocation", () => {
+  const deliveries = [];
+  const traces = [];
+  const scheduler = manualScheduler();
+  let tracing = false;
+  let allocatorCalls = 0;
+  let epochReads = 0;
+  const epoch = Symbol("active-trace");
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (...args) => deliveries.push(args),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: (kind, fields) => traces.push({ kind, fields }),
+    shouldTrace: () => tracing,
+    readTraceEpoch: () => {
+      epochReads += 1;
+      return epoch;
+    },
+    nextTerminalOutputSequence: () => {
+      allocatorCalls += 1;
+      return allocatorCalls;
+    },
+  });
+
+  dispatcher.enqueue({
+    kind: "terminal_output",
+    id: "inactive",
+    data_base64: "aW5hY3RpdmU=",
+  });
+  scheduler.runOnce();
+
+  assert.equal(deliveries[0].length, 1, "inactive receive keeps the legacy one-argument API");
+  assert.deepEqual(traces, []);
+  assert.equal(allocatorCalls, 0, "inactive tracing must not call the sequence allocator");
+  assert.equal(epochReads, 0, "inactive tracing must not read the trace epoch");
+
+  tracing = true;
+  dispatcher.enqueue({
+    kind: "terminal_output",
+    id: "active",
+    data_base64: "YWN0aXZl",
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(deliveries[1][1], {
+    sequence: 1,
+    window_id: "active",
+    epoch,
+  });
+  assert.equal(allocatorCalls, 1);
+  assert.equal(epochReads, 1);
+});
+
+test("recreated dispatchers preserve output sequence with a shared allocator", () => {
+  const deliveries = [];
+  let browserSequence = 0;
+  const nextTerminalOutputSequence = () => {
+    browserSequence += 1;
+    return browserSequence;
+  };
+
+  for (let connection = 0; connection < 2; connection += 1) {
+    const scheduler = manualScheduler();
+    const dispatcher = createSocketReceiveDispatcher({
+      receive: (_event, metadata) => deliveries.push(metadata),
+      schedule: scheduler.schedule,
+      now: () => 0,
+      onTrace: () => {},
+      nextTerminalOutputSequence,
+    });
+    dispatcher.enqueue({
+      kind: "terminal_output",
+      id: "same-window",
+      data_base64: `connection-${connection}`,
+    });
+    scheduler.runOnce();
+  }
+
+  assert.deepEqual(deliveries, [
+    { sequence: 1, window_id: "same-window" },
+    { sequence: 2, window_id: "same-window" },
+  ]);
+});
+
+test("generation advance drops stale dispatcher work before tracing or allocation", () => {
+  const oldScheduler = manualScheduler();
+  const newScheduler = manualScheduler();
+  const deliveries = [];
+  const traces = [];
+  const epoch = Symbol("current-trace");
+  let generation = 1;
+  let sequence = 0;
+  let allocatorCalls = 0;
+  let epochReads = 0;
+
+  function dispatcherFor(ownGeneration, scheduler) {
+    return createSocketReceiveDispatcher({
+      receive: (event, metadata) => {
+        if (ownGeneration !== generation) {
+          return;
+        }
+        deliveries.push({ event, metadata });
+      },
+      schedule: scheduler.schedule,
+      now: () => 0,
+      onTrace: (kind, fields) => traces.push({ kind, fields }),
+      shouldTrace: () => ownGeneration === generation,
+      readTraceEpoch: () => {
+        epochReads += 1;
+        return epoch;
+      },
+      nextTerminalOutputSequence: () => {
+        allocatorCalls += 1;
+        sequence += 1;
+        return sequence;
+      },
+    });
+  }
+
+  const oldDispatcher = dispatcherFor(generation, oldScheduler);
+  oldDispatcher.enqueue({
+    kind: "terminal_output",
+    id: "stale-window",
+    data_base64: "b2xk",
+  });
+
+  generation += 1;
+  const newDispatcher = dispatcherFor(generation, newScheduler);
+  oldScheduler.runOnce();
+
+  assert.deepEqual(deliveries, []);
+  assert.deepEqual(traces, []);
+  assert.equal(allocatorCalls, 0, "stale work must not consume a sequence");
+  assert.equal(epochReads, 0, "stale work must not inspect the active epoch");
+
+  newDispatcher.enqueue({
+    kind: "terminal_output",
+    id: "current-window",
+    data_base64: "bmV3",
+  });
+  newScheduler.runOnce();
+
+  assert.equal(allocatorCalls, 1);
+  assert.equal(epochReads, 1);
+  assert.equal(deliveries.length, 1);
+  assert.deepEqual(deliveries[0].metadata, {
+    sequence: 1,
+    window_id: "current-window",
+    epoch,
+  });
+  assert.deepEqual(
+    traces
+      .filter(({ kind }) => kind === "terminal_output_ws_receive")
+      .map(({ fields }) => fields),
+    [{ sequence: 1, window_id: "current-window" }],
+  );
+});
+
+for (const [failure, nextTerminalOutputSequence] of [
+  [
+    "throws",
+    () => {
+      throw new Error("allocator unavailable");
+    },
+  ],
+  ["returns undefined", () => undefined],
+  ["returns null", () => null],
+  ["returns NaN", () => Number.NaN],
+  ["returns Infinity", () => Number.POSITIVE_INFINITY],
+  ["returns an empty string", () => ""],
+]) {
+  test(`sequence allocator that ${failure} leaves terminal delivery operational`, () => {
+    const deliveries = [];
+    const traces = [];
+    const scheduler = manualScheduler();
+    const dispatcher = createSocketReceiveDispatcher({
+      receive: (...args) => deliveries.push(args),
+      schedule: scheduler.schedule,
+      now: () => 0,
+      onTrace: (kind, fields) => traces.push({ kind, fields }),
+      nextTerminalOutputSequence,
+    });
+
+    dispatcher.enqueue({
+      kind: "terminal_output",
+      id: "agent-fail-open",
+      data_base64: "b2s=",
+    });
+
+    assert.doesNotThrow(() => scheduler.runOnce());
+    assert.equal(deliveries.length, 1);
+    assert.equal(
+      deliveries[0].length,
+      1,
+      "failed diagnostics keep the legacy receive call",
+    );
+    assert.equal(
+      traces.some(({ kind }) => kind === "terminal_output_ws_receive"),
+      false,
+      "a failed allocator must not emit an ambiguous marker",
+    );
+  });
+}
+
+test("terminal receive trace failures never interrupt delivery", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event, metadata) => received.push({ event, metadata }),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: () => {
+      throw new Error("diagnostics failed");
+    },
+  });
+
+  dispatcher.enqueue({
+    kind: "terminal_output",
+    id: "agent-safe",
+    data_base64: "b2s=",
+  });
+
+  assert.doesNotThrow(() => scheduler.runOnce());
+  assert.equal(received.length, 1);
+  assert.deepEqual(received[0].metadata, {
+    sequence: 1,
+    window_id: "agent-safe",
+  });
 });

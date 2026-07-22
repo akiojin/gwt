@@ -28,6 +28,7 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 gwt-core.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

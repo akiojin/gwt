@@ -180,8 +180,8 @@ test("app.js wires application wheel fallback only through agent window presets"
   );
   assert.match(
     appSource,
-    /sendTerminalInput:\s*\(data\)\s*=>\s*\{[\s\S]*?send\(\{\s*kind:\s*"terminal_input",\s*id:\s*windowId,\s*data\s*\}\);[\s\S]*?\}/,
-    "agent fullscreen wheel fallback must send PageUp/PageDown through terminal_input",
+    /sendTerminalInput:\s*\(data\)\s*=>\s*\{[\s\S]*?sendTerminalInput\(\s*windowId\s*,\s*data\s*\);[\s\S]*?\}/,
+    "agent fullscreen wheel fallback must use the shared TerminalInput send path",
   );
 });
 

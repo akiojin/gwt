@@ -63,6 +63,8 @@ export function createSocketReceiveDispatcher({
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
   shouldTrace,
+  readTraceEpoch,
+  nextTerminalOutputSequence,
 } = {}) {
   if (typeof receive !== "function") {
     throw new TypeError(
@@ -84,9 +86,16 @@ export function createSocketReceiveDispatcher({
   });
   const traceImpl = typeof onTrace === "function" ? onTrace : null;
   const shouldTraceImpl = typeof shouldTrace === "function" ? shouldTrace : null;
+  const readTraceEpochImpl =
+    typeof readTraceEpoch === "function" ? readTraceEpoch : null;
+  const sequenceAllocatorImpl =
+    typeof nextTerminalOutputSequence === "function"
+      ? nextTerminalOutputSequence
+      : null;
 
   const queue = [];
   let scheduled = false;
+  let terminalOutputTraceSequence = 0;
 
   function traceActive() {
     if (!traceImpl) {
@@ -114,6 +123,62 @@ export function createSocketReceiveDispatcher({
     }
   }
 
+  function terminalOutputTraceMetadata(event) {
+    if (!event || event.kind !== "terminal_output" || !traceActive()) {
+      return null;
+    }
+    let epoch;
+    if (readTraceEpochImpl) {
+      try {
+        epoch = readTraceEpochImpl();
+      } catch (_) {
+        return null;
+      }
+      if (epoch === null || epoch === undefined) {
+        return null;
+      }
+    }
+    let sequence;
+    try {
+      if (sequenceAllocatorImpl) {
+        sequence = sequenceAllocatorImpl();
+      } else {
+        terminalOutputTraceSequence += 1;
+        sequence = terminalOutputTraceSequence;
+      }
+    } catch (_) {
+      return null;
+    }
+    if (
+      (typeof sequence !== "number" || !Number.isFinite(sequence))
+      && (typeof sequence !== "string" || sequence.length === 0)
+    ) {
+      return null;
+    }
+    const metadata = {
+      sequence,
+      window_id: event.id ?? "",
+    };
+    if (readTraceEpochImpl) {
+      metadata.epoch = epoch;
+    }
+    return Object.freeze(metadata);
+  }
+
+  function emitTerminalOutputTrace(kind, metadata) {
+    if (!traceImpl || !metadata) {
+      return;
+    }
+    try {
+      traceImpl(kind, {
+        sequence: metadata.sequence,
+        window_id: metadata.window_id,
+      });
+    } catch (_) {
+      // Diagnostics must never affect WebSocket delivery.
+    }
+  }
+
   function flush() {
     scheduled = false;
     if (queue.length === 0) {
@@ -135,7 +200,13 @@ export function createSocketReceiveDispatcher({
       const receiveStart = nowImpl();
       try {
         const event = queuedEntryPayload(entry);
-        receive(event);
+        const traceMetadata = terminalOutputTraceMetadata(event);
+        if (traceMetadata) {
+          emitTerminalOutputTrace("terminal_output_ws_receive", traceMetadata);
+          receive(event, traceMetadata);
+        } else {
+          receive(event);
+        }
         trace("ws_receive", () => ({
           event_kind: event && event.kind,
           duration_ms: nowImpl() - receiveStart,

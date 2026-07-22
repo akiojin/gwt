@@ -217,6 +217,11 @@
       let terminalFitScheduler = null;
       let terminalViewportRefreshScheduler = null;
       const terminalOutputBatcher = createTerminalOutputBatcher({
+        onTrace: (kind, fields) => {
+          traceUi(kind, fields);
+        },
+        shouldTrace: () => uiTraceWiring.isTracing(),
+        readTraceEpoch: () => uiTraceWiring.currentEpoch(),
         mergeChunks: (chunks, windowId) => {
           const decoder = decoderMap.get(windowId);
           if (!decoder) {
@@ -374,10 +379,13 @@
         briefing.setAttribute("aria-hidden", "true");
       }
 
-      // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
-      // Incremented on every `terminal.onData` firing so layer-by-layer counts
-      // can be diffed against backend `gwt_input_trace` logs.
+      // Browser-local opaque sequence for terminal input that actually reaches
+      // the WebSocket send path. Dropped pre-ready onData firings do not consume
+      // a sequence because there is no backend write to correlate.
       let inputTraceSeq = 0;
+      // The output allocator outlives per-connection dispatchers so reconnects
+      // cannot reuse a sequence inside one browser trace capture.
+      let outputTraceSeq = 0;
 
       let socket = null;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
@@ -847,6 +855,27 @@
       const tracePointer = uiTraceWiring.tracePointer;
       const traceMeasure = uiTraceWiring.traceMeasure;
 
+      function nextTerminalOutputTraceSequence() {
+        outputTraceSeq += 1;
+        return outputTraceSeq;
+      }
+
+      function sendTerminalInput(windowId, data) {
+        inputTraceSeq += 1;
+        terminalOutputBatcher.prioritize(windowId);
+        if (uiTraceWiring.isTracing()) {
+          try {
+            traceUi(UI_TRACE_EVENT.terminalInputEnqueue, {
+              sequence: inputTraceSeq,
+              window_id: windowId,
+            });
+          } catch (_) {
+            // Diagnostics must never affect terminal input delivery.
+          }
+        }
+        send({ kind: "terminal_input", id: windowId, data });
+      }
+
       // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
       // the Command Palette. The dry-run entry previews the plan; the apply
       // entry confirms before mutating projection files on disk.
@@ -1096,16 +1125,20 @@
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
         socketReceiveDispatcher = createSocketReceiveDispatcher({
-          receive: (event) => {
+          receive: (event, traceMetadata) => {
             if (ownGeneration !== socketReceiveDispatcherGeneration) {
               return;
             }
-            receive(event);
+            receive(event, traceMetadata);
           },
           onTrace: (kind, fields) => {
             traceUi(kind, fields);
           },
-          shouldTrace: uiTraceWiring.isTracing,
+          shouldTrace: () =>
+            ownGeneration === socketReceiveDispatcherGeneration
+            && uiTraceWiring.isTracing(),
+          readTraceEpoch: uiTraceWiring.currentEpoch,
+          nextTerminalOutputSequence: nextTerminalOutputTraceSequence,
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
@@ -3560,8 +3593,7 @@
               return;
             }
             terminal.focus();
-            terminalOutputBatcher.prioritize(windowId);
-            send({ kind: "terminal_input", id: windowId, data });
+            sendTerminalInput(windowId, data);
           },
         });
         const containerResizeCleanup = attachContainerResizeReflow({
@@ -3632,8 +3664,6 @@
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
-          inputTraceSeq += 1;
-          const wsState = socket ? socket.readyState : -1;
           // Issue #2924: drop pre-ready onData firings — see
           // gateTerminalInputForReadiness in terminal-viewport-reflow.js
           // for the contract. The runtime is fetched fresh each firing so
@@ -3643,23 +3673,9 @@
             data,
           });
           if (!gate.forward) {
-            console.debug("[gwt_input_trace:onData:dropped]", {
-              seq: inputTraceSeq,
-              windowId,
-              dataLen: data.length,
-              reason: gate.reason,
-              wsState,
-            });
             return;
           }
-          console.debug("[gwt_input_trace:onData]", {
-            seq: inputTraceSeq,
-            windowId,
-            dataLen: data.length,
-            wsState,
-          });
-          terminalOutputBatcher.prioritize(windowId);
-          send({ kind: "terminal_input", id: windowId, data });
+          sendTerminalInput(windowId, data);
         });
         const runtime = {
           terminal,
@@ -3764,7 +3780,11 @@
         const pending = pendingOutputMap.get(windowId);
         if (pending?.length) {
           for (const chunk of pending) {
-            writeOutput(windowId, chunk);
+            if (typeof chunk === "string") {
+              writeOutput(windowId, chunk);
+            } else {
+              writeOutput(windowId, chunk.base64, chunk.traceMetadata);
+            }
           }
           pendingOutputMap.delete(windowId);
         }
@@ -3776,40 +3796,71 @@
           const flush = runtime.deferredWrites;
           runtime.deferredWrites = [];
           for (const chunk of flush) {
-            writeOutput(windowId, chunk);
+            if (typeof chunk === "string") {
+              writeOutput(windowId, chunk);
+            } else {
+              writeOutput(windowId, chunk.base64, chunk.traceMetadata);
+            }
           }
         }
       }
 
-      function writeOutput(windowId, base64) {
+      function writeOutputToTerminal(windowId, base64, traceMetadata) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          const queue = pendingOutputMap.get(windowId) || [];
+          queue.push(
+            traceMetadata ? { base64, traceMetadata } : base64,
+          );
+          pendingOutputMap.set(windowId, queue);
+          return;
+        }
+        if (base64) {
+          runtime.hasOutput = true;
+        }
+        // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
+        // completed its initial fit, hold the chunk in the runtime's
+        // deferred queue. The createTerminalRuntime rAF flushes this
+        // queue after the activation sequence so writes land at the
+        // real cols/rows instead of xterm's default 80×24 grid.
+        if (runtime.isReady === false) {
+          runtime.deferredWrites.push(
+            traceMetadata ? { base64, traceMetadata } : base64,
+          );
+          return;
+        }
+        terminalOutputBatcher.enqueue(windowId, base64, traceMetadata);
+        if (!canRefreshTerminalViewport(windowId)) {
+          markTerminalViewportRefreshPending(windowId);
+        }
+      }
+
+      function isStaleTerminalTraceMetadata(traceMetadata) {
+        if (
+          !traceMetadata
+          || typeof traceMetadata !== "object"
+          || !Object.hasOwn(traceMetadata, "epoch")
+        ) {
+          return false;
+        }
+        try {
+          return traceMetadata.epoch !== uiTraceWiring.currentEpoch();
+        } catch (_) {
+          return true;
+        }
+      }
+
+      function writeOutput(windowId, base64, traceMetadata) {
+        if (!uiTraceWiring.isTracing()) {
+          return writeOutputToTerminal(windowId, base64, traceMetadata);
+        }
+        if (isStaleTerminalTraceMetadata(traceMetadata)) {
+          return writeOutputToTerminal(windowId, base64, traceMetadata);
+        }
         return traceMeasure(
           UI_TRACE_EVENT.writeOutput,
-          { window_id: windowId, bytes_base64: base64 ? base64.length : 0 },
-          () => {
-            const runtime = terminalMap.get(windowId);
-            if (!runtime) {
-              const queue = pendingOutputMap.get(windowId) || [];
-              queue.push(base64);
-              pendingOutputMap.set(windowId, queue);
-              return;
-            }
-            if (base64) {
-              runtime.hasOutput = true;
-            }
-            // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
-            // completed its initial fit, hold the chunk in the runtime's
-            // deferred queue. The createTerminalRuntime rAF flushes this
-            // queue after the activation sequence so writes land at the
-            // real cols/rows instead of xterm's default 80×24 grid.
-            if (runtime.isReady === false) {
-              runtime.deferredWrites.push(base64);
-              return;
-            }
-            terminalOutputBatcher.enqueue(windowId, base64);
-            if (!canRefreshTerminalViewport(windowId)) {
-              markTerminalViewportRefreshPending(windowId);
-            }
-          },
+          { window_id: windowId },
+          () => writeOutputToTerminal(windowId, base64, traceMetadata),
         );
       }
 
@@ -5260,7 +5311,7 @@
         knowledgeSettingsSurface,
       });
 
-      function receive(event) {
+      function receive(event, traceMetadata) {
         if (shouldDropLiveEventForTestMode(event)) {
           return;
         }
@@ -5377,7 +5428,11 @@
             });
             break;
           case "terminal_output":
-            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
+            frontendUnits.terminalHost.writeOutput(
+              event.id,
+              event.data_base64,
+              traceMetadata,
+            );
             break;
           case "terminal_snapshot":
             frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);

@@ -17,7 +17,10 @@
 //! Behavior-preserving move: `WindowRuntime` / `RuntimeStopThreads` stay in
 //! `mod.rs` and are reached via `super`.
 
-use std::sync::{mpsc as std_mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc as std_mpsc, Arc, Mutex,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -27,6 +30,103 @@ use super::{
     combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, Pane, PaneStatus,
     Read as _, RuntimeStopThreads, UserEvent, WindowProcessStatus,
 };
+
+static PTY_OUTPUT_TRACE_READER_ID: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+fn next_pty_output_trace_reader_id() -> u64 {
+    loop {
+        let reader_id = PTY_OUTPUT_TRACE_READER_ID.fetch_add(1, Ordering::Relaxed);
+        if reader_id != 0 {
+            return reader_id;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct PtyOutputTraceReader {
+    reader_id: u64,
+    seq: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PtyOutputTraceRead {
+    reader_id: u64,
+    seq: u64,
+}
+
+impl PtyOutputTraceReader {
+    pub(super) fn new() -> Self {
+        Self {
+            reader_id: next_pty_output_trace_reader_id(),
+            seq: 0,
+        }
+    }
+
+    #[inline]
+    pub(super) fn record_successful_read(&mut self, id: &str) -> Option<PtyOutputTraceRead> {
+        if !tracing::enabled!(target: "gwt_input_trace", tracing::Level::DEBUG) {
+            return None;
+        }
+
+        self.seq = self.seq.wrapping_add(1);
+        if self.seq == 0 {
+            self.reader_id = next_pty_output_trace_reader_id();
+            self.seq = 1;
+        }
+        let read = PtyOutputTraceRead {
+            reader_id: self.reader_id,
+            seq: self.seq,
+        };
+        trace_pty_output_arrival(id, read.reader_id, read.seq);
+        Some(read)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_seq_for_test(&mut self, seq: u64) {
+        self.seq = seq;
+    }
+}
+
+impl PtyOutputTraceRead {
+    #[inline]
+    pub(super) fn trace_slow_reader_pane_lock(self, id: &str, lock_wait_us: u64, parse_us: u64) {
+        trace_slow_reader_pane_lock(id, self.reader_id, self.seq, lock_wait_us, parse_us);
+    }
+}
+
+#[inline]
+fn trace_pty_output_arrival(id: &str, reader_id: u64, seq: u64) {
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "pty_output_arrival",
+        window_id = %id,
+        reader_id,
+        seq,
+        "PTY output arrived at reader"
+    );
+}
+
+#[inline]
+fn trace_slow_reader_pane_lock(
+    id: &str,
+    reader_id: u64,
+    seq: u64,
+    lock_wait_us: u64,
+    parse_us: u64,
+) {
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "reader_pane_lock",
+        window_id = %id,
+        reader_id,
+        seq,
+        lock_wait_us,
+        parse_us,
+        outcome = "slow_parse",
+        "reader thread held pane mutex (output parsing)"
+    );
+}
 
 impl AppRuntime {
     /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
@@ -122,14 +222,13 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let data_len = data.len();
         let write_result = {
             let Some(runtime) = self.runtimes.get(id) else {
                 tracing::debug!(
                     target: "gwt_input_trace",
                     stage = "event_loop_runtime_missing",
                     window_id = %id,
-                    data_len,
+                    outcome = "runtime_missing",
                     "terminal_input dropped: no runtime for window"
                 );
                 return Vec::new();
@@ -145,14 +244,18 @@ impl AppRuntime {
                     let result = pane
                         .write_input(data.as_bytes())
                         .map_err(|error| error.to_string());
+                    let outcome = if result.is_ok() {
+                        "success"
+                    } else {
+                        "write_failed"
+                    };
                     tracing::debug!(
                         target: "gwt_input_trace",
                         stage = "pty_write",
                         window_id = %id,
-                        data_len,
                         lock_wait_us,
                         write_us = write_started.elapsed().as_micros() as u64,
-                        ok = result.is_ok(),
+                        outcome,
                         "terminal_input forwarded to PTY writer"
                     );
                     result
@@ -162,9 +265,8 @@ impl AppRuntime {
                         target: "gwt_input_trace",
                         stage = "pane_lock_failed",
                         window_id = %id,
-                        data_len,
                         lock_wait_us,
-                        error = %error,
+                        outcome = "lock_failed",
                         "terminal_input dropped: pane mutex poisoned"
                     );
                     Err(error)
@@ -186,6 +288,7 @@ impl AppRuntime {
                 target: "gwt_input_trace",
                 stage = "registry_lock_poisoned",
                 window_id = %id,
+                outcome = "pane_lock_failed",
                 "failed to register PTY writer: pane mutex poisoned"
             );
             return;
@@ -196,12 +299,12 @@ impl AppRuntime {
             Ok(mut guard) => {
                 guard.insert(id.to_string(), pty);
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "registry_write_poisoned",
                     window_id = %id,
-                    error = %error,
+                    outcome = "registry_lock_failed",
                     "failed to register PTY writer: registry poisoned"
                 );
             }
@@ -213,12 +316,12 @@ impl AppRuntime {
             Ok(mut guard) => {
                 guard.remove(id);
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "registry_deregister_poisoned",
                     window_id = %id,
-                    error = %error,
+                    outcome = "registry_lock_failed",
                     "failed to deregister PTY writer: registry poisoned"
                 );
             }
@@ -338,11 +441,13 @@ impl AppRuntime {
             };
 
             let mut reader = reader;
+            let mut output_trace_reader = PtyOutputTraceReader::new();
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
+                        let output_trace_read = output_trace_reader.record_successful_read(&id);
                         let chunk = buffer[..read].to_vec();
                         let lock_started = Instant::now();
                         if let Ok(mut pane) = pane.lock() {
@@ -356,15 +461,13 @@ impl AppRuntime {
                             // normal output bursts while still surfacing the
                             // lock-hold windows that matter for drop triage.
                             if lock_wait_us > 500 || parse_us > 500 {
-                                tracing::debug!(
-                                    target: "gwt_input_trace",
-                                    stage = "reader_pane_lock",
-                                    window_id = %id,
-                                    chunk_len = read,
-                                    lock_wait_us,
-                                    parse_us,
-                                    "reader thread held pane mutex (output parsing)"
-                                );
+                                if let Some(output_trace_read) = output_trace_read {
+                                    output_trace_read.trace_slow_reader_pane_lock(
+                                        &id,
+                                        lock_wait_us,
+                                        parse_us,
+                                    );
+                                }
                             }
                         }
                         proxy.send(UserEvent::RuntimeOutput {
