@@ -7,9 +7,10 @@ use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
     load_or_synthesize_workspace_work_items, transact_workspace_state,
     update_workspace_projection_with_journal_for_resolved_work_target, ClassifiedProjection,
-    PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem, WorkspaceAgentSummary,
-    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
-    WorkspaceRetentionConfig, WorkspaceStartUpdate, WorkspaceStatusCategory,
+    PruneAction, PruneSkipReason, TrackedWorkEventPolicy, WorkEvent, WorkEventKind, WorkItem,
+    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjection,
+    WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
+    WorkspaceStatusCategory,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -337,8 +338,6 @@ pub(super) fn run<E: CliEnv>(
                 .map(parse_status_category)
                 .transpose()
                 .map_err(string_error)?;
-            let opens_work_settlement = status_category
-                == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
             let session_id = std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV)
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -399,6 +398,15 @@ pub(super) fn run<E: CliEnv>(
                 &session_id,
             )
             .map_err(core_error)?;
+            let tracked_event_policy =
+                if crate::cli::execution_state::is_completed(&target.work_event_root) {
+                    TrackedWorkEventPolicy::SkipTracked
+                } else {
+                    TrackedWorkEventPolicy::Persist
+                };
+            let opens_work_settlement = tracked_event_policy == TrackedWorkEventPolicy::Persist
+                && intent.status_category
+                    == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
             tracing::debug!(
                 session_id = %target.session_id,
                 work_id = %target.work_id,
@@ -424,6 +432,7 @@ pub(super) fn run<E: CliEnv>(
             let entry = update_workspace_projection_with_journal_for_resolved_work_target(
                 &persistence_target,
                 update,
+                tracked_event_policy,
                 |_, _| {
                     let refreshed =
                         crate::agent_project_state::resolve_session_work_mutation_target(
@@ -1473,6 +1482,29 @@ pub(crate) mod tests {
         save_workspace_projection(repo, &projection).expect("save assigned Session fixture");
     }
 
+    fn save_completed_execution_record(worktree: &Path, session_id: &str, owner: u64) {
+        use crate::cli::execution_state::{
+            ExecutionControlRecord, ExecutionControlStatus, ExecutionOwnerKind,
+        };
+        let now = Utc::now();
+        let record = ExecutionControlRecord {
+            owner_kind: ExecutionOwnerKind::Issue,
+            owner_number: owner,
+            primary_session_id: session_id.to_string(),
+            entrypoint: "launch".to_string(),
+            bundled_required_owners: Vec::new(),
+            status: ExecutionControlStatus::Completed,
+            blocked_reason: None,
+            missing_verification: None,
+            launched_at: now,
+            settled_at: Some(now),
+            transfers: Vec::new(),
+            recoveries: Vec::new(),
+            content_hash: String::new(),
+        };
+        crate::cli::execution_state::save(worktree, &record).expect("save execution record");
+    }
+
     #[test]
     fn parse_workspace_update_accepts_summary_fields() {
         let parsed = parse(&[
@@ -1939,6 +1971,150 @@ pub(crate) mod tests {
         assert!(
             !gwt_core::paths::gwt_repo_local_work_events_path(&project_root).exists(),
             "agent workspace update must not write the repo-local Work event to the Project State root"
+        );
+    }
+
+    /// Issue #3278 regression: when the agent session referenced by
+    /// `GWT_SESSION_ID` records a worktree that disagrees with the worktree the
+    /// process actually runs in, `workspace.update` must refuse to write — the
+    /// tracked Work event and its identity would be attributed to a foreign
+    /// Work. The refusal is actionable (names the session, the expected
+    /// worktree, and the actual worktree) and leaves tracked logs untouched.
+    #[test]
+    fn workspace_update_rejects_session_cwd_worktree_mismatch() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_worktree = temp.path().join("work").join("issue-session");
+        let actual_worktree = temp.path().join("work").join("issue-actual");
+        std::fs::create_dir_all(&session_worktree).expect("session worktree");
+        std::fs::create_dir_all(&actual_worktree).expect("actual worktree");
+        // The session (stale GWT_SESSION_ID) points at a different worktree
+        // than the one this process runs in.
+        write_session_with_project_state_root("session-1", &session_worktree, &session_worktree);
+        let session_events_path =
+            gwt_core::paths::gwt_repo_local_work_events_path(&session_worktree);
+        let session_events_before =
+            std::fs::read(&session_events_path).expect("seeded session Work event log");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
+
+        let mut env = TestEnv::new(actual_worktree.clone());
+        let mut out = String::new();
+        let error = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Late coordination update".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect_err("session/cwd worktree mismatch must fail closed");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("session-1"),
+            "error must name the conflicting session: {message}"
+        );
+        assert!(
+            message.contains("issue-session") && message.contains("issue-actual"),
+            "error must name both the expected and actual worktree: {message}"
+        );
+        assert!(
+            !gwt_core::paths::gwt_repo_local_work_events_path(&actual_worktree).exists(),
+            "refused update must not append a tracked Work event in the actual worktree"
+        );
+        assert_eq!(
+            std::fs::read(&session_events_path).expect("session Work event log after refusal"),
+            session_events_before,
+            "refused update must leave the session worktree event log byte-equivalent"
+        );
+    }
+
+    /// Issue #3278 regression: once the Execution Control Record for the
+    /// worktree has settled as Completed, a coordination-only
+    /// `workspace.update` (the kind a post-merge stale reminder triggers) must
+    /// not append to the git-tracked `events.jsonl` — otherwise it re-dirties an
+    /// already committed/merged worktree. The machine-local projection still
+    /// updates so the Board / titlebar stay live.
+    #[test]
+    fn workspace_update_skips_tracked_event_after_execution_completed() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
+
+        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        canonical.agents.push(assigned_agent_with_window(
+            "session-1",
+            "project::agent-1",
+            &worktree,
+        ));
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+        let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+        let events_before = std::fs::read(&events_path).expect("seeded tracked Work event log");
+
+        // The execution for this worktree already completed (final commit +
+        // push + PR merge happened before this coordination update).
+        save_completed_execution_record(&worktree, "session-1", 3278);
+
+        let mut env = TestEnv::new(worktree.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Post-merge coordination focus".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect("update workspace");
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            std::fs::read(&events_path).expect("tracked Work event log after update"),
+            events_before,
+            "completed-execution coordination update must leave tracked events.jsonl byte-equivalent"
+        );
+        let saved = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("canonical agent");
+        assert_eq!(
+            agent.current_focus.as_deref(),
+            Some("Post-merge coordination focus"),
+            "the machine-local projection must still reflect the coordination update"
         );
     }
 

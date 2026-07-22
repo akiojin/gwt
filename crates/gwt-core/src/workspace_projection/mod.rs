@@ -74,9 +74,9 @@ pub use persistence::{
     workspace_work_event_from_board_entry, worktree_sources_needing_backfill, ClassifiedProjection,
     PruneAction, PruneSkipReason, PruneSummary, ResumeOwnerBleedRepairReport,
     SessionBoundWorkspaceMutationTarget, SessionBoundWorkspaceTerminalTarget, StaleReason,
-    WorkItemsCache, WorkItemsRebuildOutcome, WorkspaceRetentionConfig, WorkspaceSessionAssignment,
-    WorkspaceTerminalEventOutcome, WorktreeReconcileSource, WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
-    WORK_ITEMS_REBUILD_VERSION,
+    TrackedWorkEventPolicy, WorkItemsCache, WorkItemsRebuildOutcome, WorkspaceRetentionConfig,
+    WorkspaceSessionAssignment, WorkspaceTerminalEventOutcome, WorktreeReconcileSource,
+    WORKSPACE_AGENT_IDENTITY_RESET_VERSION, WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
     decode_workspace_work_event_line, with_workspace_current_and_work_items_lock,

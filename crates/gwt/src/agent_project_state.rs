@@ -10,7 +10,7 @@ use gwt_core::{
         load_workspace_work_items_from_path, mutate_existing_workspace_projection,
         update_workspace_projection_with_journal_for_resolved_work_target,
         SessionBoundWorkspaceMutationTarget, SessionBoundWorkspaceTerminalTarget,
-        WorkspaceAgentSummary, WorkspaceProjectionUpdate,
+        TrackedWorkEventPolicy, WorkspaceAgentSummary, WorkspaceProjectionUpdate,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -191,14 +191,21 @@ pub fn apply_authenticated_workspace_update(
         ));
     }
 
-    let opens_work_settlement = request.intent.status_category
-        == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
     let observation = request.observation.clone();
     let target = resolve_authenticated_session_work_mutation_target(
         authenticated_project_root,
         authenticated_session_id,
         &observation,
     )?;
+    let tracked_event_policy = if crate::cli::execution_state::is_completed(&target.work_event_root)
+    {
+        TrackedWorkEventPolicy::SkipTracked
+    } else {
+        TrackedWorkEventPolicy::Persist
+    };
+    let opens_work_settlement = tracked_event_policy == TrackedWorkEventPolicy::Persist
+        && request.intent.status_category
+            == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
     let persistence_target = target.persistence_target();
     let update = WorkspaceProjectionUpdate {
         title: request.intent.title,
@@ -216,6 +223,7 @@ pub fn apply_authenticated_workspace_update(
     let entry = update_workspace_projection_with_journal_for_resolved_work_target(
         &persistence_target,
         update,
+        tracked_event_policy,
         |_, _| {
             let refreshed = resolve_authenticated_session_work_mutation_target(
                 authenticated_project_root,
@@ -660,6 +668,13 @@ fn resolve_host_session_work_mutation_target(
     let session_id = session.id.as_str();
     let invocation_raw = canonicalize_mutation_path(invocation_cwd, "cwd")?;
     let session_worktree = canonicalize_mutation_path(&session.worktree_path, "worktree")?;
+    if invocation_raw != session_worktree {
+        return Err(mutation_error(format!(
+            "Session cwd mismatch for Session {session_id}: expected {}, got {}",
+            session_worktree.display(),
+            invocation_raw.display()
+        )));
+    }
     let session_git_root = git_toplevel(&session_worktree, "worktree")?;
     let declared_repo_hash = required_session_repo_hash(&session)?;
     let observed = repo_hash_for_mutation(&session_git_root, "repo hash")?;
@@ -703,13 +718,6 @@ fn resolve_host_session_work_mutation_target(
         &branch_identity,
         &session,
     )?;
-    if invocation_raw != session_worktree {
-        return Err(mutation_error(format!(
-            "Session cwd mismatch for Session {session_id}: expected {}, got {}",
-            session_worktree.display(),
-            invocation_raw.display()
-        )));
-    }
     if session_worktree != session_git_root {
         return Err(mutation_error(format!(
             "Session event root mismatch for Session {session_id}: workspace.update must run at the validated Git toplevel"
@@ -1518,6 +1526,29 @@ mod tests {
         );
     }
 
+    fn save_completed_execution_fixture(worktree: &Path, session_id: &str) {
+        let now = Utc::now();
+        crate::cli::execution_state::save(
+            worktree,
+            &crate::cli::execution_state::ExecutionControlRecord {
+                owner_kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                owner_number: 3278,
+                primary_session_id: session_id.to_string(),
+                entrypoint: "launch".to_string(),
+                bundled_required_owners: Vec::new(),
+                status: crate::cli::execution_state::ExecutionControlStatus::Completed,
+                blocked_reason: None,
+                missing_verification: None,
+                launched_at: now,
+                settled_at: Some(now),
+                transfers: Vec::new(),
+                recoveries: Vec::new(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save completed execution fixture");
+    }
+
     #[derive(Debug)]
     enum SessionLedgerFixture {
         Missing { session_id: String },
@@ -1625,6 +1656,7 @@ mod tests {
                 agent_current_focus: None,
                 agent_title_summary: None,
             },
+            gwt_core::workspace_projection::TrackedWorkEventPolicy::Persist,
         )
         .expect("seed Work mutation surfaces");
     }
@@ -1767,6 +1799,56 @@ mod tests {
                 .expect("Host terminal update must create a settlement obligation");
             assert!(record.obligation_open);
             assert_eq!(record.session_id, session.id);
+        });
+    }
+
+    #[test]
+    fn authenticated_post_completion_update_skips_tracked_event_and_settlement() {
+        with_strict_target_fixture(|repo, session| {
+            let work_id = "work-authenticated-completed";
+            seed_unique_mutation_target(repo, repo, session, work_id);
+            let events_path = gwt_core::paths::gwt_repo_local_work_events_path(repo);
+            let events_before = std::fs::read(&events_path).expect("seeded tracked Work events");
+            save_completed_execution_fixture(repo, &session.id);
+
+            apply_authenticated_workspace_update(
+                repo,
+                &session.id,
+                AgentWorkspaceUpdateRequest {
+                    schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                    claimed_session_id: session.id.clone(),
+                    observation: observe_agent_runtime(repo).expect("runtime observation"),
+                    intent: AgentWorkspaceUpdateIntent {
+                        status_category: Some(
+                            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+                        ),
+                        current_focus: Some("post-completion coordination".to_string()),
+                        ..AgentWorkspaceUpdateIntent::default()
+                    },
+                },
+            )
+            .expect("authenticated post-completion update");
+
+            assert_eq!(
+                std::fs::read(&events_path).expect("tracked Work events after update"),
+                events_before,
+                "Host bridge must preserve tracked events byte-for-byte after execution completion"
+            );
+            let current = gwt_core::workspace_projection::load_workspace_projection(repo)
+                .expect("load current projection")
+                .expect("current projection");
+            assert_eq!(
+                current
+                    .latest_agent_for_session(&session.id)
+                    .and_then(|agent| agent.current_focus.as_deref()),
+                Some("post-completion coordination")
+            );
+            assert!(
+                crate::cli::verification_record::load_work_event_settlement_record(repo)
+                    .expect("load settlement record")
+                    .is_none(),
+                "a skipped tracked event must not reopen the settlement obligation"
+            );
         });
     }
 

@@ -814,24 +814,55 @@ fn workspace_event_establishes_session_attachment(kind: WorkEventKind) -> bool {
     )
 }
 
+/// Whether a `workspace.update` should append its Work event to the git-tracked
+/// `events.jsonl` (Issue #3278).
+///
+/// The tracked log is the append-only, git-committed Work core. Once a Work has
+/// settled — its execution completed and the worktree committed / merged —
+/// coordination-only updates must stop appending so a post-merge stale reminder
+/// cannot re-dirty a clean worktree. Under [`TrackedWorkEventPolicy::SkipTracked`]
+/// the machine-local projection and work-items still update, so the Board and
+/// titlebar stay live; only the tracked file is left untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedWorkEventPolicy {
+    /// Append the Work event to the tracked `events.jsonl` (active work).
+    Persist,
+    /// Skip the tracked append; still update machine-local projection state.
+    SkipTracked,
+}
+
 pub fn update_workspace_projection_with_journal(
     repo_path: &Path,
     update: WorkspaceProjectionUpdate,
 ) -> Result<WorkspaceJournalEntry> {
-    update_workspace_projection_with_journal_for_work_event_root(repo_path, repo_path, update)
+    update_workspace_projection_with_journal_for_work_event_root(
+        repo_path,
+        repo_path,
+        update,
+        TrackedWorkEventPolicy::Persist,
+    )
 }
 
 pub fn update_workspace_projection_with_journal_for_work_event_root(
     project_state_root: &Path,
     work_event_root: &Path,
     update: WorkspaceProjectionUpdate,
+    tracked_event_policy: TrackedWorkEventPolicy,
 ) -> Result<WorkspaceJournalEntry> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let journal_path = gwt_workspace_journal_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
     let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(work_event_root)?;
+    // SkipTracked leaves the git-tracked events.jsonl completely untouched — it
+    // does not even run the legacy→repo-local migration, so a settled worktree
+    // stays byte-for-byte clean.
+    let events_path = match tracked_event_policy {
+        TrackedWorkEventPolicy::Persist => {
+            Some(repo_local_work_events_path_with_migration(work_event_root)?)
+        }
+        TrackedWorkEventPolicy::SkipTracked => None,
+    };
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
         let current_precondition = workspace_state_file_fingerprint(&current_path)?;
         let work_items_precondition = workspace_state_file_fingerprint(&work_items_path)?;
@@ -858,6 +889,13 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
             )));
         }
 
+        // The event is always applied to the machine-local work-items above;
+        // `events_path`/`events` govern only the git-tracked append, which is
+        // omitted for a settled worktree (SkipTracked → events_path is None).
+        let events = match &events_path {
+            Some(_) => vec![event],
+            None => Vec::new(),
+        };
         let transaction = PendingWorkspaceStateTransaction {
             version: WORKSPACE_STATE_TRANSACTION_VERSION,
             transaction_id: Some(Uuid::new_v4().to_string()),
@@ -867,8 +905,8 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
             work_items_precondition: Some(work_items_precondition),
             projection,
             work_items: Some(work_items),
-            events_path: Some(events_path.clone()),
-            events: vec![event],
+            events_path: events_path.clone(),
+            events,
             journal_path: Some(journal_path.clone()),
             journal_entries: vec![entry.clone()],
         };
@@ -947,6 +985,7 @@ impl std::fmt::Debug for SessionBoundWorkspaceMutationTarget {
 pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     target: &SessionBoundWorkspaceMutationTarget,
     update: WorkspaceProjectionUpdate,
+    tracked_event_policy: TrackedWorkEventPolicy,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceJournalEntry> {
     validate_session_bound_target_shape(target, &update)?;
@@ -954,7 +993,12 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
     let journal_path = gwt_workspace_journal_path_for_repo_path(&target.project_state_root);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.work_event_root);
-    let events_path = gwt_repo_local_work_events_path(&target.work_event_root);
+    let events_path = match tracked_event_policy {
+        TrackedWorkEventPolicy::Persist => {
+            Some(gwt_repo_local_work_events_path(&target.work_event_root))
+        }
+        TrackedWorkEventPolicy::SkipTracked => None,
+    };
 
     // This strict entry point never synthesizes or migrates authority state.
     // Target resolution already proved each surface; disappearance between
@@ -962,7 +1006,6 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     for (path, label) in [
         (&current_path, "current projection"),
         (&work_items_path, "WorkItems projection"),
-        (&events_path, "tracked Work event log"),
     ] {
         match path.try_exists() {
             Ok(true) => {}
@@ -976,6 +1019,19 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
                     "Session-bound workspace transaction could not verify the {label}"
                 )))
             }
+        }
+    }
+    if let Some(events_path) = events_path.as_ref() {
+        match events_path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return Err(GwtError::Other(
+                "Session-bound workspace transaction requires an existing tracked Work event log"
+                    .to_string(),
+            )),
+            Err(_) => return Err(GwtError::Other(
+                "Session-bound workspace transaction could not verify the tracked Work event log"
+                    .to_string(),
+            )),
         }
     }
 
@@ -1027,6 +1083,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             ));
         }
 
+        let events = events_path.as_ref().map_or_else(Vec::new, |_| vec![event]);
         let transaction = PendingWorkspaceStateTransaction {
             version: WORKSPACE_STATE_TRANSACTION_VERSION,
             transaction_id: Some(Uuid::new_v4().to_string()),
@@ -1036,8 +1093,8 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             work_items_precondition: Some(work_items_precondition),
             projection,
             work_items: Some(work_items),
-            events_path: Some(events_path.clone()),
-            events: vec![event],
+            events_path: events_path.clone(),
+            events,
             journal_path: Some(journal_path.clone()),
             journal_entries: vec![entry.clone()],
         };

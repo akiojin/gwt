@@ -1888,6 +1888,7 @@ fn legacy_journal_copy_waits_for_workspace_transaction_lock() {
                 agent_current_focus: None,
                 agent_title_summary: None,
             },
+            TrackedWorkEventPolicy::Persist,
         )
     });
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -2027,6 +2028,7 @@ fn workspace_journal_event_records_to_agent_worktree_log() {
             agent_current_focus: Some("修正中".to_string()),
             agent_title_summary: Some("Workspace detail content".to_string()),
         },
+        TrackedWorkEventPolicy::Persist,
     )
     .expect("workspace update");
 
@@ -2229,7 +2231,12 @@ fn t812_apply_resolved_workspace_update(
     target: &T812ResolvedMutationTarget,
     update: WorkspaceProjectionUpdate,
 ) -> Result<WorkspaceJournalEntry> {
-    update_workspace_projection_with_journal_for_resolved_work_target(target, update, |_, _| Ok(()))
+    update_workspace_projection_with_journal_for_resolved_work_target(
+        target,
+        update,
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+    )
 }
 
 fn t812_read_events(path: &Path) -> Vec<WorkEvent> {
@@ -2574,6 +2581,103 @@ fn session_bound_update_revalidates_assignment_after_lock_wait_without_mutation(
         &after_reassignment,
         &after_attempt,
         "stale resolved target after lock-time reassignment",
+    );
+}
+
+/// Issue #3278: `TrackedWorkEventPolicy::SkipTracked` must leave the git-tracked
+/// `events.jsonl` byte-for-byte unchanged (so a settled/merged worktree stays
+/// clean) while the machine-local projection still records the coordination
+/// update.
+#[test]
+fn skip_tracked_policy_leaves_committed_events_log_untouched() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_state_root = temp.path().join("workspace-home");
+    let worktree = temp.path().join("workspace-home/work/20260722-0100");
+    init_test_git_repo(&worktree);
+
+    let mut projection = WorkspaceProjection::default_for_project(&project_state_root);
+    projection.id = canonical_work_id(&project_state_root, Some("develop"), None).unwrap();
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-current".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(worktree.clone()),
+        branch: Some("work/20260722-0100".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: Utc::now(),
+    });
+    save_workspace_projection(&project_state_root, &projection).expect("seed projection");
+
+    let update = |focus: &str| WorkspaceProjectionUpdate {
+        title: None,
+        status_category: None,
+        status_text: None,
+        owner: None,
+        next_action: None,
+        summary: None,
+        progress_summary: None,
+        agent_session_id: Some("session-current".to_string()),
+        agent_current_focus: Some(focus.to_string()),
+        agent_title_summary: None,
+    };
+
+    // Active work: the event is appended to the tracked log (bundled into commits).
+    update_workspace_projection_with_journal_for_work_event_root(
+        &project_state_root,
+        &worktree,
+        update("active focus"),
+        TrackedWorkEventPolicy::Persist,
+    )
+    .expect("persist update");
+
+    let events_path = gwt_repo_local_work_events_path(&worktree);
+    let after_persist = fs::read_to_string(&events_path).expect("events log");
+    assert_eq!(
+        after_persist.lines().count(),
+        1,
+        "active update appends one tracked event"
+    );
+
+    // Settled work: a coordination-only update must not touch the tracked log.
+    update_workspace_projection_with_journal_for_work_event_root(
+        &project_state_root,
+        &worktree,
+        update("post-completion focus"),
+        TrackedWorkEventPolicy::SkipTracked,
+    )
+    .expect("skip-tracked update");
+
+    assert_eq!(
+        fs::read_to_string(&events_path).expect("events log"),
+        after_persist,
+        "SkipTracked must leave the committed events.jsonl byte-for-byte unchanged"
+    );
+
+    let saved = load_workspace_projection(&project_state_root)
+        .expect("load projection")
+        .expect("projection exists");
+    let agent = saved
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == "session-current")
+        .expect("agent row");
+    assert_eq!(
+        agent.current_focus.as_deref(),
+        Some("post-completion focus"),
+        "machine-local projection must still reflect the coordination update"
     );
 }
 
