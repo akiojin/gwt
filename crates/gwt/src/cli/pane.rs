@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use gwt_agent::session::GWT_SESSION_ID_ENV;
+use gwt_agent::{session::GWT_SESSION_ID_ENV, GWT_PANE_WS_URL_ENV};
 use gwt_github::{ApiError, SpecOpsError};
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -22,8 +22,6 @@ use crate::persistence::WindowPlacement;
 use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
-const PANE_WS_URL_ENV: &str = "GWT_PANE_WS_URL";
-const HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 
 pub fn parse(args: &[String]) -> Result<PaneCommand, CliParseError> {
@@ -379,18 +377,15 @@ fn ensure_no_args(args: &[String]) -> Result<(), CliParseError> {
 }
 
 fn pane_websocket_url_from_env() -> Result<String, String> {
-    if let Ok(url) = std::env::var(PANE_WS_URL_ENV) {
-        if !url.trim().is_empty() {
-            return Ok(url);
-        }
-    }
-
-    let hook_url = std::env::var(HOOK_FORWARD_URL_ENV).map_err(|_| {
-        format!("{HOOK_FORWARD_URL_ENV} is not set; run pane.* from a gwt-launched agent pane")
-    })?;
-    websocket_url_from_hook_forward_url(&hook_url).ok_or_else(|| {
-        format!("could not derive pane websocket URL from {HOOK_FORWARD_URL_ENV}={hook_url}")
-    })
+    std::env::var(GWT_PANE_WS_URL_ENV)
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{GWT_PANE_WS_URL_ENV} is not set; relaunch the Session from gwt before using pane.*"
+            )
+        })
 }
 
 fn project_root_for_pane(default: &Path) -> String {
@@ -398,23 +393,6 @@ fn project_root_for_pane(default: &Path) -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default.to_string_lossy().into_owned())
-}
-
-pub(crate) fn websocket_url_from_hook_forward_url(hook_url: &str) -> Option<String> {
-    let hook_url = hook_url.trim();
-    let (scheme, rest) = hook_url
-        .strip_prefix("http://")
-        .map(|rest| ("ws://", rest))
-        .or_else(|| {
-            hook_url
-                .strip_prefix("https://")
-                .map(|rest| ("wss://", rest))
-        })?;
-    let host_end = rest.find('/').unwrap_or(rest.len());
-    if host_end == 0 {
-        return None;
-    }
-    Some(format!("{}{}{}", scheme, &rest[..host_end], "/ws"))
 }
 
 fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<PersistedWindowState>> {
@@ -555,6 +533,7 @@ fn config_error(message: String) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     use crate::persistence::WindowGeometry;
+    use gwt_core::test_support::ScopedEnvVar;
 
     use super::*;
 
@@ -708,19 +687,37 @@ mod tests {
     }
 
     #[test]
-    fn websocket_url_is_derived_from_hook_forward_url() {
-        assert_eq!(
-            websocket_url_from_hook_forward_url("http://127.0.0.1:61234/internal/hook-live"),
-            Some("ws://127.0.0.1:61234/ws".to_string())
+    fn pane_websocket_env_uses_dedicated_browser_listener() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/ws");
+        let _hook_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            "http://127.0.0.1:45123/internal/hook-live",
         );
+
         assert_eq!(
-            websocket_url_from_hook_forward_url("https://example.test/internal/hook-live"),
-            Some("wss://example.test/ws".to_string())
+            pane_websocket_url_from_env().expect("dedicated pane endpoint"),
+            "ws://127.0.0.1:46234/ws"
         );
-        assert_eq!(
-            websocket_url_from_hook_forward_url("file:///tmp/socket"),
-            None
+    }
+
+    #[test]
+    fn pane_websocket_env_never_derives_browser_access_from_agent_capability_listener() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pane_url = ScopedEnvVar::unset(GWT_PANE_WS_URL_ENV);
+        let _hook_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            "http://127.0.0.1:61234/internal/hook-live",
         );
+
+        let error = pane_websocket_url_from_env()
+            .expect_err("capability-only listener must not become a pane WebSocket endpoint");
+
+        assert!(error.contains(GWT_PANE_WS_URL_ENV), "{error}");
     }
 
     #[test]

@@ -360,21 +360,22 @@ impl AppRuntime {
         let projection = match workspace_projection::transact_workspace_state(
             project_root,
             |projection, work_items, _work_items_persisted| {
-                let event =
-                    workspace_projection::workspace_work_event_from_board_entry(projection, entry);
+                let Some(event) =
+                    workspace_projection::resolve_workspace_work_event_from_board_entry(
+                        projection, work_items, entry,
+                    )
+                else {
+                    return Ok((projection.clone(), Vec::new()));
+                };
                 let state_cutoff = work_items
                     .work_items
                     .iter()
                     .find(|item| item.id == event.work_item_id)
                     .map(|item| item.updated_at);
-                let event_is_current = state_cutoff.is_none_or(|cutoff| event.updated_at >= cutoff);
-                projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
-                let events = (event_is_current
-                    && board_entry_origin_can_record_workspace_work_event(projection, entry))
-                .then_some(event)
-                .into_iter()
-                .collect();
-                Ok((projection.clone(), events))
+                if event.work_item_id == projection.id {
+                    projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
+                }
+                Ok((projection.clone(), vec![event]))
             },
         ) {
             Ok(projection) => projection,
@@ -390,18 +391,6 @@ impl AppRuntime {
 
         self.apply_workspace_projection_title_sync(project_root, &projection)
     }
-}
-
-fn board_entry_origin_can_record_workspace_work_event(
-    projection: &workspace_projection::WorkspaceProjection,
-    entry: &coordination::BoardEntry,
-) -> bool {
-    let Some(session_id) = entry.origin_session_id.as_deref() else {
-        return true;
-    };
-    projection
-        .latest_agent_for_session(session_id)
-        .is_some_and(|agent| agent.is_assigned() && entry.updated_at >= agent.updated_at)
 }
 
 fn board_error(client_id: &str, id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {

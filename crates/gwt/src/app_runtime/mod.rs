@@ -556,7 +556,7 @@ pub struct AppRuntime {
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
-    pub(crate) hook_forward_target: Option<HookForwardTarget>,
+    pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
     pub(crate) issue_link_cache_dir: PathBuf,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
@@ -742,7 +742,7 @@ impl AppRuntime {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
-            hook_forward_target: None,
+            agent_capability_issuer: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
