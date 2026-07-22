@@ -276,6 +276,12 @@ impl ClientQueue {
                 }) {
                     entry.payload = message.payload.clone();
                 } else {
+                    if state.entries.len() >= LOSSLESS_HARD_CAP {
+                        state.dead = true;
+                        drop(state);
+                        self.notify.notify_one();
+                        return true;
+                    }
                     state.entries.push_back(Self::queued(message));
                 }
             }
@@ -2761,6 +2767,82 @@ mod tests {
             1,
             "same-operation progress coalesces to a single queued entry"
         );
+    }
+
+    // Issue #3315 / SPEC-2359 FR-563: coalescing only bounds repeated
+    // snapshots for the same operation. A stuck client can still receive
+    // many distinct operations, so adding a new coalesce key must retain the
+    // same hard-cap disconnect contract as any other lossless event.
+    #[test]
+    fn client_queue_disconnects_when_distinct_attachment_operations_exceed_hard_cap() {
+        let queue = ClientQueue::default();
+
+        for index in 0..LOSSLESS_HARD_CAP {
+            let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+                "tab-1::agent-1",
+                &format!("op-{index}"),
+                AttachmentProgressPhase::Staging,
+            )));
+            assert!(!dead, "client stays alive until the hard cap");
+        }
+        assert_eq!(queue.len(), LOSSLESS_HARD_CAP);
+        assert!(!queue.is_dead());
+
+        let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-0",
+            AttachmentProgressPhase::Attached,
+        )));
+        assert!(
+            !dead,
+            "an existing operation can still reach its terminal state at the hard cap"
+        );
+        assert_eq!(queue.len(), LOSSLESS_HARD_CAP);
+
+        let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-overflow",
+            AttachmentProgressPhase::Attached,
+        )));
+        assert!(dead, "a distinct operation beyond the hard cap is rejected");
+        assert!(queue.is_dead());
+        assert!(
+            matches!(queue.try_next(), Some(DrainStep::Closed)),
+            "hard-capped snapshot queue reports Closed to the drain loop"
+        );
+    }
+
+    // SPEC-2359 SC-399 names both terminal phases. Failed must remain
+    // lossless under the same lossy terminal-output flood as Attached.
+    #[test]
+    fn client_queue_preserves_failed_attachment_state_under_lossy_flood() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSY_HIGH_WATER + 20) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("chunk-{index}"),
+            )));
+        }
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-failed",
+            AttachmentProgressPhase::Queued,
+        )));
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-failed",
+            AttachmentProgressPhase::Failed,
+        )));
+
+        let (payloads, _) = drain_all(&queue);
+        let attachment: Vec<&String> = payloads
+            .iter()
+            .filter(|payload| payload.contains("\"kind\":\"attachment_progress\""))
+            .collect();
+        assert_eq!(attachment.len(), 1, "one operation keeps one latest entry");
+        assert!(attachment[0].contains("\"phase\":\"failed\""));
+        assert!(!queue.is_dead());
     }
 
     // SPEC-2359 W-17 (FR-395/SC-263): the dispatch path keeps clients
