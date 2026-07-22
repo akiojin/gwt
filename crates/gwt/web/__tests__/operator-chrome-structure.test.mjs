@@ -5421,6 +5421,24 @@ test("Terminal output decode is deferred out of the receive path", () => {
   );
 });
 
+test("Playwright synthetic output uses the real terminal scheduler without trace markers", () => {
+  const bridgeBody = extractFunctionBody(appSource, "installPlaywrightTestBridge");
+  assert.match(
+    bridgeBody,
+    /enqueueSyntheticOutput\s*\(\s*windowId\s*,\s*base64\s*\)\s*\{\s*return\s+writeOutputToTerminal\(\s*windowId\s*,\s*base64\s*\);?\s*\}/,
+    "the test-only producer must enqueue through the production terminal output scheduler",
+  );
+  const syntheticOutputMethod = bridgeBody.match(
+    /enqueueSyntheticOutput\s*\(\s*windowId\s*,\s*base64\s*\)\s*\{([\s\S]*?)\n\s*\}/,
+  );
+  assert.ok(syntheticOutputMethod, "expected a Playwright synthetic output method");
+  assert.doesNotMatch(
+    syntheticOutputMethod[1],
+    /\bwriteOutput\s*\(/,
+    "synthetic busy load must not consume the active trace ring",
+  );
+});
+
 test("Terminal input uses one privacy-safe sequenced send helper", () => {
   const helperBody = extractFunctionBody(appSource, "sendTerminalInput");
   const sequenceIndex = helperBody.indexOf("inputTraceSeq += 1;");

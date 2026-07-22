@@ -6703,6 +6703,9 @@
           send(detail);
         });
         window.__gwtTerminalTestApi = Object.freeze({
+          enqueueSyntheticOutput(windowId, base64) {
+            return writeOutputToTerminal(windowId, base64);
+          },
           metrics(windowId) {
             const runtime = terminalMap.get(windowId);
             const terminal = runtime?.terminal;
