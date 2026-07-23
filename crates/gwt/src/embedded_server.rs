@@ -166,24 +166,38 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 }
 
 /// One backend event serialized once and shared across every client queue.
+///
+/// `coalesce_key` and `repair_pane_id` are deliberately separate identities.
+/// `coalesce_key` collapses successive snapshots of the same logical target to
+/// the latest value (terminal pane for `terminal_snapshot`, `operation_id` for
+/// `attachment_progress`). `repair_pane_id` names the terminal pane whose
+/// dropped streamed output must self-heal via a snapshot re-send. A single
+/// event participates in at most one role, so attachment progress can coalesce
+/// by operation without being mistaken for a terminal pane needing repair
+/// (Issue #3315).
 struct PreparedOutbound {
     payload: String,
     kind: &'static str,
-    pane_id: Option<String>,
+    coalesce_key: Option<String>,
+    repair_pane_id: Option<String>,
     class: QueueClass,
 }
 
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
     let kind = event.event_kind();
-    let pane_id = match event {
-        gwt::BackendEvent::TerminalOutput { id, .. }
-        | gwt::BackendEvent::TerminalSnapshot { id, .. } => Some(id.clone()),
-        _ => None,
+    let (coalesce_key, repair_pane_id) = match event {
+        gwt::BackendEvent::TerminalOutput { id, .. } => (None, Some(id.clone())),
+        gwt::BackendEvent::TerminalSnapshot { id, .. } => (Some(id.clone()), None),
+        gwt::BackendEvent::AttachmentProgress { operation_id, .. } => {
+            (Some(operation_id.clone()), None)
+        }
+        _ => (None, None),
     };
     PreparedOutbound {
         payload: serde_json::to_string(event).expect("backend event json"),
         kind,
-        pane_id,
+        coalesce_key,
+        repair_pane_id,
         class: queue_class_for_kind(kind),
     }
 }
@@ -191,7 +205,7 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
 struct QueuedOutbound {
     payload: String,
     kind: &'static str,
-    pane_id: Option<String>,
+    coalesce_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -236,12 +250,12 @@ impl ClientQueue {
         if state.dead {
             return true;
         }
-        // Snapshot-class kinds without an extracted pane identity (file
-        // trees, resume acks, release notes) must not replace each other by
-        // kind alone — different windows would clobber one another. They get
-        // lossless append semantics instead.
+        // Snapshot-class kinds without a coalesce key (file trees, resume acks,
+        // release notes) must not replace each other by kind alone — different
+        // windows would clobber one another. They get lossless append semantics
+        // instead.
         let effective_class = match message.class {
-            QueueClass::SnapshotLatest if message.pane_id.is_none() => QueueClass::Lossless,
+            QueueClass::SnapshotLatest if message.coalesce_key.is_none() => QueueClass::Lossless,
             other => other,
         };
         match effective_class {
@@ -257,20 +271,24 @@ impl ClientQueue {
                 }
             }
             QueueClass::SnapshotLatest => {
-                if let Some(entry) = state
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.kind == message.kind && entry.pane_id == message.pane_id)
-                {
+                if let Some(entry) = state.entries.iter_mut().find(|entry| {
+                    entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
+                }) {
                     entry.payload = message.payload.clone();
                 } else {
+                    if state.entries.len() >= LOSSLESS_HARD_CAP {
+                        state.dead = true;
+                        drop(state);
+                        self.notify.notify_one();
+                        return true;
+                    }
                     state.entries.push_back(Self::queued(message));
                 }
             }
             QueueClass::Lossy => {
                 if state.entries.len() >= LOSSY_HIGH_WATER {
                     state.dropped_lossy += 1;
-                    if let Some(pane) = &message.pane_id {
+                    if let Some(pane) = &message.repair_pane_id {
                         state.dirty_panes.insert(pane.clone());
                     }
                     return false;
@@ -296,7 +314,7 @@ impl ClientQueue {
         QueuedOutbound {
             payload: message.payload.clone(),
             kind: message.kind,
-            pane_id: message.pane_id.clone(),
+            coalesce_key: message.coalesce_key.clone(),
         }
     }
 
@@ -1759,7 +1777,10 @@ mod tests {
         header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap,
     };
-    use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
+    use gwt::{
+        AttachmentProgressPhase, BackendEvent, FrontendEvent, RuntimeHookEvent,
+        RuntimeHookEventKind,
+    };
     use reqwest::StatusCode as HttpStatusCode;
     use tokio::runtime::Runtime;
 
@@ -2353,6 +2374,24 @@ mod tests {
         }
     }
 
+    fn attachment_progress(
+        pane: &str,
+        operation_id: &str,
+        phase: AttachmentProgressPhase,
+    ) -> BackendEvent {
+        BackendEvent::AttachmentProgress {
+            id: pane.to_string(),
+            operation_id: operation_id.to_string(),
+            phase,
+            file_index: Some(0),
+            file_count: 1,
+            filename: Some("notes.txt".to_string()),
+            bytes_done: Some(16),
+            bytes_total: Some(16),
+            message: None,
+        }
+    }
+
     fn drain_all(queue: &ClientQueue) -> (Vec<String>, Vec<String>) {
         let mut payloads = Vec::new();
         let mut repairs = Vec::new();
@@ -2558,6 +2597,11 @@ mod tests {
             queue_class_for_kind("terminal_snapshot"),
             QueueClass::SnapshotLatest
         );
+        // Issue #3315: attachment progress is a lossless snapshot, not lossy.
+        assert_eq!(
+            queue_class_for_kind("attachment_progress"),
+            QueueClass::SnapshotLatest
+        );
         assert_eq!(
             queue_class_for_kind("release_notes_error"),
             QueueClass::Lossless
@@ -2584,6 +2628,221 @@ mod tests {
         assert_eq!(payloads.len(), 2, "distinct windows must both be delivered");
         assert!(payloads.iter().any(|payload| payload.contains("window-1")));
         assert!(payloads.iter().any(|payload| payload.contains("window-2")));
+    }
+
+    // Issue #3315: under a terminal-output flood that saturates the lossy
+    // queue, a full attachment operation must still coalesce to a single
+    // latest-state entry and preserve the terminal `Attached` phase. The old
+    // EphemeralStatus/Lossy class dropped these past the high-water mark, which
+    // left the frontend surface stuck at `Queued · 100%`.
+    #[test]
+    fn client_queue_coalesces_attachment_progress_and_preserves_terminal_state_under_lossy_flood() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSY_HIGH_WATER + 20) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("chunk-{index}"),
+            )));
+        }
+        assert_eq!(
+            queue.len(),
+            LOSSY_HIGH_WATER,
+            "lossy flood saturates the queue at the high-water mark"
+        );
+
+        for phase in [
+            AttachmentProgressPhase::Queued,
+            AttachmentProgressPhase::Staging,
+            AttachmentProgressPhase::Injecting,
+            AttachmentProgressPhase::Attached,
+        ] {
+            queue.enqueue(&prepare_outbound(&attachment_progress(
+                "tab-1::agent-1",
+                "op-1",
+                phase,
+            )));
+        }
+
+        assert!(
+            !queue.is_dead(),
+            "attachment progress must never disconnect the client"
+        );
+
+        let (payloads, _) = drain_all(&queue);
+        let attachment: Vec<&String> = payloads
+            .iter()
+            .filter(|payload| payload.contains("\"kind\":\"attachment_progress\""))
+            .collect();
+        assert_eq!(
+            attachment.len(),
+            1,
+            "one operation coalesces to a single queued entry regardless of flood"
+        );
+        assert!(
+            attachment[0].contains("\"phase\":\"attached\""),
+            "the terminal Attached state survives the lossy flood"
+        );
+        assert!(attachment[0].contains("\"operation_id\":\"op-1\""));
+    }
+
+    // Issue #3315: coalescing is keyed by operation_id — different attachment
+    // operations in the same pane must never clobber one another, and a
+    // terminal `Failed` is as durable as `Attached`.
+    #[test]
+    fn client_queue_keeps_distinct_attachment_operations_independent() {
+        let queue = ClientQueue::default();
+
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-a",
+            AttachmentProgressPhase::Queued,
+        )));
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-b",
+            AttachmentProgressPhase::Staging,
+        )));
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-a",
+            AttachmentProgressPhase::Attached,
+        )));
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-b",
+            AttachmentProgressPhase::Failed,
+        )));
+
+        let (payloads, _) = drain_all(&queue);
+        let attachment: Vec<&String> = payloads
+            .iter()
+            .filter(|payload| payload.contains("\"kind\":\"attachment_progress\""))
+            .collect();
+        assert_eq!(
+            attachment.len(),
+            2,
+            "two distinct operations keep two independent entries"
+        );
+        assert!(
+            attachment
+                .iter()
+                .any(|payload| payload.contains("\"operation_id\":\"op-a\"")
+                    && payload.contains("\"phase\":\"attached\"")),
+            "op-a keeps only its latest (Attached) state"
+        );
+        assert!(
+            attachment
+                .iter()
+                .any(|payload| payload.contains("\"operation_id\":\"op-b\"")
+                    && payload.contains("\"phase\":\"failed\"")),
+            "op-b keeps its terminal Failed state independently"
+        );
+    }
+
+    // Issue #3315: a runaway progress stream for one operation must not grow
+    // the queue toward the lossless hard cap or disconnect the client — the
+    // latest state replaces the queued one in place.
+    #[test]
+    fn client_queue_does_not_disconnect_under_attachment_progress_flood() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSLESS_HARD_CAP + 100) {
+            let phase = if index % 2 == 0 {
+                AttachmentProgressPhase::Staging
+            } else {
+                AttachmentProgressPhase::Injecting
+            };
+            let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+                "tab-1::agent-1",
+                "op-flood",
+                phase,
+            )));
+            assert!(!dead, "coalesced snapshot flood never reaches the hard cap");
+        }
+
+        assert!(!queue.is_dead());
+        assert_eq!(
+            queue.len(),
+            1,
+            "same-operation progress coalesces to a single queued entry"
+        );
+    }
+
+    // Issue #3315 / SPEC-2359 FR-563: coalescing only bounds repeated
+    // snapshots for the same operation. A stuck client can still receive
+    // many distinct operations, so adding a new coalesce key must retain the
+    // same hard-cap disconnect contract as any other lossless event.
+    #[test]
+    fn client_queue_disconnects_when_distinct_attachment_operations_exceed_hard_cap() {
+        let queue = ClientQueue::default();
+
+        for index in 0..LOSSLESS_HARD_CAP {
+            let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+                "tab-1::agent-1",
+                &format!("op-{index}"),
+                AttachmentProgressPhase::Staging,
+            )));
+            assert!(!dead, "client stays alive until the hard cap");
+        }
+        assert_eq!(queue.len(), LOSSLESS_HARD_CAP);
+        assert!(!queue.is_dead());
+
+        let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-0",
+            AttachmentProgressPhase::Attached,
+        )));
+        assert!(
+            !dead,
+            "an existing operation can still reach its terminal state at the hard cap"
+        );
+        assert_eq!(queue.len(), LOSSLESS_HARD_CAP);
+
+        let dead = queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-overflow",
+            AttachmentProgressPhase::Attached,
+        )));
+        assert!(dead, "a distinct operation beyond the hard cap is rejected");
+        assert!(queue.is_dead());
+        assert!(
+            matches!(queue.try_next(), Some(DrainStep::Closed)),
+            "hard-capped snapshot queue reports Closed to the drain loop"
+        );
+    }
+
+    // SPEC-2359 SC-399 names both terminal phases. Failed must remain
+    // lossless under the same lossy terminal-output flood as Attached.
+    #[test]
+    fn client_queue_preserves_failed_attachment_state_under_lossy_flood() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSY_HIGH_WATER + 20) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("chunk-{index}"),
+            )));
+        }
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-failed",
+            AttachmentProgressPhase::Queued,
+        )));
+        queue.enqueue(&prepare_outbound(&attachment_progress(
+            "tab-1::agent-1",
+            "op-failed",
+            AttachmentProgressPhase::Failed,
+        )));
+
+        let (payloads, _) = drain_all(&queue);
+        let attachment: Vec<&String> = payloads
+            .iter()
+            .filter(|payload| payload.contains("\"kind\":\"attachment_progress\""))
+            .collect();
+        assert_eq!(attachment.len(), 1, "one operation keeps one latest entry");
+        assert!(attachment[0].contains("\"phase\":\"failed\""));
+        assert!(!queue.is_dead());
     }
 
     // SPEC-2359 W-17 (FR-395/SC-263): the dispatch path keeps clients

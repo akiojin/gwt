@@ -213,6 +213,93 @@ test.describe("Browser file drop attachments", () => {
     await expect.poll(() => page.evaluate(() => window.__fileDropAlerts)).toEqual([]);
   });
 
+  test("the attachment surface auto-hides after the backend reports Attached (Issue #3315)", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+
+    await page.goto(APP_URL);
+    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+
+    const agentProgress = page.locator(
+      ".workspace-window[data-id='agent-1'] .attachment-progress",
+    );
+
+    await emitAttachmentProgress(page, {
+      operationId: "op-attach",
+      phase: "staging",
+      filename: "notes.txt",
+      bytesDone: 8,
+      bytesTotal: 16,
+    });
+    await expect(agentProgress).toBeVisible();
+    await expect(agentProgress).toContainText("Staging");
+
+    await emitAttachmentProgress(page, {
+      operationId: "op-attach",
+      phase: "attached",
+      filename: "notes.txt",
+      bytesDone: 16,
+      bytesTotal: 16,
+    });
+    await expect(agentProgress).toContainText("Attached");
+
+    // The Attached state clears itself shortly after (~0.7s). This is the
+    // regression the backend delivery fix guarantees: a delivered terminal
+    // Attached must never leave the surface stuck at `Queued · 100%`.
+    await expect(agentProgress).toBeHidden();
+    await expect(
+      page.locator(".workspace-window[data-id='shell-1'] .attachment-progress"),
+    ).toHaveCount(0);
+  });
+
+  test("a Failed phase persists until the next attachment replaces it (Issue #3315)", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+
+    await page.goto(APP_URL);
+    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+
+    const agentProgress = page.locator(
+      ".workspace-window[data-id='agent-1'] .attachment-progress",
+    );
+
+    await emitAttachmentProgress(page, {
+      operationId: "op-fail",
+      phase: "failed",
+      filename: "notes.txt",
+      bytesDone: 4,
+      bytesTotal: 16,
+      message: "disk full",
+    });
+    await expect(agentProgress).toBeVisible();
+    await expect(agentProgress).toContainText("disk full");
+    await expect(agentProgress).toHaveAttribute("data-state", "error");
+
+    // Unlike Attached, a failure has no auto-hide timer — it must stay visible
+    // past the success dwell so the user can read it.
+    await page.waitForTimeout(900);
+    await expect(agentProgress).toBeVisible();
+    await expect(agentProgress).toContainText("disk full");
+
+    // The next attachment operation reuses the same surface and replaces the
+    // error in place.
+    await emitAttachmentProgress(page, {
+      operationId: "op-next",
+      phase: "staging",
+      filename: "report.pdf",
+      bytesDone: 8,
+      bytesTotal: 32,
+    });
+    await expect(agentProgress).toBeVisible();
+    await expect(agentProgress).toContainText("Staging");
+    await expect(agentProgress).toContainText("report.pdf");
+    await expect(agentProgress).not.toContainText("disk full");
+  });
+
   test("pasting an image on an Agent terminal uploads and shows progress", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
@@ -313,6 +400,34 @@ async function dropTextFileOn(
     },
     { selector, file },
   );
+}
+
+async function emitAttachmentProgress(
+  page,
+  event: {
+    operationId: string;
+    phase: string;
+    filename?: string;
+    bytesDone?: number;
+    bytesTotal?: number;
+    message?: string | null;
+    windowId?: string;
+  },
+) {
+  await page.evaluate((event) => {
+    window.__emitFileDropBackendEvent?.({
+      kind: "attachment_progress",
+      id: event.windowId ?? "agent-1",
+      operation_id: event.operationId,
+      phase: event.phase,
+      file_index: 0,
+      file_count: 1,
+      filename: event.filename ?? "file",
+      bytes_done: event.bytesDone ?? 0,
+      bytes_total: event.bytesTotal ?? 0,
+      message: event.message ?? null,
+    });
+  }, event);
 }
 
 async function waitForAttachFiles(page) {
