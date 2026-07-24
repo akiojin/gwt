@@ -989,8 +989,8 @@ mod tests {
         (format!("ws://{address}/internal/pane-ws"), server)
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn self_pane_close_returns_after_send_without_followup_ready() {
+    #[test]
+    fn self_pane_close_returns_after_send_without_followup_ready() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -999,25 +999,31 @@ mod tests {
             "self-close-capability",
         );
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
 
-        let project_root = "/repo/self";
-        let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
-        own.session_id = Some("session-self".to_string());
-        let (ws_url, server) = spawn_close_pane_mock(project_root, own, None).await;
+        runtime.block_on(async {
+            let project_root = "/repo/self";
+            let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".to_string());
+            let (ws_url, server) = spawn_close_pane_mock(project_root, own, None).await;
 
-        let result = close_pane(&ws_url, project_root, "agent-self").await;
-        let received_kinds = server.await.expect("pane mock task");
+            let result = close_pane(&ws_url, project_root, "agent-self").await;
+            let received_kinds = server.await.expect("pane mock task");
 
-        assert_eq!(result, Ok("close requested agent-self\n".to_string()));
-        assert_eq!(
-            received_kinds,
-            vec!["frontend_ready", "frontend_ready", "close_window"],
-            "self-close must not send a second frontend_ready after revocation"
-        );
+            assert_eq!(result, Ok("close requested agent-self\n".to_string()));
+            assert_eq!(
+                received_kinds,
+                vec!["frontend_ready", "frontend_ready", "close_window"],
+                "self-close must not send a second frontend_ready after revocation"
+            );
+        });
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn non_self_pane_close_keeps_authoritative_post_close_readback() {
+    #[test]
+    fn non_self_pane_close_keeps_authoritative_post_close_readback() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1026,25 +1032,32 @@ mod tests {
             "peer-close-capability",
         );
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
 
-        let project_root = "/repo/peer";
-        let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
-        peer.session_id = Some("session-peer".to_string());
-        let (ws_url, server) = spawn_close_pane_mock(project_root, peer, Some(Vec::new())).await;
+        runtime.block_on(async {
+            let project_root = "/repo/peer";
+            let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
+            peer.session_id = Some("session-peer".to_string());
+            let (ws_url, server) =
+                spawn_close_pane_mock(project_root, peer, Some(Vec::new())).await;
 
-        let result = close_pane(&ws_url, project_root, "agent-peer").await;
-        let received_kinds = server.await.expect("pane mock task");
+            let result = close_pane(&ws_url, project_root, "agent-peer").await;
+            let received_kinds = server.await.expect("pane mock task");
 
-        assert_eq!(result, Ok("closed agent-peer\n".to_string()));
-        assert_eq!(
-            received_kinds,
-            vec![
-                "frontend_ready",
-                "frontend_ready",
-                "close_window",
-                "frontend_ready"
-            ],
-            "non-self close must retain authoritative post-close readback"
-        );
+            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
+            assert_eq!(
+                received_kinds,
+                vec![
+                    "frontend_ready",
+                    "frontend_ready",
+                    "close_window",
+                    "frontend_ready"
+                ],
+                "non-self close must retain authoritative post-close readback"
+            );
+        });
     }
 }
