@@ -87,7 +87,9 @@ pub(crate) use docker_launch::{
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
-    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest, AgentSessionPrincipal,
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
+    AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
+    AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
@@ -349,6 +351,25 @@ enum GuiShutdownOutcome {
 #[derive(Debug, Default)]
 struct GuiShutdownCoordinator {
     started: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSelfCloseQuitAction {
+    Defer,
+    Shutdown,
+}
+
+fn agent_self_close_quit_action(
+    deferred: &mut bool,
+    has_pending_agent_self_closes: bool,
+) -> AgentSelfCloseQuitAction {
+    if has_pending_agent_self_closes {
+        *deferred = true;
+        AgentSelfCloseQuitAction::Defer
+    } else {
+        *deferred = false;
+        AgentSelfCloseQuitAction::Shutdown
+    }
 }
 
 fn request_gui_shutdown(
@@ -986,6 +1007,12 @@ enum UserEvent {
         grant: AgentCapabilityGrant,
         request: AgentFrontendRequest,
     },
+    /// Finalize one self-close that has already transitioned its exact
+    /// capability generation to Closing and attempted a direct origin-socket
+    /// acknowledgement.
+    CommitAgentSelfClose {
+        ticket: AgentSelfCloseCapabilityTicket,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -1500,6 +1527,45 @@ mod tests {
             2,
             "duplicate shutdown must not rerun cleanup"
         );
+    }
+
+    #[test]
+    fn pending_agent_self_close_does_not_consume_gui_shutdown_backstop_grace() {
+        let mut deferred = false;
+        let mut coordinator = super::GuiShutdownCoordinator::default();
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        assert_eq!(
+            super::agent_self_close_quit_action(&mut deferred, true),
+            super::AgentSelfCloseQuitAction::Defer
+        );
+        assert!(
+            calls.borrow().is_empty(),
+            "the cleanup backstop must not start while ACK delivery is pending"
+        );
+
+        assert_eq!(
+            super::agent_self_close_quit_action(&mut deferred, false),
+            super::AgentSelfCloseQuitAction::Shutdown
+        );
+        let outcome = super::request_gui_shutdown(
+            &mut coordinator,
+            super::GuiShutdownReason::QuitApp,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("cleanup".to_string()),
+        );
+
+        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            vec!["backstop:QuitApp:5s".to_string(), "cleanup".to_string()].as_slice(),
+            "the full cleanup grace must begin only after pending ACK delivery finishes"
+        );
+        assert!(!deferred);
     }
 
     #[test]
@@ -2508,6 +2574,7 @@ mod tests {
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
+            pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
@@ -4169,7 +4236,10 @@ mod tests {
             runtime
                 .handle_frontend_event(
                     "client-1".to_string(),
-                    gwt::FrontendEvent::CloseWindow { id: settings_id },
+                    gwt::FrontendEvent::CloseWindow {
+                        id: settings_id,
+                        request_id: None,
+                    },
                 )
                 .len(),
             1
@@ -7508,6 +7578,8 @@ fn main() -> std::io::Result<()> {
     // so always arm it (the legacy headless-only gate is gone).
     let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
+    let mut agent_self_close_quit_deferred = false;
+    let mut gui_shutdown_backstop_armed = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -7526,12 +7598,27 @@ fn main() -> std::io::Result<()> {
             // (`UserEvent::QuitApp`), SIGINT/SIGTERM, or
             // `Event::LoopDestroyed` instead.
             Event::UserEvent(UserEvent::QuitApp) => {
+                let self_close_was_deferred = agent_self_close_quit_deferred;
+                if agent_self_close_quit_action(
+                    &mut agent_self_close_quit_deferred,
+                    app.has_pending_agent_self_closes(),
+                ) == AgentSelfCloseQuitAction::Defer
+                {
+                    if !self_close_was_deferred {
+                        tracing::info!(
+                            target: "gwt::shutdown",
+                            "deferring GUI shutdown until accepted agent self-close ACK attempts finish"
+                        );
+                    }
+                    return;
+                }
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     GuiShutdownReason::QuitApp,
                     |reason, grace| {
-                        if !is_headless {
+                        if !is_headless && !gui_shutdown_backstop_armed {
                             spawn_gui_exit_backstop(reason, grace);
+                            gui_shutdown_backstop_armed = true;
                         }
                     },
                     || {
@@ -7594,6 +7681,14 @@ fn main() -> std::io::Result<()> {
                 let outcome =
                     app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
                 apply_agent_frontend_dispatch_outcome(&clients, &client_id, outcome);
+            }
+            Event::UserEvent(UserEvent::CommitAgentSelfClose { ticket }) => {
+                let events = app.commit_agent_self_close(ticket);
+                clients.dispatch(events);
+                if agent_self_close_quit_deferred && !app.has_pending_agent_self_closes() {
+                    agent_self_close_quit_deferred = false;
+                    let _ = proxy.send_event(UserEvent::QuitApp);
+                }
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

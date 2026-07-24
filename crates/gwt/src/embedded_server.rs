@@ -4,7 +4,7 @@ use std::{
     num::NonZeroU16,
     path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -25,7 +25,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
     AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateRequest, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
@@ -637,8 +637,14 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 #[derive(Clone)]
 pub(crate) enum AgentFrontendRequest {
     Ready,
-    CloseWindow { id: String },
-    SendInput { text: String },
+    CloseWindow {
+        id: String,
+        request_id: Option<String>,
+        responder: Option<AgentSelfCloseResponder>,
+    },
+    SendInput {
+        text: String,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
@@ -710,6 +716,128 @@ impl std::fmt::Debug for AgentSessionPrincipal {
 struct AgentCapabilityRegistryState {
     principals_by_token: HashMap<String, AgentSessionPrincipal>,
     token_by_project_session: HashMap<(PathBuf, String), String>,
+    closing_by_ticket: HashMap<String, ClosingAgentCapability>,
+    closing_ticket_by_project_session: HashMap<(PathBuf, String), String>,
+}
+
+struct ClosingAgentCapability {
+    token: String,
+    principal: AgentSessionPrincipal,
+    revoked: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AgentSelfCloseCapabilityTicket {
+    id: String,
+}
+
+impl std::fmt::Debug for AgentSelfCloseCapabilityTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentSelfCloseCapabilityTicket(<redacted>)")
+    }
+}
+
+impl AgentSelfCloseCapabilityTicket {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// One direct, origin-socket response channel for a correlated agent
+/// self-close. It is deliberately absent from the shared [`ClientHub`], so an
+/// acceptance can neither be broadcast nor replayed to another connection.
+#[derive(Clone)]
+pub(crate) struct AgentSelfCloseResponder {
+    sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseDirectAcceptance>>>>,
+}
+
+impl std::fmt::Debug for AgentSelfCloseResponder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentSelfCloseResponder(<redacted>)")
+    }
+}
+
+impl AgentSelfCloseResponder {
+    pub(crate) fn channel() -> (Self, oneshot::Receiver<AgentSelfCloseDirectAcceptance>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            Self {
+                sender: Arc::new(Mutex::new(Some(sender))),
+            },
+            receiver,
+        )
+    }
+
+    pub(crate) fn send(
+        &self,
+        acceptance: AgentSelfCloseDirectAcceptance,
+    ) -> Result<(), AgentSelfCloseDirectAcceptance> {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(sender) = sender else {
+            return Err(acceptance);
+        };
+        sender.send(acceptance)
+    }
+}
+
+/// Accepted self-close state owned by the origin WebSocket task.
+///
+/// Once this value reaches the direct-response channel, every exit path must
+/// commit the captured close. Keeping the finalizer in `Drop` covers socket
+/// failure, timeout, disconnect, and async task cancellation without exposing
+/// the internal capability ticket on the wire.
+pub(crate) struct AgentSelfCloseDirectAcceptance {
+    request_id: String,
+    window_id: String,
+    ticket: Option<AgentSelfCloseCapabilityTicket>,
+    proxy: AppEventProxy,
+}
+
+impl std::fmt::Debug for AgentSelfCloseDirectAcceptance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentSelfCloseDirectAcceptance(<redacted>)")
+    }
+}
+
+impl AgentSelfCloseDirectAcceptance {
+    pub(crate) fn new(
+        request_id: String,
+        window_id: String,
+        ticket: AgentSelfCloseCapabilityTicket,
+        proxy: AppEventProxy,
+    ) -> Self {
+        Self {
+            request_id,
+            window_id,
+            ticket: Some(ticket),
+            proxy,
+        }
+    }
+
+    fn wire_payload(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&BackendEvent::PaneCloseAccepted {
+            request_id: self.request_id.clone(),
+            window_id: self.window_id.clone(),
+        })
+    }
+
+    pub(crate) fn disarm(mut self) -> AgentSelfCloseCapabilityTicket {
+        self.ticket
+            .take()
+            .expect("self-close acceptance ticket is armed")
+    }
+}
+
+impl Drop for AgentSelfCloseDirectAcceptance {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            self.proxy.send(UserEvent::CommitAgentSelfClose { ticket });
+        }
+    }
 }
 
 /// Process-local map from opaque bearer capabilities to immutable Session
@@ -732,9 +860,19 @@ impl AgentCapabilityRegistry {
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .closing_ticket_by_project_session
+            .contains_key(&principal_key)
+        {
+            return Err("agent capability is closing; retry after pane teardown".to_string());
+        }
         let token = loop {
             let candidate = format!("gwt_agent_{}{}", Uuid::new_v4(), Uuid::new_v4());
-            if !state.principals_by_token.contains_key(&candidate) {
+            let collides_with_closing = state
+                .closing_by_ticket
+                .values()
+                .any(|closing| constant_time_token_eq(&candidate, &closing.token));
+            if !state.principals_by_token.contains_key(&candidate) && !collides_with_closing {
                 break candidate;
             }
         };
@@ -749,6 +887,114 @@ impl AgentCapabilityRegistry {
         }
         state.principals_by_token.insert(token.clone(), principal);
         Ok(token)
+    }
+
+    fn begin_self_close_if_current(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentSelfCloseCapabilityTicket> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return None;
+        }
+        let issued_token = state
+            .principals_by_token
+            .keys()
+            .find(|candidate| constant_time_token_eq(&grant.token, candidate))
+            .cloned()?;
+        let principal = state.principals_by_token.remove(&issued_token)?;
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&issued_token, current))
+        {
+            state.token_by_project_session.remove(&principal_key);
+        }
+        let ticket = loop {
+            let candidate = format!("gwt_close_{}{}", Uuid::new_v4(), Uuid::new_v4());
+            if !state.closing_by_ticket.contains_key(&candidate) {
+                break AgentSelfCloseCapabilityTicket { id: candidate };
+            }
+        };
+        state
+            .closing_ticket_by_project_session
+            .insert(principal_key, ticket.id.clone());
+        state.closing_by_ticket.insert(
+            ticket.id.clone(),
+            ClosingAgentCapability {
+                token: issued_token,
+                principal,
+                revoked: false,
+            },
+        );
+        Some(ticket)
+    }
+
+    fn rollback_self_close(&self, ticket: &AgentSelfCloseCapabilityTicket) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(closing) = state.closing_by_ticket.remove(ticket.id()) else {
+            return false;
+        };
+        let principal_key = (
+            closing.principal.canonical_project_root().to_path_buf(),
+            closing.principal.session_id().to_string(),
+        );
+        if state
+            .closing_ticket_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| current == ticket.id())
+        {
+            state
+                .closing_ticket_by_project_session
+                .remove(&principal_key);
+        }
+        if closing.revoked
+            || state.token_by_project_session.contains_key(&principal_key)
+            || state.principals_by_token.contains_key(&closing.token)
+        {
+            return false;
+        }
+        state
+            .token_by_project_session
+            .insert(principal_key, closing.token.clone());
+        state
+            .principals_by_token
+            .insert(closing.token, closing.principal);
+        true
+    }
+
+    fn finish_self_close(&self, ticket: &AgentSelfCloseCapabilityTicket) -> bool {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(closing) = state.closing_by_ticket.remove(ticket.id()) else {
+            return false;
+        };
+        let principal_key = (
+            closing.principal.canonical_project_root().to_path_buf(),
+            closing.principal.session_id().to_string(),
+        );
+        if state
+            .closing_ticket_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| current == ticket.id())
+        {
+            state
+                .closing_ticket_by_project_session
+                .remove(&principal_key);
+        }
+        true
     }
 
     fn authenticate(&self, token: &str) -> Option<AgentSessionPrincipal> {
@@ -831,7 +1077,16 @@ impl AgentCapabilityRegistry {
             .find(|candidate| constant_time_token_eq(token, candidate))
             .cloned()
         else {
-            return false;
+            let closing = state
+                .closing_by_ticket
+                .values_mut()
+                .find(|closing| constant_time_token_eq(token, &closing.token));
+            let Some(closing) = closing else {
+                return false;
+            };
+            let newly_revoked = !closing.revoked;
+            closing.revoked = true;
+            return newly_revoked;
         };
         let Some(principal) = state.principals_by_token.remove(&issued_token) else {
             return false;
@@ -851,11 +1106,11 @@ impl AgentCapabilityRegistry {
     }
 
     fn session_count(&self) -> usize {
-        self.inner
+        let state = self
+            .inner
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .token_by_project_session
-            .len()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.token_by_project_session.len() + state.closing_ticket_by_project_session.len()
     }
 }
 
@@ -915,6 +1170,21 @@ impl AgentCapabilityIssuer {
 
     pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         self.registry.grant_is_current(grant)
+    }
+
+    pub(crate) fn begin_self_close_if_current(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentSelfCloseCapabilityTicket> {
+        self.registry.begin_self_close_if_current(grant)
+    }
+
+    pub(crate) fn rollback_self_close(&self, ticket: &AgentSelfCloseCapabilityTicket) -> bool {
+        self.registry.rollback_self_close(ticket)
+    }
+
+    pub(crate) fn finish_self_close(&self, ticket: &AgentSelfCloseCapabilityTicket) -> bool {
+        self.registry.finish_self_close(ticket)
     }
 
     #[cfg(test)]
@@ -1736,8 +2006,14 @@ impl AgentPaneSessionScope {
     fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
-            FrontendEvent::CloseWindow { id } if self.allowed_window_ids.contains(&id) => {
-                Some(AgentFrontendRequest::CloseWindow { id })
+            FrontendEvent::CloseWindow { id, request_id }
+                if self.allowed_window_ids.contains(&id) =>
+            {
+                Some(AgentFrontendRequest::CloseWindow {
+                    id,
+                    request_id,
+                    responder: None,
+                })
             }
             FrontendEvent::PaneSendInput { session_id, text }
                 if session_id == self.grant.principal().session_id() =>
@@ -1895,6 +2171,32 @@ async fn agent_pane_client_session(
     .await;
 }
 
+async fn send_agent_self_close_acceptance<S>(
+    sender: &mut S,
+    acceptance: AgentSelfCloseDirectAcceptance,
+    deadline_after: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match acceptance.wire_payload() {
+        Ok(payload) => {
+            let _ =
+                tokio::time::timeout(deadline_after, sender.send(Message::Text(payload.into())))
+                    .await;
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to serialize direct pane close acceptance"
+            );
+        }
+    }
+    // The accepted handoff finalizes after the bounded send attempt on every
+    // result. If this future is cancelled while awaiting the sink, Rust drops
+    // the owned acceptance and runs the same finalizer.
+    drop(acceptance);
+}
+
 async fn client_session_with_scope(
     socket: WebSocket,
     state: ServerState,
@@ -1953,8 +2255,21 @@ async fn client_session_with_scope(
                                     }
                                     Some(ScopedFrontendRequest::Agent {
                                         grant,
-                                        request,
+                                        mut request,
                                     }) => {
+                                        let direct_acceptance = match &mut request {
+                                            AgentFrontendRequest::CloseWindow {
+                                                request_id: Some(_),
+                                                responder,
+                                                ..
+                                            } => {
+                                                let (direct_responder, acceptance) =
+                                                    AgentSelfCloseResponder::channel();
+                                                *responder = Some(direct_responder);
+                                                Some(acceptance)
+                                            }
+                                            _ => None,
+                                        };
                                         let event_grant = grant.clone();
                                         let dispatched = state.agent_capabilities.dispatch_if_current(
                                             &grant,
@@ -1971,6 +2286,43 @@ async fn client_session_with_scope(
                                                 target: "gwt_security",
                                                 "agent pane WebSocket capability rotated or revoked before dispatch"
                                             );
+                                            break;
+                                        }
+                                        if let Some(mut direct_acceptance) = direct_acceptance {
+                                            // Correlated self-close is a two-phase exchange. The
+                                            // tao thread first atomically accepts or rejects the
+                                            // current capability generation. Only an accepted
+                                            // request gets a direct response on this origin
+                                            // socket; generic ClientHub traffic is never used.
+                                            let deadline =
+                                                tokio::time::Instant::now() + Duration::from_secs(2);
+                                            let accepted = loop {
+                                                tokio::select! {
+                                                    result = &mut direct_acceptance => {
+                                                        break result.ok();
+                                                    }
+                                                    incoming = receiver.next() => {
+                                                        match incoming {
+                                                            Some(Ok(Message::Close(_)))
+                                                            | Some(Err(_))
+                                                            | None => break None,
+                                                            Some(Ok(_)) => {}
+                                                        }
+                                                    }
+                                                    _ = tokio::time::sleep_until(deadline) => {
+                                                        break None;
+                                                    }
+                                                }
+                                            };
+                                            let Some(acceptance) = accepted else {
+                                                break;
+                                            };
+                                            send_agent_self_close_acceptance(
+                                                &mut sender,
+                                                acceptance,
+                                                Duration::from_secs(2),
+                                            )
+                                            .await;
                                             break;
                                         }
                                     }
@@ -2182,15 +2534,18 @@ mod tests {
     use std::{
         collections::HashMap,
         net::IpAddr,
+        pin::Pin,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+        task::{Context, Poll},
         time::Duration,
     };
 
+    use axum::extract::ws::Message as AxumMessage;
     use axum::http::{
         header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap, StatusCode,
     };
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::{Sink, SinkExt, StreamExt};
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
     use tokio::runtime::Runtime;
@@ -2205,11 +2560,74 @@ mod tests {
 
     use super::{
         agent_bridge_bind_ip, bearer_token, handle_frontend_message, prepare_outbound,
-        queue_class_for_kind, websocket_origin_authorized, AgentCapabilityIssuer,
-        AgentCapabilityRegistry, AgentSessionPrincipal, ClientHub, ClientQueue, DrainStep,
-        EmbeddedServer, QueueClass, ServerState, DRAIN_LOW_WATER, LOSSLESS_HARD_CAP,
-        LOSSY_HIGH_WATER,
+        queue_class_for_kind, send_agent_self_close_acceptance, websocket_origin_authorized,
+        AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
+        AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub, ClientQueue, DrainStep,
+        EmbeddedServer, PreparedOutbound, QueueClass, ServerState, DRAIN_LOW_WATER,
+        LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
+
+    struct FailingMessageSink;
+
+    impl Sink<AxumMessage> for FailingMessageSink {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Err("socket closed"))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: AxumMessage) -> Result<(), Self::Error> {
+            Err("socket closed")
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct PendingMessageSink;
+
+    impl Sink<AxumMessage> for PendingMessageSink {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: AxumMessage) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+    }
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
         let (proxy, events) = AppEventProxy::stub();
@@ -2565,11 +2983,13 @@ mod tests {
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
                 id: "tab-owned::agent-1".to_string(),
+                request_id: None,
             })
             .is_some());
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
                 id: "tab-foreign::agent-2".to_string(),
+                request_id: None,
             })
             .is_none());
         assert!(matches!(
@@ -2610,11 +3030,13 @@ mod tests {
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
                 id: "tab-owned::agent-1".to_string(),
+                request_id: None,
             })
             .is_none());
         assert!(scope
             .filter_inbound(FrontendEvent::CloseWindow {
                 id: "tab-owned::agent-3".to_string(),
+                request_id: None,
             })
             .is_some());
         assert_eq!(
@@ -2673,6 +3095,370 @@ mod tests {
             terminal_snapshot("scoped-tab::agent-1", "scoped snapshot"),
         )]);
         assert!(pane.try_recv().is_some());
+    }
+
+    fn direct_acceptance_for_test(
+        proxy: AppEventProxy,
+        ticket_id: &str,
+    ) -> AgentSelfCloseDirectAcceptance {
+        AgentSelfCloseDirectAcceptance::new(
+            "e544de42-fd9f-49a7-9ba2-b8b16ca1572a".to_string(),
+            "tab-owned::agent-1".to_string(),
+            super::AgentSelfCloseCapabilityTicket {
+                id: ticket_id.to_string(),
+            },
+            proxy,
+        )
+    }
+
+    fn recorded_self_close_commit_ids(events: &Arc<Mutex<Vec<UserEvent>>>) -> Vec<String> {
+        events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|event| match event {
+                UserEvent::CommitAgentSelfClose { ticket } => Some(ticket.id().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn accepted_self_close_send_error_still_finalizes_exactly_once() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut sink = FailingMessageSink;
+
+        runtime.block_on(send_agent_self_close_acceptance(
+            &mut sink,
+            direct_acceptance_for_test(proxy, "send-error-ticket"),
+            Duration::from_secs(1),
+        ));
+
+        assert_eq!(
+            recorded_self_close_commit_ids(&events),
+            vec!["send-error-ticket"]
+        );
+    }
+
+    #[test]
+    fn accepted_self_close_send_timeout_still_finalizes_exactly_once() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut sink = PendingMessageSink;
+
+        runtime.block_on(send_agent_self_close_acceptance(
+            &mut sink,
+            direct_acceptance_for_test(proxy, "send-timeout-ticket"),
+            Duration::from_millis(10),
+        ));
+
+        assert_eq!(
+            recorded_self_close_commit_ids(&events),
+            vec!["send-timeout-ticket"]
+        );
+    }
+
+    #[test]
+    fn accepted_self_close_task_cancellation_still_finalizes_exactly_once() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+
+        runtime.block_on(async {
+            let acceptance = direct_acceptance_for_test(proxy, "cancelled-task-ticket");
+            let task = tokio::spawn(async move {
+                let mut sink = PendingMessageSink;
+                send_agent_self_close_acceptance(&mut sink, acceptance, Duration::from_secs(60))
+                    .await;
+            });
+            tokio::task::yield_now().await;
+            task.abort();
+            assert!(task
+                .await
+                .expect_err("task must be cancelled")
+                .is_cancelled());
+        });
+
+        assert_eq!(
+            recorded_self_close_commit_ids(&events),
+            vec!["cancelled-task-ticket"]
+        );
+    }
+
+    #[test]
+    fn correlated_agent_self_close_acceptance_uses_only_the_origin_socket() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let finalizer_proxy = proxy.clone();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue(project.path(), "session-1")
+            .expect("current target");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let request_id = "e544de42-fd9f-49a7-9ba2-b8b16ca1572a";
+        let window_id = "tab-owned::agent-1";
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+
+            let pane_queue = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let queue = clients
+                        .clients
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .find(|registration| !registration.receives_broadcasts)
+                        .map(|registration| registration.queue.clone());
+                    if let Some(queue) = queue {
+                        break queue;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("pane client registration");
+            assert!(!pane_queue.enqueue(&PreparedOutbound {
+                payload: serde_json::json!({
+                    "kind": "workspace_state",
+                    "workspace": {
+                        "active_tab_id": "tab-owned",
+                        "recent_projects": [],
+                        "tabs": [{
+                            "id": "tab-owned",
+                            "project_root": project.path(),
+                            "workspace": { "windows": [{ "id": window_id }] }
+                        }]
+                    }
+                })
+                .to_string(),
+                kind: "workspace_state",
+                pane_id: None,
+                class: QueueClass::IdempotentLatest,
+            }));
+            let workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("scoped workspace response")
+                .expect("workspace frame")
+                .expect("valid workspace frame");
+            assert!(matches!(workspace, WebSocketMessage::Text(_)));
+
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "close_window",
+                        "id": window_id,
+                        "request_id": request_id,
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send correlated close");
+
+            let (grant, responder) = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let dispatched = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::AgentFrontend { .. }));
+                        position.map(|position| recorded.remove(position))
+                    };
+                    if let Some(UserEvent::AgentFrontend {
+                        grant,
+                        request:
+                            AgentFrontendRequest::CloseWindow {
+                                id,
+                                request_id: Some(correlation),
+                                responder: Some(responder),
+                            },
+                        ..
+                    }) = dispatched
+                    {
+                        assert_eq!(id, window_id);
+                        assert_eq!(correlation, request_id);
+                        break (grant, responder);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("agent close dispatch");
+            let ticket = issuer
+                .begin_self_close_if_current(&grant)
+                .expect("accept current self-close generation");
+            responder
+                .send(AgentSelfCloseDirectAcceptance::new(
+                    request_id.to_string(),
+                    window_id.to_string(),
+                    ticket,
+                    finalizer_proxy.clone(),
+                ))
+                .expect("origin response task is waiting");
+
+            let response = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("direct close acceptance")
+                .expect("acceptance frame")
+                .expect("valid acceptance frame");
+            let WebSocketMessage::Text(response) = response else {
+                panic!("acceptance must be text");
+            };
+            let response: serde_json::Value =
+                serde_json::from_str(response.as_ref()).expect("acceptance JSON");
+            assert_eq!(response["kind"], "pane_close_accepted");
+            assert_eq!(response["request_id"], request_id);
+            assert_eq!(response["window_id"], window_id);
+            assert_eq!(
+                pane_queue.len(),
+                0,
+                "the direct acceptance must not pass through ClientHub"
+            );
+        });
+
+        let ticket = {
+            let mut recorded = events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let position = recorded
+                .iter()
+                .position(|event| matches!(event, UserEvent::CommitAgentSelfClose { .. }))
+                .expect("accepted response attempt must schedule finalization");
+            match recorded.remove(position) {
+                UserEvent::CommitAgentSelfClose { ticket } => ticket,
+                _ => unreachable!("matched self-close finalizer"),
+            }
+        };
+        assert!(issuer.finish_self_close(&ticket));
+        server.shutdown();
+    }
+
+    #[test]
+    fn correlated_agent_self_close_is_rejected_before_enqueue_after_rotation() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let original = issuer
+            .issue(project.path(), "session-1")
+            .expect("original target");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", original.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+            let pane_queue = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let queue = clients
+                        .clients
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .find(|registration| !registration.receives_broadcasts)
+                        .map(|registration| registration.queue.clone());
+                    if let Some(queue) = queue {
+                        break queue;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("pane client registration");
+            assert!(!pane_queue.enqueue(&PreparedOutbound {
+                payload: serde_json::json!({
+                    "kind": "workspace_state",
+                    "workspace": {
+                        "active_tab_id": "tab-owned",
+                        "recent_projects": [],
+                        "tabs": [{
+                            "id": "tab-owned",
+                            "project_root": project.path(),
+                            "workspace": {
+                                "windows": [{ "id": "tab-owned::agent-1" }]
+                            }
+                        }]
+                    }
+                })
+                .to_string(),
+                kind: "workspace_state",
+                pane_id: None,
+                class: QueueClass::IdempotentLatest,
+            }));
+            let _workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("scoped workspace response")
+                .expect("workspace frame")
+                .expect("valid workspace frame");
+
+            issuer
+                .issue(project.path(), "session-1")
+                .expect("rotate capability");
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "close_window",
+                        "id": "tab-owned::agent-1",
+                        "request_id": "52185ac8-3d18-470f-bfc3-73fa5eac2ff5",
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send close after rotation");
+            let _ = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("rotated correlated socket must close");
+        });
+
+        assert!(
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a rotated correlated close must not enqueue AgentFrontend"
+        );
+        server.shutdown();
     }
 
     #[test]
@@ -2911,6 +3697,62 @@ mod tests {
         });
 
         server.shutdown();
+    }
+
+    #[test]
+    fn accepted_self_close_makes_grant_non_current_until_ticket_finishes() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = super::AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:1/internal/hook-live",
+            "ws://127.0.0.1:1/ws",
+            "ws://127.0.0.1:2/internal/pane-ws",
+        );
+        let original = issuer
+            .issue(project.path(), "session-1")
+            .expect("original capability");
+        let grant = issuer
+            .grant_for_test(&original.token)
+            .expect("current grant");
+
+        let ticket = issuer
+            .begin_self_close_if_current(&grant)
+            .expect("begin self-close");
+        assert!(!issuer.grant_is_current(&grant));
+        assert!(!issuer.authenticates_token(&original.token));
+        assert!(
+            issuer.issue(project.path(), "session-1").is_err(),
+            "the same principal cannot reissue while its close ticket is pending"
+        );
+
+        assert!(issuer.rollback_self_close(&ticket));
+        assert!(issuer.grant_is_current(&grant));
+        assert!(issuer.authenticates_token(&original.token));
+
+        let ticket = issuer
+            .begin_self_close_if_current(&grant)
+            .expect("begin accepted self-close");
+        assert!(issuer.revoke_token(&original.token));
+        assert!(
+            !issuer.rollback_self_close(&ticket),
+            "an independently revoked closing grant must never become active again"
+        );
+        assert!(!issuer.grant_is_current(&grant));
+
+        let replacement = issuer
+            .issue(project.path(), "session-1")
+            .expect("reissue after revoked ticket clears");
+        let replacement_grant = issuer
+            .grant_for_test(&replacement.token)
+            .expect("replacement grant");
+        let ticket = issuer
+            .begin_self_close_if_current(&replacement_grant)
+            .expect("begin replacement self-close");
+        assert!(issuer.finish_self_close(&ticket));
+        assert!(
+            !issuer.finish_self_close(&ticket),
+            "ticket replay must be a no-op"
+        );
+        assert!(issuer.issue(project.path(), "session-1").is_ok());
     }
 
     #[test]

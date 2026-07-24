@@ -238,21 +238,33 @@ async fn close_pane(
             window.id == resolved_id && window.session_id.as_deref() == Some(session_id)
         })
     });
-    send_frontend_event(
-        &mut socket,
-        json!({ "kind": "close_window", "id": resolved_id }),
-    )
-    .await?;
-    if closes_calling_session {
+    let close_request_id = closes_calling_session.then(|| uuid::Uuid::new_v4().to_string());
+    let close_event = match &close_request_id {
+        Some(request_id) => {
+            json!({ "kind": "close_window", "id": resolved_id, "request_id": request_id })
+        }
+        None => json!({ "kind": "close_window", "id": resolved_id }),
+    };
+    send_frontend_event(&mut socket, close_event).await?;
+    if let Some(request_id) = close_request_id.as_deref() {
+        wait_for_pane_close_acceptance(
+            &mut socket,
+            request_id,
+            &resolved_id,
+            Duration::from_secs(2),
+        )
+        .await?;
         return Ok(format!("close requested {requested_id}\n"));
     }
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
-    if resolve_window_id(&windows, requested_id).is_none() {
+    if resolve_window_id(&windows, &resolved_id).is_none() {
         Ok(format!("closed {requested_id}\n"))
     } else {
-        Ok(format!("close requested {requested_id}\n"))
+        Err(format!(
+            "pane close: backend did not close {requested_id}; the target may be this authenticated Session and requires a correlated acceptance"
+        ))
     }
 }
 
@@ -376,6 +388,43 @@ struct PaneSendReply {
     ok: bool,
     window_id: Option<String>,
     error: Option<String>,
+}
+
+fn parse_pane_close_acceptance(
+    value: &Value,
+    expected_request_id: &str,
+    expected_window_id: &str,
+) -> Result<bool, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("pane_close_accepted") {
+        return Ok(false);
+    }
+    let request_id = value
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pane_close_accepted missing request_id".to_string())?;
+    let window_id = value
+        .get("window_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pane_close_accepted missing window_id".to_string())?;
+    Ok(request_id == expected_request_id && window_id == expected_window_id)
+}
+
+async fn wait_for_pane_close_acceptance(
+    socket: &mut PaneWebSocket,
+    expected_request_id: &str,
+    expected_window_id: &str,
+    deadline_after: Duration,
+) -> Result<(), String> {
+    tokio::time::timeout(deadline_after, async {
+        loop {
+            let value = next_backend_json(socket).await?;
+            if parse_pane_close_acceptance(&value, expected_request_id, expected_window_id)? {
+                return Ok::<(), String>(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| "pane close: backend timed out before matching pane_close_accepted".to_string())?
 }
 
 fn parse_pane_send_result(value: &Value) -> Result<Option<PaneSendReply>, String> {
@@ -910,9 +959,9 @@ mod tests {
         })
     }
 
-    async fn next_frontend_kind(
+    async fn next_frontend_json(
         socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    ) -> String {
+    ) -> Value {
         let message = socket
             .next()
             .await
@@ -921,17 +970,32 @@ mod tests {
         let Message::Text(text) = message else {
             panic!("frontend frame must be text");
         };
-        let value: Value = serde_json::from_str(text.as_ref()).expect("frontend frame JSON");
+        serde_json::from_str(text.as_ref()).expect("frontend frame JSON")
+    }
+
+    async fn next_frontend_kind(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> String {
+        let value = next_frontend_json(socket).await;
         value["kind"]
             .as_str()
             .expect("frontend frame kind")
             .to_string()
     }
 
+    #[derive(Clone, Copy)]
+    enum SelfCloseMockReply {
+        Matching,
+        Mismatched,
+        UnrelatedThenMatching,
+        CloseWithoutReply,
+    }
+
     async fn spawn_close_pane_mock(
         project_root: &'static str,
         target: PersistedWindowState,
         post_close_windows: Option<Vec<PersistedWindowState>>,
+        self_close_reply: SelfCloseMockReply,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let initial_state = workspace_state_for_test(project_root, vec![target]);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -953,7 +1017,13 @@ mod tests {
                     .expect("send workspace state");
 
                 if connection_index == 1 {
-                    received_kinds.push(next_frontend_kind(&mut socket).await);
+                    let close = next_frontend_json(&mut socket).await;
+                    received_kinds.push(
+                        close["kind"]
+                            .as_str()
+                            .expect("close frontend kind")
+                            .to_string(),
+                    );
                     if let Some(windows) = post_close_windows.as_ref() {
                         received_kinds.push(
                             tokio::time::timeout(
@@ -969,17 +1039,47 @@ mod tests {
                             .send(Message::Text(post_close_state.to_string().into()))
                             .await
                             .expect("send post-close workspace state");
-                    } else if let Ok(Some(Ok(Message::Text(extra)))) =
-                        tokio::time::timeout(Duration::from_millis(250), socket.next()).await
-                    {
-                        let extra: Value =
-                            serde_json::from_str(extra.as_ref()).expect("extra frontend JSON");
-                        received_kinds.push(
-                            extra["kind"]
-                                .as_str()
-                                .expect("extra frontend kind")
-                                .to_string(),
-                        );
+                    } else {
+                        let request_id = close["request_id"]
+                            .as_str()
+                            .expect("self-close request correlation");
+                        match self_close_reply {
+                            SelfCloseMockReply::Matching
+                            | SelfCloseMockReply::Mismatched
+                            | SelfCloseMockReply::UnrelatedThenMatching => {
+                                let response_request_id = match self_close_reply {
+                                    SelfCloseMockReply::Matching
+                                    | SelfCloseMockReply::UnrelatedThenMatching => request_id,
+                                    SelfCloseMockReply::Mismatched => "wrong-request-id",
+                                    SelfCloseMockReply::CloseWithoutReply => unreachable!(),
+                                };
+                                if matches!(
+                                    self_close_reply,
+                                    SelfCloseMockReply::UnrelatedThenMatching
+                                ) {
+                                    socket
+                                        .send(Message::Text(
+                                            json!({ "kind": "runtime_hook_event" })
+                                                .to_string()
+                                                .into(),
+                                        ))
+                                        .await
+                                        .expect("send unrelated backend frame");
+                                }
+                                let accepted = json!({
+                                    "kind": "pane_close_accepted",
+                                    "request_id": response_request_id,
+                                    "window_id": close["id"],
+                                });
+                                socket
+                                    .send(Message::Text(accepted.to_string().into()))
+                                    .await
+                                    .expect("send self-close acceptance");
+                            }
+                            SelfCloseMockReply::CloseWithoutReply => {
+                                socket.close(None).await.expect("close without acceptance");
+                            }
+                        }
                     }
                 }
             }
@@ -990,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn self_pane_close_returns_after_send_without_followup_ready() {
+    fn self_pane_close_requires_matching_server_acceptance() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1008,7 +1108,8 @@ mod tests {
             let project_root = "/repo/self";
             let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
             own.session_id = Some("session-self".to_string());
-            let (ws_url, server) = spawn_close_pane_mock(project_root, own, None).await;
+            let (ws_url, server) =
+                spawn_close_pane_mock(project_root, own, None, SelfCloseMockReply::Matching).await;
 
             let result = close_pane(&ws_url, project_root, "agent-self").await;
             let received_kinds = server.await.expect("pane mock task");
@@ -1019,6 +1120,221 @@ mod tests {
                 vec!["frontend_ready", "frontend_ready", "close_window"],
                 "self-close must not send a second frontend_ready after revocation"
             );
+        });
+    }
+
+    #[test]
+    fn self_pane_close_ignores_unrelated_frames_before_matching_acceptance() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/self";
+            let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".to_string());
+            let (ws_url, server) = spawn_close_pane_mock(
+                project_root,
+                own,
+                None,
+                SelfCloseMockReply::UnrelatedThenMatching,
+            )
+            .await;
+
+            let result = close_pane(&ws_url, project_root, "agent-self").await;
+            server.await.expect("pane mock task");
+
+            assert_eq!(result, Ok("close requested agent-self\n".to_string()));
+        });
+    }
+
+    #[test]
+    fn self_pane_close_absolute_deadline_is_not_extended_by_unrelated_frames() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind flood mock");
+            let address = listener.local_addr().expect("flood mock address");
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept flood connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept flood websocket");
+                loop {
+                    if socket
+                        .send(Message::Text(
+                            json!({ "kind": "runtime_hook_event" }).to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            });
+            let (mut socket, _) = connect_async(format!("ws://{address}/internal/pane-ws"))
+                .await
+                .expect("connect flood websocket");
+            let started = std::time::Instant::now();
+
+            let error = wait_for_pane_close_acceptance(
+                &mut socket,
+                "expected-request",
+                "tab-self::agent-self",
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("unrelated frames must not extend the absolute deadline");
+
+            assert!(error.contains("timed out"), "{error}");
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "absolute deadline was extended by unrelated traffic: {:?}",
+                started.elapsed()
+            );
+            drop(socket);
+            server.abort();
+            let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn own_pane_close_never_reports_success_without_matching_ambient_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            for ambient_session in [None, Some("different-session")] {
+                let _session = match ambient_session {
+                    Some(session_id) => ScopedEnvVar::set(GWT_SESSION_ID_ENV, session_id),
+                    None => ScopedEnvVar::unset(GWT_SESSION_ID_ENV),
+                };
+                let project_root = "/repo/self";
+                let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
+                own.session_id = Some("session-self".to_string());
+                let (ws_url, server) = spawn_close_pane_mock(
+                    project_root,
+                    own.clone(),
+                    Some(vec![own]),
+                    SelfCloseMockReply::Matching,
+                )
+                .await;
+
+                let error = close_pane(&ws_url, project_root, "agent-self")
+                    .await
+                    .expect_err("rejected uncorrelated self-close must not report success");
+                let received_kinds = server.await.expect("pane mock task");
+
+                assert!(
+                    error.contains("requires a correlated acceptance"),
+                    "{error}"
+                );
+                assert_eq!(
+                    received_kinds,
+                    vec![
+                        "frontend_ready",
+                        "frontend_ready",
+                        "close_window",
+                        "frontend_ready"
+                    ]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn self_pane_close_rejects_disconnect_without_acceptance() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/self";
+            let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".to_string());
+            let (ws_url, server) = spawn_close_pane_mock(
+                project_root,
+                own,
+                None,
+                SelfCloseMockReply::CloseWithoutReply,
+            )
+            .await;
+
+            let error = close_pane(&ws_url, project_root, "agent-self")
+                .await
+                .expect_err("disconnect before acceptance must fail");
+            let received_kinds = server.await.expect("pane mock task");
+
+            assert!(error.starts_with("pane "), "{error}");
+            assert_eq!(
+                received_kinds,
+                vec!["frontend_ready", "frontend_ready", "close_window"]
+            );
+        });
+    }
+
+    #[test]
+    fn self_pane_close_rejects_mismatched_acceptance() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/self";
+            let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".to_string());
+            let (ws_url, server) =
+                spawn_close_pane_mock(project_root, own, None, SelfCloseMockReply::Mismatched)
+                    .await;
+
+            let error = close_pane(&ws_url, project_root, "agent-self")
+                .await
+                .expect_err("mismatched acceptance must fail");
+            server.await.expect("pane mock task");
+
+            assert!(error.starts_with("pane "), "{error}");
         });
     }
 
@@ -1041,8 +1357,13 @@ mod tests {
             let project_root = "/repo/peer";
             let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
             peer.session_id = Some("session-peer".to_string());
-            let (ws_url, server) =
-                spawn_close_pane_mock(project_root, peer, Some(Vec::new())).await;
+            let (ws_url, server) = spawn_close_pane_mock(
+                project_root,
+                peer,
+                Some(Vec::new()),
+                SelfCloseMockReply::Matching,
+            )
+            .await;
 
             let result = close_pane(&ws_url, project_root, "agent-peer").await;
             let received_kinds = server.await.expect("pane mock task");
