@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     num::NonZeroU16,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
     time::Instant,
 };
@@ -22,7 +23,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use gwt::{FrontendEvent, HookForwardTarget, RuntimeHookEvent};
+use gwt::{
+    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateRequest, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+};
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, net::TcpListener, runtime::Runtime, sync::oneshot};
@@ -80,6 +84,28 @@ pub struct AccessLogRecord {
 #[derive(Clone, Default)]
 pub struct AccessLogSink {
     inner: Arc<Mutex<std::collections::VecDeque<AccessLogRecord>>>,
+}
+
+#[derive(Clone)]
+struct AccessLogPolicy {
+    sink: AccessLogSink,
+    record_user_agent: bool,
+}
+
+impl AccessLogPolicy {
+    fn browser(sink: AccessLogSink) -> Self {
+        Self {
+            sink,
+            record_user_agent: true,
+        }
+    }
+
+    fn agent(sink: AccessLogSink) -> Self {
+        Self {
+            sink,
+            record_user_agent: false,
+        }
+    }
 }
 
 impl AccessLogSink {
@@ -508,7 +534,7 @@ impl ClientHub {
 struct ServerState {
     proxy: AppEventProxy,
     clients: ClientHub,
-    hook_forward_token: String,
+    agent_capabilities: AgentCapabilityRegistry,
     attachment_upload_token: String,
     attachment_uploads: AttachmentUploadStore,
     pty_writers: PtyWriterRegistry,
@@ -521,13 +547,218 @@ struct ServerState {
 pub struct EmbeddedServer {
     url: String,
     bound_addr: SocketAddr,
-    hook_forward_token: String,
+    agent_capability_issuer: AgentCapabilityIssuer,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    agent_shutdown_tx: Option<oneshot::Sender<()>>,
     // Same rationale as `ServerState::access_log`: tests read it via the
     // `access_log()` accessor; production code (main bootstrap) does not yet
     // surface the sink to the UI.
     #[allow(dead_code)]
     access_log: AccessLogSink,
+}
+
+/// Server-side identity authenticated by an opaque agent capability.
+///
+/// Neither field is accepted as routing authority from an agent request: the
+/// registry derives this principal when the capability is issued and keeps it
+/// process-local for the lifetime of the embedded server.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AgentSessionPrincipal {
+    canonical_project_root: PathBuf,
+    session_id: String,
+}
+
+impl AgentSessionPrincipal {
+    fn new(project_root: &Path, session_id: &str) -> Result<Self, String> {
+        if session_id.trim() != session_id
+            || gwt_agent::validate_session_id_path_component(session_id).is_err()
+        {
+            return Err("agent capability session id must be non-empty and canonical".to_string());
+        }
+
+        let canonical_project_root = dunce::canonicalize(project_root)
+            .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+            .map_err(|_| "agent capability project scope must be an existing canonical root")?;
+
+        Ok(Self {
+            canonical_project_root,
+            session_id: session_id.to_string(),
+        })
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn canonical_project_root(&self) -> &Path {
+        &self.canonical_project_root
+    }
+
+    /// Kept as the narrow project-observation check for the forthcoming
+    /// workspace-update route; hook-live only needs the canonical root value.
+    #[allow(dead_code)]
+    pub(crate) fn authorizes_project_root(&self, project_root: &Path) -> bool {
+        dunce::canonicalize(project_root)
+            .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+            .is_ok_and(|candidate| candidate == self.canonical_project_root)
+    }
+}
+
+impl std::fmt::Debug for AgentSessionPrincipal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentSessionPrincipal")
+            .field("canonical_project_root", &"<redacted>")
+            .field("session_id", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct AgentCapabilityRegistryState {
+    principals_by_token: HashMap<String, AgentSessionPrincipal>,
+    token_by_project_session: HashMap<(PathBuf, String), String>,
+}
+
+/// Process-local map from opaque bearer capabilities to immutable Session
+/// principals. A capability never persists to disk and its bearer is the only
+/// identity material that crosses into an agent process or container.
+#[derive(Clone, Default)]
+struct AgentCapabilityRegistry {
+    inner: Arc<RwLock<AgentCapabilityRegistryState>>,
+}
+
+impl AgentCapabilityRegistry {
+    fn issue(&self, project_root: &Path, session_id: &str) -> Result<String, String> {
+        let principal = AgentSessionPrincipal::new(project_root, session_id)?;
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let token = loop {
+            let candidate = format!("gwt_agent_{}{}", Uuid::new_v4(), Uuid::new_v4());
+            if !state.principals_by_token.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+
+        // Rotation of a project + Session pair happens while one write lock is
+        // held, so no observer can authenticate both the stale and new bearer.
+        if let Some(previous) = state
+            .token_by_project_session
+            .insert(principal_key, token.clone())
+        {
+            state.principals_by_token.remove(&previous);
+        }
+        state.principals_by_token.insert(token.clone(), principal);
+        Ok(token)
+    }
+
+    fn authenticate(&self, token: &str) -> Option<AgentSessionPrincipal> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut authenticated = None;
+        for (candidate, principal) in &state.principals_by_token {
+            if constant_time_token_eq(token, candidate) {
+                authenticated = Some(principal.clone());
+            }
+        }
+        authenticated
+    }
+
+    fn revoke(&self, project_root: &Path, session_id: &str) -> Result<bool, String> {
+        let principal = AgentSessionPrincipal::new(project_root, session_id)?;
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(token) = state.token_by_project_session.remove(&principal_key) else {
+            return Ok(false);
+        };
+        state.principals_by_token.remove(&token);
+        Ok(true)
+    }
+
+    fn session_count(&self) -> usize {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token_by_project_session
+            .len()
+    }
+}
+
+/// In-process authority used by launch orchestration to mint one capability
+/// for a canonical project + Session pair.
+#[derive(Clone)]
+pub(crate) struct AgentCapabilityIssuer {
+    hook_forward_url: String,
+    pane_websocket_url: String,
+    registry: AgentCapabilityRegistry,
+}
+
+impl AgentCapabilityIssuer {
+    fn new(
+        hook_forward_url: String,
+        pane_websocket_url: String,
+        registry: AgentCapabilityRegistry,
+    ) -> Self {
+        Self {
+            hook_forward_url,
+            pane_websocket_url,
+            registry,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(hook_forward_url: &str, pane_websocket_url: &str) -> Self {
+        Self::new(
+            hook_forward_url.to_string(),
+            pane_websocket_url.to_string(),
+            AgentCapabilityRegistry::default(),
+        )
+    }
+
+    pub(crate) fn issue(
+        &self,
+        project_root: &Path,
+        session_id: &str,
+    ) -> Result<HookForwardTarget, String> {
+        Ok(HookForwardTarget {
+            url: self.hook_forward_url.clone(),
+            token: self.registry.issue(project_root, session_id)?,
+        })
+    }
+
+    pub(crate) fn revoke(&self, project_root: &Path, session_id: &str) -> Result<bool, String> {
+        self.registry.revoke(project_root, session_id)
+    }
+
+    pub(crate) fn pane_websocket_url(&self) -> &str {
+        &self.pane_websocket_url
+    }
+}
+
+impl std::fmt::Debug for AgentCapabilityIssuer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentCapabilityIssuer")
+            .field("hook_forward_url", &self.hook_forward_url)
+            .field("pane_websocket_url", &self.pane_websocket_url)
+            .field("registered_sessions", &self.registry.session_count())
+            .finish()
+    }
 }
 
 impl EmbeddedServer {
@@ -610,9 +841,38 @@ impl EmbeddedServer {
             TcpListener::from_std(listener)?
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let hook_forward_token = Uuid::new_v4().to_string();
+        let agent_listener = runtime.block_on(TcpListener::bind(SocketAddr::new(
+            agent_bridge_bind_ip(),
+            0,
+        )))?;
+        let agent_addr = agent_listener.local_addr()?;
+        let (agent_shutdown_tx, agent_shutdown_rx) = oneshot::channel();
+        let agent_capabilities = AgentCapabilityRegistry::default();
+        let agent_capability_issuer = AgentCapabilityIssuer::new(
+            format!("http://127.0.0.1:{}/internal/hook-live", agent_addr.port()),
+            format!(
+                "ws://{}:{}/ws",
+                display_host(local_browser_client_ip(addr.ip())),
+                addr.port()
+            ),
+            agent_capabilities.clone(),
+        );
         let attachment_upload_token = Uuid::new_v4().to_string();
         let access_log = AccessLogSink::default();
+        let server_state = ServerState {
+            proxy,
+            clients,
+            agent_capabilities,
+            attachment_upload_token,
+            attachment_uploads,
+            pty_writers,
+            access_log: access_log.clone(),
+        };
+
+        // Agent-originated HTTP traffic is isolated from the browser surface.
+        // This router is deliberately capability-only; future agent routes can
+        // be added here and reuse the same authenticated principal boundary.
+        let agent_app = agent_router(server_state.clone(), access_log.clone());
 
         // SPEC-3016: every embedded frontend asset route (entrypoints, root
         // JS modules, vendor JS/CSS, stylesheets, fonts) is registered from
@@ -630,19 +890,10 @@ impl EmbeddedServer {
                 "/internal/attachments/upload",
                 post(attachment_upload_handler),
             )
-            .route("/internal/hook-live", post(hook_live_handler))
             .route("/ws", get(websocket_handler))
-            .with_state(ServerState {
-                proxy,
-                clients,
-                hook_forward_token: hook_forward_token.clone(),
-                attachment_upload_token,
-                attachment_uploads,
-                pty_writers,
-                access_log: access_log.clone(),
-            })
+            .with_state(server_state)
             .layer(middleware::from_fn_with_state(
-                access_log.clone(),
+                AccessLogPolicy::browser(access_log.clone()),
                 access_log_middleware,
             ));
 
@@ -699,11 +950,25 @@ impl EmbeddedServer {
             }
         });
 
+        runtime.spawn(async move {
+            let server = axum::serve(
+                agent_listener,
+                agent_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = agent_shutdown_rx.await;
+            });
+            if let Err(error) = server.await {
+                eprintln!("embedded agent bridge error: {error}");
+            }
+        });
+
         Ok(Self {
             url: format!("http://{}:{}/", display_host(addr.ip()), addr.port()),
             bound_addr: addr,
-            hook_forward_token,
+            agent_capability_issuer,
             shutdown_tx: Some(shutdown_tx),
+            agent_shutdown_tx: Some(agent_shutdown_tx),
             access_log,
         })
     }
@@ -728,14 +993,37 @@ impl EmbeddedServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-    }
-
-    pub(super) fn hook_forward_target(&self) -> HookForwardTarget {
-        HookForwardTarget {
-            url: format!("{}internal/hook-live", self.url),
-            token: self.hook_forward_token.clone(),
+        if let Some(tx) = self.agent_shutdown_tx.take() {
+            let _ = tx.send(());
         }
     }
+
+    pub(crate) fn agent_capability_issuer(&self) -> AgentCapabilityIssuer {
+        self.agent_capability_issuer.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn hook_forward_target(&self) -> HookForwardTarget {
+        let project_root = std::env::current_dir().expect("embedded-server test project root");
+        self.agent_capability_issuer
+            .issue(&project_root, "session-1")
+            .expect("canonical embedded-server test session")
+    }
+}
+
+fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
+    Router::new()
+        .route("/internal/hook-live", post(hook_live_handler))
+        .route("/internal/workspace-update", post(workspace_update_handler))
+        .route(
+            "/internal/work-terminalization",
+            post(work_terminalization_handler),
+        )
+        .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            AccessLogPolicy::agent(access_log),
+            access_log_middleware,
+        ))
 }
 
 fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState> {
@@ -984,6 +1272,27 @@ fn display_host(ip: IpAddr) -> String {
     }
 }
 
+fn local_browser_client_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ip => ip,
+    }
+}
+
+fn agent_bridge_bind_ip() -> IpAddr {
+    // Docker Desktop and Podman Machine proxy their host aliases to host
+    // loopback. Native Linux host-gateway aliases target a bridge interface,
+    // so this wildcard bind is intentional and applies only to the
+    // capability-only router protected by an opaque two-UUID bearer; browser
+    // routes stay on the independently configured listener.
+    if cfg!(target_os = "linux") {
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    }
+}
+
 /// SPEC-1942 FR-098: access log middleware. Captures every HTTP request (and
 /// the start of every WebSocket upgrade — the upgrade returns a `101 Switching
 /// Protocols` response which is exactly what we record) into both
@@ -994,18 +1303,21 @@ fn display_host(ip: IpAddr) -> String {
 /// Successful `/internal/hook-live` posts are internal hook-forwarding traffic
 /// and are omitted entirely; failures remain visible for diagnosis.
 async fn access_log_middleware(
-    State(sink): State<AccessLogSink>,
+    State(policy): State<AccessLogPolicy>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
-    let user_agent = request
-        .headers()
-        .get(USER_AGENT)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
+    let user_agent = policy.record_user_agent.then(|| {
+        request
+            .headers()
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    });
+    let user_agent = user_agent.flatten();
 
     let started = Instant::now();
     let response = next.run(request).await;
@@ -1048,7 +1360,7 @@ async fn access_log_middleware(
             "embedded server access"
         );
     }
-    sink.record(record);
+    policy.sink.record(record);
 
     response
 }
@@ -1071,14 +1383,139 @@ async fn websocket_handler(
 async fn hook_live_handler(
     headers: HeaderMap,
     State(state): State<ServerState>,
-    Json(event): Json<RuntimeHookEvent>,
+    Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    if !hook_forward_authorized(&headers, &state.hook_forward_token) {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    if event.gwt_session_id.as_deref() != Some(principal.session_id()) {
+        tracing::warn!(
+            target: "gwt_security",
+            "hook-live session claim did not match the authenticated agent capability"
+        );
         return StatusCode::UNAUTHORIZED;
     }
 
+    // The payload is observational data, not routing authority. Docker agents
+    // may report an in-container cwd, so dispatch uses the server-side scope.
+    event.gwt_session_id = Some(principal.session_id().to_string());
+    event.project_root = Some(
+        principal
+            .canonical_project_root()
+            .to_string_lossy()
+            .into_owned(),
+    );
     state.proxy.send(UserEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
+}
+
+async fn workspace_update_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentWorkspaceUpdateRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::apply_authenticated_workspace_update(&mutation_project_root, &session_id, request)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::Internal,
+                message: "Host workspace mutation task failed before a response was produced"
+                    .to_string(),
+            },
+        ),
+    }
+}
+
+async fn work_terminalization_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentWorkTerminalizationRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::apply_authenticated_work_terminalization(&mutation_project_root, &session_id, request)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::Internal,
+                message: "Host Work terminalization task failed before a response was produced"
+                    .to_string(),
+            },
+        ),
+    }
+}
+
+fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusCode {
+    match code {
+        AgentWorkspaceUpdateErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        AgentWorkspaceUpdateErrorCode::RelaunchRequired
+        | AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+        | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
+        | AgentWorkspaceUpdateErrorCode::IdentityConflict
+        | AgentWorkspaceUpdateErrorCode::TransactionConflict => StatusCode::CONFLICT,
+        AgentWorkspaceUpdateErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn workspace_update_error_response(
+    status: StatusCode,
+    error: AgentWorkspaceUpdateError,
+) -> Response {
+    (status, Json(error)).into_response()
 }
 
 async fn client_session(socket: WebSocket, state: ServerState) {
@@ -1282,12 +1719,39 @@ fn route_terminal_input_with(
     );
 }
 
+#[cfg(test)]
 pub fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    bearer_token(headers).is_some_and(|token| constant_time_token_eq(token, expected_token))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected_token)
+        .filter(|token| !token.is_empty())
+}
+
+fn constant_time_token_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn agent_capability_principal(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Option<AgentSessionPrincipal> {
+    state
+        .agent_capabilities
+        .authenticate(bearer_token(headers)?)
 }
 
 pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
@@ -1319,11 +1783,12 @@ pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent
 mod tests {
     use std::{
         collections::HashMap,
+        net::IpAddr,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
     };
 
     use axum::http::{
-        header::{HOST, ORIGIN},
+        header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap,
     };
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
@@ -1335,10 +1800,11 @@ mod tests {
     use crate::{AppEventProxy, AttachmentUploadStore, OutboundEvent, UserEvent};
 
     use super::{
-        handle_frontend_message, prepare_outbound, queue_class_for_kind, route_terminal_input_with,
-        terminal_input_fast_path, websocket_origin_authorized, ClientHub, ClientQueue, DrainStep,
-        EmbeddedServer, FastPathOutcome, QueueClass, ServerState, DRAIN_LOW_WATER,
-        LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        agent_bridge_bind_ip, bearer_token, handle_frontend_message, prepare_outbound,
+        queue_class_for_kind, route_terminal_input_with, terminal_input_fast_path,
+        websocket_origin_authorized, AgentCapabilityIssuer, AgentCapabilityRegistry,
+        AgentSessionPrincipal, ClientHub, ClientQueue, DrainStep, EmbeddedServer, FastPathOutcome,
+        QueueClass, ServerState, DRAIN_LOW_WATER, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
@@ -1347,7 +1813,7 @@ mod tests {
             ServerState {
                 proxy,
                 clients: ClientHub::default(),
-                hook_forward_token: "token".to_string(),
+                agent_capabilities: AgentCapabilityRegistry::default(),
                 attachment_upload_token: "upload-token".to_string(),
                 attachment_uploads: AttachmentUploadStore::in_system_temp(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -1461,6 +1927,475 @@ mod tests {
             message: None,
             occurred_at: "2026-04-21T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn agent_session_principal_canonicalizes_project_and_redacts_debug() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let aliased_project = project.path().join("child").join("..");
+        std::fs::create_dir_all(project.path().join("child")).expect("project child");
+
+        let principal = AgentSessionPrincipal::new(&aliased_project, "session-secret")
+            .expect("canonical principal");
+        let canonical_project = dunce::canonicalize(project.path()).expect("canonical project");
+
+        assert_eq!(principal.canonical_project_root(), canonical_project);
+        assert_eq!(principal.session_id(), "session-secret");
+        assert!(principal.authorizes_project_root(project.path()));
+        assert!(AgentSessionPrincipal::new(project.path(), "").is_err());
+        assert!(AgentSessionPrincipal::new(project.path(), " session-secret").is_err());
+        let unsafe_session_error = AgentSessionPrincipal::new(project.path(), "../session-secret")
+            .expect_err("unsafe Session id must be rejected");
+        assert!(!unsafe_session_error.contains("session-secret"));
+        assert!(AgentSessionPrincipal::new(project.path(), "session/foreign").is_err());
+
+        let debug = format!("{principal:?}");
+        assert!(!debug.contains("session-secret"));
+        assert!(!debug.contains(&canonical_project.display().to_string()));
+    }
+
+    #[test]
+    fn agent_session_principal_preserves_exact_project_state_scope() {
+        let project_state_root = tempfile::tempdir().expect("Project State root");
+        let child_bare = project_state_root.path().join("project.git");
+        let request = gwt_core::process::ProcessPlanRequest::new("git")
+            .args(["init", "--bare"])
+            .arg(&child_bare);
+        let output = gwt_core::process::resolved_command(request)
+            .expect("resolve git")
+            .output()
+            .expect("initialize child bare repository");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {output:?}"
+        );
+
+        let principal = AgentSessionPrincipal::new(project_state_root.path(), "session-1")
+            .expect("Project State-scoped principal");
+        let canonical_project_state_root =
+            dunce::canonicalize(project_state_root.path()).expect("canonical Project State root");
+        let canonical_bare = dunce::canonicalize(&child_bare).expect("canonical bare repository");
+
+        assert_eq!(
+            principal.canonical_project_root(),
+            canonical_project_state_root,
+            "capability scope must match the exact root persisted in the Session ledger"
+        );
+        assert_ne!(principal.canonical_project_root(), canonical_bare);
+        assert!(principal.authorizes_project_root(project_state_root.path()));
+        assert!(!principal.authorizes_project_root(&child_bare));
+    }
+
+    #[test]
+    fn agent_capability_registry_rotates_same_project_session_atomically() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+
+        let stale = registry
+            .issue(project.path(), "session-1")
+            .expect("first capability");
+        let current = registry
+            .issue(project.path(), "session-1")
+            .expect("rotated capability");
+
+        assert_ne!(stale, current);
+        assert!(registry.authenticate(&stale).is_none());
+        let principal = registry
+            .authenticate(&current)
+            .expect("current capability remains valid");
+        assert_eq!(principal.session_id(), "session-1");
+        assert!(principal.authorizes_project_root(project.path()));
+        assert_eq!(registry.session_count(), 1);
+    }
+
+    #[test]
+    fn agent_capability_registry_keeps_same_session_separate_across_projects() {
+        let project_a = tempfile::tempdir().expect("project A tempdir");
+        let project_b = tempfile::tempdir().expect("project B tempdir");
+        let registry = AgentCapabilityRegistry::default();
+
+        let token_a = registry
+            .issue(project_a.path(), "shared-session")
+            .expect("project A capability");
+        let token_b = registry
+            .issue(project_b.path(), "shared-session")
+            .expect("project B capability");
+
+        assert_ne!(token_a, token_b);
+        let principal_a = registry
+            .authenticate(&token_a)
+            .expect("project A principal");
+        let principal_b = registry
+            .authenticate(&token_b)
+            .expect("project B principal");
+        assert!(principal_a.authorizes_project_root(project_a.path()));
+        assert!(!principal_a.authorizes_project_root(project_b.path()));
+        assert!(principal_b.authorizes_project_root(project_b.path()));
+        assert!(!principal_b.authorizes_project_root(project_a.path()));
+        assert_eq!(registry.session_count(), 2);
+    }
+
+    #[test]
+    fn agent_capability_registry_revoke_retires_only_requested_pair() {
+        let project_a = tempfile::tempdir().expect("project A tempdir");
+        let project_b = tempfile::tempdir().expect("project B tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let token_a = registry
+            .issue(project_a.path(), "session-1")
+            .expect("project A capability");
+        let token_b = registry
+            .issue(project_b.path(), "session-1")
+            .expect("project B capability");
+
+        assert!(registry
+            .revoke(project_a.path(), "session-1")
+            .expect("revoke project A"));
+        assert!(registry.authenticate(&token_a).is_none());
+        assert!(registry.authenticate(&token_b).is_some());
+        assert!(!registry
+            .revoke(project_a.path(), "session-1")
+            .expect("repeat revoke"));
+        assert_eq!(registry.session_count(), 1);
+    }
+
+    #[test]
+    fn bearer_token_parser_rejects_missing_empty_and_non_bearer_values() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(bearer_token(&headers), None);
+
+        headers.insert(AUTHORIZATION, "Bearer ".parse().expect("empty bearer"));
+        assert_eq!(bearer_token(&headers), None);
+
+        headers.insert(
+            AUTHORIZATION,
+            "bearer capability".parse().expect("lowercase bearer"),
+        );
+        assert_eq!(bearer_token(&headers), None);
+
+        headers.insert(
+            AUTHORIZATION,
+            "Basic capability".parse().expect("basic authorization"),
+        );
+        assert_eq!(bearer_token(&headers), None);
+
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer capability".parse().expect("bearer authorization"),
+        );
+        assert_eq!(bearer_token(&headers), Some("capability"));
+    }
+
+    #[test]
+    fn agent_capability_issuer_debug_never_contains_secret_or_principal() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let issuer = AgentCapabilityIssuer::new(
+            "http://127.0.0.1:43123/internal/hook-live".to_string(),
+            "ws://127.0.0.1:43124/ws".to_string(),
+            registry,
+        );
+        let target = issuer
+            .issue(project.path(), "session-secret")
+            .expect("issued target");
+
+        let debug = format!("{issuer:?}");
+        assert!(!debug.contains(&target.token));
+        assert!(!debug.contains("session-secret"));
+        assert!(!debug.contains(&project.path().display().to_string()));
+    }
+
+    #[test]
+    fn agent_bridge_bind_policy_widens_only_for_native_linux_container_access() {
+        let expected = if cfg!(target_os = "linux") {
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        };
+
+        assert_eq!(agent_bridge_bind_ip(), expected);
+    }
+
+    #[test]
+    fn agent_bridge_uses_capability_only_listener_and_rejects_stale_or_foreign_tokens() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let pane_websocket_url = issuer.pane_websocket_url().to_string();
+        let stale = issuer
+            .issue(project.path(), "session-1")
+            .expect("stale target");
+        let current = issuer
+            .issue(project.path(), "session-1")
+            .expect("current target");
+        let foreign = issuer
+            .issue(foreign_project.path(), "session-2")
+            .expect("foreign target");
+        let client = reqwest::blocking::Client::new();
+
+        assert_ne!(
+            reqwest::Url::parse(server.url())
+                .expect("browser URL")
+                .port_or_known_default(),
+            reqwest::Url::parse(&current.url)
+                .expect("agent URL")
+                .port_or_known_default(),
+        );
+        assert_eq!(
+            reqwest::Url::parse(&pane_websocket_url)
+                .expect("pane WebSocket URL")
+                .port_or_known_default(),
+            reqwest::Url::parse(server.url())
+                .expect("browser URL")
+                .port_or_known_default(),
+        );
+        assert_ne!(
+            reqwest::Url::parse(&pane_websocket_url)
+                .expect("pane WebSocket URL")
+                .port_or_known_default(),
+            reqwest::Url::parse(&current.url)
+                .expect("agent URL")
+                .port_or_known_default(),
+        );
+        assert_eq!(
+            reqwest::Url::parse(&current.url)
+                .expect("agent URL")
+                .host_str(),
+            Some("127.0.0.1")
+        );
+
+        let agent_health = client
+            .get(
+                reqwest::Url::parse(&current.url)
+                    .expect("agent URL")
+                    .join("/healthz")
+                    .expect("agent health URL"),
+            )
+            .send()
+            .expect("agent health request");
+        assert_eq!(agent_health.status(), HttpStatusCode::NOT_FOUND);
+
+        let browser_hook = client
+            .post(format!("{}internal/hook-live", server.url()))
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("browser hook request");
+        assert_eq!(browser_hook.status(), HttpStatusCode::NOT_FOUND);
+
+        let stale_response = client
+            .post(&stale.url)
+            .bearer_auth(&stale.token)
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("stale hook request");
+        assert_eq!(stale_response.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let foreign_response = client
+            .post(&foreign.url)
+            .bearer_auth(&foreign.token)
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("foreign hook request");
+        assert_eq!(foreign_response.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let accepted = client
+            .post(&current.url)
+            .bearer_auth(&current.token)
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("current hook request");
+        assert_eq!(accepted.status(), HttpStatusCode::NO_CONTENT);
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let [UserEvent::RuntimeHook(recorded_event)] = recorded.as_slice() else {
+            panic!("only the current matching capability should dispatch: {recorded:?}");
+        };
+        let canonical_project = dunce::canonicalize(project.path())
+            .expect("canonical project")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(recorded_event.gwt_session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            recorded_event.project_root.as_deref(),
+            Some(canonical_project.as_str())
+        );
+
+        drop(recorded);
+        server.shutdown();
+    }
+
+    #[test]
+    fn workspace_update_route_authenticates_before_host_mutation_service() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let foreign_project = tempfile::tempdir().expect("foreign project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let stale = issuer
+            .issue(project.path(), "session-1")
+            .expect("stale target");
+        let current = issuer
+            .issue(project.path(), "session-1")
+            .expect("current target");
+        let foreign = AgentCapabilityIssuer::new(
+            current.url.clone(),
+            issuer.pane_websocket_url().to_string(),
+            AgentCapabilityRegistry::default(),
+        )
+        .issue(foreign_project.path(), "session-1")
+        .expect("foreign-registry target");
+        let mut workspace_update_url = reqwest::Url::parse(&current.url).expect("agent hook URL");
+        workspace_update_url.set_path("/internal/workspace-update");
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "different-session",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            },
+            "intent": {}
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let browser_response = client
+            .post(format!("{}internal/workspace-update", server.url()))
+            .json(&request)
+            .send()
+            .expect("browser workspace-update request");
+        assert_eq!(browser_response.status(), HttpStatusCode::NOT_FOUND);
+
+        for (case, token) in [
+            ("missing", None),
+            ("stale", Some(stale.token.as_str())),
+            ("foreign", Some(foreign.token.as_str())),
+        ] {
+            let mut request_builder = client.post(workspace_update_url.clone()).json(&request);
+            if let Some(token) = token {
+                request_builder = request_builder.bearer_auth(token);
+            }
+            let response = request_builder
+                .send()
+                .unwrap_or_else(|error| panic!("{case} workspace-update request: {error}"));
+            assert_eq!(
+                response.status(),
+                HttpStatusCode::UNAUTHORIZED,
+                "{case} bearer must be rejected before Host mutation"
+            );
+            let body = response.text().expect("unauthorized response body");
+            assert!(!body.contains(&stale.token));
+            assert!(!body.contains(&foreign.token));
+        }
+
+        let current_response = client
+            .post(workspace_update_url)
+            .bearer_auth(&current.token)
+            .json(&request)
+            .send()
+            .expect("current workspace-update request");
+        assert_eq!(current_response.status(), HttpStatusCode::CONFLICT);
+        let error: serde_json::Value = current_response
+            .json()
+            .expect("Host mutation service error body");
+        assert_eq!(error["code"], "provenance_mismatch");
+        assert!(error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Session claim")));
+        assert!(!error.to_string().contains(&current.token));
+        assert!(events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn work_terminalization_route_authenticates_before_host_mutation_service() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let target = server
+            .agent_capability_issuer()
+            .issue(project.path(), "session-1")
+            .expect("terminalization target");
+        let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+        url.set_path("/internal/work-terminalization");
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "different-session",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            },
+            "terminal_kind": "done"
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let browser_response = client
+            .post(format!("{}internal/work-terminalization", server.url()))
+            .json(&request)
+            .send()
+            .expect("browser terminalization request");
+        assert_eq!(browser_response.status(), HttpStatusCode::NOT_FOUND);
+
+        let unauthorized = client
+            .post(url.clone())
+            .json(&request)
+            .send()
+            .expect("unauthorized terminalization request");
+        assert_eq!(unauthorized.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let authenticated = client
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&request)
+            .send()
+            .expect("authenticated terminalization request");
+        assert_eq!(authenticated.status(), HttpStatusCode::CONFLICT);
+        let error: serde_json::Value = authenticated
+            .json()
+            .expect("terminalization service error body");
+        assert_eq!(error["code"], "provenance_mismatch");
+        assert!(error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Session claim")));
+        assert!(events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
+        server.shutdown();
     }
 
     #[test]
@@ -2196,7 +3131,7 @@ mod tests {
         let hook = server.hook_forward_target();
         let client = reqwest::blocking::Client::new();
 
-        assert_eq!(hook.url, format!("{}internal/hook-live", server.url()));
+        assert_ne!(hook.url, format!("{}internal/hook-live", server.url()));
 
         let health = client
             .get(format!("{}healthz", server.url()))
@@ -2414,6 +3349,100 @@ mod tests {
     }
 
     #[test]
+    fn failed_agent_routes_never_record_client_metadata_that_can_repeat_capability_secrets() {
+        const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("server");
+        let hook = server.hook_forward_target();
+        let mut workspace_update_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        workspace_update_url.set_path("/internal/workspace-update");
+        let mut work_terminalization_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        work_terminalization_url.set_path("/internal/work-terminalization");
+        let workspace_request = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "session-1",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            },
+            "intent": {}
+        });
+        let terminalization_request = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "session-1",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            },
+            "terminal_kind": "done"
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let hook_response = client
+            .post(&hook.url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("unauthorized hook request");
+        assert_eq!(hook_response.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let workspace_response = client
+            .post(workspace_update_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&workspace_request)
+            .send()
+            .expect("unauthorized workspace-update request");
+        assert_eq!(workspace_response.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let terminalization_response = client
+            .post(work_terminalization_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&terminalization_request)
+            .send()
+            .expect("unauthorized Work terminalization request");
+        assert_eq!(
+            terminalization_response.status(),
+            HttpStatusCode::UNAUTHORIZED
+        );
+
+        let records = server.access_log().snapshot();
+        for path in [
+            "/internal/hook-live",
+            "/internal/workspace-update",
+            "/internal/work-terminalization",
+        ] {
+            let record = records
+                .iter()
+                .find(|record| record.path == path)
+                .unwrap_or_else(|| panic!("failed {path} access should remain visible"));
+            assert_eq!(record.status, 401);
+            assert_eq!(
+                record.user_agent, None,
+                "agent access records must not retain caller-controlled metadata"
+            );
+        }
+        assert!(
+            !format!("{records:?}").contains(TOKEN_SENTINEL),
+            "agent access records must stay capability-secret-free"
+        );
+
+        server.shutdown();
+    }
+
+    #[test]
     fn embedded_server_streams_attachment_uploads_into_upload_store() {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
@@ -2583,6 +3612,13 @@ mod tests {
             server.url().starts_with("http://0.0.0.0:"),
             "0.0.0.0 bind must surface 0.0.0.0 url, got {}",
             server.url(),
+        );
+        assert!(
+            server
+                .agent_capability_issuer()
+                .pane_websocket_url()
+                .starts_with("ws://127.0.0.1:"),
+            "pane clients must receive a connectable loopback URL for a wildcard browser bind"
         );
         server.shutdown();
     }

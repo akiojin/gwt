@@ -1,11 +1,38 @@
 use std::{collections::BTreeSet, env, fs, io::Write, path::Path, process::Stdio};
 
+use chrono::Utc;
 use gwt_agent::{AgentId, Session};
 use gwt_core::process::hidden_command;
 use gwt_core::{
-    paths::project_scope_hash, workspace_projection::load_workspace_projection_from_path,
+    paths::project_scope_hash,
+    workspace_projection::{
+        append_workspace_work_event_to_path, load_workspace_projection_from_path,
+        save_workspace_projection_to_path, save_workspace_work_items_projection_to_path, WorkEvent,
+        WorkEventKind, WorkItemsProjection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+        WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceStatusCategory,
+    },
 };
 use tempfile::TempDir;
+
+fn isolated_gwtd_command() -> std::process::Command {
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+    for key in [
+        "GWT_BIN_PATH",
+        "GWT_BROWSER_URL_FILE",
+        "GWT_HOOK_BIN",
+        "GWT_HOOK_FORWARD_TOKEN",
+        "GWT_HOOK_FORWARD_URL",
+        "GWT_PROJECT_ROOT",
+        "GWT_REPO_HASH",
+        "GWT_SESSION_ID",
+        "GWT_SESSION_KIND",
+        "GWT_SESSION_RUNTIME_PATH",
+        "GWT_WORKTREE_HASH",
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
 
 fn prepared_hook_session() -> (TempDir, TempDir, String) {
     let home = tempfile::tempdir().expect("home tempdir");
@@ -20,7 +47,7 @@ fn prepared_hook_session() -> (TempDir, TempDir, String) {
 
 #[test]
 fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .args(["__internal", "daemon-hook", "forward"])
         .stdin(Stdio::null())
         .output()
@@ -40,7 +67,7 @@ fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
 
 #[test]
 fn gwtd_help_describes_the_headless_cli_surface() {
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .arg("--help")
         .output()
         .expect("run gwtd --help");
@@ -62,10 +89,99 @@ fn gwtd_help_describes_the_headless_cli_surface() {
 fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
-        .current_dir(project.path())
+    let project_root = project
+        .path()
+        .canonicalize()
+        .expect("canonical project root");
+    let branch = "work/bin-json";
+    let session_id = "session-bin-json";
+    let work_id = "work-bin-json";
+    let run_git = |args: &[&str]| {
+        let output = hidden_command("git")
+            .args(args)
+            .current_dir(&project_root)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "-q", "-b", branch]);
+    run_git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/acme/gwtd-bin-json.git",
+    ]);
+
+    let mut session = Session::new(&project_root, branch, AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(project_root.clone());
+    assert!(
+        session.repo_hash.is_some(),
+        "fixture origin must set repo hash"
+    );
+    session
+        .save(&home.path().join(".gwt/sessions"))
+        .expect("save Session ledger fixture");
+
+    let state_dir = home
+        .path()
+        .join(".gwt/projects")
+        .join(project_scope_hash(&project_root).as_str())
+        .join("project-state");
+    let current_path = state_dir.join("current.json");
+    let works_path = state_dir.join("works.json");
+    let tracked_events_path = project_root.join(".gwt/work/events.jsonl");
+    let now = Utc::now();
+    let mut projection = WorkspaceProjection::default_for_project(&project_root);
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: session_id.to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: Some("fixture focus".to_string()),
+        title_summary: Some("Fixture Work".to_string()),
+        worktree_path: Some(project_root.clone()),
+        branch: Some(branch.to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some(work_id.to_string()),
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current_path, &projection)
+        .expect("save canonical Session assignment");
+
+    let mut event = WorkEvent::new(WorkEventKind::Start, work_id, now);
+    event.title = Some("Fixture Work".to_string());
+    event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.agent_session_id = Some(session_id.to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(project_root.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let mut work_items = WorkItemsProjection::empty(now);
+    let _ = work_items.apply_event(event.clone());
+    save_workspace_work_items_projection_to_path(&works_path, &work_items)
+        .expect("save assigned WorkItems fixture");
+    append_workspace_work_event_to_path(&tracked_events_path, &event)
+        .expect("save tracked Work event fixture");
+
+    let mut child = isolated_gwtd_command()
+        .current_dir(&project_root)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
+        .env("GWT_SESSION_ID", session_id)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -103,12 +219,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
         "stdout should be success JSON with ok=true, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let projection_path = home
-        .path()
-        .join(".gwt/projects")
-        .join(project_scope_hash(project.path()).as_str())
-        .join("project-state/current.json");
-    let projection = load_workspace_projection_from_path(&projection_path)
+    let projection = load_workspace_projection_from_path(&current_path)
         .expect("load workspace projection")
         .expect("workspace projection should be written under isolated home");
     let agent = projection
@@ -128,7 +239,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
         ["index", "--help"].as_slice(),
         ["workspace", "update", "--title-summary", "legacy"].as_slice(),
     ] {
-        let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        let output = isolated_gwtd_command()
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -151,7 +262,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
 
 #[test]
 fn gwtd_index_help_lists_every_rebuild_scope() {
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .args(["--help", "index"])
         .output()
         .expect("run gwtd --help index");
@@ -177,7 +288,8 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         None => std::env::remove_var("GWT_HOOK_BIN"),
     }
 
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
+        .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -229,7 +341,7 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
 #[test]
 fn gwtd_managed_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .current_dir(worktree.path())
         .args(["hook", "event", "SessionStart"])
         .env("HOME", home.path())
@@ -255,7 +367,7 @@ fn gwtd_managed_hook_event_remains_argv_transport_exception() {
 #[test]
 fn gwtd_provider_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = isolated_gwtd_command()
         .current_dir(worktree.path())
         .args(["hook", "provider-event", "opencode", "session.created"])
         .env("HOME", home.path())
@@ -311,7 +423,7 @@ fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
         .expect("git remote add")
         .success());
 
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .current_dir(repo.path())
         .args(["hook", "gwt-self-improvement-stop"])
         .env("HOME", home.path())
@@ -362,7 +474,7 @@ fn gwtd_direct_self_improvement_stop_bypasses_repo_coordinate_bootstrap() {
     )
     .expect("compose PATH");
 
-    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let output = isolated_gwtd_command()
         .current_dir(repo.path())
         .args(["hook", "gwt-self-improvement-stop"])
         .env("HOME", home.path())
@@ -471,7 +583,7 @@ fn generated_hook_subcommands(corpus: &str) -> BTreeSet<String> {
 fn gwtd_hook_argv_rejected(args: &[&str], stdin: &str) -> (bool, String) {
     let home = tempfile::tempdir().expect("home tempdir");
     let cwd = tempfile::tempdir().expect("cwd tempdir");
-    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = isolated_gwtd_command()
         .current_dir(cwd.path())
         .args(args)
         .env("HOME", home.path())
