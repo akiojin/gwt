@@ -1048,6 +1048,12 @@ impl AppRuntime {
                         events
                     }
                     Err(error) => {
+                        // The session is provisional until the PTY handoff
+                        // succeeds. Do not leave an Active projection behind
+                        // when process startup fails; this is the rollback
+                        // boundary for Continue work / fresh fallback.
+                        self.active_agent_sessions.remove(&window_id);
+                        let _ = self.persist();
                         self.launch_error_events(window_id, error, launch_feedback_context)
                     }
                 }
