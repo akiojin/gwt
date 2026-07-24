@@ -52,6 +52,15 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
 }
 
+#[doc(hidden)]
+pub use agent_project_state::{
+    apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
+    observe_agent_runtime, AgentRuntimeObservation, AgentWorkTerminalKind,
+    AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
+    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
+    AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+};
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
     cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
@@ -89,15 +98,17 @@ pub use index_worker::{
     ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
-    is_auto_improve_candidate, issue_monitor_launch_plan, issue_monitor_launch_profile_summary,
-    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path, load_issue_monitor_prefs,
-    save_issue_monitor_prefs, scan_issue_monitor_candidates, AutonomousIssueRecord,
-    AutonomousPhase, AutonomousReviewDispatch, EligibilityDecision, FailureClass,
+    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project, issue_monitor_launch_plan,
+    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
+    issue_monitor_prefs_path_for_repo_path, load_issue_monitor_prefs, mutate_issue_monitor_prefs,
+    mutate_issue_monitor_prefs_recovering, save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
+    AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorCandidateSource,
     IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue,
     IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue,
     IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, MonitorInboxState,
+    IssueMonitorStatusView, MonitorInboxState, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,

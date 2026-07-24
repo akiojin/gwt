@@ -227,6 +227,18 @@ pub(super) const STOP_REMINDER_SHORT_JA: &str = "Board Post Reminder (Stop): age
 停止前に追加の completed-status post は不要です。Work current state が変わった場合は \
 `workspace.update` JSON envelope で更新し、Agent/window title bar には `params.purpose` を設定します。";
 
+pub(super) const TERMINAL_SETTLEMENT_REMINDER: &str = "# Board Post Reminder\n\
+\n\
+The Work lifecycle is in terminal delivery settlement. Keep coordination and blocker handoff on the Board, but do not append another tracked Work-state event. Finish in this order: final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. When the final event is the only bookkeeping change, use a scoped Conventional Commit with the exact `chore(work):` prefix.";
+
+pub(super) const TERMINAL_SETTLEMENT_REMINDER_JA: &str = "# Board Post Reminder\n\
+\n\
+Work lifecycle は終端 delivery settlement 中です。coordination と blocker handoff は Board に残せますが、tracked Work-state event を追加しないでください。final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion の順で完了します。final event だけが bookkeeping change の場合は、exact `chore(work):` prefix の scoped Conventional Commit を使用できます。";
+
+pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
+
+pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion です。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
+
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\
 If this task produced a reusable lesson, decision, failure pattern, or agent workflow correction, \
