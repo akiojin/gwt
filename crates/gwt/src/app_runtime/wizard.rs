@@ -912,9 +912,10 @@ impl AppRuntime {
             .as_deref()
             .is_some_and(|id| !id.trim().is_empty())
         {
-            return reply_error(
-                "The requested Session id is not resumable; use the Work Resume picker or start a new Work.".to_string(),
-            );
+            // A persisted Session may outlive its provider conversation. Start
+            // a fresh conversation instead of leaving Continue work at a
+            // dead-end; the launch prompt carries the handoff context.
+            builder = builder.session_mode(gwt_agent::SessionMode::Normal);
         } else if session.agent_id.supports_resume_picker() {
             builder = builder.session_mode(gwt_agent::SessionMode::Resume);
         } else {
