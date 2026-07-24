@@ -1052,7 +1052,7 @@ impl AppRuntime {
                         // succeeds. Do not leave an Active projection behind
                         // when process startup fails; this is the rollback
                         // boundary for Continue work / fresh fallback.
-                        self.active_agent_sessions.remove(&window_id);
+                        self.mark_agent_session_stopped(&window_id);
                         let _ = self.persist();
                         self.launch_error_events(window_id, error, launch_feedback_context)
                     }
