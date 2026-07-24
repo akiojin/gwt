@@ -32,7 +32,7 @@ use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
-    docker_binary_for_launch, finalize_docker_agent_launch_config, geometry_to_pty_size,
+    finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
     install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
     launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
@@ -108,22 +108,30 @@ fn install_agent_capability_env(
     project_root: &Path,
     session_id: &str,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
-    container_runtime_binary: &str,
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
 ) -> Result<(), String> {
     let Some(issuer) = issuer else {
         return Ok(());
     };
+    let runtime_kind = container_runtime.map(gwt_docker::detect::ResolvedContainerRuntime::kind);
     let pane_websocket_url = gwt_agent::pane_websocket_url_for_launch_runtime(
         issuer.pane_websocket_url(),
+        issuer.agent_pane_websocket_url(),
         runtime_target,
-        container_runtime_binary,
+        runtime_kind,
     )?;
     let target = issuer.issue(project_root, session_id)?;
-    let forward_url = gwt_agent::hook_forward_url_for_launch_runtime(
+    let forward_url = match gwt_agent::hook_forward_url_for_launch_runtime(
         &target.url,
         runtime_target,
-        container_runtime_binary,
-    )?;
+        runtime_kind,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            issuer.revoke_token(&target.token);
+            return Err(error);
+        }
+    };
     env.insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), forward_url);
     env.insert(
         gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
@@ -849,7 +857,12 @@ impl AppRuntime {
                 runtime_target,
                 agent_project_root,
             )) => {
+                let issued_capability_token = process_launch
+                    .env
+                    .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                    .cloned();
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
@@ -857,6 +870,7 @@ impl AppRuntime {
                     );
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
+                    self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events(
                         window_id,
                         "Project tab not found".to_string(),
@@ -868,6 +882,7 @@ impl AppRuntime {
                 // launch bursts cheap).
                 self.spawn_work_events_ingest(tab.project_root.clone(), false);
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
+                    self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
@@ -879,6 +894,16 @@ impl AppRuntime {
                 let geometry = window.geometry.clone();
                 let session_id_for_restore = session_id.clone();
 
+                if let Some(token) = issued_capability_token {
+                    if let Some(previous) = self
+                        .agent_capability_tokens
+                        .insert(window_id.clone(), token.clone())
+                    {
+                        if previous != token {
+                            self.revoke_unbound_agent_capability(Some(&previous));
+                        }
+                    }
+                }
                 self.active_agent_sessions.insert(
                     window_id.clone(),
                     ActiveAgentSession {
@@ -1048,6 +1073,7 @@ impl AppRuntime {
                         events
                     }
                     Err(error) => {
+                        self.revoke_agent_capability_for_window(&window_id);
                         self.launch_error_events(window_id, error, launch_feedback_context)
                     }
                 }
@@ -1578,6 +1604,7 @@ impl AppRuntime {
                     window_id.clone(),
                 )
             });
+        let mut issued_capability_token = None;
         let result = (|| {
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -1589,7 +1616,8 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Starting Docker service...".to_string(),
             });
-            apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+            let container_runtime =
+                apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -1735,21 +1763,27 @@ impl AppRuntime {
                 runtime_path.display().to_string(),
             );
             let runtime_target = config.runtime_target;
-            let container_runtime_binary = docker_binary_for_launch();
             install_agent_capability_env(
                 &mut config.env_vars,
                 agent_capability_issuer.as_ref(),
                 Path::new(&project_root),
                 &session_id,
                 runtime_target,
-                &container_runtime_binary,
+                container_runtime.as_ref(),
             )?;
+            issued_capability_token = config
+                .env_vars
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .cloned();
             config
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            let docker_runtime_worktree =
-                finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
+            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
+                Path::new(&project_root),
+                &mut config,
+                container_runtime.as_ref(),
+            )?;
             let agent_project_root = docker_runtime_worktree.unwrap_or_else(|| {
                 config
                     .env_vars
@@ -1858,6 +1892,12 @@ impl AppRuntime {
                 );
             }
             Err(error) => {
+                if let (Some(issuer), Some(token)) = (
+                    agent_capability_issuer.as_ref(),
+                    issued_capability_token.as_deref(),
+                ) {
+                    issuer.revoke_token(token);
+                }
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
                     result: Err(error),
@@ -1968,21 +2008,10 @@ impl AppRuntime {
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
+            self.revoke_agent_capability_for_window(window_id);
             return;
         };
-        if let (Some(issuer), Some(project_root)) = (
-            self.agent_capability_issuer.as_ref(),
-            self.tab(&session.tab_id)
-                .map(|tab| tab.project_root.as_path()),
-        ) {
-            if let Err(error) = issuer.revoke(project_root, &session.session_id) {
-                tracing::warn!(
-                    session_id = %session.session_id,
-                    error = %error,
-                    "failed to revoke stopped Agent capability"
-                );
-            }
-        }
+        self.revoke_agent_capability_for_window(window_id);
         // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
@@ -2054,6 +2083,17 @@ impl AppRuntime {
             // Cannot enumerate: fall back to "gone means it was ephemeral".
             Err(_) => !session.worktree_path.exists(),
         }
+    }
+
+    fn revoke_unbound_agent_capability(&self, token: Option<&str>) {
+        if let (Some(issuer), Some(token)) = (self.agent_capability_issuer.as_ref(), token) {
+            issuer.revoke_token(token);
+        }
+    }
+
+    fn revoke_agent_capability_for_window(&mut self, window_id: &str) {
+        let token = self.agent_capability_tokens.remove(window_id);
+        self.revoke_unbound_agent_capability(token.as_deref());
     }
 
     /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
@@ -2309,9 +2349,11 @@ mod docker_session_persistence_tests {
         config.docker_service = Some("app".to_string());
         config.command = "codex".to_string();
         config.args = vec!["--no-alt-screen".to_string()];
-        let runtime_worktree = finalize_docker_agent_launch_config(&project, &mut config)
-            .expect("finalize Docker launch")
-            .expect("Docker runtime worktree");
+        let runtime = crate::resolved_test_docker_runtime(temp.path());
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize Docker launch")
+                .expect("Docker runtime worktree");
 
         let mut session = gwt_agent::Session::new(
             &project,
@@ -2338,6 +2380,7 @@ mod docker_session_persistence_tests {
             remove_env: config.remove_env,
             cwd: config.working_dir,
         };
+        assert_eq!(process_launch.command, runtime.binary());
         let workdir_index = process_launch
             .args
             .iter()
@@ -2372,11 +2415,12 @@ mod agent_endpoint_env_tests {
     use super::*;
 
     #[test]
-    fn launch_injects_browser_pane_websocket_separately_from_capability_listener() {
+    fn launch_injects_the_runtime_specific_pane_websocket_endpoint() {
         let project = tempfile::tempdir().expect("project tempdir");
         let issuer = AgentCapabilityIssuer::for_test(
             "http://127.0.0.1:45123/internal/hook-live",
             "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
         );
         let mut env = HashMap::new();
 
@@ -2386,7 +2430,7 @@ mod agent_endpoint_env_tests {
             project.path(),
             "session-pane-env",
             gwt_agent::LaunchRuntimeTarget::Host,
-            "unused-host-runtime",
+            None,
         )
         .expect("install agent launch endpoints");
 
@@ -2397,17 +2441,18 @@ mod agent_endpoint_env_tests {
         );
         assert_eq!(
             env.get(gwt_agent::GWT_PANE_WS_URL_ENV).map(String::as_str),
-            Some("ws://127.0.0.1:46234/ws")
+            Some("ws://127.0.0.1:45123/internal/pane-ws")
         );
 
         let mut docker_env = HashMap::new();
+        let docker_runtime = crate::resolved_test_docker_runtime(project.path());
         install_agent_capability_env(
             &mut docker_env,
             Some(&issuer),
             project.path(),
             "session-pane-env-docker",
             gwt_agent::LaunchRuntimeTarget::Docker,
-            "docker",
+            Some(&docker_runtime),
         )
         .expect("install Docker agent launch endpoints");
 
@@ -2421,7 +2466,83 @@ mod agent_endpoint_env_tests {
             docker_env
                 .get(gwt_agent::GWT_PANE_WS_URL_ENV)
                 .map(String::as_str),
-            Some("ws://host.docker.internal:46234/ws")
+            Some("ws://host.docker.internal:45123/internal/pane-ws")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_contract_pins_a_stateful_wrapper_across_override_and_endpoint_consumers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+counter="$0.count"
+count=0
+if [ -f "$counter" ]; then
+  read count < "$counter"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  printf 'Docker version 28.3.0, build test\n'
+else
+  printf 'podman version 5.4.2\n'
+fi
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+        )
+        .expect("resolve launch runtime once");
+        let bundle = crate::docker_launch::docker_bundle_mounts_for_home(temp.path());
+        let override_content = crate::docker_launch::docker_bundle_override_content_for_runtime(
+            "app",
+            &bundle,
+            runtime.kind(),
+        );
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut env = HashMap::new();
+        install_agent_capability_env(
+            &mut env,
+            Some(&issuer),
+            temp.path(),
+            "session-stateful-runtime",
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            Some(&runtime),
+        )
+        .expect("install pinned Docker endpoints");
+
+        assert!(override_content.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert_eq!(
+            env.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        assert_eq!(
+            env.get(gwt_agent::GWT_PANE_WS_URL_ENV).map(String::as_str),
+            Some("ws://host.docker.internal:45123/internal/pane-ws")
+        );
+        assert_eq!(
+            std::fs::read_to_string(wrapper.with_extension("count"))
+                .expect("read wrapper probe count")
+                .trim(),
+            "1",
+            "one launch must probe a configured runtime wrapper exactly once"
         );
     }
 }

@@ -4,8 +4,9 @@
 //! Docker-related files (Dockerfile, docker-compose.yml, .devcontainer/).
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use tracing::{debug, info};
@@ -17,6 +18,7 @@ pub const PODMAN_HOST_BRIDGE_NAME: &str = "host.containers.internal";
 /// Compose mapping required to make Docker's reserved host alias available on
 /// Linux as well as Docker Desktop.
 pub const DOCKER_HOST_GATEWAY_EXTRA_HOST: &str = "host.docker.internal:host-gateway";
+const CONTAINER_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Container CLI selected for a launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,51 @@ impl ContainerRuntimeKind {
     }
 }
 
+/// Container runtime identity resolved once for a launch.
+///
+/// Keeping the configured binary and detected kind together prevents a
+/// stateful wrapper from being re-probed by each launch-contract consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedContainerRuntime {
+    binary: String,
+    kind: ContainerRuntimeKind,
+}
+
+impl ResolvedContainerRuntime {
+    /// Resolve the configured CLI once and pin its runtime kind.
+    pub fn resolve(container_runtime_binary: &str) -> Result<Self, String> {
+        Self::resolve_with_timeout(container_runtime_binary, CONTAINER_RUNTIME_PROBE_TIMEOUT)
+    }
+
+    fn resolve_with_timeout(
+        container_runtime_binary: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let binary = container_runtime_binary.trim();
+        if binary.is_empty() {
+            return Err(
+                "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN is empty"
+                    .to_string(),
+            );
+        }
+        let kind = probe_container_runtime_kind_with_timeout(binary, timeout)?;
+        Ok(Self {
+            binary: binary.to_string(),
+            kind,
+        })
+    }
+
+    /// Configured CLI binary associated with this resolved runtime.
+    pub fn binary(&self) -> &str {
+        &self.binary
+    }
+
+    /// Runtime kind pinned when this value was resolved.
+    pub fn kind(&self) -> ContainerRuntimeKind {
+        self.kind
+    }
+}
+
 /// Derive the runtime contract from the configured container CLI binary.
 pub fn container_runtime_kind(
     container_runtime_binary: &str,
@@ -57,10 +104,90 @@ pub fn container_runtime_kind(
     match binary_name.trim_end_matches(".exe") {
         "docker" => Ok(ContainerRuntimeKind::Docker),
         "podman" | "podman-remote" => Ok(ContainerRuntimeKind::Podman),
-        _ => Err(format!(
-            "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN resolved to '{container_runtime_binary}'"
-        )),
+        _ => probe_container_runtime_kind(container_runtime_binary),
     }
+}
+
+fn probe_container_runtime_kind(
+    container_runtime_binary: &str,
+) -> Result<ContainerRuntimeKind, String> {
+    probe_container_runtime_kind_with_timeout(
+        container_runtime_binary,
+        CONTAINER_RUNTIME_PROBE_TIMEOUT,
+    )
+}
+
+fn probe_container_runtime_kind_with_timeout(
+    container_runtime_binary: &str,
+    timeout: Duration,
+) -> Result<ContainerRuntimeKind, String> {
+    let binary = container_runtime_binary.trim();
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        "container runtime probe deadline exceeds the supported clock range".to_string()
+    })?;
+    let hub = gwt_core::process_console::global();
+    let options = gwt_core::process_console::SpawnOptions::new("container runtime --version")
+        .forward_output(false);
+    let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
+        &hub,
+        gwt_core::process_console::ProcessKind::Docker,
+        binary,
+        &["--version"],
+        options,
+        deadline,
+    )
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            format!(
+                "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN '{container_runtime_binary}' timed out during its --version probe after {}ms",
+                timeout.as_millis()
+            )
+        } else {
+            format!(
+                "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN '{container_runtime_binary}' could not be probed with --version: {error}"
+            )
+        }
+    })?;
+    if !output.success() {
+        return Err(format!(
+            "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN '{container_runtime_binary}' failed its --version probe"
+        ));
+    }
+
+    container_runtime_kind_from_version_output(output.stdout.as_bytes(), output.stderr.as_bytes())
+        .ok_or_else(|| {
+            format!(
+                "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN '{container_runtime_binary}' did not identify itself as either runtime"
+            )
+        })
+}
+
+fn container_runtime_kind_from_version_output(
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Option<ContainerRuntimeKind> {
+    let output = String::from_utf8_lossy(stdout);
+    let errors = String::from_utf8_lossy(stderr);
+    let mut detected = None;
+    for line in output.lines().chain(errors.lines()) {
+        let normalized = line.trim().to_ascii_lowercase();
+        let candidate = if normalized.starts_with("docker version ") {
+            Some(ContainerRuntimeKind::Docker)
+        } else if normalized.starts_with("podman version ") {
+            Some(ContainerRuntimeKind::Podman)
+        } else {
+            None
+        };
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        match detected {
+            None => detected = Some(candidate),
+            Some(current) if current == candidate => {}
+            Some(_) => return None,
+        }
+    }
+    detected
 }
 
 /// Detected Docker files in a directory.
@@ -90,11 +217,19 @@ fn docker_probe(args: &[&str], label: &str) -> bool {
 /// or the spawn error) so preflight errors can explain *why* a probe
 /// failed instead of only that it failed (Issue #3029).
 fn docker_probe_diagnostics(args: &[&str], label: &str) -> std::result::Result<(), String> {
+    let binary = docker_binary();
+    docker_probe_diagnostics_with_binary(&binary, args, label)
+}
+
+fn docker_probe_diagnostics_with_binary(
+    binary: &OsStr,
+    args: &[&str],
+    label: &str,
+) -> std::result::Result<(), String> {
     // SPEC-2809 / SPEC-1924 Phase D-docker — route docker probes through
     // `spawn_logged_blocking` so the docker tab of the Console window /
     // Logs Process facet sees them. The `binary` may be a `GWT_DOCKER_BIN`
     // override; pass it as the program directly.
-    let binary = docker_binary();
     let attempted_binary = binary.to_string_lossy().into_owned();
     // Emit before spawning so the event is captured by tracing subscribers that
     // wrap this call (e.g. `with_default` in tests). On Linux the tokio
@@ -113,7 +248,7 @@ fn docker_probe_diagnostics(args: &[&str], label: &str) -> std::result::Result<(
     let result = gwt_core::process_console::spawn_logged_blocking(
         &hub,
         gwt_core::process_console::ProcessKind::Docker,
-        &binary,
+        binary,
         args,
         options,
     );
@@ -169,6 +304,19 @@ pub fn launch_preflight() -> std::result::Result<(), String> {
     docker_probe_diagnostics(&["compose", "version"], "docker compose")
         .map_err(|detail| preflight_message("docker compose is not available", &detail))?;
     docker_probe_diagnostics(&["info"], "daemon")
+        .map_err(|detail| preflight_message("Docker daemon is not running", &detail))?;
+    Ok(())
+}
+
+/// Preflight a runtime whose binary and kind were already resolved for this
+/// launch. The kind probe is deliberately not repeated.
+pub fn launch_preflight_for_resolved_runtime(
+    runtime: &ResolvedContainerRuntime,
+) -> std::result::Result<(), String> {
+    let binary = OsStr::new(runtime.binary());
+    docker_probe_diagnostics_with_binary(binary, &["compose", "version"], "docker compose")
+        .map_err(|detail| preflight_message("docker compose is not available", &detail))?;
+    docker_probe_diagnostics_with_binary(binary, &["info"], "daemon")
         .map_err(|detail| preflight_message("Docker daemon is not running", &detail))?;
     Ok(())
 }
@@ -238,6 +386,21 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create executable parent");
+        }
+        std::fs::write(path, contents).expect("write executable");
+        let mut permissions = std::fs::metadata(path)
+            .expect("executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod executable");
+    }
+
     #[test]
     fn container_runtime_kind_is_derived_from_the_selected_cli_binary() {
         for binary in ["docker", r"C:\Program Files\Docker\DOCKER.EXE"] {
@@ -258,6 +421,245 @@ mod tests {
         assert!(
             error.contains("Docker or Podman"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn container_runtime_kind_probes_a_configured_cli_wrapper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("docker-wrapper");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\n",
+        )
+        .expect("write Docker wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod Docker wrapper");
+
+        assert_eq!(
+            container_runtime_kind(wrapper.to_str().expect("UTF-8 wrapper path"))
+                .expect("wrapper runtime"),
+            ContainerRuntimeKind::Docker
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_runtime_probes_known_basename_once_and_normalizes_the_binary() {
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("docker");
+        write_executable(
+            &wrapper,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0}.calls\"\nprintf 'podman version 5.4.2\\n'\n",
+        );
+        let configured = format!("  {}  ", wrapper.display());
+
+        let runtime =
+            ResolvedContainerRuntime::resolve(&configured).expect("resolve masquerading wrapper");
+
+        assert_eq!(runtime.kind(), ContainerRuntimeKind::Podman);
+        assert_eq!(
+            runtime.binary(),
+            wrapper.to_str().expect("UTF-8 wrapper path")
+        );
+        let calls =
+            std::fs::read_to_string(wrapper.with_extension("calls")).expect("read probe calls");
+        assert_eq!(calls.lines().collect::<Vec<_>>(), ["--version"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_runtime_rejects_ambiguous_or_failed_known_basename_wrappers() {
+        let temp = TempDir::new().expect("tempdir");
+        let ambiguous = temp.path().join("ambiguous").join("docker");
+        write_executable(
+            &ambiguous,
+            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\nprintf 'podman version 5.4.2\\n' >&2\n",
+        );
+        let failed = temp.path().join("failed").join("docker");
+        write_executable(
+            &failed,
+            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\nexit 19\n",
+        );
+
+        let ambiguous_error = ResolvedContainerRuntime::resolve(
+            ambiguous.to_str().expect("UTF-8 ambiguous wrapper path"),
+        )
+        .expect_err("ambiguous known basename must fail closed");
+        let failed_error =
+            ResolvedContainerRuntime::resolve(failed.to_str().expect("UTF-8 failed wrapper path"))
+                .expect_err("failed known basename must fail closed");
+
+        assert!(
+            ambiguous_error.contains("did not identify"),
+            "{ambiguous_error}"
+        );
+        assert!(
+            failed_error.contains("failed its --version probe"),
+            "{failed_error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_runtime_times_out_a_stuck_known_basename_wrapper() {
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("docker");
+        write_executable(&wrapper, "#!/bin/sh\nexec sleep 30\n");
+
+        let started = std::time::Instant::now();
+        let error = ResolvedContainerRuntime::resolve_with_timeout(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+            Duration::from_millis(50),
+        )
+        .expect_err("stuck known basename must fail closed");
+
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the bounded resolver must terminate promptly"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn container_runtime_kind_times_out_a_stuck_cli_wrapper() {
+        use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("stuck-container-wrapper");
+        std::fs::write(&wrapper, "#!/bin/sh\nexec sleep 30\n").expect("write stuck wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod stuck wrapper");
+
+        let started = std::time::Instant::now();
+        let error = probe_container_runtime_kind_with_timeout(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+            Duration::from_millis(50),
+        )
+        .expect_err("a stuck wrapper must fail closed");
+
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the bounded probe must not wait for the wrapper's sleep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn container_runtime_kind_timeout_terminates_non_exec_descendants() {
+        use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("descendant-container-wrapper");
+        let marker = wrapper.with_extension("marker");
+        let ready = wrapper.with_extension("ready");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf ready > \"${0}.ready\"\n(trap '' HUP TERM; sleep 3; printf leaked > \"${0}.marker\") </dev/null >/dev/null 2>&1 &\nsleep 0.1\nwhile :; do sleep 1; done\n",
+        )
+        .expect("write descendant wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod descendant wrapper");
+
+        let error = probe_container_runtime_kind_with_timeout(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+            Duration::from_secs(2),
+        )
+        .expect_err("a stuck wrapper must fail closed");
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            ready.exists(),
+            "the non-exec descendant must start before the wrapper timeout"
+        );
+
+        std::thread::sleep(Duration::from_millis(3_200));
+        assert!(
+            !marker.exists(),
+            "timeout cleanup must terminate the wrapper process tree before a descendant can act"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_runtime_preflight_reuses_the_pinned_binary_without_a_second_kind_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        let calls = wrapper.with_extension("calls");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "${0}.calls"
+case "$*" in
+  "--version")
+    printf 'Docker version 28.3.0, build test\n'
+    ;;
+  "compose version"|"info")
+    exit 0
+    ;;
+  *)
+    exit 9
+    ;;
+esac
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let runtime =
+            ResolvedContainerRuntime::resolve(wrapper.to_str().expect("UTF-8 wrapper path"))
+                .expect("resolve runtime");
+        launch_preflight_for_resolved_runtime(&runtime).expect("resolved runtime preflight");
+
+        let calls = std::fs::read_to_string(calls).expect("read wrapper calls");
+        assert_eq!(
+            calls.lines().filter(|call| *call == "--version").count(),
+            1,
+            "preflight must not repeat runtime-kind detection"
+        );
+        assert!(calls.lines().any(|call| call == "compose version"));
+        assert!(calls.lines().any(|call| call == "info"));
+    }
+
+    #[test]
+    fn container_runtime_kind_parser_accepts_podman_identity_from_stderr() {
+        assert_eq!(
+            container_runtime_kind_from_version_output(
+                b"wrapper diagnostics\n",
+                b"podman version 5.4.2\n",
+            ),
+            Some(ContainerRuntimeKind::Podman)
+        );
+    }
+
+    #[test]
+    fn container_runtime_kind_parser_rejects_ambiguous_runtime_identity() {
+        assert_eq!(
+            container_runtime_kind_from_version_output(
+                b"Docker version 28.3.0, build test\n",
+                b"podman version 5.4.2\n",
+            ),
+            None,
+            "a wrapper that claims both runtime contracts must fail closed"
         );
     }
 

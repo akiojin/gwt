@@ -455,9 +455,24 @@ pub struct WorkEventSettlementRecord {
 pub fn load_work_event_settlement_record(
     worktree: &Path,
 ) -> io::Result<Option<WorkEventSettlementRecord>> {
-    let Some(contents) =
-        crate::cli::trusted_store::read(worktree, WORK_EVENT_SETTLEMENT_RECORD_FILE)?
-    else {
+    let contents = crate::cli::trusted_store::read(worktree, WORK_EVENT_SETTLEMENT_RECORD_FILE)?;
+    decode_work_event_settlement_record(contents)
+}
+
+fn load_work_event_settlement_record_from_resolved_dir(
+    trusted_dir: &Path,
+) -> io::Result<Option<WorkEventSettlementRecord>> {
+    let contents = crate::cli::trusted_store::read_from_resolved_dir(
+        trusted_dir,
+        WORK_EVENT_SETTLEMENT_RECORD_FILE,
+    )?;
+    decode_work_event_settlement_record(contents)
+}
+
+fn decode_work_event_settlement_record(
+    contents: Option<String>,
+) -> io::Result<Option<WorkEventSettlementRecord>> {
+    let Some(contents) = contents else {
         return Ok(None);
     };
     let record = serde_json::from_str::<WorkEventSettlementRecord>(&contents)
@@ -488,6 +503,29 @@ pub fn load_work_event_settlement_record(
     Ok(Some(record))
 }
 
+fn required_work_event_settlement_trusted_dir(worktree: &Path) -> io::Result<PathBuf> {
+    crate::cli::trusted_store::trusted_dir_for_worktree(worktree).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "repo-scoped trusted store is unavailable for Work event settlement",
+        )
+    })
+}
+
+fn require_unchanged_work_event_settlement_trusted_dir(
+    worktree: &Path,
+    expected: &Path,
+) -> io::Result<()> {
+    let current = crate::cli::trusted_store::trusted_dir_for_worktree(worktree);
+    if current.as_deref() == Some(expected) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        ErrorKind::PermissionDenied,
+        "trusted store identity changed during Work event settlement; retry after repository identity stabilizes",
+    ))
+}
+
 /// Atomically reserve a terminal Work mutation before any tracked event or
 /// projection is written. This intentionally does not inspect Git: a clean,
 /// pushed worktree must still retain the obligation until the exact event
@@ -498,12 +536,7 @@ pub fn prepare_work_event_settlement_record(
     event: &gwt_core::workspace_projection::WorkEvent,
     journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
 ) -> io::Result<WorkEventSettlementRecord> {
-    if crate::cli::trusted_store::trusted_dir_for_worktree(worktree).is_none() {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            "repo-scoped trusted store is unavailable for Work event settlement",
-        ));
-    }
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
     if event.kind != gwt_core::workspace_projection::WorkEventKind::Done
         || event.id.trim().is_empty()
         || event.work_item_id.trim().is_empty()
@@ -519,8 +552,9 @@ pub fn prepare_work_event_settlement_record(
         ));
     }
 
-    crate::cli::trusted_store::with_write_lease(worktree, || {
-        let record_session_id = load_work_event_settlement_record(worktree)?
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
+        let record_session_id = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?
             .filter(|record| record.obligation_open)
             .map_or_else(|| session_id.to_string(), |record| record.session_id);
         let record = WorkEventSettlementRecord {
@@ -535,7 +569,8 @@ pub fn prepare_work_event_settlement_record(
             },
             updated_at: Utc::now(),
         };
-        persist_work_event_settlement_record(worktree, &record)?;
+        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
+        persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
         Ok(record)
     })
 }
@@ -551,14 +586,10 @@ pub fn save_work_event_settlement_record(
     session_id: &str,
     open_obligation: bool,
 ) -> io::Result<WorkEventSettlementRecord> {
-    if crate::cli::trusted_store::trusted_dir_for_worktree(worktree).is_none() {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            "repo-scoped trusted store is unavailable for Work event settlement",
-        ));
-    }
-    crate::cli::trusted_store::with_write_lease(worktree, || {
-        let previous = load_work_event_settlement_record(worktree)?;
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
+        let previous = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?;
         if let Some(record) = previous.as_ref().filter(|record| record.obligation_open) {
             if let WorkEventSettlementStatus::PendingMutation {
                 event_id,
@@ -589,18 +620,32 @@ pub fn save_work_event_settlement_record(
             status: status.clone(),
             updated_at: Utc::now(),
         };
-        persist_work_event_settlement_record(worktree, &record)?;
+        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
+        persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
         Ok(record)
     })
 }
 
+#[cfg(test)]
 fn persist_work_event_settlement_record(
     worktree: &Path,
     record: &WorkEventSettlementRecord,
 ) -> io::Result<()> {
+    let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, record)
+}
+
+fn persist_work_event_settlement_record_to_resolved_dir(
+    trusted_dir: &Path,
+    record: &WorkEventSettlementRecord,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(record)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    crate::cli::trusted_store::write(worktree, WORK_EVENT_SETTLEMENT_RECORD_FILE, &bytes)
+    crate::cli::trusted_store::write_to_resolved_dir(
+        trusted_dir,
+        WORK_EVENT_SETTLEMENT_RECORD_FILE,
+        &bytes,
+    )
 }
 
 fn pending_work_event_is_persisted(
@@ -924,6 +969,7 @@ fn event_commit_has_non_bookkeeping_change(
         .args([
             "diff-tree",
             "--root",
+            "-m",
             "--no-commit-id",
             "--name-only",
             "-r",
@@ -2531,6 +2577,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn work_event_settlement_accepts_pushed_merge_commit_with_event_and_source_changes() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.git_ok(&["checkout", "-qb", "settlement-feature"]);
+        fixture.append_event("feature-terminal-event");
+        fs::write(fixture.repo.join("src.txt"), "feature source delivery\n")
+            .expect("write feature source change");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: implement feature with Work event");
+
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.append_event("main-side-event");
+        fixture.stage_events();
+        fixture.commit("chore(work): record concurrent main Work event");
+
+        let merge = fixture.git_output(&["merge", "--no-ff", "--no-commit", "settlement-feature"]);
+        assert!(
+            !merge.status.success(),
+            "the fixture must require an explicit event-log merge resolution"
+        );
+        fs::write(
+            fixture.event_path(),
+            concat!(
+                "{\"id\":\"base\"}\n",
+                "{\"id\":\"main-side-event\"}\n",
+                "{\"id\":\"feature-terminal-event\"}\n",
+                "{\"id\":\"merge-resolution-event\"}\n",
+            ),
+        )
+        .expect("resolve merged Work event log");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: merge source and Work event delivery");
+        let merge_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            fixture.latest_event_commit(),
+            merge_commit,
+            "the path-limited event commit must be the merge itself"
+        );
+        fixture.push();
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status(),
+            "a pushed merge carrying both source and the Work event must satisfy commit policy"
+        );
+    }
+
+    #[test]
     fn work_event_settlement_checks_only_the_exact_tracked_event_path_for_dirtiness() {
         let fixture = WorkEventGitFixture::tracked();
         fs::write(
@@ -2796,6 +2889,162 @@ pub(crate) mod tests {
         assert!(
             !repo.path().join(".gwt/skill-state").exists(),
             "the mirrorless API must not fall back to worktree state"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_persistence_fails_closed_if_trusted_dir_disappears() {
+        let repo = tempfile::tempdir().expect("repository without trusted-store identity");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .output()
+            .expect("initialize repository without origin");
+        assert!(init.status.success());
+        assert!(
+            crate::cli::trusted_store::trusted_dir_for_worktree(repo.path()).is_none(),
+            "fixture must model identity disappearing after the outer guard"
+        );
+        let record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: "session-required-trusted-write".to_string(),
+            obligation_open: true,
+            status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
+            updated_at: Utc::now(),
+        };
+
+        let error = persist_work_event_settlement_record(repo.path(), &record)
+            .expect_err("settlement persistence must never silently no-op");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert!(
+            !repo.path().join(".gwt/skill-state").exists(),
+            "required settlement persistence must not create a mirror fallback"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_fails_closed_when_trusted_dir_changes_after_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = tempfile::tempdir().expect("repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+
+        let trusted_a = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+            .expect("initial trusted directory");
+        let initial_record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: "session-from-leased-directory".to_string(),
+            obligation_open: false,
+            status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
+            updated_at: Utc::now(),
+        };
+        let initial_bytes =
+            serde_json::to_vec_pretty(&initial_record).expect("serialize initial settlement");
+        gwt_github::cache::write_atomic(
+            &trusted_a.join(WORK_EVENT_SETTLEMENT_RECORD_FILE),
+            &initial_bytes,
+        )
+        .expect("seed settlement beneath the directory that will be leased");
+        let repo_for_hook = repo.path().to_path_buf();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            let output = gwt_core::process::hidden_command("git")
+                .args([
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.com/t/changed-trusted-store.git",
+                ])
+                .current_dir(&repo_for_hook)
+                .output()
+                .expect("change repository identity after lease acquisition");
+            assert!(output.status.success());
+        });
+
+        let error =
+            save_work_event_settlement_record(repo.path(), "session-stable-trusted-dir", false)
+                .expect_err("trusted-store identity drift must fail closed");
+
+        let trusted_b = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+            .expect("changed trusted directory");
+        assert_ne!(
+            trusted_a, trusted_b,
+            "fixture must change the resolved trusted directory"
+        );
+        let persisted_a = fs::read_to_string(trusted_a.join(WORK_EVENT_SETTLEMENT_RECORD_FILE))
+            .expect("read settlement from leased directory");
+        assert_eq!(
+            persisted_a,
+            String::from_utf8(initial_bytes).expect("initial settlement UTF-8"),
+            "fail-closed drift handling must leave the leased directory byte-equivalent"
+        );
+        assert!(
+            error.to_string().contains("trusted store identity changed"),
+            "drift rejection must be actionable: {error}"
+        );
+        assert!(
+            !trusted_b.join(WORK_EVENT_SETTLEMENT_RECORD_FILE).exists(),
+            "a resolver change must not redirect persistence to an unlocked directory"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_fails_closed_when_trusted_dir_disappears_after_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = tempfile::tempdir().expect("repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+            .expect("initial trusted directory");
+        let initial_record = WorkEventSettlementRecord {
+            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+            session_id: "session-before-identity-loss".to_string(),
+            obligation_open: false,
+            status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
+            updated_at: Utc::now(),
+        };
+        let initial_bytes =
+            serde_json::to_vec_pretty(&initial_record).expect("serialize initial settlement");
+        gwt_github::cache::write_atomic(
+            &trusted.join(WORK_EVENT_SETTLEMENT_RECORD_FILE),
+            &initial_bytes,
+        )
+        .expect("seed settlement beneath the directory that will be leased");
+        let repo_for_hook = repo.path().to_path_buf();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            let output = gwt_core::process::hidden_command("git")
+                .args(["remote", "remove", "origin"])
+                .current_dir(&repo_for_hook)
+                .output()
+                .expect("remove repository identity after lease acquisition");
+            assert!(output.status.success());
+        });
+
+        let error =
+            save_work_event_settlement_record(repo.path(), "session-after-identity-loss", false)
+                .expect_err("trusted-store identity loss must fail closed");
+
+        assert!(
+            crate::cli::trusted_store::trusted_dir_for_worktree(repo.path()).is_none(),
+            "fixture must remove the trusted-store identity"
+        );
+        assert!(
+            error.to_string().contains("trusted store identity changed"),
+            "identity-loss rejection must be actionable: {error}"
+        );
+        assert_eq!(
+            fs::read(trusted.join(WORK_EVENT_SETTLEMENT_RECORD_FILE))
+                .expect("read unchanged settlement"),
+            initial_bytes,
+            "identity loss must leave the leased directory byte-equivalent"
         );
     }
 }

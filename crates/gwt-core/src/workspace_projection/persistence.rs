@@ -1089,6 +1089,15 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         before_persist(&event, &entry)?;
 
         let events = events_path.as_ref().map_or_else(Vec::new, |_| vec![event]);
+        // The legacy journal has no Work identity: synthesis attributes every
+        // entry to the shared current projection. A foreign target is already
+        // durable in works.json and its Work event, so journaling it here would
+        // replay that foreign status onto current if works.json were lost.
+        let legacy_journal_entries = if projection.id == target.work_id {
+            vec![entry.clone()]
+        } else {
+            Vec::new()
+        };
         let transaction = PendingWorkspaceStateTransaction {
             version: WORKSPACE_STATE_TRANSACTION_VERSION,
             transaction_id: Some(Uuid::new_v4().to_string()),
@@ -1100,8 +1109,8 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             work_items: Some(work_items),
             events_path: events_path.clone(),
             events,
-            journal_path: Some(journal_path.clone()),
-            journal_entries: vec![entry.clone()],
+            journal_path: (!legacy_journal_entries.is_empty()).then_some(journal_path.clone()),
+            journal_entries: legacy_journal_entries,
         };
         persist_workspace_state_transaction_locked(&current_path, &transaction)?;
         Ok(entry)

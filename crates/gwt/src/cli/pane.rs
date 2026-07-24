@@ -7,7 +7,14 @@ use futures_util::{SinkExt, StreamExt};
 use gwt_agent::{session::GWT_SESSION_ID_ENV, GWT_PANE_WS_URL_ENV};
 use gwt_github::{ApiError, SpecOpsError};
 use serde_json::{json, Value};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::AUTHORIZATION, HeaderValue},
+        Message,
+    },
+};
 
 use crate::{
     persistence::{PersistedWindowState, WindowState},
@@ -23,6 +30,9 @@ use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
+
+type PaneWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub fn parse(args: &[String]) -> Result<PaneCommand, CliParseError> {
     let Some((head, rest)) = args.split_first() else {
@@ -118,9 +128,13 @@ async fn send_pane_input(
     let window_id = resolve_send_target(&windows, requested_id, &session_id)?;
     let line = ensure_trailing_submit(text);
 
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
+    let scoped_windows = next_workspace_windows(&mut socket, project_root, "pane send").await?;
+    let scoped_window_id = resolve_send_target(&scoped_windows, requested_id, &session_id)?;
+    if scoped_window_id != window_id {
+        return Err("pane send target changed while establishing the authenticated scope".into());
+    }
     send_frontend_event(
         &mut socket,
         json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
@@ -151,9 +165,7 @@ async fn request_window_list(
     ws_url: &str,
     project_root: &str,
 ) -> Result<Vec<PersistedWindowState>, String> {
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     next_workspace_windows(&mut socket, project_root, "pane list").await
@@ -165,9 +177,7 @@ async fn read_pane_snapshot(
     requested_id: &str,
     lines: usize,
 ) -> Result<String, String> {
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let mut windows = Vec::new();
@@ -210,9 +220,14 @@ async fn close_pane(
         return Err(format!("pane close: unknown pane {requested_id}"));
     };
 
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
+    let scoped_windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
+    if resolve_window_id(&scoped_windows, &resolved_id) != Some(resolved_id.as_str()) {
+        return Err(format!(
+            "pane close: pane {requested_id} left the authenticated project scope"
+        ));
+    }
     send_frontend_event(
         &mut socket,
         json!({ "kind": "close_window", "id": resolved_id }),
@@ -228,23 +243,52 @@ async fn close_pane(
     }
 }
 
-async fn send_frontend_event(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    payload: Value,
-) -> Result<(), String> {
+async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
+    let request = pane_websocket_request(ws_url)?;
+    connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))
+}
+
+fn pane_websocket_request(
+    ws_url: &str,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|_| "invalid pane WebSocket URL".to_string())?;
+    if !matches!(request.uri().scheme_str(), Some("ws" | "wss")) || request.uri().query().is_some()
+    {
+        return Err("pane WebSocket URL must use ws/wss without a query".to_string());
+    }
+    if request.uri().path() != "/internal/pane-ws" {
+        return Err("pane WebSocket URL must use the exact /internal/pane-ws path".to_string());
+    }
+
+    let token = std::env::var(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} is not set; relaunch the Session from gwt before using pane.*",
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
+            )
+        })?;
+    let bearer = HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| "invalid pane capability token".to_string())?;
+    request.headers_mut().insert(AUTHORIZATION, bearer);
+    Ok(request)
+}
+
+async fn send_frontend_event(socket: &mut PaneWebSocket, payload: Value) -> Result<(), String> {
     socket
         .send(Message::Text(payload.to_string().into()))
         .await
         .map_err(|err| format!("pane websocket send failed: {err}"))
 }
 
-async fn next_backend_json(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) -> Result<Value, String> {
+async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
     let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
         .await
         .map_err(|_| "pane websocket timed out waiting for backend response".to_string())?
@@ -263,9 +307,7 @@ async fn next_backend_json(
 }
 
 async fn next_workspace_windows(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    socket: &mut PaneWebSocket,
     project_root: &str,
     context: &str,
 ) -> Result<Vec<PersistedWindowState>, String> {
@@ -704,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_websocket_env_never_derives_browser_access_from_agent_capability_listener() {
+    fn pane_websocket_env_never_guesses_a_pane_route_from_the_hook_endpoint() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -715,9 +757,49 @@ mod tests {
         );
 
         let error = pane_websocket_url_from_env()
-            .expect_err("capability-only listener must not become a pane WebSocket endpoint");
+            .expect_err("the explicit pane WebSocket endpoint must remain required");
 
         assert!(error.contains(GWT_PANE_WS_URL_ENV), "{error}");
+    }
+
+    #[test]
+    fn pane_websocket_request_carries_the_agent_capability_in_authorization() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "agent-capability-secret-sentinel",
+        );
+
+        let request = pane_websocket_request("ws://127.0.0.1:45123/internal/pane-ws")
+            .expect("pane WebSocket request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer agent-capability-secret-sentinel")
+        );
+        assert!(!request.uri().to_string().contains("secret-sentinel"));
+    }
+
+    #[test]
+    fn pane_websocket_request_rejects_browser_listener_fallback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "agent-capability-secret-sentinel",
+        );
+
+        let error = pane_websocket_request("ws://127.0.0.1:46234/ws")
+            .expect_err("pane.* must never fall back to the browser listener");
+        assert!(error.contains("/internal/pane-ws"), "{error}");
+        assert!(pane_websocket_request("ws://127.0.0.1:46234/ws?token=forbidden").is_err());
+        assert!(pane_websocket_request("ws://127.0.0.1:46234/internal/hook-live").is_err());
     }
 
     #[test]

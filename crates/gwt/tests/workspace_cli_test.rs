@@ -814,17 +814,18 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
             Some("host owns real mutation")
         );
 
-        let journal_text =
-            fs::read_to_string(&host_journal_path).expect("Host journal after mutation");
-        let journal_entry = journal_text
-            .lines()
-            .rfind(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str::<Value>(line).expect("Host journal JSON"))
-            .expect("Host journal entry");
-        let journal_entry_id = journal_entry["id"].as_str().expect("Host journal entry id");
-        assert_eq!(journal_entry["summary"], "host owns real mutation");
+        assert!(
+            !host_journal_path.exists(),
+            "{case}: a foreign target must not enter the identity-less legacy current journal"
+        );
         let response: Value = serde_json::from_slice(&output.stdout).expect("gwtd response JSON");
         assert_ok(&response, "real Host proxy workspace.update");
+        let journal_entry_id = response["output"]
+            .as_str()
+            .and_then(|value| value.strip_prefix("workspace updated: "))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .expect("Host mutation receipt id");
         assert!(
             response["output"]
                 .as_str()

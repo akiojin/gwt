@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     num::NonZeroU16,
     path::{Path, PathBuf},
@@ -407,16 +407,40 @@ pub struct ClientHubHealthStats {
 
 #[derive(Clone, Default)]
 pub struct ClientHub {
-    clients: Arc<Mutex<HashMap<String, Arc<ClientQueue>>>>,
+    clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+}
+
+#[derive(Clone)]
+struct ClientRegistration {
+    queue: Arc<ClientQueue>,
+    receives_broadcasts: bool,
 }
 
 impl ClientHub {
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
+        self.register_with_broadcasts(client_id, true)
+    }
+
+    fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
+        self.register_with_broadcasts(client_id, false)
+    }
+
+    fn register_with_broadcasts(
+        &self,
+        client_id: String,
+        receives_broadcasts: bool,
+    ) -> Arc<ClientQueue> {
         let queue = Arc::new(ClientQueue::default());
         self.clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(client_id, queue.clone());
+            .insert(
+                client_id,
+                ClientRegistration {
+                    queue: queue.clone(),
+                    receives_broadcasts,
+                },
+            );
         queue
     }
 
@@ -426,8 +450,8 @@ impl ClientHub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(client_id);
-        if let Some(queue) = removed {
-            queue.close();
+        if let Some(registration) = removed {
+            registration.queue.close();
         }
     }
 
@@ -450,7 +474,10 @@ impl ClientHub {
                 .clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            clients.values().cloned().collect()
+            clients
+                .values()
+                .map(|registration| registration.queue.clone())
+                .collect()
         };
 
         let mut stats = ClientHubHealthStats {
@@ -472,14 +499,20 @@ impl ClientHub {
         // and per-client enqueue work happen outside the registry mutex. This
         // keeps register/unregister responsive even when the broadcast batch
         // is large or one client is slow to drain its queue.
-        let snapshot: Vec<(String, Arc<ClientQueue>)> = {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
             let clients = self
                 .clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             clients
                 .iter()
-                .map(|(id, queue)| (id.clone(), queue.clone()))
+                .map(|(id, registration)| {
+                    (
+                        id.clone(),
+                        registration.queue.clone(),
+                        registration.receives_broadcasts,
+                    )
+                })
                 .collect()
         };
 
@@ -488,14 +521,18 @@ impl ClientHub {
             let prepared = prepare_outbound(&outbound.event);
             match outbound.target {
                 DispatchTarget::Broadcast => {
-                    for (client_id, queue) in &snapshot {
+                    for (client_id, queue, receives_broadcasts) in &snapshot {
+                        if !receives_broadcasts {
+                            continue;
+                        }
                         if queue.enqueue(&prepared) {
                             dead_clients.push(client_id.clone());
                         }
                     }
                 }
                 DispatchTarget::Client(client_id) => {
-                    if let Some((_, queue)) = snapshot.iter().find(|(id, _)| id == &client_id) {
+                    if let Some((_, queue, _)) = snapshot.iter().find(|(id, _, _)| id == &client_id)
+                    {
                         if queue.enqueue(&prepared) {
                             dead_clients.push(client_id);
                         }
@@ -522,8 +559,8 @@ impl ClientHub {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for client_id in dead_clients {
-                if let Some(queue) = clients.remove(&client_id) {
-                    queue.close();
+                if let Some(registration) = clients.remove(&client_id) {
+                    registration.queue.close();
                 }
             }
         }
@@ -568,6 +605,56 @@ pub(crate) struct AgentSessionPrincipal {
     session_id: String,
 }
 
+/// One authenticated capability generation carried from the agent listener
+/// to the tao event loop. Its custom `Debug` implementation prevents the
+/// bearer or principal from leaking through `UserEvent` diagnostics.
+#[derive(Clone)]
+pub(crate) struct AgentCapabilityGrant {
+    token: String,
+    principal: AgentSessionPrincipal,
+}
+
+impl AgentCapabilityGrant {
+    fn new(token: String, principal: AgentSessionPrincipal) -> Self {
+        Self { token, principal }
+    }
+
+    pub(crate) fn principal(&self) -> &AgentSessionPrincipal {
+        &self.principal
+    }
+}
+
+impl std::fmt::Debug for AgentCapabilityGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentCapabilityGrant(<redacted>)")
+    }
+}
+
+/// Narrow internal protocol accepted from a capability-authenticated agent.
+/// Project and Session authority remain attached to the server-side
+/// [`AgentSessionPrincipal`]; no path or Session claim is copied from the
+/// untrusted WebSocket payload.
+#[derive(Clone)]
+pub(crate) enum AgentFrontendRequest {
+    Ready,
+    CloseWindow { id: String },
+    SendInput { text: String },
+}
+
+impl std::fmt::Debug for AgentFrontendRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
+            Self::CloseWindow { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
+            }
+            Self::SendInput { .. } => {
+                formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
+            }
+        }
+    }
+}
+
 impl AgentSessionPrincipal {
     fn new(project_root: &Path, session_id: &str) -> Result<Self, String> {
         if session_id.trim() != session_id
@@ -584,6 +671,11 @@ impl AgentSessionPrincipal {
             canonical_project_root,
             session_id: session_id.to_string(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(project_root: &Path, session_id: &str) -> Result<Self, String> {
+        Self::new(project_root, session_id)
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -673,21 +765,89 @@ impl AgentCapabilityRegistry {
         authenticated
     }
 
-    fn revoke(&self, project_root: &Path, session_id: &str) -> Result<bool, String> {
-        let principal = AgentSessionPrincipal::new(project_root, session_id)?;
+    /// Run one non-blocking dispatch only while `token` is still the current
+    /// grant for `expected_principal`.
+    ///
+    /// The registry read lock stays held through the callback. Rotation or
+    /// revocation therefore linearizes either before this check (zero
+    /// dispatch) or after the already-authorized enqueue.
+    fn dispatch_if_current(&self, grant: &AgentCapabilityGrant, dispatch: impl FnOnce()) -> bool {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return false;
+        }
+
+        dispatch();
+        true
+    }
+
+    fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::grant_is_current_in_state(&state, grant)
+    }
+
+    fn grant_is_current_in_state(
+        state: &AgentCapabilityRegistryState,
+        grant: &AgentCapabilityGrant,
+    ) -> bool {
+        let authenticated = state
+            .principals_by_token
+            .iter()
+            .find_map(|(candidate, principal)| {
+                constant_time_token_eq(&grant.token, candidate).then_some(principal)
+            });
+        if authenticated != Some(&grant.principal) {
+            return false;
+        }
         let principal_key = (
-            principal.canonical_project_root().to_path_buf(),
-            principal.session_id().to_string(),
+            grant.principal.canonical_project_root().to_path_buf(),
+            grant.principal.session_id().to_string(),
         );
+        state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&grant.token, current))
+    }
+
+    /// Revoke one issue-time opaque token without consulting the filesystem.
+    ///
+    /// The project+Session reverse index is removed only when it still points
+    /// at this exact token, so cleanup for an older launch cannot revoke a
+    /// rotated replacement.
+    fn revoke_token(&self, token: &str) -> bool {
         let mut state = self
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(token) = state.token_by_project_session.remove(&principal_key) else {
-            return Ok(false);
+        let Some(issued_token) = state
+            .principals_by_token
+            .keys()
+            .find(|candidate| constant_time_token_eq(token, candidate))
+            .cloned()
+        else {
+            return false;
         };
-        state.principals_by_token.remove(&token);
-        Ok(true)
+        let Some(principal) = state.principals_by_token.remove(&issued_token) else {
+            return false;
+        };
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&issued_token, current))
+        {
+            state.token_by_project_session.remove(&principal_key);
+        }
+        true
     }
 
     fn session_count(&self) -> usize {
@@ -705,6 +865,7 @@ impl AgentCapabilityRegistry {
 pub(crate) struct AgentCapabilityIssuer {
     hook_forward_url: String,
     pane_websocket_url: String,
+    agent_pane_websocket_url: String,
     registry: AgentCapabilityRegistry,
 }
 
@@ -712,20 +873,27 @@ impl AgentCapabilityIssuer {
     fn new(
         hook_forward_url: String,
         pane_websocket_url: String,
+        agent_pane_websocket_url: String,
         registry: AgentCapabilityRegistry,
     ) -> Self {
         Self {
             hook_forward_url,
             pane_websocket_url,
+            agent_pane_websocket_url,
             registry,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(hook_forward_url: &str, pane_websocket_url: &str) -> Self {
+    pub(crate) fn for_test(
+        hook_forward_url: &str,
+        pane_websocket_url: &str,
+        agent_pane_websocket_url: &str,
+    ) -> Self {
         Self::new(
             hook_forward_url.to_string(),
             pane_websocket_url.to_string(),
+            agent_pane_websocket_url.to_string(),
             AgentCapabilityRegistry::default(),
         )
     }
@@ -741,12 +909,32 @@ impl AgentCapabilityIssuer {
         })
     }
 
-    pub(crate) fn revoke(&self, project_root: &Path, session_id: &str) -> Result<bool, String> {
-        self.registry.revoke(project_root, session_id)
+    pub(crate) fn revoke_token(&self, token: &str) -> bool {
+        self.registry.revoke_token(token)
+    }
+
+    pub(crate) fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
+        self.registry.grant_is_current(grant)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authenticates_token(&self, token: &str) -> bool {
+        self.registry.authenticate(token).is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grant_for_test(&self, token: &str) -> Option<AgentCapabilityGrant> {
+        self.registry
+            .authenticate(token)
+            .map(|principal| AgentCapabilityGrant::new(token.to_string(), principal))
     }
 
     pub(crate) fn pane_websocket_url(&self) -> &str {
         &self.pane_websocket_url
+    }
+
+    pub(crate) fn agent_pane_websocket_url(&self) -> &str {
+        &self.agent_pane_websocket_url
     }
 }
 
@@ -756,6 +944,7 @@ impl std::fmt::Debug for AgentCapabilityIssuer {
             .debug_struct("AgentCapabilityIssuer")
             .field("hook_forward_url", &self.hook_forward_url)
             .field("pane_websocket_url", &self.pane_websocket_url)
+            .field("agent_pane_websocket_url", &self.agent_pane_websocket_url)
             .field("registered_sessions", &self.registry.session_count())
             .finish()
     }
@@ -855,6 +1044,7 @@ impl EmbeddedServer {
                 display_host(local_browser_client_ip(addr.ip())),
                 addr.port()
             ),
+            format!("ws://127.0.0.1:{}/internal/pane-ws", agent_addr.port()),
             agent_capabilities.clone(),
         );
         let attachment_upload_token = Uuid::new_v4().to_string();
@@ -1014,6 +1204,7 @@ impl EmbeddedServer {
 fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
     Router::new()
         .route("/internal/hook-live", post(hook_live_handler))
+        .route("/internal/pane-ws", get(agent_pane_websocket_handler))
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route(
             "/internal/work-terminalization",
@@ -1380,6 +1571,17 @@ async fn websocket_handler(
     ws.on_upgrade(move |socket| client_session(socket, state))
 }
 
+async fn agent_pane_websocket_handler(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<ServerState>,
+) -> Response {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    ws.on_upgrade(move |socket| agent_pane_client_session(socket, state, grant))
+}
+
 async fn hook_live_handler(
     headers: HeaderMap,
     State(state): State<ServerState>,
@@ -1518,9 +1720,191 @@ fn workspace_update_error_response(
     (status, Json(error)).into_response()
 }
 
+struct AgentPaneSessionScope {
+    grant: AgentCapabilityGrant,
+    allowed_window_ids: HashSet<String>,
+}
+
+impl AgentPaneSessionScope {
+    fn new(grant: AgentCapabilityGrant) -> Self {
+        Self {
+            grant,
+            allowed_window_ids: HashSet::new(),
+        }
+    }
+
+    fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
+        match event {
+            FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
+            FrontendEvent::CloseWindow { id } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::CloseWindow { id })
+            }
+            FrontendEvent::PaneSendInput { session_id, text }
+                if session_id == self.grant.principal().session_id() =>
+            {
+                Some(AgentFrontendRequest::SendInput { text })
+            }
+            _ => None,
+        }
+    }
+
+    fn filter_outbound(&mut self, payload: String) -> Option<String> {
+        let mut value: serde_json::Value = serde_json::from_str(&payload).ok()?;
+        match value.get("kind").and_then(serde_json::Value::as_str)? {
+            "workspace_state" => {
+                self.filter_workspace_state(&mut value)?;
+                serde_json::to_string(&value).ok()
+            }
+            "terminal_snapshot" => value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| self.allowed_window_ids.contains(id))
+                .then_some(payload),
+            "pane_send_result" => value
+                .get("window_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|id| self.allowed_window_ids.contains(id))
+                .then_some(payload),
+            _ => None,
+        }
+    }
+
+    fn filter_workspace_state(&mut self, value: &mut serde_json::Value) -> Option<()> {
+        let workspace = value.get_mut("workspace")?.as_object_mut()?;
+        let active_tab_id = workspace
+            .get("active_tab_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let tabs = workspace.get_mut("tabs")?.as_array_mut()?;
+        tabs.retain(|tab| self.authorizes_tab(tab));
+
+        self.allowed_window_ids.clear();
+        for tab in tabs.iter() {
+            let windows = tab
+                .get("workspace")
+                .and_then(|workspace| workspace.get("windows"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten();
+            for window in windows {
+                if let Some(id) = window.get("id").and_then(serde_json::Value::as_str) {
+                    self.allowed_window_ids.insert(id.to_string());
+                }
+            }
+        }
+
+        let first_tab_id = tabs
+            .first()
+            .and_then(|tab| tab.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let active_is_allowed = active_tab_id.is_some_and(|active| {
+            tabs.iter().any(|tab| {
+                tab.get("id").and_then(serde_json::Value::as_str) == Some(active.as_str())
+            })
+        });
+        if !active_is_allowed {
+            workspace.insert(
+                "active_tab_id".to_string(),
+                first_tab_id
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        workspace.insert(
+            "recent_projects".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+        Some(())
+    }
+
+    fn authorizes_tab(&self, tab: &serde_json::Value) -> bool {
+        let Some(project_root) = tab.get("project_root").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        dunce::canonicalize(project_root)
+            .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+            .is_ok_and(|path| path == self.grant.principal().canonical_project_root())
+    }
+
+    fn filter_repair_panes(&self, repair_panes: Vec<String>) -> Vec<String> {
+        repair_panes
+            .into_iter()
+            .filter(|id| self.allowed_window_ids.contains(id))
+            .collect()
+    }
+}
+
+enum ClientSessionScope {
+    Browser,
+    Agent(AgentPaneSessionScope),
+}
+
+enum ScopedFrontendRequest {
+    Browser(FrontendEvent),
+    Agent {
+        grant: AgentCapabilityGrant,
+        request: AgentFrontendRequest,
+    },
+}
+
+impl ClientSessionScope {
+    fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
+        match self {
+            Self::Browser => Some(ScopedFrontendRequest::Browser(event)),
+            Self::Agent(scope) => {
+                scope
+                    .filter_inbound(event)
+                    .map(|request| ScopedFrontendRequest::Agent {
+                        grant: scope.grant.clone(),
+                        request,
+                    })
+            }
+        }
+    }
+
+    fn filter_outbound(&mut self, payload: String) -> Option<String> {
+        match self {
+            Self::Browser => Some(payload),
+            Self::Agent(scope) => scope.filter_outbound(payload),
+        }
+    }
+
+    fn filter_repair_panes(&self, repair_panes: Vec<String>) -> Vec<String> {
+        match self {
+            Self::Browser => repair_panes,
+            Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
+        }
+    }
+}
+
 async fn client_session(socket: WebSocket, state: ServerState) {
+    client_session_with_scope(socket, state, ClientSessionScope::Browser).await;
+}
+
+async fn agent_pane_client_session(
+    socket: WebSocket,
+    state: ServerState,
+    grant: AgentCapabilityGrant,
+) {
+    client_session_with_scope(
+        socket,
+        state,
+        ClientSessionScope::Agent(AgentPaneSessionScope::new(grant)),
+    )
+    .await;
+}
+
+async fn client_session_with_scope(
+    socket: WebSocket,
+    state: ServerState,
+    mut scope: ClientSessionScope,
+) {
     let client_id = Uuid::new_v4().to_string();
-    let outbound = state.clients.register(client_id.clone());
+    let outbound = match &scope {
+        ClientSessionScope::Browser => state.clients.register(client_id.clone()),
+        ClientSessionScope::Agent(_) => state.clients.register_pane(client_id.clone()),
+    };
     let (mut sender, mut receiver) = socket.split();
 
     let input_seq = Arc::new(AtomicU64::new(0));
@@ -1530,9 +1914,13 @@ async fn client_session(socket: WebSocket, state: ServerState) {
             step = outbound.next() => {
                 match step {
                     DrainStep::Message { payload, repair_panes } => {
+                        let Some(payload) = scope.filter_outbound(payload) else {
+                            continue;
+                        };
                         if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
                         }
+                        let repair_panes = scope.filter_repair_panes(repair_panes);
                         if !repair_panes.is_empty() {
                             // SPEC-2359 W-17 (FR-396): streamed output for
                             // these panes was dropped under queue pressure —
@@ -1553,13 +1941,46 @@ async fn client_session(socket: WebSocket, state: ServerState) {
                         let text_len = text.len();
                         match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
                             Ok(event) => {
-                                handle_frontend_message(
-                                    &state,
-                                    &client_id,
-                                    &input_seq,
-                                    text_len,
-                                    event,
-                                );
+                                match scope.filter_inbound(event) {
+                                    Some(ScopedFrontendRequest::Browser(event)) => {
+                                        handle_frontend_message(
+                                            &state,
+                                            &client_id,
+                                            &input_seq,
+                                            text_len,
+                                            event,
+                                        );
+                                    }
+                                    Some(ScopedFrontendRequest::Agent {
+                                        grant,
+                                        request,
+                                    }) => {
+                                        let event_grant = grant.clone();
+                                        let dispatched = state.agent_capabilities.dispatch_if_current(
+                                            &grant,
+                                            || {
+                                                state.proxy.send(UserEvent::AgentFrontend {
+                                                    client_id: client_id.clone(),
+                                                    grant: event_grant,
+                                                    request,
+                                                });
+                                            },
+                                        );
+                                        if !dispatched {
+                                            tracing::warn!(
+                                                target: "gwt_security",
+                                                "agent pane WebSocket capability rotated or revoked before dispatch"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            target: "gwt_security",
+                                            "agent pane WebSocket rejected an out-of-scope frontend event"
+                                        );
+                                    }
+                                }
                             }
                             Err(error) => {
                                 eprintln!("invalid frontend message: {error}");
@@ -1722,6 +2143,15 @@ fn agent_capability_principal(
         .authenticate(bearer_token(headers)?)
 }
 
+fn agent_capability_grant(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Option<AgentCapabilityGrant> {
+    let token = bearer_token(headers)?.to_string();
+    let principal = state.agent_capabilities.authenticate(&token)?;
+    Some(AgentCapabilityGrant::new(token, principal))
+}
+
 pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
         return true;
@@ -1753,15 +2183,23 @@ mod tests {
         collections::HashMap,
         net::IpAddr,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+        time::Duration,
     };
 
     use axum::http::{
         header::{AUTHORIZATION, HOST, ORIGIN},
-        HeaderMap,
+        HeaderMap, StatusCode,
     };
+    use futures_util::{SinkExt, StreamExt};
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
     use tokio::runtime::Runtime;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{
+            client::IntoClientRequest, Error as WebSocketError, Message as WebSocketMessage,
+        },
+    };
 
     use crate::{AppEventProxy, AttachmentUploadStore, OutboundEvent, UserEvent};
 
@@ -1911,25 +2349,102 @@ mod tests {
     }
 
     #[test]
-    fn agent_capability_registry_revoke_retires_only_requested_pair() {
+    fn agent_capability_registry_exact_token_revoke_preserves_rotated_and_foreign_grants() {
         let project_a = tempfile::tempdir().expect("project A tempdir");
         let project_b = tempfile::tempdir().expect("project B tempdir");
         let registry = AgentCapabilityRegistry::default();
-        let token_a = registry
+        let stale_a = registry
             .issue(project_a.path(), "session-1")
-            .expect("project A capability");
+            .expect("stale project A capability");
+        let current_a = registry
+            .issue(project_a.path(), "session-1")
+            .expect("current project A capability");
         let token_b = registry
             .issue(project_b.path(), "session-1")
             .expect("project B capability");
 
-        assert!(registry
-            .revoke(project_a.path(), "session-1")
-            .expect("revoke project A"));
-        assert!(registry.authenticate(&token_a).is_none());
+        assert!(
+            !registry.revoke_token(&stale_a),
+            "revoking a rotated token must not remove the replacement grant"
+        );
+        assert!(registry.authenticate(&current_a).is_some());
         assert!(registry.authenticate(&token_b).is_some());
-        assert!(!registry
-            .revoke(project_a.path(), "session-1")
-            .expect("repeat revoke"));
+        assert!(registry.revoke_token(&current_a));
+        assert!(registry.authenticate(&current_a).is_none());
+        assert!(registry.authenticate(&token_b).is_some());
+        assert!(!registry.revoke_token(&current_a));
+        assert_eq!(registry.session_count(), 1);
+    }
+
+    #[test]
+    fn agent_capability_registry_revoke_survives_project_deletion() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let token = registry
+            .issue(project.path(), "session-1")
+            .expect("project capability");
+
+        project.close().expect("delete project after issue");
+
+        assert!(registry.revoke_token(&token));
+        assert!(registry.authenticate(&token).is_none());
+        assert_eq!(registry.session_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_capability_registry_revoke_survives_project_permission_loss() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let token = registry
+            .issue(project.path(), "session-permission-loss")
+            .expect("project capability");
+        let original_permissions = std::fs::metadata(project.path())
+            .expect("project metadata")
+            .permissions();
+        let mut inaccessible_permissions = original_permissions.clone();
+        inaccessible_permissions.set_mode(0o0);
+        std::fs::set_permissions(project.path(), inaccessible_permissions)
+            .expect("remove project permissions");
+
+        let revoked = registry.revoke_token(&token);
+
+        std::fs::set_permissions(project.path(), original_permissions)
+            .expect("restore project permissions");
+        assert!(revoked);
+        assert!(registry.authenticate(&token).is_none());
+        assert_eq!(registry.session_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_capability_registry_exact_revoke_ignores_symlink_retargeting() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let project_a = root.path().join("project-a");
+        let project_b = root.path().join("project-b");
+        let alias = root.path().join("project-link");
+        std::fs::create_dir(&project_a).expect("project A");
+        std::fs::create_dir(&project_b).expect("project B");
+        std::os::unix::fs::symlink(&project_a, &alias).expect("alias project A");
+
+        let registry = AgentCapabilityRegistry::default();
+        let token_a = registry
+            .issue(&alias, "session-1")
+            .expect("project A capability");
+        std::fs::remove_file(&alias).expect("remove project A alias");
+        std::os::unix::fs::symlink(&project_b, &alias).expect("retarget alias to project B");
+        let token_b = registry
+            .issue(&alias, "session-1")
+            .expect("project B capability");
+
+        assert!(registry.revoke_token(&token_a));
+        assert!(registry.authenticate(&token_a).is_none());
+        assert!(
+            registry.authenticate(&token_b).is_some(),
+            "retargeting a symlink must not make stale cleanup revoke the new principal"
+        );
         assert_eq!(registry.session_count(), 1);
     }
 
@@ -1967,6 +2482,7 @@ mod tests {
         let issuer = AgentCapabilityIssuer::new(
             "http://127.0.0.1:43123/internal/hook-live".to_string(),
             "ws://127.0.0.1:43124/ws".to_string(),
+            "ws://127.0.0.1:43123/internal/pane-ws".to_string(),
             registry,
         );
         let target = issuer
@@ -1980,6 +2496,186 @@ mod tests {
     }
 
     #[test]
+    fn agent_pane_scope_filters_project_output_and_frontend_authority() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let foreign = tempfile::tempdir().expect("foreign tempdir");
+        let principal =
+            AgentSessionPrincipal::new(project.path(), "session-1").expect("agent principal");
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        let workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "app_version": "test",
+                "active_tab_id": "tab-foreign",
+                "recent_projects": [{ "path": foreign.path() }],
+                "tabs": [
+                    {
+                        "id": "tab-owned",
+                        "project_root": project.path(),
+                        "workspace": { "windows": [{ "id": "tab-owned::agent-1" }] }
+                    },
+                    {
+                        "id": "tab-foreign",
+                        "project_root": foreign.path(),
+                        "workspace": { "windows": [{ "id": "tab-foreign::agent-2" }] }
+                    }
+                ]
+            }
+        });
+
+        let filtered = scope
+            .filter_outbound(workspace.to_string())
+            .expect("owned workspace projection");
+        let filtered: serde_json::Value =
+            serde_json::from_str(&filtered).expect("filtered workspace JSON");
+        let tabs = filtered["workspace"]["tabs"]
+            .as_array()
+            .expect("workspace tabs");
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0]["id"], "tab-owned");
+        assert_eq!(filtered["workspace"]["active_tab_id"], "tab-owned");
+        assert_eq!(
+            filtered["workspace"]["recent_projects"],
+            serde_json::json!([])
+        );
+
+        assert!(scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "terminal_snapshot",
+                    "id": "tab-owned::agent-1",
+                    "data_base64": ""
+                })
+                .to_string()
+            )
+            .is_some());
+        assert!(scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "terminal_snapshot",
+                    "id": "tab-foreign::agent-2",
+                    "data_base64": ""
+                })
+                .to_string()
+            )
+            .is_none());
+        assert!(scope
+            .filter_inbound(FrontendEvent::CloseWindow {
+                id: "tab-owned::agent-1".to_string(),
+            })
+            .is_some());
+        assert!(scope
+            .filter_inbound(FrontendEvent::CloseWindow {
+                id: "tab-foreign::agent-2".to_string(),
+            })
+            .is_none());
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::PaneSendInput {
+                session_id: "session-1".to_string(),
+                text: "hello".to_string(),
+            }),
+            Some(super::AgentFrontendRequest::SendInput { text }) if text == "hello"
+        ));
+        assert!(scope
+            .filter_inbound(FrontendEvent::PaneSendInput {
+                session_id: "foreign-claim".to_string(),
+                text: "hello".to_string(),
+            })
+            .is_none());
+        assert!(scope
+            .filter_inbound(FrontendEvent::TerminalInput {
+                id: "tab-owned::agent-1".to_string(),
+                data: "not-authorized-on-agent-route".to_string(),
+            })
+            .is_none());
+
+        let refreshed_workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "active_tab_id": "tab-owned",
+                "recent_projects": [],
+                "tabs": [{
+                    "id": "tab-owned",
+                    "project_root": project.path(),
+                    "workspace": { "windows": [{ "id": "tab-owned::agent-3" }] }
+                }]
+            }
+        });
+        scope
+            .filter_outbound(refreshed_workspace.to_string())
+            .expect("refreshed owned workspace projection");
+        assert!(scope
+            .filter_inbound(FrontendEvent::CloseWindow {
+                id: "tab-owned::agent-1".to_string(),
+            })
+            .is_none());
+        assert!(scope
+            .filter_inbound(FrontendEvent::CloseWindow {
+                id: "tab-owned::agent-3".to_string(),
+            })
+            .is_some());
+        assert_eq!(
+            scope.filter_repair_panes(vec![
+                "tab-owned::agent-1".to_string(),
+                "tab-owned::agent-3".to_string(),
+                "tab-foreign::agent-2".to_string(),
+            ]),
+            vec!["tab-owned::agent-3".to_string()]
+        );
+    }
+
+    #[test]
+    fn browser_client_scope_preserves_existing_unrestricted_websocket_contract() {
+        let mut scope = super::ClientSessionScope::Browser;
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::TerminalInput {
+                id: "any-project::terminal-1".to_string(),
+                data: "input".to_string(),
+            }),
+            Some(super::ScopedFrontendRequest::Browser(FrontendEvent::TerminalInput { id, data }))
+                if id == "any-project::terminal-1" && data == "input"
+        ));
+
+        let payload = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "recent_projects": [{ "path": "/another/project" }],
+                "tabs": [{ "id": "another-project" }]
+            }
+        })
+        .to_string();
+        assert_eq!(scope.filter_outbound(payload.clone()), Some(payload));
+        assert_eq!(
+            scope.filter_repair_panes(vec!["any-project::terminal-1".to_string()]),
+            vec!["any-project::terminal-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn agent_pane_client_registration_never_enqueues_global_broadcasts() {
+        let clients = ClientHub::default();
+        let browser = clients.register("browser".to_string());
+        let pane = clients.register_pane("pane".to_string());
+
+        clients.dispatch(vec![OutboundEvent::broadcast(terminal_snapshot(
+            "foreign-tab::agent-1",
+            "foreign snapshot",
+        ))]);
+
+        assert!(browser.try_recv().is_some());
+        assert!(pane.try_recv().is_none());
+
+        clients.dispatch(vec![OutboundEvent::reply(
+            "pane",
+            terminal_snapshot("scoped-tab::agent-1", "scoped snapshot"),
+        )]);
+        assert!(pane.try_recv().is_some());
+    }
+
+    #[test]
     fn agent_bridge_bind_policy_widens_only_for_native_linux_container_access() {
         let expected = if cfg!(target_os = "linux") {
             IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
@@ -1988,6 +2684,233 @@ mod tests {
         };
 
         assert_eq!(agent_bridge_bind_ip(), expected);
+    }
+
+    #[test]
+    fn agent_pane_websocket_route_requires_its_capability_and_keeps_browser_ws_open() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue(project.path(), "session-1")
+            .expect("current target");
+        let foreign_token = AgentCapabilityRegistry::default()
+            .issue(project.path(), "session-1")
+            .expect("foreign-registry capability");
+        let agent_pane_url = issuer.agent_pane_websocket_url().to_string();
+        let browser_pane_url = issuer.pane_websocket_url().to_string();
+
+        runtime.block_on(async {
+            for (case, token) in [("missing", None), ("foreign", Some(foreign_token.as_str()))] {
+                let mut request = agent_pane_url
+                    .as_str()
+                    .into_client_request()
+                    .expect("agent pane WebSocket request");
+                if let Some(token) = token {
+                    request.headers_mut().insert(
+                        AUTHORIZATION,
+                        format!("Bearer {token}")
+                            .parse()
+                            .expect("bearer header value"),
+                    );
+                }
+
+                match connect_async(request).await {
+                    Err(WebSocketError::Http(response)) => assert_eq!(
+                        response.status().as_u16(),
+                        StatusCode::UNAUTHORIZED.as_u16(),
+                        "{case} capability must be rejected during the handshake"
+                    ),
+                    Err(error) => panic!("{case} handshake returned the wrong error: {error}"),
+                    Ok((socket, _)) => {
+                        drop(socket);
+                        panic!("{case} capability unexpectedly upgraded")
+                    }
+                }
+            }
+
+            let mut authorized_request = agent_pane_url
+                .as_str()
+                .into_client_request()
+                .expect("authorized agent pane WebSocket request");
+            authorized_request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", target.token)
+                    .parse()
+                    .expect("authorized bearer header value"),
+            );
+            let (mut authorized_socket, response) = connect_async(authorized_request)
+                .await
+                .expect("authorized agent pane WebSocket upgrade");
+            assert_eq!(
+                response.status().as_u16(),
+                StatusCode::SWITCHING_PROTOCOLS.as_u16()
+            );
+            authorized_socket
+                .close(None)
+                .await
+                .expect("close authorized agent pane WebSocket");
+
+            let (mut browser_socket, response) = connect_async(browser_pane_url.as_str())
+                .await
+                .expect("browser WebSocket remains token-free");
+            assert_eq!(
+                response.status().as_u16(),
+                StatusCode::SWITCHING_PROTOCOLS.as_u16()
+            );
+            browser_socket
+                .close(None)
+                .await
+                .expect("close browser WebSocket");
+        });
+
+        let records = server.access_log().snapshot();
+        assert!(records.iter().any(|record| {
+            record.path == "/internal/pane-ws" && record.status == StatusCode::UNAUTHORIZED.as_u16()
+        }));
+        assert!(records.iter().any(|record| {
+            record.path == "/internal/pane-ws"
+                && record.status == StatusCode::SWITCHING_PROTOCOLS.as_u16()
+        }));
+        assert!(records.iter().any(|record| {
+            record.path == "/ws" && record.status == StatusCode::SWITCHING_PROTOCOLS.as_u16()
+        }));
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn connected_agent_pane_socket_stops_dispatching_after_rotation_and_revoke() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let original = issuer
+            .issue(project.path(), "session-1")
+            .expect("original capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let ready = r#"{"kind":"frontend_ready"}"#.to_string();
+
+        runtime.block_on(async {
+            let connect = |token: &str| {
+                let mut request = pane_url
+                    .as_str()
+                    .into_client_request()
+                    .expect("agent pane WebSocket request");
+                request.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {token}")
+                        .parse()
+                        .expect("bearer header value"),
+                );
+                request
+            };
+
+            let (mut original_socket, _) = connect_async(connect(&original.token))
+                .await
+                .expect("original agent pane WebSocket");
+            original_socket
+                .send(WebSocketMessage::Text(ready.clone().into()))
+                .await
+                .expect("send ready on original socket");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if !events
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("original ready dispatch");
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+
+            let current = issuer
+                .issue(project.path(), "session-1")
+                .expect("rotated capability");
+            original_socket
+                .send(WebSocketMessage::Text(ready.clone().into()))
+                .await
+                .expect("send ready after rotation");
+            let _ = tokio::time::timeout(Duration::from_secs(1), original_socket.next())
+                .await
+                .expect("rotated socket must be closed by the server");
+            assert!(
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+                "a rotated socket must not enqueue an AgentFrontend event"
+            );
+
+            let (mut current_socket, _) = connect_async(connect(&current.token))
+                .await
+                .expect("current agent pane WebSocket");
+            current_socket
+                .send(WebSocketMessage::Text(ready.clone().into()))
+                .await
+                .expect("send ready on current socket");
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if !events
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("current ready dispatch");
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+
+            assert!(issuer.revoke_token(&current.token));
+            current_socket
+                .send(WebSocketMessage::Text(ready.into()))
+                .await
+                .expect("send ready after revoke");
+            let _ = tokio::time::timeout(Duration::from_secs(1), current_socket.next())
+                .await
+                .expect("revoked socket must be closed by the server");
+            assert!(
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+                "a revoked socket must not enqueue an AgentFrontend event"
+            );
+        });
+
+        server.shutdown();
     }
 
     #[test]
@@ -2134,6 +3057,7 @@ mod tests {
         let foreign = AgentCapabilityIssuer::new(
             current.url.clone(),
             issuer.pane_websocket_url().to_string(),
+            issuer.agent_pane_websocket_url().to_string(),
             AgentCapabilityRegistry::default(),
         )
         .issue(foreign_project.path(), "session-1")

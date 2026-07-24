@@ -35,12 +35,16 @@ pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
 pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
 /// Loopback endpoint used by daemon-owned hook live events.
 pub const GWT_HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
-/// Bearer token paired with [`GWT_HOOK_FORWARD_URL_ENV`].
+/// Bearer token paired with [`GWT_HOOK_FORWARD_URL_ENV`] and authenticated
+/// agent-listener pane WebSockets.
 pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
-/// Browser-listener WebSocket endpoint used by `gwtd pane.*` operations.
+/// Explicit WebSocket endpoint used by `gwtd pane.*` operations.
 ///
-/// This is intentionally separate from [`GWT_HOOK_FORWARD_URL_ENV`], whose
-/// listener exposes capability-authenticated agent routes only.
+/// Managed Host and container launches use the capability-authenticated agent
+/// listener together with [`GWT_HOOK_FORWARD_TOKEN_ENV`]. Host keeps the
+/// listener's loopback URL while containers use their runtime host alias. The
+/// endpoint stays separate from [`GWT_HOOK_FORWARD_URL_ENV`] so clients never
+/// derive one route from the other.
 pub const GWT_PANE_WS_URL_ENV: &str = "GWT_PANE_WS_URL";
 
 /// One agent-tool conversation session observed for a gwt session (a Work, in

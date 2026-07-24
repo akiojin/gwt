@@ -24,8 +24,9 @@ pub use container::{
 };
 pub use detect::{
     compose_available, container_runtime_kind, daemon_running, detect_docker_files,
-    docker_available, launch_preflight, ContainerRuntimeKind, DockerFiles, DOCKER_HOST_BRIDGE_NAME,
-    DOCKER_HOST_GATEWAY_EXTRA_HOST, PODMAN_HOST_BRIDGE_NAME,
+    docker_available, launch_preflight, launch_preflight_for_resolved_runtime,
+    ContainerRuntimeKind, DockerFiles, DOCKER_HOST_BRIDGE_NAME, DOCKER_HOST_GATEWAY_EXTRA_HOST,
+    PODMAN_HOST_BRIDGE_NAME,
 };
 pub use devcontainer::DevContainerConfig;
 pub use port::{check_port_available, PortAllocator, PortMapping};
