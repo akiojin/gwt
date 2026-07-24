@@ -347,6 +347,13 @@ pub struct WindowAddress {
     pub(crate) raw_id: String,
 }
 
+pub(crate) struct PendingAgentSelfClose {
+    ticket: AgentSelfCloseCapabilityTicket,
+    window_id: String,
+    address: WindowAddress,
+    session_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LaunchWizardSession {
     pub(crate) tab_id: String,
@@ -567,6 +574,10 @@ pub struct AppRuntime {
     /// Kept separately from [`ActiveAgentSession`] so stop/failure cleanup
     /// never needs to reconstruct authority from a mutable filesystem path.
     pub(crate) agent_capability_tokens: HashMap<String, String>,
+    /// Accepted correlated self-closes waiting for the origin WebSocket task
+    /// to finish its bounded direct ACK attempt. Entries are keyed by an
+    /// unguessable process-local ticket, never by wire correlation data.
+    pub(crate) pending_agent_self_closes: HashMap<String, PendingAgentSelfClose>,
     pub(crate) issue_link_cache_dir: PathBuf,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
@@ -824,6 +835,7 @@ impl AppRuntime {
             recoverable_agent_error_windows: HashSet::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
+            pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
@@ -2005,7 +2017,7 @@ impl AppRuntime {
                 rows,
                 base_geometry_revision,
             ),
-            FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
+            FrontendEvent::CloseWindow { id, .. } => self.close_window_events(&id),
             FrontendEvent::StopWindow { id } => self.stop_window_events(&id),
             FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
@@ -2663,11 +2675,33 @@ impl AppRuntime {
             );
             return AgentFrontendDispatchOutcome::StaleCapability;
         }
-        AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
-            client_id,
-            grant.principal().clone(),
-            request,
-        ))
+        match request {
+            AgentFrontendRequest::CloseWindow {
+                id,
+                request_id: Some(request_id),
+                responder: Some(responder),
+            } => AgentFrontendDispatchOutcome::Dispatched(
+                self.accept_agent_self_close(grant, id, request_id, responder),
+            ),
+            AgentFrontendRequest::CloseWindow {
+                request_id: Some(_),
+                ..
+            }
+            | AgentFrontendRequest::CloseWindow {
+                responder: Some(_), ..
+            } => {
+                tracing::warn!(
+                    target: "gwt_security",
+                    "correlated agent self-close rejected without an origin response channel"
+                );
+                AgentFrontendDispatchOutcome::Dispatched(Vec::new())
+            }
+            request => AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
+                client_id,
+                grant.principal().clone(),
+                request,
+            )),
+        }
     }
 
     pub(crate) fn handle_agent_frontend_event(
@@ -2678,11 +2712,36 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         match request {
             AgentFrontendRequest::Ready => self.agent_frontend_sync_events(&client_id, &principal),
-            AgentFrontendRequest::CloseWindow { id } => {
+            AgentFrontendRequest::CloseWindow {
+                id,
+                request_id,
+                responder,
+            } => {
+                if request_id.is_some() || responder.is_some() {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "correlated agent self-close bypassed generation-aware dispatch"
+                    );
+                    return Vec::new();
+                }
                 if !self.agent_principal_authorizes_window(&principal, &id) {
                     tracing::warn!(
                         target: "gwt_security",
                         "cross-project pane lifecycle request denied"
+                    );
+                    return Vec::new();
+                }
+                let closes_own_session = self
+                    .window_lookup
+                    .get(&id)
+                    .and_then(|address| self.tab(&address.tab_id).map(|tab| (tab, address)))
+                    .and_then(|(tab, address)| tab.workspace.window(&address.raw_id))
+                    .and_then(|window| window.session_id.as_deref())
+                    == Some(principal.session_id());
+                if closes_own_session {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "uncorrelated agent self-close rejected"
                     );
                     return Vec::new();
                 }
@@ -2705,6 +2764,125 @@ impl AppRuntime {
                 self.pane_send_input_to_window_events(client_id, &window_id, &text)
             }
         }
+    }
+
+    fn accept_agent_self_close(
+        &mut self,
+        grant: AgentCapabilityGrant,
+        requested_window_id: String,
+        request_id: String,
+        responder: AgentSelfCloseResponder,
+    ) -> Vec<OutboundEvent> {
+        let canonical_request_id = Uuid::parse_str(&request_id)
+            .ok()
+            .is_some_and(|parsed| parsed.hyphenated().to_string() == request_id);
+        if !canonical_request_id {
+            tracing::warn!(
+                target: "gwt_security",
+                "agent self-close rejected an invalid correlation id"
+            );
+            return Vec::new();
+        }
+
+        let own_window_id = match self.agent_principal_session_window(grant.principal()) {
+            Ok(window_id) => window_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_security",
+                    reason = %error,
+                    "agent self-close could not resolve one exact Session window"
+                );
+                return Vec::new();
+            }
+        };
+        if requested_window_id != own_window_id {
+            tracing::warn!(
+                target: "gwt_security",
+                "correlated agent self-close targeted a peer or foreign window"
+            );
+            return Vec::new();
+        }
+
+        let Some(address) = self.window_lookup.get(&own_window_id).cloned() else {
+            return Vec::new();
+        };
+        let captured_session_id = self
+            .tab(&address.tab_id)
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+            .and_then(|window| window.session_id.clone());
+        if captured_session_id.as_deref() != Some(grant.principal().session_id()) {
+            tracing::warn!(
+                target: "gwt_security",
+                "agent self-close Session changed before acceptance"
+            );
+            return Vec::new();
+        }
+        let Some(issuer) = self.agent_capability_issuer.clone() else {
+            return Vec::new();
+        };
+        let Some(ticket) = issuer.begin_self_close_if_current(&grant) else {
+            tracing::warn!(
+                target: "gwt_security",
+                "agent self-close capability changed before acceptance"
+            );
+            return Vec::new();
+        };
+
+        let pending = PendingAgentSelfClose {
+            ticket: ticket.clone(),
+            window_id: own_window_id.clone(),
+            address,
+            session_id: captured_session_id.expect("validated Session id"),
+        };
+        self.pending_agent_self_closes
+            .insert(ticket.id().to_string(), pending);
+        let acceptance = AgentSelfCloseDirectAcceptance::new(
+            request_id,
+            own_window_id,
+            ticket,
+            self.proxy.clone(),
+        );
+        if let Err(acceptance) = responder.send(acceptance) {
+            let ticket = acceptance.disarm();
+            self.pending_agent_self_closes.remove(ticket.id());
+            issuer.rollback_self_close(&ticket);
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn commit_agent_self_close(
+        &mut self,
+        ticket: AgentSelfCloseCapabilityTicket,
+    ) -> Vec<OutboundEvent> {
+        let Some(pending) = self.pending_agent_self_closes.remove(ticket.id()) else {
+            return Vec::new();
+        };
+        let still_captured_window =
+            self.window_lookup
+                .get(&pending.window_id)
+                .is_some_and(|current| {
+                    current.tab_id == pending.address.tab_id
+                        && current.raw_id == pending.address.raw_id
+                })
+                && self
+                    .tab(&pending.address.tab_id)
+                    .and_then(|tab| tab.workspace.window(&pending.address.raw_id))
+                    .and_then(|window| window.session_id.as_deref())
+                    == Some(pending.session_id.as_str());
+
+        let events = if still_captured_window {
+            self.close_window_events(&pending.window_id)
+        } else {
+            Vec::new()
+        };
+        if let Some(issuer) = self.agent_capability_issuer.as_ref() {
+            issuer.finish_self_close(&pending.ticket);
+        }
+        events
+    }
+
+    pub(crate) fn has_pending_agent_self_closes(&self) -> bool {
+        !self.pending_agent_self_closes.is_empty()
     }
 
     fn agent_principal_authorizes_window(

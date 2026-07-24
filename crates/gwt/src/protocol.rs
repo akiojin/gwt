@@ -290,6 +290,8 @@ pub enum FrontendEvent {
     },
     CloseWindow {
         id: String,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// SPEC-2356 安心 Addendum (FR-041): stop the window's agent runtime (kill
     /// the PTY through the existing stop path) but KEEP the window and its
@@ -1506,6 +1508,12 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    /// Direct, origin-connection-only acceptance for an authenticated
+    /// self-close. The internal close ticket never crosses the wire.
+    PaneCloseAccepted {
+        request_id: String,
+        window_id: String,
+    },
     IssueMonitorStatus {
         status: IssueMonitorStatusView,
     },
@@ -2217,6 +2225,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pane_close_accepted",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2637,6 +2650,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
@@ -2831,6 +2845,50 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn pane_close_request_preserves_optional_correlation_for_agent_clients() {
+        let correlated = serde_json::json!({
+            "kind": "close_window",
+            "id": "tab-1::agent-1",
+            "request_id": "018f6f10-4e0e-7f5d-9c6f-5f7edaa557d2"
+        });
+        let event = serde_json::from_value::<FrontendEvent>(correlated).expect("close request");
+        assert!(matches!(
+            event,
+            FrontendEvent::CloseWindow {
+                id,
+                request_id: Some(request_id),
+            } if id == "tab-1::agent-1"
+                && request_id == "018f6f10-4e0e-7f5d-9c6f-5f7edaa557d2"
+        ));
+
+        let legacy = serde_json::json!({
+            "kind": "close_window",
+            "id": "tab-1::agent-1"
+        });
+        let event =
+            serde_json::from_value::<FrontendEvent>(legacy).expect("legacy browser close request");
+        assert!(matches!(
+            event,
+            FrontendEvent::CloseWindow {
+                id,
+                request_id: None,
+            } if id == "tab-1::agent-1"
+        ));
+    }
+
+    #[test]
+    fn pane_close_acceptance_is_explicitly_lossless() {
+        let policy =
+            backend_event_policy("pane_close_accepted").expect("pane_close_accepted policy");
+
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
         );
     }
 

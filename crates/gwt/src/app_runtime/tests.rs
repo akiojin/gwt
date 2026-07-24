@@ -51,7 +51,8 @@ use super::{
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
-    AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry, UploadedAttachment,
+    AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
+    UploadedAttachment,
 };
 
 #[test]
@@ -2407,6 +2408,7 @@ fn sample_runtime_with_events(
         recoverable_agent_error_windows: HashSet::new(),
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
+        pending_agent_self_closes: HashMap::new(),
         issue_link_cache_dir: gwt_cache_dir(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
@@ -2522,6 +2524,8 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         principal.clone(),
         AgentFrontendRequest::CloseWindow {
             id: "tab-foreign::agent-foreign".to_string(),
+            request_id: None,
+            responder: None,
         },
     );
 
@@ -2535,6 +2539,8 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
         principal,
         AgentFrontendRequest::CloseWindow {
             id: "tab-authenticated::agent-authenticated".to_string(),
+            request_id: None,
+            responder: None,
         },
     );
     assert!(!runtime
@@ -2618,6 +2624,357 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
             ..
         }] if window_id == "tab-project::agent-project"
     ));
+}
+
+#[test]
+fn queued_correlated_self_close_rechecks_generation_before_acceptance() {
+    let temp = tempdir().expect("tempdir");
+    let (mut runtime, events, issuer, queued_grant, window_id) = self_close_runtime(temp.path());
+    issuer
+        .issue(temp.path().join("project").as_path(), "session-project")
+        .expect("rotate capability before queued self-close dispatch");
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "stale-origin-pane".to_string(),
+        queued_grant,
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("acb37331-72e8-493a-a411-12d060d5a33b".to_string()),
+            responder: Some(responder),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::StaleCapability
+    ));
+    assert!(acceptance.try_recv().is_err());
+    assert!(runtime.pending_agent_self_closes.is_empty());
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(events.lock().expect("event log").is_empty());
+}
+
+fn self_close_runtime(
+    temp_root: &Path,
+) -> (
+    AppRuntime,
+    Arc<Mutex<Vec<UserEvent>>>,
+    crate::embedded_server::AgentCapabilityIssuer,
+    crate::embedded_server::AgentCapabilityGrant,
+    String,
+) {
+    let project = temp_root.join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp_root, vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let target = issuer
+        .issue(&project, "session-project")
+        .expect("self-close capability");
+    let grant = issuer
+        .grant_for_test(&target.token)
+        .expect("authenticated self-close grant");
+    let window_id = "tab-project::agent-project".to_string();
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), target.token);
+    (runtime, events, issuer, grant, window_id)
+}
+
+fn take_self_close_commit(
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> super::AgentSelfCloseCapabilityTicket {
+    let mut events = events.lock().expect("event log");
+    let position = events
+        .iter()
+        .position(|event| matches!(event, UserEvent::CommitAgentSelfClose { .. }))
+        .expect("self-close acceptance drop must schedule a commit");
+    match events.remove(position) {
+        UserEvent::CommitAgentSelfClose { ticket } => ticket,
+        _ => unreachable!("matched self-close commit"),
+    }
+}
+
+#[test]
+fn accepted_agent_self_close_waits_for_direct_ack_then_commits_exactly_once() {
+    let temp = tempdir().expect("tempdir");
+    let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "origin-pane-client".to_string(),
+        grant.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("d466de22-4a6b-4b5c-9c88-bdc2ab334f67".to_string()),
+            responder: Some(responder),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
+            if dispatched.is_empty()
+    ));
+    let accepted = acceptance.try_recv().expect("direct acceptance");
+    assert!(!issuer.grant_is_current(&grant));
+    assert!(
+        issuer
+            .issue(temp.path().join("project").as_path(), "session-project")
+            .is_err(),
+        "the same principal must not be reissued while its close is pending"
+    );
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "acceptance must not remove the window before the direct ACK attempt"
+    );
+    assert!(runtime.has_pending_agent_self_closes());
+
+    drop(accepted);
+    let ticket = take_self_close_commit(&events);
+    let replay = ticket.clone();
+    let committed = runtime.commit_agent_self_close(ticket);
+    assert!(!committed.is_empty());
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+    assert!(!runtime.has_pending_agent_self_closes());
+    assert!(runtime.commit_agent_self_close(replay).is_empty());
+    assert!(
+        issuer
+            .issue(temp.path().join("project").as_path(), "session-project")
+            .is_ok(),
+        "finalization must release the Closing principal"
+    );
+}
+
+#[test]
+fn agent_self_close_disconnect_before_acceptance_rolls_back_the_grant() {
+    let temp = tempdir().expect("tempdir");
+    let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
+    let (responder, acceptance) = AgentSelfCloseResponder::channel();
+    drop(acceptance);
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "disconnected-pane-client".to_string(),
+        grant.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("89d7c5fc-3894-48dc-a6f4-180af89fb6a3".to_string()),
+            responder: Some(responder),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
+            if dispatched.is_empty()
+    ));
+    assert!(issuer.grant_is_current(&grant));
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(runtime.pending_agent_self_closes.is_empty());
+    assert!(events.lock().expect("event log").is_empty());
+}
+
+#[test]
+fn correlated_agent_self_close_rejects_same_project_peer_window() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let peer = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    assert!(tab
+        .workspace
+        .set_session_id(&peer.id, Some("session-peer".to_string())));
+    let peer_window_id = combined_window_id("tab-project", &peer.id);
+    let (mut runtime, _events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let target = issuer
+        .issue(&project, "session-project")
+        .expect("self capability");
+    let grant = issuer
+        .grant_for_test(&target.token)
+        .expect("authenticated grant");
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "origin-pane-client".to_string(),
+        grant.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: peer_window_id.clone(),
+            request_id: Some("fb5c985e-d51a-419a-9fcf-a0ba1229273a".to_string()),
+            responder: Some(responder),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
+            if dispatched.is_empty()
+    ));
+    assert!(acceptance.try_recv().is_err());
+    assert!(issuer.grant_is_current(&grant));
+    assert!(runtime.window_lookup.contains_key(&peer_window_id));
+}
+
+#[test]
+fn correlated_agent_self_close_fails_closed_for_ambiguous_session_windows() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let duplicate = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    assert!(tab
+        .workspace
+        .set_session_id(&duplicate.id, Some("session-project".to_string())));
+    let (mut runtime, _events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let target = issuer
+        .issue(&project, "session-project")
+        .expect("self capability");
+    let grant = issuer
+        .grant_for_test(&target.token)
+        .expect("authenticated grant");
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "origin-pane-client".to_string(),
+        grant.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-project".to_string(),
+            request_id: Some("6c00f003-8b70-42b4-be2f-af6f03c62698".to_string()),
+            responder: Some(responder),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
+            if dispatched.is_empty()
+    ));
+    assert!(acceptance.try_recv().is_err());
+    assert!(issuer.grant_is_current(&grant));
+    assert_eq!(runtime.window_lookup.len(), 2);
+}
+
+#[test]
+fn accepted_agent_self_close_survives_external_stop_before_commit() {
+    let temp = tempdir().expect("tempdir");
+    let (mut runtime, events, _issuer, grant, window_id) = self_close_runtime(temp.path());
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "origin-pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("e3c14844-f500-477d-b794-ab0fccb003af".to_string()),
+            responder: Some(responder),
+        },
+    );
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(_)
+    ));
+    let accepted = acceptance.try_recv().expect("direct acceptance");
+
+    let stopped = runtime.stop_window_events(&window_id);
+    assert!(!stopped.is_empty());
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    drop(accepted);
+
+    let ticket = take_self_close_commit(&events);
+    let committed = runtime.commit_agent_self_close(ticket);
+    assert!(!committed.is_empty());
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+}
+
+#[test]
+fn accepted_agent_self_close_does_not_remove_same_id_successor_session() {
+    let temp = tempdir().expect("tempdir");
+    let (mut runtime, events, _issuer, grant, window_id) = self_close_runtime(temp.path());
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "origin-pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("0745685c-28cc-4b3f-888e-e11a11bd773c".to_string()),
+            responder: Some(responder),
+        },
+    );
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(_)
+    ));
+    let accepted = acceptance.try_recv().expect("direct acceptance");
+    let address = runtime
+        .window_lookup
+        .get(&window_id)
+        .expect("window address")
+        .clone();
+    assert!(runtime
+        .tab_mut(&address.tab_id)
+        .expect("tab")
+        .workspace
+        .set_session_id(&address.raw_id, Some("successor-session".to_string())));
+    drop(accepted);
+
+    let ticket = take_self_close_commit(&events);
+    assert!(runtime.commit_agent_self_close(ticket).is_empty());
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "a same-id replacement with a new Session must survive stale close finalization"
+    );
 }
 
 fn wait_for_recorded_event(
