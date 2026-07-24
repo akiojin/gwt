@@ -781,6 +781,7 @@ mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                no_change_evidence: None,
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },

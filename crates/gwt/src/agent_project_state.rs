@@ -1583,6 +1583,8 @@ mod tests {
                 status: crate::cli::execution_state::ExecutionControlStatus::Completed,
                 blocked_reason: None,
                 missing_verification: None,
+                required_recovery_commands: Vec::new(),
+                required_recovery_commands_hash: String::new(),
                 launched_at: now,
                 settled_at: Some(now),
                 transfers: Vec::new(),
