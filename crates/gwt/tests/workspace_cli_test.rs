@@ -820,18 +820,12 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
         );
         let response: Value = serde_json::from_slice(&output.stdout).expect("gwtd response JSON");
         assert_ok(&response, "real Host proxy workspace.update");
-        let journal_entry_id = response["output"]
+        let _journal_entry_id = response["output"]
             .as_str()
             .and_then(|value| value.strip_prefix("workspace updated: "))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .expect("Host mutation receipt id");
-        assert!(
-            response["output"]
-                .as_str()
-                .is_some_and(|value| value.contains(journal_entry_id)),
-            "{case}: the child must receive the real Host journal receipt: {response}"
-        );
 
         let tracked_events_after = fs::read(&tracked_events_path).expect("tracked events after");
         assert!(

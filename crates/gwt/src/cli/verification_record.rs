@@ -967,10 +967,10 @@ fn event_commit_has_non_bookkeeping_change(
 ) -> Result<bool, ()> {
     let output = gwt_core::process::hidden_command("git")
         .args([
-            "diff-tree",
+            "show",
             "--root",
-            "-m",
-            "--no-commit-id",
+            "--first-parent",
+            "--format=",
             "--name-only",
             "-r",
             "-z",
@@ -2620,6 +2620,53 @@ pub(crate) mod tests {
             evaluate_work_event_settlement(&fixture.repo),
             fixture.settled_status(),
             "a pushed merge carrying both source and the Work event must satisfy commit policy"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_rejects_bookkeeping_only_merge_when_other_parent_contains_source() {
+        let fixture = WorkEventGitFixture::tracked();
+
+        fixture.git_ok(&["checkout", "-qb", "settlement-topic"]);
+        fixture.append_event("topic-terminal-event");
+        fixture.stage_events();
+        fixture.commit("chore(work): record topic Work event");
+
+        fixture.git_ok(&["checkout", "-q", "main"]);
+        fixture.append_event("main-side-event");
+        fs::write(fixture.repo.join("src.txt"), "main source delivery\n")
+            .expect("write main-side source change");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
+        fixture.commit("fix: advance main source and Work event");
+
+        let merge = fixture.git_output(&["merge", "--no-ff", "--no-commit", "settlement-topic"]);
+        assert!(
+            !merge.status.success(),
+            "the fixture must require an explicit event-log merge resolution"
+        );
+        fs::write(
+            fixture.event_path(),
+            concat!(
+                "{\"id\":\"base\"}\n",
+                "{\"id\":\"main-side-event\"}\n",
+                "{\"id\":\"topic-terminal-event\"}\n",
+                "{\"id\":\"merge-resolution-event\"}\n",
+            ),
+        )
+        .expect("resolve merged Work event log");
+        fixture.git_ok(&["add", "--", WORK_EVENTS_PATH]);
+        fixture.commit("fix: merge Work event delivery");
+        assert_eq!(
+            fixture.latest_event_commit(),
+            fixture.git_stdout(&["rev-parse", "HEAD"]),
+            "the path-limited event commit must be the merge itself"
+        );
+        fixture.push();
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit),
+            "source inherited from another parent must not satisfy the merge commit policy"
         );
     }
 

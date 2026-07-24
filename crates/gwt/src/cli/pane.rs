@@ -228,11 +228,24 @@ async fn close_pane(
             "pane close: pane {requested_id} left the authenticated project scope"
         ));
     }
+    let ambient_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
+    let ambient_session_id = ambient_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty());
+    let closes_calling_session = ambient_session_id.is_some_and(|session_id| {
+        scoped_windows.iter().any(|window| {
+            window.id == resolved_id && window.session_id.as_deref() == Some(session_id)
+        })
+    });
     send_frontend_event(
         &mut socket,
         json!({ "kind": "close_window", "id": resolved_id }),
     )
     .await?;
+    if closes_calling_session {
+        return Ok(format!("close requested {requested_id}\n"));
+    }
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
@@ -883,5 +896,168 @@ mod tests {
     #[test]
     fn render_snapshot_lines_keeps_requested_tail() {
         assert_eq!(render_snapshot_lines("a\nb\nc\n", 2), "b\nc\n");
+    }
+
+    fn workspace_state_for_test(project_root: &str, windows: Vec<PersistedWindowState>) -> Value {
+        json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "tabs": [{
+                    "project_root": project_root,
+                    "workspace": { "windows": windows },
+                }],
+            },
+        })
+    }
+
+    async fn next_frontend_kind(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> String {
+        let message = socket
+            .next()
+            .await
+            .expect("frontend frame")
+            .expect("valid frontend frame");
+        let Message::Text(text) = message else {
+            panic!("frontend frame must be text");
+        };
+        let value: Value = serde_json::from_str(text.as_ref()).expect("frontend frame JSON");
+        value["kind"]
+            .as_str()
+            .expect("frontend frame kind")
+            .to_string()
+    }
+
+    async fn spawn_close_pane_mock(
+        project_root: &'static str,
+        target: PersistedWindowState,
+        post_close_windows: Option<Vec<PersistedWindowState>>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let initial_state = workspace_state_for_test(project_root, vec![target]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind pane mock");
+        let address = listener.local_addr().expect("pane mock address");
+        let server = tokio::spawn(async move {
+            let mut received_kinds = Vec::new();
+            for connection_index in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept pane connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane websocket");
+
+                received_kinds.push(next_frontend_kind(&mut socket).await);
+                socket
+                    .send(Message::Text(initial_state.to_string().into()))
+                    .await
+                    .expect("send workspace state");
+
+                if connection_index == 1 {
+                    received_kinds.push(next_frontend_kind(&mut socket).await);
+                    if let Some(windows) = post_close_windows.as_ref() {
+                        received_kinds.push(
+                            tokio::time::timeout(
+                                Duration::from_secs(1),
+                                next_frontend_kind(&mut socket),
+                            )
+                            .await
+                            .expect("post-close frontend_ready timeout"),
+                        );
+                        let post_close_state =
+                            workspace_state_for_test(project_root, windows.clone());
+                        socket
+                            .send(Message::Text(post_close_state.to_string().into()))
+                            .await
+                            .expect("send post-close workspace state");
+                    } else if let Ok(Some(Ok(Message::Text(extra)))) =
+                        tokio::time::timeout(Duration::from_millis(250), socket.next()).await
+                    {
+                        let extra: Value =
+                            serde_json::from_str(extra.as_ref()).expect("extra frontend JSON");
+                        received_kinds.push(
+                            extra["kind"]
+                                .as_str()
+                                .expect("extra frontend kind")
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            received_kinds
+        });
+
+        (format!("ws://{address}/internal/pane-ws"), server)
+    }
+
+    #[test]
+    fn self_pane_close_returns_after_send_without_followup_ready() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/self";
+            let mut own = window("tab-self::agent-self", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".to_string());
+            let (ws_url, server) = spawn_close_pane_mock(project_root, own, None).await;
+
+            let result = close_pane(&ws_url, project_root, "agent-self").await;
+            let received_kinds = server.await.expect("pane mock task");
+
+            assert_eq!(result, Ok("close requested agent-self\n".to_string()));
+            assert_eq!(
+                received_kinds,
+                vec!["frontend_ready", "frontend_ready", "close_window"],
+                "self-close must not send a second frontend_ready after revocation"
+            );
+        });
+    }
+
+    #[test]
+    fn non_self_pane_close_keeps_authoritative_post_close_readback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "peer-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/peer";
+            let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
+            peer.session_id = Some("session-peer".to_string());
+            let (ws_url, server) =
+                spawn_close_pane_mock(project_root, peer, Some(Vec::new())).await;
+
+            let result = close_pane(&ws_url, project_root, "agent-peer").await;
+            let received_kinds = server.await.expect("pane mock task");
+
+            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
+            assert_eq!(
+                received_kinds,
+                vec![
+                    "frontend_ready",
+                    "frontend_ready",
+                    "close_window",
+                    "frontend_ready"
+                ],
+                "non-self close must retain authoritative post-close readback"
+            );
+        });
     }
 }
