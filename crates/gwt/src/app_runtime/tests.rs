@@ -44,10 +44,10 @@ use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
     save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
     AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
-    AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
-    KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
-    LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, FrontendHydrationCompletion,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime,
+    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
@@ -1232,6 +1232,99 @@ fn prepend_tool_parent_to_path(tool: &Path) -> ScopedEnvVar {
 
 fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
     prepend_tool_parent_to_path(fake_gh)
+}
+
+fn save_merged_work_items(project_root: &Path, count: usize) {
+    let updated_at = chrono::Utc::now();
+    let work_items = (0..count)
+        .map(|index| {
+            let branch = format!("work/perf-{index:03}");
+            let worktree_path = project_root.join("work").join(format!("perf-{index:03}"));
+            fs::create_dir_all(&worktree_path).expect("create performance fixture worktree");
+            gwt_core::workspace_projection::WorkItem {
+                id: format!("work-perf-{index:03}"),
+                title: format!("Performance fixture {index:03}"),
+                intent: None,
+                summary: None,
+                progress_summary: None,
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+                owner: None,
+                created_at: updated_at,
+                updated_at,
+                completed_at: None,
+                agents: Vec::new(),
+                execution_containers: vec![
+                    gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                        branch: Some(branch),
+                        worktree_path: Some(worktree_path),
+                        pr_number: Some(3_000 + index as u64),
+                        pr_url: None,
+                        pr_state: Some("MERGED".to_string()),
+                    },
+                ],
+                board_refs: Vec::new(),
+                related_work_item_ids: Vec::new(),
+                events: Vec::new(),
+                legacy_metadata_snapshot: None,
+                legacy_metadata_authoritative: false,
+                legacy_metadata_snapshot_at: None,
+                duplicate_event_containers: Default::default(),
+                discarded: false,
+                discarded_at: None,
+            }
+        })
+        .collect();
+    let projection = gwt_core::workspace_projection::WorkItemsProjection {
+        updated_at,
+        work_items,
+    };
+    let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
+    fs::create_dir_all(path.parent().expect("work items parent"))
+        .expect("create work items parent");
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+        &path,
+        &projection,
+    )
+    .expect("save performance fixture work items");
+}
+
+fn empty_repo_activity_snapshot() -> super::RepoActivitySnapshot {
+    super::RepoActivitySnapshot {
+        captured_at: std::time::Instant::now(),
+        worktree_activity: HashMap::new(),
+        known_clean_branches: HashSet::new(),
+        live_process_worktree_paths: HashSet::new(),
+        local_worktree_branches: HashSet::new(),
+        detached_worktree_paths: HashSet::new(),
+        merged_branches: HashMap::new(),
+        cleanup_ready_branches: HashMap::new(),
+        tip_subjects: HashMap::new(),
+    }
+}
+
+fn seed_known_clean_repo_activity(
+    runtime: &mut AppRuntime,
+    project_root: &Path,
+    branches: &[&str],
+    clean_paths: &[&Path],
+    live_paths: &[&Path],
+) {
+    let mut snapshot = empty_repo_activity_snapshot();
+    snapshot.known_clean_branches = branches.iter().map(|branch| branch.to_string()).collect();
+    for path in clean_paths {
+        if let Ok(path) = dunce::canonicalize(path) {
+            snapshot
+                .worktree_activity
+                .insert(path, super::WorktreeActivity::Clean);
+        }
+    }
+    snapshot.live_process_worktree_paths = live_paths
+        .iter()
+        .filter_map(|path| dunce::canonicalize(path).ok())
+        .collect();
+    runtime
+        .repo_activity_snapshots
+        .insert(project_root.to_path_buf(), snapshot);
 }
 
 fn canvas_bounds() -> WindowGeometry {
@@ -2829,6 +2922,11 @@ fn sample_runtime_with_events(
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
         work_ai_summaries: HashMap::new(),
+        repo_activity_snapshots: HashMap::new(),
+        repo_activity_scans_inflight: HashSet::new(),
+        repo_activity_scan_generations: HashMap::new(),
+        frontend_hydration_generations: HashMap::new(),
+        frontend_hydration_context_generation: 0,
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
@@ -2876,6 +2974,38 @@ fn wait_for_recorded_event(
     }
     let snapshot = events.lock().expect("event log").clone();
     panic!("timed out waiting for {label}: {snapshot:?}");
+}
+
+fn finish_frontend_hydration(
+    runtime: &AppRuntime,
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+    client_id: &str,
+) -> Vec<OutboundEvent> {
+    wait_for_recorded_event("frontend hydration", recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::FrontendHydrationReady {
+                    client_id: ready_client,
+                    ..
+                } if ready_client == client_id
+            )
+        })
+    });
+    let hydration = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            UserEvent::FrontendHydrationReady {
+                client_id: ready_client,
+                hydration,
+            } if ready_client == client_id => Some(hydration.clone()),
+            _ => None,
+        })
+        .expect("frontend hydration event");
+    runtime.handle_frontend_hydration_ready(client_id, hydration)
 }
 
 /// Issue #3297: `load_knowledge_bridge_events` replies off the GUI event
@@ -3641,7 +3771,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
         WindowPreset::Shell,
         WindowProcessStatus::Ready,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "shell-1");
     let (command, args) = if cfg!(windows) {
         (
@@ -3679,8 +3809,9 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
         },
     );
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
 
     assert!(events.iter().all(|event| matches!(
         &event.target,
@@ -3705,7 +3836,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
         WindowPreset::Shell,
         WindowProcessStatus::Ready,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "shell-1");
     let (command, args) = if cfg!(windows) {
         (
@@ -3745,8 +3876,9 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
         },
     );
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
 
     let snapshot = events.iter().find_map(|event| match &event.event {
         BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(data_base64),
@@ -3785,7 +3917,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
         WindowPreset::Shell,
         WindowProcessStatus::Ready,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "shell-1");
     let (command, args) = if cfg!(windows) {
         (
@@ -3826,8 +3958,9 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
         },
     );
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
 
     let snapshot = events.iter().find_map(|event| match &event.event {
         BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(data_base64),
@@ -4402,7 +4535,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
         ProjectKind::Git,
         &[WindowPreset::Board],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.active_agent_sessions.insert(
         "tab-1::agent-1".to_string(),
         ActiveAgentSession {
@@ -4421,8 +4554,9 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
         },
     );
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
 
     assert!(matches!(
         events.first().map(|event| &event.event),
@@ -6791,15 +6925,16 @@ fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_r
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
     let _ = runtime.handle_launch_complete(
         window_id.clone(),
         Err("launch failed before process spawn".to_string()),
     );
 
-    let events =
+    let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
 
     let snapshot = events
         .iter()
@@ -12584,6 +12719,372 @@ fn app_runtime_active_work_projection_does_not_spawn_git_for_cleanup_candidate()
 }
 
 #[test]
+fn app_runtime_active_work_projection_is_process_free_for_many_worktrees() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    save_merged_work_items(&repo, 64);
+
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+
+    assert_eq!(
+        view.active_works.len(),
+        64,
+        "fixture must render every Work"
+    );
+    assert!(
+        view.active_works.iter().all(|work| !work.merged_into_base
+            && !work.done_equivalent
+            && work.cleanup_candidate.is_none()),
+        "repository activity cache miss must keep merge and cleanup verdicts unknown"
+    );
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "Active Work projection render must consume only cached repository activity; \
+         synchronous Git invocations:\n{invocations}"
+    );
+}
+
+#[test]
+fn app_state_view_uses_cached_intake_classification_without_git() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let intake = repo.join(".intake-session");
+    fs::create_dir_all(&intake).expect("create intake fixture");
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id: window_id.clone(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: String::new(),
+            display_name: "Codex".to_string(),
+            worktree_path: intake,
+            agent_project_root: String::new(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let state = runtime.app_state_view();
+
+    assert_eq!(
+        state.tabs[0].workspace.windows[0].lane_kind,
+        gwt::WindowLaneKind::Unknown,
+        "cache miss must stay unknown instead of probing or guessing"
+    );
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "workspace-state projection must not spawn Git: {invocations}"
+    );
+}
+
+#[test]
+fn app_runtime_select_project_tab_is_process_free_for_many_worktrees() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let first_repo = temp.path().join("first-repo");
+    let target_repo = temp.path().join("target-repo");
+    fs::create_dir_all(&first_repo).expect("create first repo");
+    fs::create_dir_all(&target_repo).expect("create target repo");
+    save_merged_work_items(&target_repo, 64);
+
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let tabs = vec![
+        sample_project_tab("tab-1", "First", first_repo, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "tab-2",
+            "Target",
+            target_repo.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+    runtime
+        .last_work_events_ingest
+        .borrow_mut()
+        .insert(target_repo, std::time::Instant::now());
+
+    let events = runtime.select_project_tab_events("tab-2");
+
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "SelectProjectTab synchronous path must not run repository processes; \
+         invocations:\n{invocations}"
+    );
+}
+
+#[test]
+fn app_runtime_frontend_ready_defers_all_terminal_snapshots() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let presets = vec![WindowPreset::Shell; 10];
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &presets);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_ids = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| combined_window_id("tab-1", &window.id))
+        .collect::<Vec<_>>();
+    for window_id in &window_ids {
+        insert_test_pane_runtime(&mut runtime, window_id);
+        runtime.runtimes[window_id]
+            .pane
+            .lock()
+            .expect("pane")
+            .process_bytes(b"deferred snapshot fixture\r\n");
+    }
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "FrontendReady synchronous return must be a lightweight bootstrap; \
+         pane snapshots belong to generation-gated background hydration"
+    );
+    wait_for_recorded_event("frontend hydration", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::FrontendHydrationReady {
+                    hydration:
+                        FrontendHydrationCompletion {
+                            terminal_snapshots,
+                            ..
+                        },
+                    ..
+                } if terminal_snapshots.len() == 10
+            )
+        })
+    });
+    runtime.stop_all_runtimes();
+}
+
+#[test]
+fn frontend_hydration_captures_and_validates_active_project_root() {
+    let temp = tempdir().expect("tempdir");
+    let first_root = temp.path().join("repo-a");
+    let replacement_root = temp.path().join("repo-b");
+    fs::create_dir_all(&first_root).expect("first repo");
+    fs::create_dir_all(&replacement_root).expect("replacement repo");
+    let tab = sample_project_tab("tab-1", "Repo", first_root.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let _ = runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    wait_for_recorded_event("project-scoped frontend hydration", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::FrontendHydrationReady {
+                    hydration:
+                        FrontendHydrationCompletion {
+                            active_project_root: Some(project_root),
+                            ..
+                        },
+                    ..
+                } if project_root == &first_root
+            )
+        })
+    });
+
+    runtime.tabs[0].project_root = replacement_root;
+    let events = runtime.handle_frontend_hydration_ready(
+        "client-1",
+        FrontendHydrationCompletion {
+            generation: 1,
+            context_generation: runtime.frontend_hydration_context_generation,
+            active_tab_id: Some("tab-1".to_string()),
+            active_project_root: Some(first_root),
+            window_instances: Vec::new(),
+            terminal_snapshots: Vec::new(),
+        },
+    );
+
+    assert!(
+        events.is_empty(),
+        "a hydration captured for the previous project root must be dropped"
+    );
+}
+
+#[test]
+fn frontend_hydration_drops_older_client_generation() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().join("repo"),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 2);
+
+    let events = runtime.handle_frontend_hydration_ready(
+        "client-1",
+        FrontendHydrationCompletion {
+            generation: 1,
+            context_generation: runtime.frontend_hydration_context_generation,
+            active_tab_id: Some("tab-1".to_string()),
+            active_project_root: runtime.active_project_root().map(Path::to_path_buf),
+            window_instances: Vec::new(),
+            terminal_snapshots: vec![("stale-window".to_string(), b"stale".to_vec())],
+        },
+    );
+
+    assert!(
+        events.is_empty(),
+        "older hydration generation must be dropped"
+    );
+}
+
+#[test]
+fn frontend_hydration_drops_a_b_a_tab_switch_completion() {
+    let temp = tempdir().expect("tempdir");
+    let tabs = vec![
+        sample_project_tab(
+            "tab-a",
+            "A",
+            temp.path().join("repo-a"),
+            ProjectKind::Git,
+            &[],
+        ),
+        sample_project_tab(
+            "tab-b",
+            "B",
+            temp.path().join("repo-b"),
+            ProjectKind::Git,
+            &[],
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-a"));
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 1);
+    let captured_context = runtime.frontend_hydration_context_generation;
+    runtime.set_active_tab("tab-b".to_string());
+    runtime.set_active_tab("tab-a".to_string());
+
+    let events = runtime.handle_frontend_hydration_ready(
+        "client-1",
+        FrontendHydrationCompletion {
+            generation: 1,
+            context_generation: captured_context,
+            active_tab_id: Some("tab-a".to_string()),
+            active_project_root: runtime.active_project_root().map(Path::to_path_buf),
+            window_instances: Vec::new(),
+            terminal_snapshots: Vec::new(),
+        },
+    );
+
+    assert!(
+        events.is_empty(),
+        "matching tab id after A→B→A must not revive the stale A hydration"
+    );
+}
+
+#[test]
+fn frontend_hydration_drops_closed_and_reopened_window_instance() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let old_instance = Arc::as_ptr(&runtime.runtimes[&window_id].pane) as usize;
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 1);
+
+    let events = runtime.handle_frontend_hydration_ready(
+        "client-1",
+        FrontendHydrationCompletion {
+            generation: 1,
+            context_generation: runtime.frontend_hydration_context_generation,
+            active_tab_id: Some("tab-1".to_string()),
+            active_project_root: runtime.active_project_root().map(Path::to_path_buf),
+            window_instances: vec![(window_id.clone(), old_instance)],
+            terminal_snapshots: vec![(window_id, b"stale".to_vec())],
+        },
+    );
+    runtime.stop_all_runtimes();
+
+    assert!(
+        events.is_empty(),
+        "a reopened window with the same id must reject the old pane snapshot"
+    );
+}
+
+#[test]
 fn workspace_cleanup_failure_does_not_emit_done_work_item() {
     let _env_lock = env_test_lock()
         .lock()
@@ -12810,6 +13311,13 @@ fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent
             tab_id: "tab-1".to_string(),
         },
     );
+    seed_known_clean_repo_activity(
+        &mut runtime,
+        &repo,
+        &["work/20260615-live-cleanup"],
+        &[],
+        &[],
+    );
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -12857,7 +13365,14 @@ fn app_runtime_row_cleanup_candidate_exposes_merged_workspace_without_live_agent
     })
     .expect("record work");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    seed_known_clean_repo_activity(
+        &mut runtime,
+        &repo,
+        &["work/20260615-merged-cleanup"],
+        &[],
+        &[],
+    );
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -12932,6 +13447,13 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
             tab_id: "tab-1".to_string(),
         },
     );
+    seed_known_clean_repo_activity(
+        &mut runtime,
+        &repo,
+        &["work/20260615-grouped-cleanup"],
+        &[],
+        &[],
+    );
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -12989,7 +13511,14 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
             .expect("spawn cwd process"),
     );
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    seed_known_clean_repo_activity(
+        &mut runtime,
+        &repo,
+        &["work/20260616-0203"],
+        &[worktree.as_path()],
+        &[worktree.as_path()],
+    );
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -18916,6 +19445,9 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
     runtime
         .active_agent_sessions
         .insert(execution_id.clone(), execution_session);
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), super::scan_repo_activity_snapshot(&repo));
 
     let view = runtime.app_state_view();
     let windows = &view
@@ -23280,14 +23812,21 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
     let mut works = vec![
         row(Some("origin/work/merged"), None),
         row(Some("work/open"), None),
-        row(None, Some("MERGED")),
+        row(Some("work/pr-merged"), Some("MERGED")),
     ];
     let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
         [("work/merged".to_string(), chrono::Utc::now())]
             .into_iter()
             .collect();
 
-    super::mark_merged_active_works(&mut works, Some(&merged));
+    let known_clean = [
+        "work/merged".to_string(),
+        "work/open".to_string(),
+        "work/pr-merged".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    super::mark_merged_active_works(&mut works, Some(&merged), None, Some(&known_clean));
 
     assert!(
         works[0].merged_into_base,
@@ -23346,8 +23885,21 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         updated_at: "2026-06-10T12:00:00Z".to_string(),
     }];
 
-    super::mark_merged_active_works(&mut works, None);
-    super::mark_workspace_cleanup_candidates(&mut works, None, &[], &HashSet::new());
+    let activity = [(
+        fs::canonicalize(&repo).expect("canonical repo"),
+        super::WorktreeActivity::Dirty,
+    )]
+    .into_iter()
+    .collect();
+    super::mark_merged_active_works(&mut works, None, Some(&activity), None);
+    super::mark_workspace_cleanup_candidates(
+        &mut works,
+        None,
+        Some(&activity),
+        None,
+        &[],
+        &HashSet::new(),
+    );
 
     assert!(
         !works[0].merged_into_base,
@@ -23456,14 +24008,14 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     .expect("record work");
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.spawn_work_merge_status_scan(repo.clone());
 
     wait_for_recorded_event("dirty work merge status", &events, |events| {
         events.iter().any(|event| {
             matches!(
                 event,
-                UserEvent::WorkMergeStatus {
+                UserEvent::RepoActivityReady {
                     project_root,
                     ..
                 } if project_root == &repo
@@ -23475,13 +24027,15 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     let (_, merged_branches, cleanup_ready_branches) = snapshot
         .iter()
         .find_map(|event| match event {
-            UserEvent::WorkMergeStatus {
+            UserEvent::RepoActivityReady {
                 project_root,
-                merged_branches,
-                cleanup_ready_branches,
-            } if project_root == &repo => {
-                Some((project_root, merged_branches, cleanup_ready_branches))
-            }
+                snapshot,
+                ..
+            } if project_root == &repo => Some((
+                project_root,
+                &snapshot.merged_branches,
+                &snapshot.cleanup_ready_branches,
+            )),
             _ => None,
         })
         .expect("work merge status event");
@@ -23530,23 +24084,135 @@ fn spawn_work_merge_status_scan_clears_stale_cache_when_no_targets_remain() {
     .expect("record terminal work");
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.spawn_work_merge_status_scan(repo.clone());
 
     wait_for_recorded_event("empty work merge status", &events, |events| {
         events.iter().any(|event| {
             matches!(
                 event,
-                UserEvent::WorkMergeStatus {
+                UserEvent::RepoActivityReady {
                     project_root,
-                    merged_branches,
-                    cleanup_ready_branches,
+                    snapshot,
+                    ..
                 } if project_root == &repo
-                    && merged_branches.is_empty()
-                    && cleanup_ready_branches.is_empty()
+                    && snapshot.merged_branches.is_empty()
+                    && snapshot.cleanup_ready_branches.is_empty()
             )
         })
     });
+}
+
+#[test]
+fn repo_activity_refresh_is_single_flight_and_fresh_for_ten_seconds() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.spawn_work_merge_status_scan(repo.clone());
+    runtime.spawn_work_merge_status_scan(repo.clone());
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo).copied(),
+        Some(1),
+        "a second request while in flight must reuse the running scan"
+    );
+
+    wait_for_recorded_event("repository activity snapshot", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::RepoActivityReady {
+                    project_root,
+                    generation: 1,
+                    ..
+                } if project_root == &repo
+            )
+        })
+    });
+    let snapshot = events
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::RepoActivityReady {
+                project_root,
+                generation: 1,
+                snapshot,
+            } if project_root == &repo => Some(snapshot.clone()),
+            _ => None,
+        })
+        .expect("snapshot result");
+    runtime.apply_repo_activity_snapshot(&repo, 1, snapshot);
+    runtime.spawn_work_merge_status_scan(repo.clone());
+
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo).copied(),
+        Some(1),
+        "a fresh snapshot must suppress another process-backed scan"
+    );
+    assert!(!runtime.repo_activity_scans_inflight.contains(&repo));
+}
+
+#[test]
+fn repo_activity_status_probes_never_exceed_two_concurrent_processes() {
+    let worker_count = 8;
+    let start = Arc::new(std::sync::Barrier::new(worker_count + 1));
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let maximum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let start = Arc::clone(&start);
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            scope.spawn(move || {
+                start.wait();
+                super::with_repo_status_probe_permit(|| {
+                    let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    maximum.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(20));
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                });
+            });
+        }
+        start.wait();
+    });
+
+    let observed = maximum.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(observed > 0, "at least one status probe must execute");
+    assert!(
+        observed <= 2,
+        "repository status process concurrency must stay bounded at two, observed {observed}"
+    );
+}
+
+#[test]
+fn repo_activity_completion_drops_stale_generation() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 2);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+
+    let events = runtime.apply_repo_activity_snapshot(&repo, 1, empty_repo_activity_snapshot());
+
+    assert!(events.is_empty());
+    assert!(!runtime.repo_activity_snapshots.contains_key(&repo));
+    assert!(
+        runtime.repo_activity_scans_inflight.contains(&repo),
+        "the newer in-flight generation must remain owned"
+    );
 }
 
 #[test]
@@ -24262,7 +24928,10 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
         ),
     ];
 
-    super::mark_merged_active_works(&mut works, Some(&merged));
+    let known_clean = ["work/merged".to_string(), "work/other".to_string()]
+        .into_iter()
+        .collect();
+    super::mark_merged_active_works(&mut works, Some(&merged), None, Some(&known_clean));
 
     assert!(works[0].done_equivalent, "merged ∧ stale → derived Done");
     assert!(
@@ -24317,10 +24986,13 @@ fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
         [("work/no-changes".to_string(), "no_changes".to_string())]
             .into_iter()
             .collect();
+    let known_clean = ["work/no-changes".to_string()].into_iter().collect();
 
     super::mark_workspace_cleanup_candidates(
         &mut works,
         Some(&cleanup_ready),
+        None,
+        Some(&known_clean),
         &[],
         &HashSet::new(),
     );
@@ -24428,10 +25100,24 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
         [fs::canonicalize(&live_process_worktree).expect("canonical live process worktree")]
             .into_iter()
             .collect();
+    let activity = [(
+        fs::canonicalize(&live_process_worktree).expect("canonical live process worktree"),
+        super::WorktreeActivity::Clean,
+    )]
+    .into_iter()
+    .collect();
+    let known_clean = [
+        "work/live-agent".to_string(),
+        "work/live-process".to_string(),
+    ]
+    .into_iter()
+    .collect();
 
     super::mark_workspace_cleanup_candidates(
         &mut works,
         Some(&cleanup_ready),
+        Some(&activity),
+        Some(&known_clean),
         &[&session],
         &live_process_paths,
     );

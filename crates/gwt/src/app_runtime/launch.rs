@@ -2056,6 +2056,26 @@ impl AppRuntime {
         }
     }
 
+    /// Projection-only form of [`Self::is_ephemeral_intake_session`]. The
+    /// repository activity worker already enumerated detached worktrees, so
+    /// rendering can classify the lane without spawning Git.
+    pub(super) fn ephemeral_intake_session_cached(
+        &self,
+        session: &ActiveAgentSession,
+    ) -> Option<bool> {
+        if !is_ephemeral_intake_worktree(&session.worktree_path) {
+            return Some(false);
+        }
+        if !session.worktree_path.exists() {
+            return Some(true);
+        }
+        let project_root = self.tab(&session.tab_id).map(|tab| &tab.project_root)?;
+        let snapshot = self.repo_activity_snapshots.get(project_root)?;
+        dunce::canonicalize(&session.worktree_path)
+            .ok()
+            .map(|path| snapshot.detached_worktree_paths.contains(&path))
+    }
+
     /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
     /// session ends. A clean worktree is force-removed; a dirty one is kept and
     /// logged so uncommitted work is never destroyed (the user-facing retention

@@ -67,8 +67,8 @@ pub(crate) use app_runtime::{
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner,
-    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
-    ProjectTabRuntime, WindowAddress,
+    DispatchTarget, FrontendHydrationCompletion, IssueLaunchWizardPrepared, OutboundEvent,
+    ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, RepoActivitySnapshot, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -977,6 +977,12 @@ enum UserEvent {
         client_id: ClientId,
         event: FrontendEvent,
     },
+    /// SPEC-3170 FR-045: process/PTY-backed second phase of FrontendReady.
+    /// The event loop validates all captured generations before dispatch.
+    FrontendHydrationReady {
+        client_id: ClientId,
+        hydration: FrontendHydrationCompletion,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -1019,20 +1025,13 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
-    /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
-    /// The runtime caches the set and rebroadcasts the Workspace projection
-    /// so rows can show the "safe to delete" badge.
-    WorkMergeStatus {
+    /// SPEC-3170 FR-044: one complete, generation-tagged repository activity
+    /// scan. All process-backed inputs are collected off the event loop and
+    /// atomically replace the projection cache.
+    RepoActivityReady {
         project_root: PathBuf,
-        merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
-        cleanup_ready_branches: std::collections::HashMap<String, String>,
-    },
-    /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
-    /// caches the `branch -> subject` map and rebroadcasts the Workspace
-    /// projection so historical rows show "what work was running".
-    WorkTipSubjects {
-        project_root: PathBuf,
-        tip_subjects: std::collections::HashMap<String, String>,
+        generation: u64,
+        snapshot: RepoActivitySnapshot,
     },
     /// SPEC-3075: result of the background `gh pr list` scan. The runtime caches
     /// the `branch -> PR title` map and rebroadcasts the Workspace projection so
@@ -2465,6 +2464,11 @@ mod tests {
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
+            repo_activity_snapshots: HashMap::new(),
+            repo_activity_scans_inflight: std::collections::HashSet::new(),
+            repo_activity_scan_generations: HashMap::new(),
+            frontend_hydration_generations: HashMap::new(),
+            frontend_hydration_context_generation: 0,
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -7533,6 +7537,13 @@ fn main() -> std::io::Result<()> {
                     );
                 }
             }
+            Event::UserEvent(UserEvent::FrontendHydrationReady {
+                client_id,
+                hydration,
+            }) => {
+                let events = app.handle_frontend_hydration_ready(&client_id, hydration);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the
                 // only producer of this variant. The browser UI now
@@ -7572,23 +7583,12 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_work_events_ingested(project_root, changed);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::WorkMergeStatus {
+            Event::UserEvent(UserEvent::RepoActivityReady {
                 project_root,
-                merged_branches,
-                cleanup_ready_branches,
+                generation,
+                snapshot,
             }) => {
-                let events = app.apply_work_merge_status(
-                    &project_root,
-                    merged_branches,
-                    cleanup_ready_branches,
-                );
-                clients.dispatch(events);
-            }
-            Event::UserEvent(UserEvent::WorkTipSubjects {
-                project_root,
-                tip_subjects,
-            }) => {
-                let events = app.apply_work_tip_subjects(&project_root, tip_subjects);
+                let events = app.apply_repo_activity_snapshot(&project_root, generation, snapshot);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkPrTitles {

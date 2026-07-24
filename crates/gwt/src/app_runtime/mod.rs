@@ -75,6 +75,16 @@ impl BlockingTaskSpawner {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FrontendHydrationCompletion {
+    pub(crate) generation: u64,
+    pub(crate) context_generation: u64,
+    pub(crate) active_tab_id: Option<String>,
+    pub(crate) active_project_root: Option<PathBuf>,
+    pub(crate) window_instances: Vec<(String, usize)>,
+    pub(crate) terminal_snapshots: Vec<(String, Vec<u8>)>,
+}
+
 pub struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
@@ -156,6 +166,7 @@ use workspace::{
     workspace_cleanup_candidate_for_projection, workspace_projection_for_current_resume,
     workspace_projection_owner_title, WorkspaceLaunchProjectionKind,
 };
+use workspace_views::scan_live_process_worktree_paths;
 use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, agent_launch_purpose_title,
@@ -175,6 +186,7 @@ use workspace_views::{
     mark_remote_only_active_works, mark_workspace_cleanup_candidates,
     workspace_work_agent_view_from_ref, workspace_work_event_kind_wire,
 };
+pub(crate) use workspace_views::{RepoActivitySnapshot, WorktreeActivity};
 
 #[derive(Debug, Clone)]
 pub struct ActiveAgentSession {
@@ -518,10 +530,10 @@ pub struct AppRuntime {
     /// This includes merged branches and branches with no effective tree diff
     /// from the canonical base. Runtime-only; never persisted.
     pub(crate) work_cleanup_ready_branches: HashMap<PathBuf, HashMap<String, String>>,
-    /// SPEC-3075: per-project `branch short name -> tip commit subject`, resolved
-    /// off the hot path by [`AppRuntime::spawn_work_tip_subjects_scan`] (one
-    /// `for-each-ref` spawn). Fills the Workspace rail summary for historical
-    /// Works that never recorded a `title-summary` purpose.
+    /// SPEC-3075: per-project `branch short name -> tip commit subject`,
+    /// resolved inside the repository activity snapshot off the hot path.
+    /// Fills the Workspace rail summary for historical Works that never
+    /// recorded a `title-summary` purpose.
     pub(crate) work_tip_subjects: HashMap<PathBuf, HashMap<String, String>>,
     /// SPEC-3075: per-project `branch (PR head ref) -> PR title`, resolved off
     /// the hot path by [`AppRuntime::spawn_work_pr_titles_scan`] (one `gh pr
@@ -535,6 +547,19 @@ pub struct AppRuntime {
     /// the raw commit subject but below PR title / agent title-summary. Empty
     /// when AI is disabled — the non-AI chain then stands unchanged.
     pub(crate) work_ai_summaries: HashMap<PathBuf, HashMap<String, String>>,
+    /// SPEC-3170 FR-044: immutable repository activity consumed by every
+    /// synchronous projection path. Workers replace the whole entry only after
+    /// a complete scan, so the event loop never observes a half-refreshed mix.
+    pub(crate) repo_activity_snapshots: HashMap<PathBuf, RepoActivitySnapshot>,
+    /// At most one repository activity scan may run per project. The
+    /// generation also rejects a late result after an explicit refresh.
+    pub(crate) repo_activity_scans_inflight: HashSet<PathBuf>,
+    pub(crate) repo_activity_scan_generations: HashMap<PathBuf, u64>,
+    /// SPEC-3170 FR-045: newest FrontendReady hydration request per client.
+    /// Background pane snapshots are accepted only when this generation and
+    /// the captured tab/window topology still match.
+    pub(crate) frontend_hydration_generations: HashMap<ClientId, u64>,
+    pub(crate) frontend_hydration_context_generation: u64,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
     /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
@@ -801,6 +826,11 @@ impl AppRuntime {
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
+            repo_activity_snapshots: HashMap::new(),
+            repo_activity_scans_inflight: HashSet::new(),
+            repo_activity_scan_generations: HashMap::new(),
+            frontend_hydration_generations: HashMap::new(),
+            frontend_hydration_context_generation: 0,
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -836,16 +866,71 @@ impl AppRuntime {
     /// SPEC-2359 W-15 (FR-386): store the background merged-branch scan
     /// result and rebroadcast the Workspace projection so the "safe to
     /// delete" badge appears. Display-only; never records a close (US-61).
+    #[cfg(test)]
     pub(crate) fn apply_work_merge_status(
         &mut self,
         project_root: &Path,
         merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>>,
         cleanup_ready_branches: HashMap<String, String>,
     ) -> Vec<OutboundEvent> {
+        let known_clean_branches = merged_branches
+            .keys()
+            .chain(cleanup_ready_branches.keys())
+            .cloned()
+            .collect();
         self.work_merged_branches
-            .insert(project_root.to_path_buf(), merged_branches);
+            .insert(project_root.to_path_buf(), merged_branches.clone());
         self.work_cleanup_ready_branches
-            .insert(project_root.to_path_buf(), cleanup_ready_branches);
+            .insert(project_root.to_path_buf(), cleanup_ready_branches.clone());
+        self.repo_activity_snapshots.insert(
+            project_root.to_path_buf(),
+            RepoActivitySnapshot {
+                captured_at: std::time::Instant::now(),
+                worktree_activity: HashMap::new(),
+                known_clean_branches,
+                live_process_worktree_paths: HashSet::new(),
+                local_worktree_branches: HashSet::new(),
+                detached_worktree_paths: HashSet::new(),
+                merged_branches,
+                cleanup_ready_branches,
+                tip_subjects: HashMap::new(),
+            },
+        );
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-3170 FR-044: accept only the newest complete repository activity
+    /// scan and atomically publish every process-backed projection input.
+    pub(crate) fn apply_repo_activity_snapshot(
+        &mut self,
+        project_root: &Path,
+        generation: u64,
+        snapshot: RepoActivitySnapshot,
+    ) -> Vec<OutboundEvent> {
+        let expected = self
+            .repo_activity_scan_generations
+            .get(project_root)
+            .copied();
+        if expected != Some(generation) {
+            return Vec::new();
+        }
+        self.repo_activity_scans_inflight.remove(project_root);
+        self.work_merged_branches
+            .insert(project_root.to_path_buf(), snapshot.merged_branches.clone());
+        self.work_cleanup_ready_branches.insert(
+            project_root.to_path_buf(),
+            snapshot.cleanup_ready_branches.clone(),
+        );
+        self.work_tip_subjects
+            .insert(project_root.to_path_buf(), snapshot.tip_subjects.clone());
+        self.local_worktree_branches.borrow_mut().insert(
+            project_root.to_path_buf(),
+            snapshot.local_worktree_branches.clone(),
+        );
+        self.repo_activity_snapshots
+            .insert(project_root.to_path_buf(), snapshot);
         self.active_work_projection_broadcast_for_active_tab()
             .into_iter()
             .collect()
@@ -926,9 +1011,7 @@ impl AppRuntime {
         project_root: PathBuf,
         changed: bool,
     ) -> Vec<OutboundEvent> {
-        self.reconcile_workspace_worktrees(&project_root);
-        self.spawn_work_merge_status_scan(project_root.clone());
-        self.spawn_work_tip_subjects_scan(project_root.clone());
+        self.spawn_repo_activity_snapshot_scan(project_root.clone(), true);
         self.spawn_work_pr_titles_scan(project_root.clone());
         self.spawn_work_ai_summaries_scan(project_root);
         if changed {
@@ -940,104 +1023,40 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
-        let proxy = self.proxy.clone();
-        thread::spawn(move || {
-            let Ok(projection) =
-                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
-                    &project_root,
-                )
-            else {
-                return;
-            };
-            let targets = work_branch_scan_targets(&projection);
-            if targets.is_empty() {
-                proxy.send(UserEvent::WorkMergeStatus {
-                    project_root,
-                    merged_branches: HashMap::new(),
-                    cleanup_ready_branches: HashMap::new(),
-                });
-                return;
-            }
-            let mut merged: Vec<String> = Vec::new();
-            let mut cleanup_ready_branches: HashMap<String, String> = HashMap::new();
-            for target in targets {
-                if work_branch_has_dirty_worktree(&target) {
-                    continue;
-                }
-                let branch = target.branch;
-                if let Ok(Some(readiness)) =
-                    gwt_git::branch::cleanup_readiness_base_target(&project_root, &branch)
-                {
-                    let reason = match readiness.reason {
-                        gwt_git::branch::CleanupReadinessReason::Merged => {
-                            merged.push(branch.clone());
-                            gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
-                        }
-                        gwt_git::branch::CleanupReadinessReason::NoChanges => {
-                            gwt_core::workspace_projection::WorkspaceCleanupReason::NoChanges
-                        }
-                    };
-                    cleanup_ready_branches.insert(branch, reason.as_str().to_string());
-                }
-            }
-            // SPEC-2359 W16-4 (FR-391): one extra spawn resolves every tip
-            // committer time — the merge-reference-time proxy for the derived
-            // Done classification (plan decision 8).
-            let tip_times =
-                gwt_git::refs::branch_tip_committer_times(&project_root).unwrap_or_default();
-            let merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>> = merged
-                .into_iter()
-                .map(|branch| {
-                    let unix = tip_times
-                        .get(&branch)
-                        .or_else(|| tip_times.get(&format!("origin/{branch}")))
-                        .copied();
-                    let reference = unix
-                        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-                        .unwrap_or_else(chrono::Utc::now);
-                    (branch, reference)
-                })
-                .collect();
-            proxy.send(UserEvent::WorkMergeStatus {
-                project_root,
-                merged_branches,
-                cleanup_ready_branches,
-            });
-        });
+    #[cfg(test)]
+    pub(crate) fn spawn_work_merge_status_scan(&mut self, project_root: PathBuf) {
+        self.spawn_repo_activity_snapshot_scan(project_root, false);
     }
 
-    /// SPEC-3075: cache the resolved `branch -> tip commit subject` map and
-    /// rebroadcast so the Workspace rail re-renders with the historical summary.
-    pub(crate) fn apply_work_tip_subjects(
-        &mut self,
-        project_root: &Path,
-        tip_subjects: HashMap<String, String>,
-    ) -> Vec<OutboundEvent> {
-        self.work_tip_subjects
-            .insert(project_root.to_path_buf(), tip_subjects);
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
-    }
-
-    /// SPEC-3075: resolve every branch's tip commit subject off the UI thread in
-    /// ONE `for-each-ref` spawn, then hand the map to the event loop via
-    /// [`UserEvent::WorkTipSubjects`]. This is the "what work was running" signal
-    /// for historical Works with no recorded purpose. Mirrors
-    /// [`Self::spawn_work_merge_status_scan`] but runs for every project (not
-    /// just merged branches) since every Workspace row benefits.
-    pub(crate) fn spawn_work_tip_subjects_scan(&self, project_root: PathBuf) {
+    pub(crate) fn spawn_repo_activity_snapshot_scan(&mut self, project_root: PathBuf, force: bool) {
+        let now = std::time::Instant::now();
+        if !force
+            && self
+                .repo_activity_snapshots
+                .get(&project_root)
+                .is_some_and(|snapshot| snapshot.is_fresh(now))
+        {
+            return;
+        }
+        if !self
+            .repo_activity_scans_inflight
+            .insert(project_root.clone())
+        {
+            return;
+        }
+        let generation = self
+            .repo_activity_scan_generations
+            .entry(project_root.clone())
+            .and_modify(|generation| *generation = generation.saturating_add(1))
+            .or_insert(1);
+        let generation = *generation;
         let proxy = self.proxy.clone();
-        thread::spawn(move || {
-            let tip_subjects =
-                gwt_git::refs::branch_tip_subjects(&project_root).unwrap_or_default();
-            if tip_subjects.is_empty() {
-                return;
-            }
-            proxy.send(UserEvent::WorkTipSubjects {
+        self.blocking_tasks.spawn(move || {
+            let snapshot = scan_repo_activity_snapshot(&project_root);
+            proxy.send(UserEvent::RepoActivityReady {
                 project_root,
-                tip_subjects,
+                generation,
+                snapshot,
             });
         });
     }
@@ -1136,6 +1155,7 @@ impl AppRuntime {
     /// plus the home works projection) so the Workspace list shows the union
     /// of existing worktrees and unclosed records. Errors are logged and
     /// swallowed — reconciliation must never block startup or project open.
+    #[cfg(test)]
     pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
         let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
             Ok(entries) => entries,
@@ -2641,53 +2661,126 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
-        let mut terminal_snapshots = self
+        let pane_sources = self
             .runtimes
             .iter()
-            .filter_map(|(id, runtime)| {
-                // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: snapshot replay
-                // must preserve the current formatted screen and enough
-                // scrollback history for a fresh xterm.js instance to scroll
-                // immediately after reconnect.
-                let snapshot = runtime
-                    .pane
-                    .lock()
-                    .map(|pane| pane.snapshot_bytes())
-                    .unwrap_or_default();
-                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
-            })
+            .map(|(id, runtime)| (id.clone(), runtime.pane.clone()))
             .collect::<Vec<_>>();
-        let runtime_snapshot_ids = terminal_snapshots
+        let runtime_snapshot_ids = pane_sources
             .iter()
             .map(|(id, _)| id.clone())
             .collect::<std::collections::HashSet<_>>();
-        for (id, detail) in &self.launch_error_terminal_details {
-            if !runtime_snapshot_ids.contains(id)
-                && self.window_status(id) == Some(WindowProcessStatus::Error)
-            {
-                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
-            }
-        }
+        let launch_error_snapshots = self
+            .launch_error_terminal_details
+            .iter()
+            .filter(|(id, _)| {
+                !runtime_snapshot_ids.contains(*id)
+                    && self.window_status(id) == Some(WindowProcessStatus::Error)
+            })
+            .map(|(id, detail)| (id.clone(), Self::launch_error_terminal_bytes(detail)))
+            .collect::<Vec<_>>();
+        let generation = self
+            .frontend_hydration_generations
+            .entry(client_id.to_string())
+            .and_modify(|generation| *generation = generation.saturating_add(1))
+            .or_insert(1);
+        let generation = *generation;
+        let context_generation = self.frontend_hydration_context_generation;
+        let active_tab_id = self.active_tab_id.clone();
+        let active_project_root = self.active_project_root().map(Path::to_path_buf);
+        let mut window_instances = pane_sources
+            .iter()
+            .map(|(id, pane)| (id.clone(), Arc::as_ptr(pane) as usize))
+            .collect::<Vec<_>>();
+        window_instances.sort_by(|left, right| left.0.cmp(&right.0));
+        let proxy = self.proxy.clone();
+        let hydration_client_id = client_id.to_string();
+        self.blocking_tasks.spawn(move || {
+            let mut terminal_snapshots = pane_sources
+                .into_iter()
+                .filter_map(|(id, pane)| {
+                    // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: preserve the
+                    // formatted screen and scrollback, but never lock a pane
+                    // on the event-loop bootstrap path.
+                    let snapshot = pane
+                        .lock()
+                        .map(|pane| pane.snapshot_bytes())
+                        .unwrap_or_default();
+                    (!snapshot.is_empty()).then_some((id, snapshot))
+                })
+                .collect::<Vec<_>>();
+            terminal_snapshots.extend(launch_error_snapshots);
+            proxy.send(UserEvent::FrontendHydrationReady {
+                client_id: hydration_client_id,
+                hydration: FrontendHydrationCompletion {
+                    generation,
+                    context_generation,
+                    active_tab_id,
+                    active_project_root,
+                    window_instances,
+                    terminal_snapshots,
+                },
+            });
+        });
 
-        let mut events = build_frontend_sync_events(
+        let events = build_frontend_sync_events(
             client_id,
             self.app_state_view(),
             terminal_statuses,
-            terminal_snapshots,
+            Vec::new(),
             self.launch_wizard
                 .as_ref()
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
         );
-        if let Some(event) = self.active_work_projection_reply(client_id) {
-            events.insert(1, event);
-        }
         self.schedule_active_improvement_candidates_refresh();
-        // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
-        // frontend during state hydration so the modal opens without waiting
-        // for another roundtrip.
+        events
+    }
+
+    pub(crate) fn handle_frontend_hydration_ready(
+        &self,
+        client_id: &str,
+        hydration: FrontendHydrationCompletion,
+    ) -> Vec<OutboundEvent> {
+        if self.frontend_hydration_generations.get(client_id).copied() != Some(hydration.generation)
+            || self.frontend_hydration_context_generation != hydration.context_generation
+            || self.active_tab_id != hydration.active_tab_id
+            || self.active_project_root() != hydration.active_project_root.as_deref()
+        {
+            return Vec::new();
+        }
+        let mut current_instances = self
+            .runtimes
+            .iter()
+            .map(|(id, runtime)| (id.clone(), Arc::as_ptr(&runtime.pane) as usize))
+            .collect::<Vec<_>>();
+        current_instances.sort_by(|left, right| left.0.cmp(&right.0));
+        if current_instances != hydration.window_instances {
+            return Vec::new();
+        }
+
+        let mut events = Vec::new();
+        if let Some(event) = self.active_work_projection_reply(client_id) {
+            events.push(event);
+        }
+        // SPEC-1934 US-6.1: migration probes run only after the lightweight
+        // bootstrap has already been dispatched.
         events.extend(self.migration_detected_replies(client_id));
         events.extend(self.migration_recovery_replies(client_id));
+        events.extend(
+            hydration
+                .terminal_snapshots
+                .into_iter()
+                .map(|(id, snapshot)| {
+                    OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::TerminalSnapshot {
+                            id,
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                        },
+                    )
+                }),
+        );
         events
     }
 }
@@ -2742,12 +2835,15 @@ impl AppRuntime {
                     window.lane_kind = self
                         .active_agent_sessions
                         .get(&window.id)
-                        .map(|session| {
-                            if self.is_ephemeral_intake_session(session) {
-                                gwt::WindowLaneKind::Intake
-                            } else {
-                                gwt::WindowLaneKind::Execution
-                            }
+                        .and_then(|session| {
+                            self.ephemeral_intake_session_cached(session)
+                                .map(|is_intake| {
+                                    if is_intake {
+                                        gwt::WindowLaneKind::Intake
+                                    } else {
+                                        gwt::WindowLaneKind::Execution
+                                    }
+                                })
                         })
                         .unwrap_or(gwt::WindowLaneKind::Unknown);
                     if let gwt::WindowPlacement::AgentKanban {
@@ -3031,6 +3127,8 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
+        self.frontend_hydration_context_generation =
+            self.frontend_hydration_context_generation.saturating_add(1);
         self.window_lookup.insert(
             combined_window_id(tab_id, raw_id),
             WindowAddress {
@@ -3101,6 +3199,10 @@ impl AppRuntime {
 
     pub(crate) fn set_active_tab(&mut self, tab_id: String) -> bool {
         let previous_project_root = self.active_project_root().map(Path::to_path_buf);
+        if self.active_tab_id.as_deref() != Some(tab_id.as_str()) {
+            self.frontend_hydration_context_generation =
+                self.frontend_hydration_context_generation.saturating_add(1);
+        }
         let wizard_closed = self
             .launch_wizard
             .as_ref()
@@ -3353,11 +3455,264 @@ fn work_branch_scan_targets(
     targets
 }
 
-fn work_branch_has_dirty_worktree(target: &WorkBranchScanTarget) -> bool {
-    target.worktree_paths.iter().any(|path| {
-        gwt_git::diff::get_status(path)
-            .map(|entries| !entries.is_empty())
-            .unwrap_or(false)
+fn scan_repo_activity_snapshot(project_root: &Path) -> RepoActivitySnapshot {
+    let main_root = gwt_git::worktree::main_worktree_root(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let inventory = gwt_git::worktree::WorktreeManager::new(&main_root)
+        .list()
+        .unwrap_or_default();
+    let canonical_main =
+        dunce::canonicalize(&main_root).unwrap_or_else(|_| main_root.to_path_buf());
+    let reconcile_sources = inventory
+        .iter()
+        .filter(|entry| !entry.prunable)
+        .filter_map(|entry| {
+            let path =
+                dunce::canonicalize(&entry.path).unwrap_or_else(|_| entry.path.to_path_buf());
+            (path != canonical_main).then(|| {
+                gwt_core::workspace_projection::WorktreeReconcileSource {
+                    branch: entry.branch.clone(),
+                    worktree_path: path,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    if !reconcile_sources.is_empty() {
+        match gwt_core::workspace_projection::reconcile_worktree_work_items(
+            project_root,
+            &reconcile_sources,
+            chrono::Utc::now(),
+        ) {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(
+                "workspace repository activity: backfilled {count} worktree(s) for {}",
+                project_root.display()
+            ),
+            Err(error) => tracing::warn!(
+                "workspace repository activity reconcile failed for {}: {error}",
+                project_root.display()
+            ),
+        }
+    }
+    let projection =
+        gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
+            .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
+                updated_at: chrono::Utc::now(),
+                work_items: Vec::new(),
+            });
+    let mut targets = work_branch_scan_targets(&projection);
+    let mut local_worktree_branches = HashSet::new();
+    let mut detached_worktree_paths = HashSet::new();
+    let mut worktree_paths_by_branch: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut worktree_paths = Vec::new();
+    for worktree in inventory.into_iter().filter(|entry| !entry.prunable) {
+        let branch = worktree
+            .branch
+            .as_deref()
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty());
+        if let Ok(path) = dunce::canonicalize(&worktree.path) {
+            if let Some(branch) = branch.as_ref() {
+                local_worktree_branches.insert(branch.clone());
+                worktree_paths_by_branch
+                    .entry(branch.clone())
+                    .or_default()
+                    .push(path.clone());
+            } else {
+                detached_worktree_paths.insert(path.clone());
+            }
+            worktree_paths.push(path);
+        }
+    }
+    for target in &mut targets {
+        if let Some(paths) = worktree_paths_by_branch.get(&target.branch) {
+            for path in paths {
+                if !target.worktree_paths.contains(path) {
+                    target.worktree_paths.push(path.clone());
+                }
+            }
+        }
+    }
+    for path in targets.iter().flat_map(|target| &target.worktree_paths) {
+        if let Ok(path) = dunce::canonicalize(path) {
+            worktree_paths.push(path);
+        }
+    }
+    worktree_paths.sort();
+    worktree_paths.dedup();
+
+    let worktree_activity = scan_worktree_activity_bounded(&worktree_paths);
+    let live_process_worktree_paths = scan_live_process_worktree_paths(&worktree_paths);
+    let (tip_times, tip_subjects) = scan_branch_tip_metadata(project_root);
+
+    let mut merged = Vec::new();
+    let mut cleanup_ready_branches = HashMap::new();
+    let mut known_clean_branches = HashSet::new();
+    for target in targets {
+        if !work_branch_target_is_known_clean(&target, &worktree_activity) {
+            continue;
+        }
+        let branch = target.branch;
+        known_clean_branches.insert(branch.clone());
+        if let Ok(Some(readiness)) =
+            gwt_git::branch::cleanup_readiness_base_target(project_root, &branch)
+        {
+            let reason = match readiness.reason {
+                gwt_git::branch::CleanupReadinessReason::Merged => {
+                    merged.push(branch.clone());
+                    gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
+                }
+                gwt_git::branch::CleanupReadinessReason::NoChanges => {
+                    gwt_core::workspace_projection::WorkspaceCleanupReason::NoChanges
+                }
+            };
+            cleanup_ready_branches.insert(branch, reason.as_str().to_string());
+        }
+    }
+    let merged_branches = merged
+        .into_iter()
+        .map(|branch| {
+            let unix = tip_times
+                .get(&branch)
+                .or_else(|| tip_times.get(&format!("origin/{branch}")))
+                .copied();
+            let reference = unix
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .unwrap_or_else(chrono::Utc::now);
+            (branch, reference)
+        })
+        .collect();
+
+    RepoActivitySnapshot {
+        captured_at: std::time::Instant::now(),
+        worktree_activity,
+        known_clean_branches,
+        live_process_worktree_paths,
+        local_worktree_branches,
+        detached_worktree_paths,
+        merged_branches,
+        cleanup_ready_branches,
+        tip_subjects,
+    }
+}
+
+fn scan_worktree_activity_bounded(paths: &[PathBuf]) -> HashMap<PathBuf, WorktreeActivity> {
+    let lanes = [
+        paths.iter().step_by(2).cloned().collect::<Vec<_>>(),
+        paths.iter().skip(1).step_by(2).cloned().collect::<Vec<_>>(),
+    ];
+    std::thread::scope(|scope| {
+        let workers = lanes.map(|lane| {
+            scope.spawn(move || {
+                lane.into_iter()
+                    .filter_map(|path| {
+                        with_repo_status_probe_permit(|| {
+                            gwt_git::diff::get_status(&path).ok().map(|entries| {
+                                let activity = if entries.is_empty() {
+                                    WorktreeActivity::Clean
+                                } else {
+                                    WorktreeActivity::Dirty
+                                };
+                                (path, activity)
+                            })
+                        })
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+        });
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap_or_default())
+            .collect()
+    })
+}
+
+fn with_repo_status_probe_permit<T>(probe: impl FnOnce() -> T) -> T {
+    static LIMIT: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
+        std::sync::OnceLock::new();
+    let (active_count, ready) =
+        LIMIT.get_or_init(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+    let mut active = active_count
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *active >= 2 {
+        active = ready
+            .wait(active)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *active += 1;
+    drop(active);
+
+    struct Permit<'a> {
+        active: &'a std::sync::Mutex<usize>,
+        ready: &'a std::sync::Condvar,
+    }
+    impl Drop for Permit<'_> {
+        fn drop(&mut self) {
+            let mut active = self
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *active = active.saturating_sub(1);
+            self.ready.notify_one();
+        }
+    }
+    let _permit = Permit {
+        active: active_count,
+        ready,
+    };
+    probe()
+}
+
+fn scan_branch_tip_metadata(
+    project_root: &Path,
+) -> (HashMap<String, i64>, HashMap<String, String>) {
+    let Ok(output) = gwt_core::process::run_git_logged(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(committerdate:unix)%09%(contents:subject)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ],
+        Some(project_root),
+    ) else {
+        return (HashMap::new(), HashMap::new());
+    };
+    if !output.status.success() {
+        return (HashMap::new(), HashMap::new());
+    }
+    let mut times = HashMap::new();
+    let mut subjects = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(3, '\t');
+        let name = fields.next().map(str::trim).unwrap_or_default();
+        let unix = fields.next().map(str::trim).unwrap_or_default();
+        let subject = fields.next().map(str::trim).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        if let Ok(unix) = unix.parse() {
+            times.insert(name.to_string(), unix);
+        }
+        if !subject.is_empty() {
+            subjects.insert(name.to_string(), subject.to_string());
+        }
+    }
+    (times, subjects)
+}
+
+fn work_branch_target_is_known_clean(
+    target: &WorkBranchScanTarget,
+    worktree_activity: &HashMap<PathBuf, WorktreeActivity>,
+) -> bool {
+    target.worktree_paths.iter().all(|path| {
+        if !path.exists() {
+            return true;
+        }
+        dunce::canonicalize(path)
+            .ok()
+            .and_then(|path| worktree_activity.get(&path))
+            == Some(&WorktreeActivity::Clean)
     })
 }
 

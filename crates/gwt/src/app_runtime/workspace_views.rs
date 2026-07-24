@@ -1973,12 +1973,39 @@ pub(super) fn mark_remote_only_active_works(
 /// SPEC-2359 W-15 (FR-386): flag rows whose branch is merged into a base on
 /// origin (background scan cache) or whose recorded PR state is merged — the
 /// "safe to delete" signal. Display-only; no automatic close (US-61).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreeActivity {
+    Clean,
+    Dirty,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RepoActivitySnapshot {
+    pub(crate) captured_at: std::time::Instant,
+    pub(crate) worktree_activity: HashMap<PathBuf, WorktreeActivity>,
+    pub(crate) known_clean_branches: HashSet<String>,
+    pub(crate) live_process_worktree_paths: HashSet<PathBuf>,
+    pub(crate) local_worktree_branches: HashSet<String>,
+    pub(crate) detached_worktree_paths: HashSet<PathBuf>,
+    pub(crate) merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub(crate) cleanup_ready_branches: HashMap<String, String>,
+    pub(crate) tip_subjects: HashMap<String, String>,
+}
+
+impl RepoActivitySnapshot {
+    pub(crate) fn is_fresh(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.captured_at) < std::time::Duration::from_secs(10)
+    }
+}
+
 pub(super) fn mark_merged_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
     merged_branches: Option<&HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    worktree_activity: Option<&HashMap<PathBuf, WorktreeActivity>>,
+    known_clean_branches: Option<&HashSet<String>>,
 ) {
     for work in active_works.iter_mut() {
-        if active_work_has_dirty_worktree(work) {
+        if !active_work_is_known_clean(work, worktree_activity, known_clean_branches) {
             work.merged_into_base = false;
             work.done_equivalent = false;
             continue;
@@ -2022,36 +2049,31 @@ pub(super) fn mark_merged_active_works(
     }
 }
 
-fn active_work_has_dirty_worktree(work: &gwt::ActiveWorkItemView) -> bool {
-    work.worktree_path
+fn active_work_is_known_clean(
+    work: &gwt::ActiveWorkItemView,
+    worktree_activity: Option<&HashMap<PathBuf, WorktreeActivity>>,
+    known_clean_branches: Option<&HashSet<String>>,
+) -> bool {
+    if work
+        .branch
         .as_deref()
-        .map(Path::new)
-        .filter(|path| active_work_path_is_git_toplevel(path))
-        .is_some_and(|path| {
-            gwt_git::diff::get_status(path)
-                .map(|entries| !entries.is_empty())
-                .unwrap_or(false)
+        .map(normalize_branch_name)
+        .is_some_and(|branch| {
+            known_clean_branches.is_some_and(|branches| branches.contains(&branch))
         })
-}
-
-fn active_work_path_is_git_toplevel(path: &Path) -> bool {
-    let Ok(path) = dunce::canonicalize(path) else {
+    {
+        return true;
+    }
+    let Some(path) = work.worktree_path.as_deref().map(Path::new) else {
         return false;
     };
-    let Ok(output) = gwt_core::process::run_git_logged(
-        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
-        Some(&path),
-    ) else {
+    let Some(path) = normalize_existing_worktree_path(path) else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if toplevel.as_os_str().is_empty() {
-        return false;
-    }
-    dunce::canonicalize(toplevel).is_ok_and(|toplevel| toplevel == path)
+    matches!(
+        worktree_activity.and_then(|activity| activity.get(&path)),
+        Some(WorktreeActivity::Clean)
+    )
 }
 
 /// SPEC-2359 US-78: cleanup eligibility is backend-owned per Workspace row.
@@ -2060,6 +2082,8 @@ fn active_work_path_is_git_toplevel(path: &Path) -> bool {
 pub(super) fn mark_workspace_cleanup_candidates(
     active_works: &mut [gwt::ActiveWorkItemView],
     cleanup_ready_branches: Option<&HashMap<String, String>>,
+    worktree_activity: Option<&HashMap<PathBuf, WorktreeActivity>>,
+    known_clean_branches: Option<&HashSet<String>>,
     sessions: &[&ActiveAgentSession],
     live_process_worktree_paths: &HashSet<PathBuf>,
 ) {
@@ -2077,7 +2101,13 @@ pub(super) fn mark_workspace_cleanup_candidates(
         else {
             continue;
         };
-        let Some(reason) = cleanup_reason_for_work(work, cleanup_ready_branches, &branch) else {
+        let Some(reason) = cleanup_reason_for_work(
+            work,
+            cleanup_ready_branches,
+            worktree_activity,
+            known_clean_branches,
+            &branch,
+        ) else {
             continue;
         };
         let worktree_path = work.worktree_path.as_deref().map(Path::new);
@@ -2107,9 +2137,11 @@ pub(super) fn mark_workspace_cleanup_candidates(
 fn cleanup_reason_for_work(
     work: &gwt::ActiveWorkItemView,
     cleanup_ready_branches: Option<&HashMap<String, String>>,
+    worktree_activity: Option<&HashMap<PathBuf, WorktreeActivity>>,
+    known_clean_branches: Option<&HashSet<String>>,
     branch: &str,
 ) -> Option<String> {
-    if active_work_has_dirty_worktree(work) {
+    if !active_work_is_known_clean(work, worktree_activity, known_clean_branches) {
         return None;
     }
     if let Some(reason) = cleanup_ready_branches
@@ -2133,47 +2165,14 @@ fn cleanup_reason_for_work(
     None
 }
 
-fn live_process_worktree_paths_for_cleanup(
-    active_works: &[gwt::ActiveWorkItemView],
-    cleanup_ready_branches: Option<&HashMap<String, String>>,
-    projection_cleanup_candidate: Option<&gwt::ActiveWorkCleanupCandidateView>,
-) -> HashSet<PathBuf> {
-    let mut candidate_paths = active_works
-        .iter()
-        .filter(|work| !work.remote_only)
-        .filter(|work| {
-            work.branch
-                .as_deref()
-                .map(normalize_branch_name)
-                .is_some_and(|branch| branch.starts_with("work/"))
-        })
-        .filter(|work| {
-            work.branch
-                .as_deref()
-                .map(normalize_branch_name)
-                .and_then(|branch| cleanup_reason_for_work(work, cleanup_ready_branches, &branch))
-                .is_some()
-        })
-        .filter_map(|work| {
-            work.worktree_path
-                .as_deref()
-                .map(Path::new)
-                .and_then(normalize_existing_worktree_path)
-        })
-        .collect::<Vec<_>>();
-    if let Some(path) = projection_cleanup_candidate
-        .and_then(|candidate| candidate.worktree_path.as_deref())
-        .map(Path::new)
-        .and_then(normalize_existing_worktree_path)
-    {
-        candidate_paths.push(path);
-    }
-    candidate_paths.sort();
-    candidate_paths.dedup();
+fn normalize_existing_worktree_path(path: &Path) -> Option<PathBuf> {
+    dunce::canonicalize(path).ok()
+}
+
+pub(super) fn scan_live_process_worktree_paths(candidate_paths: &[PathBuf]) -> HashSet<PathBuf> {
     if candidate_paths.is_empty() {
         return HashSet::new();
     }
-
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -2186,17 +2185,13 @@ fn live_process_worktree_paths_for_cleanup(
         let Some(cwd) = process.cwd().and_then(normalize_existing_worktree_path) else {
             continue;
         };
-        for candidate in &candidate_paths {
+        for candidate in candidate_paths {
             if cwd == *candidate || cwd.starts_with(candidate) {
                 live_paths.insert(candidate.clone());
             }
         }
     }
     live_paths
-}
-
-fn normalize_existing_worktree_path(path: &Path) -> Option<PathBuf> {
-    dunce::canonicalize(path).ok()
 }
 
 fn cleanup_candidate_has_live_process(
@@ -2575,10 +2570,14 @@ impl AppRuntime {
                 &tab.project_root,
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
-            // background merge-scan cache plus the recorded PR state.
+            // background repository-activity snapshot plus the recorded PR
+            // state. Projection must never spawn Git or scan OS processes.
+            let repo_activity = self.repo_activity_snapshots.get(&tab.project_root);
             mark_merged_active_works(
                 &mut view.active_works,
-                self.work_merged_branches.get(&tab.project_root),
+                repo_activity.map(|snapshot| &snapshot.merged_branches),
+                repo_activity.map(|snapshot| &snapshot.worktree_activity),
+                repo_activity.map(|snapshot| &snapshot.known_clean_branches),
             );
             // SPEC-3075: fill the rail summary — PR title (top), then the
             // AI-polished summary (FR-006), then the raw branch tip commit
@@ -2588,20 +2587,20 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.work_pr_titles.get(&tab.project_root),
                 self.work_ai_summaries.get(&tab.project_root),
-                self.work_tip_subjects.get(&tab.project_root),
+                repo_activity.map(|snapshot| &snapshot.tip_subjects),
             );
             // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only
             // from fetched refs, no local worktree (cache lookup only).
             mark_remote_only_active_works(
                 &mut view.active_works,
-                self.local_worktree_branches.borrow().get(&tab.project_root),
+                repo_activity.map(|snapshot| &snapshot.local_worktree_branches),
             );
-            let cleanup_ready_branches = self.work_cleanup_ready_branches.get(&tab.project_root);
-            let live_process_worktree_paths = live_process_worktree_paths_for_cleanup(
-                &view.active_works,
-                cleanup_ready_branches,
-                view.cleanup_candidate.as_ref(),
-            );
+            let cleanup_ready_branches =
+                repo_activity.map(|snapshot| &snapshot.cleanup_ready_branches);
+            let live_process_worktree_paths = repo_activity
+                .map(|snapshot| &snapshot.live_process_worktree_paths)
+                .cloned()
+                .unwrap_or_default();
             if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
                 cleanup_candidate_has_live_process(candidate, &live_process_worktree_paths)
             }) {
@@ -2610,6 +2609,8 @@ impl AppRuntime {
             mark_workspace_cleanup_candidates(
                 &mut view.active_works,
                 cleanup_ready_branches,
+                repo_activity.map(|snapshot| &snapshot.worktree_activity),
+                repo_activity.map(|snapshot| &snapshot.known_clean_branches),
                 &sessions,
                 &live_process_worktree_paths,
             );
