@@ -199,6 +199,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn detect_by_command_preserves_the_absolute_which_path_off_windows() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let expected = which::which("git").expect("git must be available to the test runner");
         let detected = AgentDetector::detect_by_command("git").expect("git must be detected");
 
