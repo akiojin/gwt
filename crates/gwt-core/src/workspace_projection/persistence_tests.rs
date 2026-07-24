@@ -2393,6 +2393,80 @@ fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() 
 }
 
 #[test]
+fn session_bound_foreign_terminal_update_never_enters_legacy_current_journal() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let journal_before = fs::read(&fixture.journal_path).expect("snapshot current journal");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("Target Work is complete".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("valid foreign-target terminal update");
+
+    let persisted = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load updated target Work")
+        .expect("updated target Work projection");
+    assert!(
+        persisted
+            .work_items
+            .iter()
+            .find(|item| item.id == T812_TARGET_WORK_ID)
+            .expect("target Work")
+            .is_terminal(),
+        "skipping the legacy journal must not skip the target Work mutation"
+    );
+    let target_event = t812_read_events(&fixture.events_path)
+        .pop()
+        .expect("target terminal event");
+    assert_eq!(target_event.work_item_id, T812_TARGET_WORK_ID);
+    assert_eq!(target_event.kind, WorkEventKind::Done);
+
+    fs::remove_file(&fixture.work_items_path).expect("simulate lost works projection");
+    let synthesized = load_or_synthesize_workspace_work_items_from_paths(
+        &fixture.work_items_path,
+        &fixture.current_path,
+        &fixture.journal_path,
+        &fixture.target.project_state_root,
+    )
+    .expect("synthesize current Work from legacy state");
+    let replayed =
+        crate::work_events_intake::refold_work_events_projection(&synthesized, Vec::new())
+            .expect("refold synthesized legacy events");
+    let current = replayed
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-foreign-shared-current")
+        .expect("shared current Work");
+
+    assert_eq!(
+        current.status_category,
+        WorkspaceStatusCategory::Blocked,
+        "a foreign target Done must not replay onto the shared current Work"
+    );
+    assert!(!current.is_terminal());
+    assert_eq!(
+        fs::read(&fixture.journal_path).expect("read preserved current journal"),
+        journal_before,
+        "the identity-less legacy journal must contain only shared-current updates"
+    );
+}
+
+#[test]
 fn session_bound_foreign_current_agent_refresh_advances_projection_timestamp() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");

@@ -1766,14 +1766,18 @@ mod tests {
             "services:\n  app:\n    image: nginx:latest\n",
         )
         .expect("compose");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  sleep 0.1\n  printf 'ok\\n'\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  sleep 0.05\n  printf 'ok\\n'\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, |_| {
             let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
             let previous_exec_timeout = std::env::var_os("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS");
-            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
-            std::env::set_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS", "500");
+            // Keep the fake command longer than the generic timeout while
+            // leaving broad scheduling margin under the compose-exec timeout.
+            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "1");
+            std::env::set_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS", "30000");
 
+            let default_timeout = docker_timeout();
+            let compose_exec_timeout = docker_compose_exec_timeout();
             let result =
                 compose_service_exec_capture(&compose_path, "app", None, &["true".to_string()]);
 
@@ -1786,6 +1790,8 @@ mod tests {
                 None => std::env::remove_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS"),
             }
 
+            assert_eq!(default_timeout, std::time::Duration::from_millis(1));
+            assert_eq!(compose_exec_timeout, std::time::Duration::from_secs(30));
             result.expect("compose exec capture should use compose-exec timeout");
         });
     }

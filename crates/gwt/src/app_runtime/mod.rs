@@ -228,6 +228,11 @@ pub struct OutboundEvent {
     pub(crate) event: BackendEvent,
 }
 
+pub(crate) enum AgentFrontendDispatchOutcome {
+    Dispatched(Vec<OutboundEvent>),
+    StaleCapability,
+}
+
 impl OutboundEvent {
     pub(crate) fn broadcast(event: BackendEvent) -> Self {
         Self {
@@ -557,6 +562,11 @@ pub struct AppRuntime {
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
     pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
+    /// Issue-time opaque agent capability keyed by combined window id.
+    ///
+    /// Kept separately from [`ActiveAgentSession`] so stop/failure cleanup
+    /// never needs to reconstruct authority from a mutable filesystem path.
+    pub(crate) agent_capability_tokens: HashMap<String, String>,
     pub(crate) issue_link_cache_dir: PathBuf,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
@@ -743,6 +753,7 @@ impl AppRuntime {
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
             agent_capability_issuer: None,
+            agent_capability_tokens: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
@@ -2531,6 +2542,177 @@ impl AppRuntime {
                 self.release_notes_events(client_id, id, focus_version)
             }
         }
+    }
+
+    /// Handle the deliberately small protocol exposed to a gwt-launched
+    /// agent. The authenticated server-side principal, not any WebSocket
+    /// payload field, remains authoritative for both project and Session.
+    pub(crate) fn handle_agent_frontend_event_if_current(
+        &mut self,
+        client_id: ClientId,
+        grant: AgentCapabilityGrant,
+        request: AgentFrontendRequest,
+    ) -> AgentFrontendDispatchOutcome {
+        let current = self
+            .agent_capability_issuer
+            .as_ref()
+            .is_some_and(|issuer| issuer.grant_is_current(&grant));
+        if !current {
+            tracing::warn!(
+                target: "gwt_security",
+                "queued agent pane request rejected after capability rotation or revoke"
+            );
+            return AgentFrontendDispatchOutcome::StaleCapability;
+        }
+        AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
+            client_id,
+            grant.principal().clone(),
+            request,
+        ))
+    }
+
+    pub(crate) fn handle_agent_frontend_event(
+        &mut self,
+        client_id: ClientId,
+        principal: AgentSessionPrincipal,
+        request: AgentFrontendRequest,
+    ) -> Vec<OutboundEvent> {
+        match request {
+            AgentFrontendRequest::Ready => self.agent_frontend_sync_events(&client_id, &principal),
+            AgentFrontendRequest::CloseWindow { id } => {
+                if !self.agent_principal_authorizes_window(&principal, &id) {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "cross-project pane lifecycle request denied"
+                    );
+                    return Vec::new();
+                }
+                self.close_window_events(&id)
+            }
+            AgentFrontendRequest::SendInput { text } => {
+                let window_id = match self.agent_principal_session_window(&principal) {
+                    Ok(window_id) => window_id,
+                    Err(error) => {
+                        return vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::PaneSendResult {
+                                ok: false,
+                                window_id: None,
+                                error: Some(error),
+                            },
+                        )];
+                    }
+                };
+                self.pane_send_input_to_window_events(client_id, &window_id, &text)
+            }
+        }
+    }
+
+    fn agent_principal_authorizes_window(
+        &self,
+        principal: &AgentSessionPrincipal,
+        window_id: &str,
+    ) -> bool {
+        self.window_lookup
+            .get(window_id)
+            .and_then(|address| self.tab(&address.tab_id))
+            .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root))
+    }
+
+    /// Resolve the authenticated Session only inside its capability project.
+    /// More than one match in that project fails closed instead of restoring
+    /// the old process-global first-match behavior.
+    fn agent_principal_session_window(
+        &self,
+        principal: &AgentSessionPrincipal,
+    ) -> Result<String, String> {
+        let mut matches = self
+            .tabs
+            .iter()
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.session_id.as_deref() == Some(principal.session_id()))
+                    .map(|window| combined_window_id(&tab.id, &window.id))
+            });
+        let Some(window_id) = matches.next() else {
+            return Err("authenticated session is not bound to this project".to_string());
+        };
+        if matches.next().is_some() {
+            return Err("authenticated session has multiple panes in this project".to_string());
+        }
+        Ok(window_id)
+    }
+
+    fn agent_frontend_sync_events(
+        &self,
+        client_id: &str,
+        principal: &AgentSessionPrincipal,
+    ) -> Vec<OutboundEvent> {
+        let mut workspace = self.app_state_view();
+        workspace
+            .tabs
+            .retain(|tab| principal.authorizes_project_root(Path::new(&tab.project_root)));
+        workspace.active_tab_id = workspace
+            .active_tab_id
+            .filter(|active| workspace.tabs.iter().any(|tab| &tab.id == active))
+            .or_else(|| workspace.tabs.first().map(|tab| tab.id.clone()));
+        // Recent-project history is process-global and is not required by
+        // pane.list/read. Never expose it on the agent capability route.
+        workspace.recent_projects.clear();
+
+        let allowed_window_ids = self
+            .window_lookup
+            .iter()
+            .filter_map(|(window_id, address)| {
+                self.tab(&address.tab_id)
+                    .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+                    .map(|_| window_id.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let mut terminal_snapshots = self
+            .runtimes
+            .iter()
+            .filter(|(id, _)| allowed_window_ids.contains(*id))
+            .filter_map(|(id, runtime)| {
+                let snapshot = runtime
+                    .pane
+                    .lock()
+                    .map(|pane| pane.snapshot_bytes())
+                    .unwrap_or_default();
+                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
+            })
+            .collect::<Vec<_>>();
+        let runtime_snapshot_ids = terminal_snapshots
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for (id, detail) in &self.launch_error_terminal_details {
+            if allowed_window_ids.contains(id)
+                && !runtime_snapshot_ids.contains(id)
+                && self.window_status(id) == Some(WindowProcessStatus::Error)
+            {
+                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
+            }
+        }
+
+        let mut events = vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::WindowCanvasState { workspace },
+        )];
+        events.extend(terminal_snapshots.into_iter().map(|(id, snapshot)| {
+            OutboundEvent::reply(
+                client_id,
+                BackendEvent::TerminalSnapshot {
+                    id,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                },
+            )
+        }));
+        events
     }
 
     pub(crate) fn frontend_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {

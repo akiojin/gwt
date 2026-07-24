@@ -49,8 +49,8 @@ use super::{
     WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
-    combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
-    PtyWriterRegistry, UploadedAttachment,
+    combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
+    AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry, UploadedAttachment,
 };
 
 #[test]
@@ -2405,6 +2405,7 @@ fn sample_runtime_with_events(
         window_hook_states: HashMap::new(),
         recoverable_agent_error_windows: HashSet::new(),
         agent_capability_issuer: None,
+        agent_capability_tokens: HashMap::new(),
         issue_link_cache_dir: gwt_cache_dir(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
@@ -2422,6 +2423,200 @@ fn sample_runtime_with_events(
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
     (runtime, _events)
+}
+
+#[test]
+fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() {
+    let temp = tempdir().expect("tempdir");
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+
+    let mut foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(foreign_tab
+        .workspace
+        .set_session_id("agent-foreign", Some("shared-session".to_string())));
+    let mut authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(authenticated_tab
+        .workspace
+        .set_session_id("agent-authenticated", Some("shared-session".to_string())));
+    // Keep the foreign tab first so a process-global session lookup would
+    // deterministically select the wrong pane.
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-foreign"),
+    );
+    let principal = AgentSessionPrincipal::for_test(&authenticated_project, "shared-session")
+        .expect("authenticated principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::SendInput {
+            text: "status\r".to_string(),
+        },
+    );
+
+    assert!(matches!(
+        events.as_slice(),
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::PaneSendResult {
+                ok: false,
+                window_id: Some(window_id),
+                error: Some(error),
+            },
+        }] if client_id == "pane-client"
+            && window_id == "tab-authenticated::agent-authenticated"
+            && error.contains("no live runtime")
+    ));
+}
+
+#[test]
+fn agent_pane_close_rejects_window_from_foreign_project() {
+    let temp = tempdir().expect("tempdir");
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+
+    let denied = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-foreign::agent-foreign".to_string(),
+        },
+    );
+
+    assert!(denied.is_empty());
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-foreign::agent-foreign"));
+
+    let _accepted = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-authenticated::agent-authenticated".to_string(),
+        },
+    );
+    assert!(!runtime
+        .window_lookup
+        .contains_key("tab-authenticated::agent-authenticated"));
+    assert!(runtime
+        .window_lookup
+        .contains_key("tab-foreign::agent-foreign"));
+}
+
+#[test]
+fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let original = issuer
+        .issue(&project, "session-project")
+        .expect("original capability");
+    let queued_grant = issuer
+        .grant_for_test(&original.token)
+        .expect("queued authenticated grant");
+
+    let current = issuer
+        .issue(&project, "session-project")
+        .expect("rotate capability before tao dispatch");
+    let stale_outcome = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        queued_grant,
+        AgentFrontendRequest::SendInput {
+            text: "stale\r".to_string(),
+        },
+    );
+    assert!(
+        matches!(
+            stale_outcome,
+            super::AgentFrontendDispatchOutcome::StaleCapability
+        ),
+        "a queued request whose generation was revoked must be rejected as stale"
+    );
+
+    let current_grant = issuer
+        .grant_for_test(&current.token)
+        .expect("current authenticated grant");
+    let current_events = match runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        current_grant,
+        AgentFrontendRequest::SendInput {
+            text: "current\r".to_string(),
+        },
+    ) {
+        super::AgentFrontendDispatchOutcome::Dispatched(events) => events,
+        super::AgentFrontendDispatchOutcome::StaleCapability => {
+            panic!("current grant must dispatch")
+        }
+    };
+    assert!(matches!(
+        current_events.as_slice(),
+        [OutboundEvent {
+            event: BackendEvent::PaneSendResult {
+                ok: false,
+                window_id: Some(window_id),
+                ..
+            },
+            ..
+        }] if window_id == "tab-project::agent-project"
+    ));
 }
 
 fn wait_for_recorded_event(
@@ -5628,6 +5823,44 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
         diagnostic.contains("launch failed before process spawn"),
         "diagnostic must include the launch error detail: {diagnostic:?}"
     );
+}
+
+#[test]
+fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let target = issuer.issue(&repo, "session-1").expect("issue capability");
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.worktree_path = repo.clone();
+    session.agent_project_root = repo.display().to_string();
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), target.token.clone());
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+
+    fs::remove_dir_all(&repo).expect("delete project after capability issue");
+    runtime.mark_agent_session_stopped(&window_id);
+
+    assert!(!issuer.authenticates_token(&target.token));
+    assert!(!runtime.agent_capability_tokens.contains_key(&window_id));
 }
 
 #[test]

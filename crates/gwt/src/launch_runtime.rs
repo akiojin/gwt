@@ -378,8 +378,10 @@ pub fn build_shell_process_launch(
     }
 
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
-    ensure_docker_gwt_binary_setup(&launch)?;
+    let runtime =
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(&docker_binary_for_launch())?;
+    ensure_docker_launch_runtime_ready_for_runtime(&runtime)?;
+    crate::docker_launch::ensure_docker_gwt_binary_setup_for_runtime(&launch, runtime.kind())?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
     env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
@@ -400,7 +402,7 @@ pub fn build_shell_process_launch(
     args.push(shell_command);
 
     Ok(ProcessLaunch {
-        command: docker_binary_for_launch(),
+        command: runtime.binary().to_string(),
         args,
         env,
         remove_env: Vec::new(),
@@ -1550,24 +1552,34 @@ pub fn command_matches_runner(command: &str, runner: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
-pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+pub fn ensure_docker_launch_runtime_ready_for_runtime(
+    runtime: &gwt_docker::detect::ResolvedContainerRuntime,
+) -> Result<(), String> {
+    ensure_docker_launch_runtime_ready_with(runtime.binary(), || {
+        gwt_docker::launch_preflight_for_resolved_runtime(runtime)
+    })
+}
+
+fn ensure_docker_launch_runtime_ready_with(
+    attempted_binary: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let path = std::env::var("PATH").unwrap_or_default();
-    let docker_bin = std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string());
     tracing::info!(
         target: "gwt::launch::preflight",
         runtime_target = "docker",
-        attempted_binary = %docker_bin,
+        attempted_binary,
         path = %path,
         "docker preflight started"
     );
-    let result = run_docker_preflight();
+    let result = preflight();
     match &result {
         Ok(()) => {
             tracing::info!(
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "ready",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 "docker preflight completed"
             );
         }
@@ -1576,7 +1588,7 @@ pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "failed",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 path = %path,
                 error = %error,
                 "docker preflight failed"
@@ -1584,10 +1596,6 @@ pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         }
     }
     result
-}
-
-fn run_docker_preflight() -> Result<(), String> {
-    gwt_docker::launch_preflight()
 }
 
 pub fn install_launch_gwt_bin_env(
@@ -2639,6 +2647,104 @@ mod tests {
         assert_eq!(
             launch.env.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(r"E:\gwt\work\20260525-0919")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_shell_launch_pins_one_stateful_runtime_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&project).expect("project dir");
+        fs::create_dir_all(&home).expect("home dir");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
+        )
+        .expect("write compose");
+
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "${0}.calls"
+if [ "$1" = "--version" ]; then
+  count=0
+  if [ -f "${0}.version-count" ]; then
+    read count < "${0}.version-count"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "${0}.version-count"
+  if [ "$count" -eq 1 ]; then
+    printf 'Docker version 28.3.0, build test\n'
+  else
+    printf 'podman version 5.4.2\n'
+  fi
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = "ps" ]; then
+    printf 'app\trunning\n'
+    exit 0
+  fi
+done
+exit 0
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let _docker_bin =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_DOCKER_BIN", wrapper.as_os_str());
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.as_os_str());
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(project.clone()),
+            branch: None,
+            base_branch: None,
+            display_name: "Docker shell".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("app".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            command_override: None,
+            command_args_override: None,
+        };
+
+        let launch =
+            build_shell_process_launch(&project, &mut config).expect("Docker shell launch");
+
+        assert_eq!(launch.command, wrapper.display().to_string());
+        assert!(
+            launch
+                .args
+                .ends_with(&["app".to_string(), "bash".to_string()]),
+            "unexpected Docker shell argv: {:?}",
+            launch.args
+        );
+        let calls = fs::read_to_string(wrapper.with_extension("calls"))
+            .expect("read runtime wrapper calls");
+        assert_eq!(
+            calls.lines().filter(|call| *call == "--version").count(),
+            1,
+            "the shell launch must resolve its stateful runtime exactly once"
+        );
+        let managed_override = fs::read_to_string(project.join("docker-compose.gwt.override.yml"))
+            .expect("read managed override");
+        assert!(
+            managed_override.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST),
+            "the first resolved Docker kind must stay pinned through setup"
         );
     }
 
