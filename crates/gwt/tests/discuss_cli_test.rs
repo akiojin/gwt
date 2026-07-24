@@ -145,6 +145,35 @@ fn discuss_park_marks_proposal_parked() {
 }
 
 #[test]
+fn discuss_park_marks_all_duplicate_active_proposals_parked() {
+    let fixture = fixture();
+    let duplicate = format!(
+        "{}\n{}",
+        ACTIVE_DISCUSSION,
+        ACTIVE_DISCUSSION.replace("Proposal A", "Proposal A")
+    );
+    fs::write(repo_local_discussions_path(&fixture), duplicate).expect("write duplicate fixture");
+
+    let response = run_discuss(
+        &fixture,
+        r#"{"schema_version":1,"operation":"discuss.park","params":{"proposal":"Proposal A"}}"#,
+    );
+    assert_ok(&response, "discuss.park");
+
+    let content = read_discussions(&fixture);
+    assert_eq!(
+        content
+            .matches("### Proposal A - Integration coverage proposal [parked]")
+            .count(),
+        2
+    );
+    assert!(
+        !content.contains("[active]"),
+        "duplicate active proposal must not remain"
+    );
+}
+
+#[test]
 fn discuss_reject_marks_proposal_rejected() {
     let fixture = fixture();
     let response = run_discuss(
