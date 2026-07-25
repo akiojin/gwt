@@ -965,6 +965,45 @@ pub fn persist_session_execution_binding(
     .map(|_| ())
 }
 
+/// Atomically advance the process-local Host capability epoch projected into
+/// one producing Session.
+///
+/// Every Host issuance gets a distinct durable epoch under the per-Session
+/// lock. Inspection/legacy Sessions have no producing binding and therefore
+/// cannot be promoted implicitly by capability issuance.
+pub fn rotate_session_execution_capability(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> std::io::Result<SessionExecutionBinding> {
+    let updated = update_session(sessions_dir, session_id, |session| {
+        let mut binding = session.execution_binding.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Inspection or legacy Session has no producing execution binding",
+            )
+        })?;
+        binding.capability_generation =
+            binding
+                .capability_generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "execution binding capability generation overflow",
+                    )
+                })?;
+        session
+            .set_execution_binding(Some(binding))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    })?;
+    updated.execution_binding.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "capability rotation lost the producing execution binding",
+        )
+    })
+}
+
 /// Persist whether the GUI should recreate this session's agent window during
 /// startup. This is intentionally separate from agent status/conversation
 /// persistence so manual close can opt out without deleting history.
@@ -1291,6 +1330,71 @@ display_name = "Codex"
             fs::read_to_string(&path).expect("read unchanged Session"),
             bound_bytes,
             "epoch replay/downgrade rejection must preserve Session bytes"
+        );
+    }
+
+    #[test]
+    fn rotate_session_execution_capability_is_atomic_monotonic_and_requires_binding() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let session = session_with_execution_owner();
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session.save(dir.path()).expect("save Session");
+        persist_session_execution_binding(dir.path(), &session_id, Some(initial.clone()))
+            .expect("persist initial binding");
+
+        let first = rotate_session_execution_capability(dir.path(), &session_id)
+            .expect("rotate first Host capability");
+        let second = rotate_session_execution_capability(dir.path(), &session_id)
+            .expect("rotate second Host capability");
+        assert_eq!(first.identity, initial.identity);
+        assert_eq!(second.identity, initial.identity);
+        assert_eq!(
+            first.capability_generation,
+            initial.capability_generation + 1
+        );
+        assert_eq!(
+            second.capability_generation,
+            first.capability_generation + 1
+        );
+
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let sessions_dir = dir.path().to_path_buf();
+            let session_id = session_id.clone();
+            workers.push(std::thread::spawn(move || {
+                rotate_session_execution_capability(&sessions_dir, &session_id)
+                    .expect("concurrent capability rotation")
+                    .capability_generation
+            }));
+        }
+        let mut generations = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join capability rotation"))
+            .collect::<Vec<_>>();
+        generations.sort_unstable();
+        assert_eq!(
+            generations,
+            vec![
+                second.capability_generation + 1,
+                second.capability_generation + 2,
+                second.capability_generation + 3,
+                second.capability_generation + 4,
+            ],
+            "the per-Session lock must serialize Host capability epochs"
+        );
+
+        let unbound = session_with_execution_owner();
+        let unbound_id = unbound.id.clone();
+        unbound.save(dir.path()).expect("save unbound Session");
+        let unbound_path = dir.path().join(format!("{unbound_id}.toml"));
+        let before = fs::read_to_string(&unbound_path).expect("read unbound Session");
+        let error = rotate_session_execution_capability(dir.path(), &unbound_id)
+            .expect_err("Inspection Session cannot receive producing capability");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read_to_string(&unbound_path).expect("read unchanged unbound Session"),
+            before
         );
     }
 
