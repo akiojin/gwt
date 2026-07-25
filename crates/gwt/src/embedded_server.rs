@@ -822,6 +822,13 @@ impl AgentSessionPrincipal {
         }
     }
 
+    pub(crate) fn prepared_execution_binding(&self) -> Option<&gwt_agent::SessionExecutionBinding> {
+        match &self.execution_authority {
+            AgentExecutionAuthority::Prepared(binding) => Some(binding),
+            AgentExecutionAuthority::Inspection | AgentExecutionAuthority::Active(_) => None,
+        }
+    }
+
     pub(crate) fn authorizes_producing_mutation(&self) -> bool {
         self.active_execution_binding().is_some()
     }
@@ -1162,6 +1169,116 @@ impl AgentCapabilityRegistry {
         Ok(token)
     }
 
+    fn promote_prepared(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<(), String> {
+        self.promote_to_active(token, expected_binding, false)
+    }
+
+    fn promote_inspection(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<(), String> {
+        self.promote_to_active(token, expected_binding, true)
+    }
+
+    fn promote_to_active(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+        allow_inspection: bool,
+    ) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let issued_token = state
+            .principals_by_token
+            .keys()
+            .find(|candidate| constant_time_token_eq(token, candidate))
+            .cloned()
+            .ok_or_else(|| "agent capability is missing or no longer current".to_string())?;
+        let principal = state
+            .principals_by_token
+            .get(&issued_token)
+            .cloned()
+            .ok_or_else(|| "agent capability is missing or no longer current".to_string())?;
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if !state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(&issued_token, current))
+        {
+            return Err("agent capability is missing or no longer current".to_string());
+        }
+        match &principal.execution_authority {
+            AgentExecutionAuthority::Inspection if allow_inspection => {
+                let mut promoted = principal;
+                promoted.execution_authority =
+                    AgentExecutionAuthority::Active(Box::new(expected_binding.clone()));
+                state.principals_by_token.insert(issued_token, promoted);
+                Ok(())
+            }
+            AgentExecutionAuthority::Prepared(binding) if binding.as_ref() == expected_binding => {
+                let mut promoted = principal;
+                promoted.execution_authority =
+                    AgentExecutionAuthority::Active(Box::new(expected_binding.clone()));
+                state.principals_by_token.insert(issued_token, promoted);
+                Ok(())
+            }
+            AgentExecutionAuthority::Active(binding) if binding.as_ref() == expected_binding => {
+                Ok(())
+            }
+            AgentExecutionAuthority::Inspection
+            | AgentExecutionAuthority::Prepared(_)
+            | AgentExecutionAuthority::Active(_) => Err(
+                "agent capability execution authority cannot be promoted to the requested binding"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn refresh_grant(&self, grant: &AgentCapabilityGrant) -> Option<AgentCapabilityGrant> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (issued_token, principal) =
+            state
+                .principals_by_token
+                .iter()
+                .find_map(|(candidate, principal)| {
+                    constant_time_token_eq(&grant.token, candidate)
+                        .then_some((candidate, principal))
+                })?;
+        if principal.canonical_project_root() != grant.principal.canonical_project_root()
+            || principal.session_id() != grant.principal.session_id()
+        {
+            return None;
+        }
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+        if !state
+            .token_by_project_session
+            .get(&principal_key)
+            .is_some_and(|current| constant_time_token_eq(issued_token, current))
+        {
+            return None;
+        }
+        Some(AgentCapabilityGrant::new(
+            issued_token.clone(),
+            principal.clone(),
+        ))
+    }
+
     fn begin_self_close_if_current(
         &self,
         grant: &AgentCapabilityGrant,
@@ -1479,6 +1596,48 @@ impl AgentCapabilityIssuer {
                 .registry
                 .issue_prepared(project_root, session_id, execution_binding)?,
         })
+    }
+
+    pub(crate) fn promote_prepared(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<(), String> {
+        self.registry.promote_prepared(token, expected_binding)
+    }
+
+    pub(crate) fn promote_inspection(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<(), String> {
+        self.registry.promote_inspection(token, expected_binding)
+    }
+
+    pub(crate) fn prepared_token_is_current(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> bool {
+        let Some(principal) = self.registry.authenticate(token) else {
+            return false;
+        };
+        let grant = AgentCapabilityGrant::new(token.to_string(), principal);
+        self.registry.grant_is_current(&grant)
+            && grant.principal().prepared_execution_binding() == Some(expected_binding)
+    }
+
+    pub(crate) fn active_token_is_current(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> bool {
+        let Some(principal) = self.registry.authenticate(token) else {
+            return false;
+        };
+        let grant = AgentCapabilityGrant::new(token.to_string(), principal);
+        self.registry.grant_is_current(&grant)
+            && grant.principal().active_execution_binding() == Some(expected_binding)
     }
 
     pub(crate) fn revoke_token(&self, token: &str) -> bool {
@@ -2360,6 +2519,10 @@ async fn execution_binding_probe_handler(
             },
         );
     };
+    // This route authorizes agent-initiated producing mutation. Prepared
+    // authority is observation-only until the coordinator commits and
+    // promotes the bearer, so it must never receive a successful receipt
+    // through the same endpoint used by PreToolUse.
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
         return execution_binding_error_response();
     };
@@ -2551,6 +2714,19 @@ enum ScopedFrontendRequest {
 }
 
 impl ClientSessionScope {
+    fn refresh_agent_grant(&mut self, registry: &AgentCapabilityRegistry) -> bool {
+        match self {
+            Self::Browser => true,
+            Self::Agent(scope) => {
+                let Some(grant) = registry.refresh_grant(&scope.grant) else {
+                    return false;
+                };
+                scope.grant = grant;
+                true
+            }
+        }
+    }
+
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
             Self::Browser => Some(ScopedFrontendRequest::Browser(event)),
@@ -2656,6 +2832,14 @@ async fn client_session_with_scope(
             step = outbound.next() => {
                 match step {
                     DrainStep::Message { payload, repair_panes } => {
+                        if !scope.refresh_agent_grant(&state.agent_capabilities) {
+                            send_agent_fence_close(
+                                &mut sender,
+                                AGENT_STALE_BINDING_CLOSE,
+                            )
+                            .await;
+                            break;
+                        }
                         let Some(payload) = scope.filter_outbound(payload) else {
                             continue;
                         };
@@ -2691,6 +2875,14 @@ async fn client_session_with_scope(
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
                         let text_len = text.len();
+                        if !scope.refresh_agent_grant(&state.agent_capabilities) {
+                            send_agent_fence_close(
+                                &mut sender,
+                                AGENT_STALE_BINDING_CLOSE,
+                            )
+                            .await;
+                            break;
+                        }
                         match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
                             Ok(event) => {
                                 match scope.filter_inbound(event) {
@@ -3060,10 +3252,11 @@ mod tests {
     use super::{
         agent_bridge_bind_ip, bearer_token, handle_frontend_message, prepare_outbound,
         queue_class_for_kind, send_agent_self_close_acceptance, websocket_origin_authorized,
-        AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
-        AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub, ClientQueue, DrainStep,
-        EmbeddedServer, HookForwardTarget, PreparedOutbound, QueueClass, ServerState,
-        DRAIN_LOW_WATER, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        AgentCapabilityGrant, AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
+        AgentPaneSessionScope, AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub,
+        ClientQueue, ClientSessionScope, DrainStep, EmbeddedServer, HookForwardTarget,
+        PreparedOutbound, QueueClass, ScopedFrontendRequest, ServerState, DRAIN_LOW_WATER,
+        LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     struct FailingMessageSink;
@@ -3150,6 +3343,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/runtime".to_string()),
@@ -3295,6 +3489,169 @@ mod tests {
         assert_eq!(principal.session_id(), "session-1");
         assert!(principal.authorizes_project_root(project.path()));
         assert_eq!(registry.session_count(), 1);
+    }
+
+    #[test]
+    fn agent_capability_registry_promotes_prepared_authority_without_rotating_bearer() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-promote".to_string(),
+            repo_hash: "repo-promote".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 2359,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-promote".to_string(),
+                binding_id: "binding-promote".to_string(),
+                ledger_head_hash: "head-promote".to_string(),
+            },
+            capability_generation: 2,
+        };
+        let token = registry
+            .issue_prepared(project.path(), "session-promote", binding.clone())
+            .expect("Prepared capability");
+        let prepared_grant = super::AgentCapabilityGrant::new(
+            token.clone(),
+            registry
+                .authenticate(&token)
+                .expect("authenticate Prepared capability"),
+        );
+        assert_eq!(
+            prepared_grant.principal().execution_authority_kind(),
+            super::AgentExecutionAuthorityKind::Prepared
+        );
+
+        registry
+            .promote_prepared(&token, &binding)
+            .expect("promote exact Prepared authority");
+        registry
+            .promote_prepared(&token, &binding)
+            .expect("promotion readback is idempotent");
+        let refreshed = registry
+            .refresh_grant(&prepared_grant)
+            .expect("same bearer refreshes to Active principal");
+        assert_eq!(refreshed.token, token);
+        assert_eq!(
+            refreshed.principal().execution_authority_kind(),
+            super::AgentExecutionAuthorityKind::Active
+        );
+        assert!(refreshed.principal().authorizes_producing_mutation());
+        assert!(
+            !registry.grant_is_current(&prepared_grant),
+            "a queued pre-promotion snapshot must not dispatch as Active"
+        );
+        assert!(registry.grant_is_current(&refreshed));
+
+        let mut mismatched = binding;
+        mismatched.identity.ledger_head_hash.push_str("-mismatch");
+        assert!(
+            registry.promote_prepared(&token, &mismatched).is_err(),
+            "promotion cannot retarget a bearer to another execution identity"
+        );
+    }
+
+    #[test]
+    fn agent_capability_registry_promotes_legacy_inspection_without_rotating_bearer() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-legacy".to_string(),
+            repo_hash: "repo-legacy".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 2359,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-legacy".to_string(),
+                binding_id: "binding-legacy".to_string(),
+                ledger_head_hash: "head-legacy".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let token = registry
+            .issue(project.path(), "session-legacy")
+            .expect("legacy inspection capability");
+        let inspection = super::AgentCapabilityGrant::new(
+            token.clone(),
+            registry
+                .authenticate(&token)
+                .expect("authenticate inspection capability"),
+        );
+
+        registry
+            .promote_inspection(&token, &binding)
+            .expect("promote exact legacy authority");
+        let refreshed = registry
+            .refresh_grant(&inspection)
+            .expect("same bearer refreshes to Active");
+        assert_eq!(refreshed.token, token);
+        assert_eq!(
+            refreshed.principal().execution_authority_kind(),
+            super::AgentExecutionAuthorityKind::Active
+        );
+        assert!(!registry.grant_is_current(&inspection));
+        assert!(registry.grant_is_current(&refreshed));
+
+        let mut mismatched = binding;
+        mismatched.identity.ledger_head_hash.push_str("-mismatch");
+        assert!(registry.promote_inspection(&token, &mismatched).is_err());
+    }
+
+    #[test]
+    fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-connected-promotion".to_string(),
+            repo_hash: "repo-connected-promotion".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 2359,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-connected-promotion".to_string(),
+                binding_id: "binding-connected-promotion".to_string(),
+                ledger_head_hash: "head-connected-promotion".to_string(),
+            },
+            capability_generation: 2,
+        };
+        let token = registry
+            .issue_prepared(
+                project.path(),
+                "session-connected-promotion",
+                binding.clone(),
+            )
+            .expect("Prepared capability");
+        let grant = AgentCapabilityGrant::new(
+            token.clone(),
+            registry
+                .authenticate(&token)
+                .expect("authenticate Prepared capability"),
+        );
+        let mut scope = ClientSessionScope::Agent(AgentPaneSessionScope::new(grant));
+        assert!(scope
+            .filter_inbound(FrontendEvent::PaneSendInput {
+                session_id: "session-connected-promotion".to_string(),
+                text: "before-promotion".to_string(),
+            })
+            .is_none());
+
+        registry
+            .promote_prepared(&token, &binding)
+            .expect("promote exact Prepared capability");
+        assert!(
+            scope.refresh_agent_grant(&registry),
+            "an already-connected socket must refresh the same bearer"
+        );
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::PaneSendInput {
+                session_id: "session-connected-promotion".to_string(),
+                text: "after-promotion".to_string(),
+            }),
+            Some(ScopedFrontendRequest::Agent {
+                request: AgentFrontendRequest::SendInput { text },
+                ..
+            }) if text == "after-promotion"
+        ));
     }
 
     #[test]
@@ -4710,6 +5067,163 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty());
+        server.shutdown();
+    }
+
+    #[test]
+    fn execution_binding_probe_route_rejects_prepared_authority_until_activation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repository");
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/prepared-probe.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&repo)
+                .output()
+                .expect("run fixture git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let repo = dunce::canonicalize(repo).expect("canonical repository");
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 2359,
+        };
+        let completed_at = chrono::Utc::now();
+        gwt::cli::execution_state::save(
+            &repo,
+            &gwt::cli::execution_state::ExecutionControlRecord {
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                primary_session_id: "session-predecessor".to_string(),
+                entrypoint: "gwt-execute".to_string(),
+                bundled_required_owners: Vec::new(),
+                status: gwt::cli::execution_state::ExecutionControlStatus::Completed,
+                blocked_reason: None,
+                missing_verification: None,
+                launched_at: completed_at,
+                settled_at: Some(completed_at),
+                transfers: Vec::new(),
+                recoveries: Vec::new(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save completed predecessor");
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+        )
+        .expect("import completed predecessor");
+        let continuation_session_id = "session-prepared-probe";
+        let request = gwt::cli::execution_state::SuccessorRequest {
+            operation_id: "operation-prepared-probe".to_string(),
+            principal_id: "host-prepared-probe".to_string(),
+            work_id: Some("work-prepared-probe".to_string()),
+            source: "continue-work".to_string(),
+            session_binding_id: "binding-prepared-probe".to_string(),
+            initial_session_id: continuation_session_id.to_string(),
+            entrypoint: "resume".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+            .expect("prepare successor");
+        let planned_identity =
+            gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+                .expect("derive Prepared binding");
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/prepared-probe", gwt_agent::AgentId::Codex);
+        session.id = continuation_session_id.to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().expect("repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: planned_identity.clone(),
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Prepared Session");
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("persist Prepared Session");
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let target = server
+            .agent_capability_issuer()
+            .issue_prepared(&repo, continuation_session_id, binding.clone())
+            .expect("Prepared Host capability");
+        let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+        url.set_path("/internal/execution-binding-probe");
+        let response = reqwest::blocking::Client::new()
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&serde_json::json!({
+                "schema_version": gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+                "operation_id": "operation-prepared-probe",
+                "nonce": "nonce-prepared-probe"
+            }))
+            .send()
+            .expect("Prepared binding probe");
+
+        assert_eq!(
+            response.status(),
+            HttpStatusCode::CONFLICT,
+            "the agent-facing mutation probe must require Active authority",
+        );
+        assert!(
+            gwt::cli::execution_state::prepared_execution_binding_matches(
+                &repo,
+                owner,
+                continuation_session_id,
+                &binding.identity,
+            )
+            .expect("Prepared authority remains pending")
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+                .expect("read generation ledger")
+                .expect("generation ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Completed),
+            "an HTTP probe must not activate the successor"
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the probe is side-effect-free at the runtime dispatch boundary"
+        );
         server.shutdown();
     }
 

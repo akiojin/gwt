@@ -63,7 +63,7 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{
-    build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
+    build_frontend_sync_events, AgentLaunchDisposition, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
@@ -1013,6 +1013,12 @@ enum UserEvent {
     CommitAgentSelfClose {
         ticket: AgentSelfCloseCapabilityTicket,
     },
+    /// Candidate Continue work launches must return an authenticated
+    /// SessionStart receipt before this correlated deadline.
+    ContinueWorkReadyTimeout {
+        window_id: String,
+        operation_id: String,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -1287,9 +1293,10 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
-        AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
-        DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        AgentLaunchDisposition, AppEventProxy, AppRuntime, AttachmentUploadStore,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1375,6 +1382,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some(project_root.display().to_string()),
             branch: Some("work/runtime".to_string()),
@@ -1891,6 +1899,25 @@ mod tests {
             }
             other => panic!("expected pane_send_result, got {other:?}"),
         }
+
+        runtime
+            .inspection_agent_windows
+            .insert("tab-1::claude-1".to_string());
+        let inspection_denied = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::PaneSendInput {
+                session_id: "session-a".to_string(),
+                text: "continue changing files\r".to_string(),
+            },
+        );
+        assert!(matches!(
+            inspection_denied.first().map(|event| &event.event),
+            Some(gwt::BackendEvent::PaneSendResult {
+                ok: false,
+                error: Some(error),
+                ..
+            }) if error.contains("inspection-only")
+        ));
     }
 
     #[test]
@@ -1905,6 +1932,7 @@ mod tests {
                 kind: RuntimeHookEventKind::RuntimeState,
                 source_event: Some("PreToolUse".to_string()),
                 gwt_session_id: Some("session-1".to_string()),
+                continuation_readiness_nonce: None,
                 agent_session_id: Some("agent-1".to_string()),
                 project_root: Some("E:/gwt/test-repo".to_string()),
                 branch: Some("feature/runtime".to_string()),
@@ -2572,10 +2600,14 @@ mod tests {
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_continue_work: HashMap::new(),
+            continue_work_outcomes: HashMap::new(),
+            continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            inspection_agent_windows: std::collections::HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
@@ -3787,6 +3819,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: None,
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/test".to_string()),
@@ -3888,6 +3921,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -4849,6 +4883,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -4889,6 +4924,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -7717,6 +7753,17 @@ fn main() -> std::io::Result<()> {
                     agent_self_close_quit_deferred = false;
                     let _ = proxy.send_event(UserEvent::QuitApp);
                 }
+            }
+            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout {
+                window_id,
+                operation_id,
+            }) => {
+                clients.dispatch(
+                    app.handle_continue_work_ready_timeout(
+                        &window_id,
+                        &operation_id,
+                    ),
+                );
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

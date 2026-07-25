@@ -702,7 +702,7 @@ fn is_verification_segment(segment: &str) -> bool {
     )
 }
 
-fn is_mutating_work_event(event: &HookEvent) -> bool {
+pub(crate) fn is_mutating_work_event(event: &HookEvent) -> bool {
     match event.tool_name.as_deref() {
         Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
         Some("Bash") => {

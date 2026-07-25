@@ -43,6 +43,15 @@ fn stop_all_before_joining<I, T>(
 }
 
 impl AppRuntime {
+    pub(crate) fn inspection_input_denied_events(&self, window_id: &str) -> Vec<OutboundEvent> {
+        let message =
+            "\r\n[gwt] This Session is inspection-only. Use Continue work before sending input.\r\n";
+        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
+            id: window_id.to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(message),
+        })]
+    }
+
     /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
     /// streamed output was dropped under client queue pressure, restoring
     /// display consistency for the affected client only.
@@ -116,6 +125,19 @@ impl AppRuntime {
         window_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
+        if self.inspection_agent_windows.contains(window_id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id.to_string()),
+                    error: Some(
+                        "the target Session is inspection-only; use Continue work before sending input"
+                            .to_string(),
+                    ),
+                },
+            )];
+        }
         let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
             Some(runtime) => runtime
@@ -149,6 +171,9 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
+        if self.inspection_agent_windows.contains(id) {
+            return self.inspection_input_denied_events(id);
+        }
         let data_len = data.len();
         let write_result = {
             let Some(runtime) = self.runtimes.get(id) else {
@@ -254,6 +279,10 @@ impl AppRuntime {
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
         self.stop_window_runtime_inner(window_id, true);
+    }
+
+    pub(crate) fn stop_window_runtime_without_session_projection(&mut self, window_id: &str) {
+        self.stop_window_runtime_inner(window_id, false);
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {

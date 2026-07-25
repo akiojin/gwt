@@ -884,9 +884,6 @@ impl AppRuntime {
         if let Some(level) = session.reasoning_level.clone() {
             builder = builder.reasoning_level(level);
         }
-        if session.skip_permissions {
-            builder = builder.skip_permissions(true);
-        }
         if session.fast_mode_enabled() {
             builder = builder.fast_mode(true);
         }
@@ -917,11 +914,12 @@ impl AppRuntime {
             );
         } else if session.agent_id.supports_resume_picker() {
             builder = builder.session_mode(gwt_agent::SessionMode::Resume);
+        } else if session.agent_id.supports_continue_latest() {
+            builder = builder.session_mode(gwt_agent::SessionMode::Continue);
         } else {
-            // Legacy metadata-only rows for agents without a native resume
-            // picker remain a fresh start fallback. Claude Code / Codex use
-            // their provider-native picker instead of silently losing Resume.
-            builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+            return reply_error(
+                "No saved conversation is available for this Session; use Continue work to start a linked execution with handoff context.".to_string(),
+            );
         }
 
         let mut config = builder.build();

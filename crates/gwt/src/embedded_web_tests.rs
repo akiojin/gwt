@@ -46,6 +46,14 @@ fn protocol_enums_js() -> &'static str {
     root_js_module_source("/protocol-enums.js")
 }
 
+fn workspace_resume_picker_js() -> &'static str {
+    root_js_module_source("/workspace-resume-picker-modal.js")
+}
+
+fn launch_wizard_surface_js() -> &'static str {
+    root_js_module_source("/launch-wizard-surface.js")
+}
+
 fn styles_components_css() -> &'static str {
     static_asset_text("/styles/components.css")
 }
@@ -3741,5 +3749,29 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
             && !shell_js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)")
             && !js.contains("scheduleMaximizedWindowsToViewportSync()"),
         "expected maximized viewport sync machinery to be removed under camera-focus",
+    );
+}
+
+#[test]
+fn embedded_web_completed_work_resume_surfaces_are_inspection_only() {
+    let picker = workspace_resume_picker_js();
+    let wizard = launch_wizard_surface_js();
+
+    assert!(
+        picker.contains("agent.resume_kind !== \"metadata_only\"")
+            && picker.contains("row.dataset.executionIntent = \"inspection\"")
+            && picker.contains("does not continue the Work"),
+        "expected the Work Resume picker to exclude fresh-start metadata and expose only explicit Inspection rows",
+    );
+    assert!(
+        wizard.contains("export function launchWizardStartMethodIntent")
+            && wizard.contains("button.dataset.executionIntent = startMethodIntent")
+            && wizard.contains("History only")
+            && wizard.contains("Continue work"),
+        "expected legacy conversation methods in the Launch Wizard to remain Inspection-only and point producing continuation to Continue work",
+    );
+    assert!(
+        !picker.contains("kind: \"continue_work\"") && !wizard.contains("kind: \"continue_work\""),
+        "Inspection surfaces must never synthesize the producing Continue work request",
     );
 }

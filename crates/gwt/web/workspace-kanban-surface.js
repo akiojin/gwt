@@ -14,6 +14,7 @@ export function createWorkspaceKanbanSurface({
   focusBoardEntry,
   branchesSurface,
   launchPending,
+  continueWork,
 }) {
   const workspaceStateMap = new Map();
 
@@ -957,23 +958,18 @@ export function createWorkspaceKanbanSurface({
         lifecycle.dataset.lifecycle = String(work.lifecycle_state || "active").toLowerCase();
         head.appendChild(lifecycle);
       }
+      appendContinueWorkAction(head, work);
       appendWorkCloseActions(head, work);
       group.appendChild(head);
 
       for (const agent of displayedAgents) {
         const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
         if (sessions.length === 0) {
-          // No conversation recorded yet — still expose a Resume control on
-          // the placeholder row so a session-less Work stays launchable.
           const empty = createNode(
             "div",
             "workspace-overview-empty workspace-detail-session-empty",
             "No session yet",
           );
-          const resumeBtn = renderWorkResumeButton(agent);
-          if (resumeBtn) {
-            empty.appendChild(resumeBtn);
-          }
           group.appendChild(empty);
         } else {
           // Multiple Session rows per agent read as noise — render only that
@@ -982,12 +978,6 @@ export function createWorkspaceKanbanSurface({
             sessions.find((session) => session && session.is_active) ||
             sessions[sessions.length - 1];
           group.appendChild(renderSessionRow(agent, latest));
-          // When the visible Session is history-only (not resumable) on a
-          // non-running Work, offer a distinct fresh-conversation control.
-          const startFresh = renderStartFreshButton(agent, [latest]);
-          if (startFresh) {
-            group.appendChild(startFresh);
-          }
         }
       }
       wrap.appendChild(group);
@@ -1036,6 +1026,33 @@ export function createWorkspaceKanbanSurface({
     container.appendChild(actions);
   }
 
+  function appendContinueWorkAction(container, work) {
+    const workId = String(work?.id || "").trim();
+    const lifecycle = String(work?.lifecycle_state || "").toLowerCase();
+    if (!workId || work?.discarded === true || lifecycle === "discarded") {
+      return;
+    }
+    const button = createNode("button", "wizard-button is-compact", "Continue work");
+    button.type = "button";
+    button.dataset.action = "continue-work";
+    button.dataset.workId = workId;
+    if (launchPending?.isPending(`continue:${workId}`)) {
+      button.disabled = true;
+      button.textContent = "Continuing...";
+      button.classList.add("is-pending");
+    }
+    button.addEventListener("click", () => {
+      const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
+      if (!bounds || typeof continueWork !== "function") {
+        return;
+      }
+      if (continueWork(workId, bounds)) {
+        renderWindows(true);
+      }
+    });
+    container.appendChild(button);
+  }
+
   function displayedWorkspaceWorks(workspace) {
     if (Array.isArray(workspace?.works) && workspace.works.length > 0) {
       return workspace.works;
@@ -1049,28 +1066,6 @@ export function createWorkspaceKanbanSurface({
       manual_close_allowed: false,
       close_blocked_reason: "",
     }));
-  }
-
-  function renderWorkResumeButton(work) {
-    // A live (running) Work has nothing to resume; only Paused / historical
-    // Works get a Resume control. Works without a status (history view) are
-    // treated as resumable.
-    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
-    if (status === "active" || status === "running") {
-      return null;
-    }
-    if (!work || !work.session_id) {
-      return null;
-    }
-    const button = createNode("button", "wizard-button is-compact", "Resume");
-    button.type = "button";
-    button.dataset.action = "resume-work";
-    button.dataset.sessionId = work.session_id;
-    if (isWorkResumePending(work.session_id)) {
-      markResumeButtonPending(button);
-    }
-    button.addEventListener("click", () => resumeWork(work));
-    return button;
   }
 
   // SPEC-2359 W-17 (FR-398): pending key shared with the Resume picker and
@@ -1091,28 +1086,6 @@ export function createWorkspaceKanbanSurface({
     button.disabled = true;
     button.textContent = "Resuming...";
     button.classList.add("is-pending");
-  }
-
-  function resumeWork(work) {
-    const sessionId = work && work.session_id;
-    if (!sessionId) {
-      return;
-    }
-    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-    if (!bounds) {
-      return;
-    }
-    if (
-      launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Resume")
-    ) {
-      return;
-    }
-    // resume_workspace_agent resumes by the gwt session id (the Work / launch),
-    // which is exactly work.session_id. Without an agent_session_id the Work's
-    // latest conversation (or a fresh start) is resumed.
-    send({ kind: "resume_workspace_agent", session_id: sessionId, bounds });
-    renderWindows();
   }
 
   function renderSessionResumeButton(work, session) {
@@ -1150,37 +1123,6 @@ export function createWorkspaceKanbanSurface({
     return button;
   }
 
-  function renderStartFreshButton(work, sessions) {
-    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
-    if (status === "active" || status === "running") {
-      return null;
-    }
-    if (!work || !work.session_id) {
-      return null;
-    }
-    const list = Array.isArray(sessions) ? sessions : [];
-    // If any Session is resumable, a per-Session Resume is already shown — no
-    // need for a Work-level fallback.
-    const anyResumable = list.some(
-      (entry) => entry && entry.resumable !== false && entry.agent_session_id,
-    );
-    if (anyResumable) {
-      return null;
-    }
-    const wrap = createNode("div", "workspace-detail-session-fresh");
-    const button = createNode("button", "wizard-button is-compact", "Start Fresh");
-    button.type = "button";
-    button.dataset.action = "resume-work";
-    button.dataset.sessionId = work.session_id;
-    button.setAttribute("aria-label", "Start a fresh conversation for this Work");
-    if (isWorkResumePending(work.session_id)) {
-      markResumeButtonPending(button);
-    }
-    button.addEventListener("click", () => resumeWork(work));
-    wrap.appendChild(button);
-    return wrap;
-  }
-
   function resumeSession(work, session) {
     const sessionId = work && work.session_id;
     if (!sessionId) {
@@ -1206,7 +1148,7 @@ export function createWorkspaceKanbanSurface({
       agent_session_id: agentSessionId,
       bounds,
     });
-    renderWindows();
+    renderWindows(true);
   }
 
   function shortSessionId(value) {
@@ -1685,13 +1627,13 @@ export function createWorkspaceKanbanSurface({
     renderWorkspaceOverviewWindow(windowData.id);
   }
 
-  function renderWindows() {
+  function renderWindows(force = false) {
     for (const windowData of activeWorkspace()?.windows || []) {
       const preset = workspaceWindowById(windowData.id)?.preset;
       if (preset !== "work" && preset !== "workspace" && preset !== "branches") {
         continue;
       }
-      renderWorkspaceOverviewWindow(windowData.id);
+      renderWorkspaceOverviewWindow(windowData.id, force);
     }
   }
 

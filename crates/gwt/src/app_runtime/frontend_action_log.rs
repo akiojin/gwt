@@ -450,6 +450,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ResumeWorkspaceAgent { session_id, .. } => {
             FrontendUserActionLog::new("resume_workspace_agent", "workspace").target(session_id)
         }
+        FrontendEvent::ContinueWork {
+            operation_id,
+            work_id,
+            ..
+        } => FrontendUserActionLog::new("continue_work", "workspace")
+            .target(work_id)
+            .mode(operation_id),
         FrontendEvent::ResumeBranchLatestAgent {
             id, branch_name, ..
         } => FrontendUserActionLog::new("resume_branch_latest_agent", "launch")

@@ -33,7 +33,12 @@
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
-      import { createLaunchPendingController } from "/launch-pending-controller.js";
+      import {
+        continueWorkOutcomeNotice,
+        createContinueWorkDispatcher,
+        createLaunchPendingController,
+        isStrongContinueWorkSuccess,
+      } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
       // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
@@ -4015,7 +4020,7 @@
       const launchPending = createLaunchPendingController({
         onChange: () => {
           try {
-            workspaceOverviewSurface.renderWindows();
+            workspaceOverviewSurface.renderWindows(true);
           } catch {
             // Surface may not be mounted yet during bootstrap.
           }
@@ -4029,6 +4034,10 @@
             console.warn("[launch-pending]", notice);
           }
         },
+      });
+      const continueWorkDispatcher = createContinueWorkDispatcher({
+        launchPending,
+        send,
       });
 
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window
@@ -4196,6 +4205,25 @@
         });
       }
 
+      function handleContinueWorkOutcome(event) {
+        const exact = continueWorkDispatcher.handleOutcome(event);
+        if (!exact) {
+          return;
+        }
+        const notice = continueWorkOutcomeNotice(exact);
+        if (notice) {
+          alertsToasts.push({
+            id: `continue-work-${exact.operation_id}`,
+            ...notice,
+            dismissible: true,
+            timeoutMs: notice.level === "error" ? 0 : 10_000,
+          });
+        }
+        if (isStrongContinueWorkSuccess(exact)) {
+          scheduleKnowledgeRelatedWorkRefresh();
+        }
+      }
+
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
         const node = createNode("div", `${className} knowledge-markdown-body`);
         const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
@@ -4274,6 +4302,8 @@
         focusBoardEntry,
         getResumeBounds: () => visibleBounds(),
         launchPending,
+        continueWork: (workId, bounds) =>
+          continueWorkDispatcher.dispatch(workId, bounds),
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -5552,15 +5582,18 @@
           case "remote_start_work_branches":
             workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
+          case "continue_work_outcome":
+            handleContinueWorkOutcome(event);
+            break;
           case "workspace_resume_agent_error":
-            launchPending.settleAck(event);
             workspaceResumePicker.handleError(event);
+            launchPending.settleAck(event);
             break;
           // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
           // accepted — settle pending UI and dismiss the picker.
           case "workspace_resume_agent_started":
-            launchPending.settleAck(event);
             workspaceResumePicker.handleStarted(event);
+            launchPending.settleAck(event);
             scheduleKnowledgeRelatedWorkRefresh();
             break;
           case "launch_wizard_state":

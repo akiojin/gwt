@@ -2715,6 +2715,7 @@ pub(crate) mod tests {
         crate::cli::execution_state::SuccessorRequest {
             operation_id: operation_id.to_string(),
             principal_id: format!("principal-{operation_id}"),
+            work_id: None,
             source: "continue-work".to_string(),
             session_binding_id: format!("binding-{operation_id}"),
             initial_session_id: session_id.to_string(),

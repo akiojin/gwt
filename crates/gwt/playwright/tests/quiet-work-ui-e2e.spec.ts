@@ -65,12 +65,12 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
       page.locator('.workspace-detail-session-badge[data-session-state="past"]'),
     ).toHaveCount(0);
 
-    // Each Work renders one Agent header (the agent/tool name), always shown,
-    // so conversation history never looks like multiple Agents. The Session row
-    // are labelled "Session ...", not with the agent name.
+    // Canonical nested Works lead with their purpose. The Session row remains
+    // explicitly labelled so conversation history cannot be mistaken for a
+    // second Work.
     const heading = page.locator(".workspace-detail-work-heading");
     await expect(heading).toHaveCount(1);
-    await expect(heading).toHaveText("Codex");
+    await expect(heading).toHaveText("Quiet Work UI redesign");
     await expect(sessions.first()).toContainText("Session");
     // Persistent data renders; never the stale "No assigned agents" placeholder.
     await expect(page.locator(".workspace-overview-detail-pane")).not.toContainText(
@@ -82,10 +82,13 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
       "Workspace",
     );
-    // Resume lives on the rendered Session row, not on the
-    // Workspace header and not as a single Work-level control.
+    // Producing continuation lives on the Work. A Session-level Resume remains
+    // a history/Inspection action and carries no execution authority.
     await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
     await expect(page.locator("[data-action='resume-work']")).toHaveCount(0);
+    const continueWork = page.locator("[data-action='continue-work']");
+    await expect(continueWork).toHaveCount(1);
+    await expect(continueWork).toHaveAttribute("data-work-id", "work-quiet-ui");
     const sessionResume = page.locator("[data-action='resume-session']");
     await expect(sessionResume).toHaveCount(1);
     await expect(sessionResume).toHaveAttribute("data-session-id", "agent-current");
@@ -93,6 +96,68 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
       "data-agent-session-id",
       "conv-bbbb2222",
     );
+  });
+
+  test("Continue work sends opaque intent, ignores stale outcome, and settles on strong fallback", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(APP_URL);
+
+    const button = page.locator("[data-action='continue-work']");
+    await expect(button).toBeVisible();
+    await button.click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as any).__continueWorkMessages.length),
+      )
+      .toBe(1);
+    const messages = await page.evaluate(
+      () => (window as any).__continueWorkMessages,
+    );
+    expect(messages).toHaveLength(1);
+    expect(Object.keys(messages[0]).sort()).toEqual([
+      "bounds",
+      "kind",
+      "operation_id",
+      "work_id",
+    ]);
+    expect(messages[0].work_id).toBe("work-quiet-ui");
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveText("Continuing...");
+
+    await page.evaluate(() => {
+      const original = (window as any).__continueWorkMessages[0];
+      (window as any).__fixtureSocket.emit({
+        kind: "continue_work_outcome",
+        operation_id: "stale-operation",
+        work_id: original.work_id,
+        outcome: "continued_conversation",
+        retryable: false,
+      });
+    });
+    await expect(button).toBeDisabled();
+
+    await page.evaluate(() => {
+      const original = (window as any).__continueWorkMessages[0];
+      (window as any).__fixtureSocket.emit({
+        kind: "continue_work_outcome",
+        operation_id: original.operation_id,
+        work_id: original.work_id,
+        outcome: "started_with_handoff",
+        retryable: false,
+      });
+    });
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveText("Continue work");
+    await expect(page.getByText("Work continued", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText(
+        "The previous conversation was unavailable, so a new conversation started with handoff context.",
+        { exact: true },
+      ),
+    ).toBeVisible();
   });
 
   test("Release Notes opens as a modal-style op-global-window", async ({
@@ -130,6 +195,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
 
 async function installBackend(page: any) {
   await page.addInitScript(() => {
+    (window as any).__continueWorkMessages = [];
     const workspaceState = {
       kind: "workspace_state",
       workspace: {
@@ -171,6 +237,26 @@ async function installBackend(page: any) {
       },
     };
 
+    const activeAgent = {
+      session_id: "agent-current",
+      agent_id: "codex",
+      display_name: "Codex",
+      status_category: "idle",
+      title_summary: "Phase 10 implementation",
+      current_focus: "Workspace Overview shell",
+      sessions: [
+        {
+          agent_session_id: "conv-aaaa1111",
+          started_at: "2026-05-21T03:20:00Z",
+          is_active: false,
+        },
+        {
+          agent_session_id: "conv-bbbb2222",
+          started_at: "2026-05-21T04:00:00Z",
+          is_active: true,
+        },
+      ],
+    };
     const projection = {
       kind: "active_work_projection",
       projection: {
@@ -195,26 +281,17 @@ async function installBackend(page: any) {
             pr_number: 2856,
             pr_state: "open",
             board_refs: ["board-claim-1"],
-            agents: [
+            agents: [activeAgent],
+            works: [
               {
-                session_id: "agent-current",
-                agent_id: "codex",
-                display_name: "Codex",
+                id: "work-quiet-ui",
+                title: "Quiet Work UI redesign",
+                work_summary: "Quiet Work UI redesign",
+                lifecycle_state: "active",
                 status_category: "idle",
-                title_summary: "Phase 10 implementation",
-                current_focus: "Workspace Overview shell",
-                sessions: [
-                  {
-                    agent_session_id: "conv-aaaa1111",
-                    started_at: "2026-05-21T03:20:00Z",
-                    is_active: false,
-                  },
-                  {
-                    agent_session_id: "conv-bbbb2222",
-                    started_at: "2026-05-21T04:00:00Z",
-                    is_active: true,
-                  },
-                ],
+                agents: [activeAgent],
+                manual_close_allowed: false,
+                close_blocked_reason: "",
               },
             ],
             events: [],
@@ -270,6 +347,7 @@ async function installBackend(page: any) {
         super();
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
+        (window as any).__fixtureSocket = this;
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
@@ -292,6 +370,9 @@ async function installBackend(page: any) {
             entries: releaseEntries,
           });
           return;
+        }
+        if (message.kind === "continue_work") {
+          (window as any).__continueWorkMessages.push(message);
         }
       }
 

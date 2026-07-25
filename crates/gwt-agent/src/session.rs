@@ -66,6 +66,11 @@ pub fn current_thread_holds_session_lease() -> bool {
 /// Environment variable injected into agent PTYs so hooks can identify the
 /// backing gwt session.
 pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
+/// One-time challenge injected only for a Prepared Continue work launch.
+///
+/// The candidate returns it with its authenticated SessionStart event. The
+/// coordinating Host consumes it before committing generation/Work state.
+pub const GWT_CONTINUE_WORK_READY_NONCE_ENV: &str = "GWT_CONTINUE_WORK_READY_TOKEN";
 /// Environment variable injected into agent PTYs so hooks can write the
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
@@ -484,10 +489,11 @@ impl Session {
     /// `--resume` target — non-empty and not the Codex placeholder. Used to gate
     /// per-Session Resume: a Session row whose conversation is not resumable
     /// shows no Resume control (history-only) instead of a button that silently
-    /// fails. gwt deliberately does not read the agent tool's conversation store
-    /// (no format coupling), so this only rejects ids that are structurally
-    /// unusable; a handle that the agent CLI no longer has still launches and
-    /// surfaces its own error.
+    /// fails. Generic per-Session inspection only rejects structurally unusable
+    /// ids and leaves provider validation to the CLI. Producing Continue work
+    /// performs its separate, read-only provider-store preflight before it
+    /// prepares a successor generation, so a missing or foreign conversation
+    /// can fall back without leaving a partial generation.
     pub fn is_resumable_conversation(&self, id: &str) -> bool {
         let id = id.trim();
         !(id.is_empty()
@@ -857,6 +863,60 @@ where
         let content = serialize_session_toml(&session)?;
         write_session_toml_atomic(&path, &content)?;
         Ok(session)
+    })
+}
+
+/// Remove one uncommitted Session only when its durable execution binding
+/// still matches the exact Prepared candidate selected by the caller.
+///
+/// Runtime sidecars are deleted before the Session TOML (the commit marker),
+/// so an interrupted cleanup remains retryable and can never delete a
+/// replacement Session that reused the same public id with different
+/// authority.
+pub fn remove_session_if_execution_binding_matches(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected: &SessionExecutionBinding,
+) -> io::Result<bool> {
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if expected.session_id != session_id {
+        return Ok(false);
+    }
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let session = match Session::load(&path) {
+            Ok(session) => session,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if session.id != session_id || session.execution_binding.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+
+        let runtime_root = sessions_dir.join("runtime");
+        if runtime_root.exists() {
+            for entry in fs::read_dir(&runtime_root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir()
+                    || entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_none()
+                {
+                    continue;
+                }
+                let runtime_path = entry.path().join(format!("{session_id}.json"));
+                match fs::remove_file(runtime_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        fs::remove_file(path)?;
+        Ok(true)
     })
 }
 
@@ -1363,6 +1423,50 @@ display_name = "Codex"
         let loaded: Session = toml::from_str(&serialized).expect("roundtrip bound Session");
         assert_eq!(loaded.execution_binding.as_ref(), Some(&binding));
         assert_eq!(loaded.schema_version, session_schema_version);
+    }
+
+    #[test]
+    fn prepared_session_cleanup_requires_exact_binding_and_removes_runtime_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Session");
+        session.save(dir.path()).expect("save bound Session");
+        let current_runtime = runtime_state_path(dir.path(), &session.id);
+        let foreign_runtime = runtime_state_path_for_pid(dir.path(), 424_242, &session.id);
+        SessionRuntimeState::new(AgentStatus::Running)
+            .save(&current_runtime)
+            .expect("save current runtime");
+        SessionRuntimeState::new(AgentStatus::Running)
+            .save(&foreign_runtime)
+            .expect("save foreign runtime");
+
+        let mut mismatched = binding.clone();
+        mismatched.identity.binding_id = "foreign-binding".to_string();
+        assert!(
+            !remove_session_if_execution_binding_matches(dir.path(), &session.id, &mismatched)
+                .expect("mismatched cleanup"),
+            "a stale or foreign cleanup must be a zero-write refusal",
+        );
+        assert!(dir.path().join(format!("{}.toml", session.id)).exists());
+        assert!(current_runtime.exists());
+        assert!(foreign_runtime.exists());
+
+        assert!(
+            remove_session_if_execution_binding_matches(dir.path(), &session.id, &binding)
+                .expect("exact cleanup"),
+            "the exact uncommitted Session must be removed",
+        );
+        assert!(!dir.path().join(format!("{}.toml", session.id)).exists());
+        assert!(!current_runtime.exists());
+        assert!(!foreign_runtime.exists());
+        assert!(
+            !remove_session_if_execution_binding_matches(dir.path(), &session.id, &binding)
+                .expect("idempotent missing cleanup"),
+            "repeat cleanup must be an idempotent no-op",
+        );
     }
 
     #[test]

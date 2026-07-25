@@ -8,7 +8,7 @@ use std::{
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::{host_process_env, hydrate_host_base_env},
-    session::GWT_SESSION_RUNTIME_PATH_ENV,
+    session::{SessionExecutionBinding, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
@@ -376,6 +376,20 @@ pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> St
     .unwrap_or_else(|| "npx".to_string())
 }
 
+/// Execution lifecycle intent is independent from provider conversation
+/// continuity. In particular, `SessionMode::Resume` can resume the same
+/// conversation while a coordinator starts a new producing generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ExecutionLaunchIntent {
+    /// Preserve the legacy launch classifier. Resume/Continue remain
+    /// inspection-only unless an explicit coordinator supplies a binding.
+    #[default]
+    Automatic,
+    /// Launch a producing continuation already authorized by the execution
+    /// coordinator. The binding is installed atomically at Session bootstrap.
+    PreparedContinuation(SessionExecutionBinding),
+}
+
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
@@ -420,6 +434,7 @@ pub struct LaunchConfig {
     /// feedback wiring but must not take over (or be gated by) the
     /// implementing session's execution lifecycle.
     pub suppress_execution_control: bool,
+    pub execution_intent: ExecutionLaunchIntent,
 }
 
 /// Permission mode for agent launch.
@@ -479,6 +494,7 @@ pub struct AgentLaunchBuilder {
     is_ephemeral: bool,
     ephemeral_base_ref: Option<String>,
     suppress_execution_control: bool,
+    execution_intent: ExecutionLaunchIntent,
 }
 
 impl AgentLaunchBuilder {
@@ -515,6 +531,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: false,
             ephemeral_base_ref: None,
             suppress_execution_control: false,
+            execution_intent: ExecutionLaunchIntent::Automatic,
         }
     }
 
@@ -531,6 +548,13 @@ impl AgentLaunchBuilder {
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;
+        self
+    }
+
+    /// Resume a provider conversation as the producing pane for a generation
+    /// that the Continue Work coordinator has already prepared.
+    pub fn prepared_continuation(mut self, binding: SessionExecutionBinding) -> Self {
+        self.execution_intent = ExecutionLaunchIntent::PreparedContinuation(binding);
         self
     }
 
@@ -830,6 +854,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: self.is_ephemeral,
             ephemeral_base_ref: self.ephemeral_base_ref,
             suppress_execution_control: self.suppress_execution_control,
+            execution_intent: self.execution_intent,
         }
     }
 
@@ -2080,6 +2105,53 @@ mod tests {
 
         assert!(config.args.contains(&"--verbose".to_string()));
         assert!(config.args.contains(&"--debug".to_string()));
+    }
+
+    #[test]
+    fn resume_conversation_and_prepared_execution_intents_are_independent() {
+        let binding = crate::SessionExecutionBinding {
+            schema_version: crate::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-continuation".to_string(),
+            repo_hash: "repo-hash".to_string(),
+            owner_kind: "spec".to_string(),
+            owner_number: 2359,
+            identity: crate::ExecutionBindingIdentity {
+                generation_id: "generation-successor".to_string(),
+                binding_id: "binding-operation-1".to_string(),
+                ledger_head_hash: "prepared-attempt-hash".to_string(),
+            },
+            capability_generation: 2,
+        };
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("conversation-existing")
+            .prepared_continuation(binding.clone())
+            .build();
+
+        assert_eq!(config.session_mode, SessionMode::Resume);
+        assert_eq!(
+            config.execution_intent,
+            ExecutionLaunchIntent::PreparedContinuation(binding)
+        );
+        assert!(
+            config.args.iter().any(|arg| arg == "conversation-existing"),
+            "the provider conversation remains a Resume even though execution is producing"
+        );
+    }
+
+    #[test]
+    fn ordinary_resume_defaults_to_automatic_execution_intent() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("conversation-inspection")
+            .build();
+
+        assert_eq!(config.session_mode, SessionMode::Resume);
+        assert_eq!(
+            config.execution_intent,
+            ExecutionLaunchIntent::Automatic,
+            "Automatic preserves the existing classifier where Resume is inspection-only"
+        );
     }
 
     #[test]

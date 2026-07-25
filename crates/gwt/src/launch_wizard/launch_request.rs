@@ -93,7 +93,7 @@ impl LaunchWizardState {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
 
-        if self.skip_permissions {
+        if self.skip_permissions && self.mode == "normal" {
             builder = builder.skip_permissions(true);
         }
 
@@ -300,7 +300,17 @@ mod tests {
         assert_eq!(config.reasoning_level.as_deref(), Some("high"));
         assert_eq!(config.tool_version.as_deref(), Some("0.110.0"));
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
-        assert!(config.skip_permissions);
+        assert!(
+            !config.skip_permissions,
+            "inspection Resume must never inherit a permission bypass"
+        );
+        assert!(
+            !config
+                .args
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+            "inspection Resume must not carry Codex's dangerous bypass flag"
+        );
         assert!(config.codex_fast_mode);
     }
 

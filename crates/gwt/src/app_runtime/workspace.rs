@@ -188,6 +188,16 @@ pub(super) enum WorkspaceLaunchProjectionKind {
     Resume { created_by_start_work: bool },
 }
 
+pub(super) struct WorkspaceLaunchTransition<'a> {
+    pub(super) work_id: Option<String>,
+    pub(super) base_branch: Option<&'a str>,
+    pub(super) linked_issue_number: Option<u64>,
+    pub(super) resume_context: Option<&'a WorkspaceResumeContext>,
+    pub(super) kind: WorkspaceLaunchProjectionKind,
+    pub(super) live_session_ids: &'a std::collections::HashSet<String>,
+    pub(super) now: chrono::DateTime<chrono::Utc>,
+}
+
 impl WorkspaceLaunchProjectionKind {
     fn work_event_kind(self) -> gwt_core::workspace_projection::WorkEventKind {
         match self {
@@ -221,45 +231,74 @@ pub(super) fn save_workspace_launch_projection(
         Some(session.branch_name.as_str()),
         Some(session.worktree_path.as_path()),
     );
-    let owner = workspace_resume_context
-        .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
-        .or_else(|| linked_issue_number.map(|issue_number| format!("Issue #{issue_number}")));
     gwt_core::workspace_projection::transact_workspace_state(
         project_root,
         |projection, _work_items, _work_items_persisted| {
-            // #3065: drop dead agent entries before computing the running-agents
-            // status text. Agent launch never prunes Shell Work.
-            projection
-                .retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
-            projection.apply_launch(
-                gwt_core::workspace_projection::WorkspaceLaunchUpdate {
-                    work_id,
-                    title: workspace_resume_context
-                        .and_then(|context| non_empty_workspace_text(context.title.as_deref())),
-                    summary: workspace_resume_context
-                        .and_then(|context| non_empty_workspace_text(context.summary.as_deref())),
-                    owner,
-                    next_action: workspace_resume_context.and_then(|context| {
-                        non_empty_workspace_text(context.next_action.as_deref())
-                    }),
-                    branch: session.branch_name.clone(),
-                    worktree_path: session.worktree_path.clone(),
-                    base_branch: base_branch.map(str::to_string),
-                    created_by_start_work: launch_kind.created_by_start_work(),
-                },
-                active_agent_summary_from_session(session, now),
-                now,
-            );
-            let work_event = workspace_work_event_from_launch_projection(
+            let work_event = apply_workspace_launch_transition(
                 projection,
                 session,
-                launch_kind.work_event_kind(),
-                now,
+                WorkspaceLaunchTransition {
+                    work_id,
+                    base_branch,
+                    linked_issue_number,
+                    resume_context: workspace_resume_context,
+                    kind: launch_kind,
+                    live_session_ids,
+                    now,
+                },
             );
             Ok(((), vec![work_event]))
         },
     )
     .map_err(|error| error.to_string())
+}
+
+pub(super) fn apply_workspace_launch_transition(
+    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
+    session: &ActiveAgentSession,
+    transition: WorkspaceLaunchTransition<'_>,
+) -> gwt_core::workspace_projection::WorkEvent {
+    let owner = transition
+        .resume_context
+        .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
+        .or_else(|| {
+            transition
+                .linked_issue_number
+                .map(|issue_number| format!("Issue #{issue_number}"))
+        });
+    // #3065: drop dead agent entries before computing the running-agents
+    // status text. Agent launch never prunes Shell Work.
+    projection.retain_live_agents_keep_shells(
+        transition.live_session_ids.iter().map(String::as_str),
+        transition.now,
+    );
+    projection.apply_launch(
+        gwt_core::workspace_projection::WorkspaceLaunchUpdate {
+            work_id: transition.work_id,
+            title: transition
+                .resume_context
+                .and_then(|context| non_empty_workspace_text(context.title.as_deref())),
+            summary: transition
+                .resume_context
+                .and_then(|context| non_empty_workspace_text(context.summary.as_deref())),
+            owner,
+            next_action: transition
+                .resume_context
+                .and_then(|context| non_empty_workspace_text(context.next_action.as_deref())),
+            branch: session.branch_name.clone(),
+            worktree_path: session.worktree_path.clone(),
+            base_branch: transition.base_branch.map(str::to_string),
+            created_by_start_work: transition.kind.created_by_start_work(),
+        },
+        active_agent_summary_from_session(session, transition.now),
+        transition.now,
+    );
+    workspace_work_event_from_launch_projection(
+        projection,
+        session,
+        transition.kind.work_event_kind(),
+        transition.now,
+    )
 }
 
 fn workspace_work_event_from_launch_projection(

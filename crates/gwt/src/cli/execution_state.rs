@@ -329,6 +329,13 @@ pub struct ExecutionGeneration {
 pub struct SuccessorRequest {
     pub operation_id: String,
     pub principal_id: String,
+    /// Optional Work correlation carried by user-facing Continue work.
+    ///
+    /// Generic generation writers leave this absent. New Continue work
+    /// operations persist it so a Host restart cannot retarget an operation
+    /// id to another Work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
     pub source: String,
     pub session_binding_id: String,
     pub initial_session_id: String,
@@ -362,6 +369,50 @@ pub struct ContinuationAttempt {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activated_generation: Option<ExecutionGenerationIdentity>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous_attempt_hash: String,
+    pub content_hash: String,
+}
+
+/// Input identity for an idempotent same-generation stale-owner takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationTakeoverRequest {
+    pub operation_id: String,
+    pub principal_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
+    /// `continue-work:resume` or `continue-work:handoff` for user-facing
+    /// takeover operations. Generic ownership transfers leave it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub from_session_id: String,
+    pub to_session_id: String,
+    pub reason: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationTakeoverAttemptStatus {
+    Prepared,
+    Aborted,
+    Activated,
+}
+
+/// Append-only CAS audit for a same-generation takeover. Prepared/Aborted
+/// entries do not alter the current generation or its effective projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationTakeoverAttempt {
+    pub request: GenerationTakeoverRequest,
+    pub worktree_binding_hash: String,
+    pub generation_id: String,
+    pub predecessor_head_hash: String,
+    pub status: GenerationTakeoverAttemptStatus,
+    pub recorded_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_binding: Option<gwt_agent::ExecutionBindingIdentity>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub previous_attempt_hash: String,
     pub content_hash: String,
@@ -406,6 +457,8 @@ pub struct ExecutionGenerationLedger {
     pub generations: Vec<ExecutionGeneration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub continuation_attempts: Vec<ContinuationAttempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takeover_attempts: Vec<GenerationTakeoverAttempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takeovers: Vec<GenerationTakeoverAudit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -660,6 +713,12 @@ fn compute_continuation_attempt_hash(attempt: &ContinuationAttempt) -> String {
     sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
 }
 
+fn compute_generation_takeover_attempt_hash(attempt: &GenerationTakeoverAttempt) -> String {
+    let mut canonical = attempt.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
 fn compute_takeover_event_hash(event: &GenerationTakeoverAudit) -> String {
     let mut canonical = event.clone();
     canonical.content_hash.clear();
@@ -886,12 +945,7 @@ fn validate_generation_ledger(
         ),
     > = std::collections::HashMap::new();
     for attempt in &ledger.continuation_attempts {
-        if attempt.request.operation_id.trim().is_empty()
-            || attempt.request.principal_id.trim().is_empty()
-            || attempt.request.source.trim().is_empty()
-            || attempt.request.session_binding_id.trim().is_empty()
-            || attempt.request.initial_session_id.trim().is_empty()
-            || attempt.request.entrypoint.trim().is_empty()
+        if validate_successor_request(&attempt.request).is_err()
             || attempt.worktree_binding_hash.trim().is_empty()
             || attempt.candidate_generation_id.trim().is_empty()
             || attempt
@@ -990,6 +1044,135 @@ fn validate_generation_ledger(
             return Err(invalid_generation_data(
                 "non-genesis execution generation has no Activated CAS event",
             ));
+        }
+    }
+    let mut previous_takeover_attempt_hash = "";
+    let mut takeover_operations: std::collections::HashMap<
+        &str,
+        (
+            &GenerationTakeoverRequest,
+            &str,
+            &str,
+            &str,
+            GenerationTakeoverAttemptStatus,
+        ),
+    > = std::collections::HashMap::new();
+    for attempt in &ledger.takeover_attempts {
+        if validate_generation_takeover_request(&attempt.request).is_err()
+            || attempt.worktree_binding_hash.trim().is_empty()
+            || attempt.generation_id.trim().is_empty()
+            || attempt.predecessor_head_hash.trim().is_empty()
+            || attempt.content_hash.is_empty()
+            || attempt.previous_attempt_hash != previous_takeover_attempt_hash
+            || attempt.content_hash != compute_generation_takeover_attempt_hash(attempt)
+            || ledger
+                .continuation_attempts
+                .iter()
+                .any(|candidate| candidate.request.operation_id == attempt.request.operation_id)
+        {
+            return Err(invalid_generation_data(
+                "generation takeover attempt chain failed identity/integrity validation",
+            ));
+        }
+        previous_takeover_attempt_hash = &attempt.content_hash;
+        match takeover_operations.get(attempt.request.operation_id.as_str()) {
+            None => {
+                if attempt.status != GenerationTakeoverAttemptStatus::Prepared
+                    || attempt.activated_binding.is_some()
+                    || attempt.resolution_reason.is_some()
+                {
+                    return Err(invalid_generation_data(
+                        "generation takeover operation must begin with one Prepared event",
+                    ));
+                }
+                takeover_operations.insert(
+                    attempt.request.operation_id.as_str(),
+                    (
+                        &attempt.request,
+                        &attempt.worktree_binding_hash,
+                        &attempt.generation_id,
+                        &attempt.predecessor_head_hash,
+                        attempt.status,
+                    ),
+                );
+            }
+            Some((
+                request,
+                worktree_binding_hash,
+                generation_id,
+                predecessor_head_hash,
+                previous_status,
+            )) => {
+                if *request != &attempt.request
+                    || *worktree_binding_hash != attempt.worktree_binding_hash
+                    || *generation_id != attempt.generation_id
+                    || *predecessor_head_hash != attempt.predecessor_head_hash
+                    || *previous_status != GenerationTakeoverAttemptStatus::Prepared
+                    || attempt.status == GenerationTakeoverAttemptStatus::Prepared
+                {
+                    return Err(invalid_generation_data(
+                        "generation takeover operation id was reused or has a non-append-only lifecycle",
+                    ));
+                }
+                match attempt.status {
+                    GenerationTakeoverAttemptStatus::Aborted => {
+                        if attempt
+                            .resolution_reason
+                            .as_deref()
+                            .is_none_or(str::is_empty)
+                            || attempt.activated_binding.is_some()
+                        {
+                            return Err(invalid_generation_data(
+                                "Aborted generation takeover is missing its audit reason",
+                            ));
+                        }
+                    }
+                    GenerationTakeoverAttemptStatus::Activated => {
+                        let binding = attempt.activated_binding.as_ref().ok_or_else(|| {
+                            invalid_generation_data(
+                                "Activated generation takeover has no committed binding",
+                            )
+                        })?;
+                        let generation = ledger
+                            .generations
+                            .iter()
+                            .find(|generation| {
+                                generation.identity.generation_id == attempt.generation_id
+                            })
+                            .ok_or_else(|| {
+                                invalid_generation_data(
+                                    "Activated generation takeover names an unknown generation",
+                                )
+                            })?;
+                        if binding.generation_id != attempt.generation_id
+                            || binding.binding_id != generation.identity.session_binding_id
+                            || attempt.resolution_reason.is_some()
+                            || !ledger.takeovers.iter().any(|takeover| {
+                                takeover.generation_id == attempt.generation_id
+                                    && takeover.from_session_id == attempt.request.from_session_id
+                                    && takeover.to_session_id == attempt.request.to_session_id
+                                    && takeover.reason == attempt.request.reason
+                                    && takeover.observed_at == attempt.request.requested_at
+                            })
+                        {
+                            return Err(invalid_generation_data(
+                                "Activated generation takeover does not match its audit event",
+                            ));
+                        }
+                    }
+                    GenerationTakeoverAttemptStatus::Prepared => unreachable!(),
+                }
+                takeover_operations.insert(
+                    attempt.request.operation_id.as_str(),
+                    (
+                        &attempt.request,
+                        &attempt.worktree_binding_hash,
+                        &attempt.generation_id,
+                        &attempt.predecessor_head_hash,
+                        attempt.status,
+                    ),
+                );
+            }
         }
     }
     enum ProjectionEventRef<'a> {
@@ -1987,6 +2170,19 @@ fn append_continuation_attempt(
     attempt
 }
 
+fn append_generation_takeover_attempt(
+    ledger: &mut ExecutionGenerationLedger,
+    mut attempt: GenerationTakeoverAttempt,
+) -> GenerationTakeoverAttempt {
+    attempt.previous_attempt_hash = ledger
+        .takeover_attempts
+        .last()
+        .map_or_else(String::new, |previous| previous.content_hash.clone());
+    attempt.content_hash = compute_generation_takeover_attempt_hash(&attempt);
+    ledger.takeover_attempts.push(attempt.clone());
+    attempt
+}
+
 fn latest_generation_event_hash(ledger: &ExecutionGenerationLedger) -> String {
     ledger
         .takeovers
@@ -2189,8 +2385,9 @@ fn legacy_genesis(
 /// Import one verified flat ECR as deterministic owner-scoped genesis.
 ///
 /// Completed/Blocked imports preserve the exact terminal projection bytes.
-/// A verified legacy Active record requires a caller liveness classification;
-/// Unknown or hashless state is refused before a lease/file is created.
+/// A legacy Active record requires a caller liveness classification. A
+/// classified hashless Active record is canonicalized as part of the atomic
+/// import; Unknown remains a zero-mutation refusal.
 pub fn ensure_generation_ledger(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -2231,22 +2428,6 @@ pub fn ensure_generation_ledger(
         )
     })?;
     let source_record = parse_legacy_generation_source(&source_projection, owner)?;
-    if source_record.content_hash.is_empty() {
-        return if source_record.status == ExecutionControlStatus::Active {
-            Err(generation_backfill_required(
-                "hashless legacy Active execution requires an explicit liveness backfill; no generation state was written",
-            ))
-        } else {
-            Err(invalid_generation_data(
-                "only integrity-verified legacy terminal executions can be imported",
-            ))
-        };
-    }
-    if !integrity_ok(&source_record) {
-        return Err(invalid_generation_data(
-            "legacy execution record failed integrity validation; no generation state was written",
-        ));
-    }
     if source_record.status == ExecutionControlStatus::Active
         && matches!(active_disposition, LegacyActiveDisposition::Unknown)
     {
@@ -2254,6 +2435,28 @@ pub fn ensure_generation_ledger(
             "legacy Active execution liveness is unknown; classify it before generation backfill",
         ));
     }
+    let (source_record, imported_projection) = if source_record.content_hash.is_empty() {
+        if source_record.status != ExecutionControlStatus::Active {
+            return Err(invalid_generation_data(
+                "only integrity-verified legacy terminal executions can be imported",
+            ));
+        }
+        let canonical =
+            String::from_utf8(serialize_execution_control(&source_record)?).map_err(|error| {
+                invalid_generation_data(format!(
+                    "serialized legacy Active projection is not UTF-8: {error}"
+                ))
+            })?;
+        let canonical_record = parse_legacy_generation_source(&canonical, owner)?;
+        (canonical_record, canonical)
+    } else {
+        if !integrity_ok(&source_record) {
+            return Err(invalid_generation_data(
+                "legacy execution record failed integrity validation; no generation state was written",
+            ));
+        }
+        (source_record, source_projection.clone())
+    };
     if let LegacyActiveDisposition::Stale {
         new_session_id,
         reason,
@@ -2293,13 +2496,14 @@ pub fn ensure_generation_ledger(
             &context.worktree,
             owner,
             &source_record,
-            source_projection.clone(),
+            imported_projection.clone(),
         );
         let mut ledger = ExecutionGenerationLedger {
             schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
             owner,
             generations: vec![genesis],
             continuation_attempts: Vec::new(),
+            takeover_attempts: Vec::new(),
             takeovers: Vec::new(),
             lifecycle_events: Vec::new(),
             current_generation_id: String::new(),
@@ -2307,7 +2511,7 @@ pub fn ensure_generation_ledger(
         };
         ledger.current_generation_id = ledger.generations[0].identity.generation_id.clone();
 
-        let mut committed_projection = source_projection.clone();
+        let mut committed_projection = imported_projection.clone();
         if source_record.status == ExecutionControlStatus::Active {
             if let LegacyActiveDisposition::Stale {
                 new_session_id,
@@ -2370,7 +2574,23 @@ fn validate_successor_request(request: &SuccessorRequest) -> io::Result<()> {
             "successor request contains an empty identity/binding field",
         ));
     }
+    if request
+        .work_id
+        .as_deref()
+        .is_some_and(|work_id| !canonical_continue_work_id(work_id))
+    {
+        return Err(invalid_generation_data(
+            "successor request contains a non-canonical Work identity",
+        ));
+    }
     Ok(())
+}
+
+fn canonical_continue_work_id(work_id: &str) -> bool {
+    work_id.trim() == work_id
+        && !work_id.is_empty()
+        && work_id.len() <= 512
+        && !work_id.chars().any(char::is_control)
 }
 
 fn latest_operation_attempt<'a>(
@@ -2401,6 +2621,122 @@ fn latest_operation_attempt<'a>(
     Ok(latest)
 }
 
+fn validate_generation_takeover_request(request: &GenerationTakeoverRequest) -> io::Result<()> {
+    if request.operation_id.trim().is_empty()
+        || request.principal_id.trim().is_empty()
+        || request.from_session_id.trim().is_empty()
+        || request.to_session_id.trim().is_empty()
+        || request.from_session_id == request.to_session_id
+        || request.reason.trim().is_empty()
+    {
+        return Err(invalid_generation_data(
+            "generation takeover request contains an empty or conflicting identity field",
+        ));
+    }
+    if request
+        .work_id
+        .as_deref()
+        .is_some_and(|work_id| !canonical_continue_work_id(work_id))
+        || request.source.as_deref().is_some_and(|source| {
+            !matches!(source, "continue-work:resume" | "continue-work:handoff")
+        })
+    {
+        return Err(invalid_generation_data(
+            "generation takeover request contains invalid continuation correlation",
+        ));
+    }
+    Ok(())
+}
+
+fn latest_generation_takeover_attempt<'a>(
+    ledger: &'a ExecutionGenerationLedger,
+    request: &GenerationTakeoverRequest,
+    expected_worktree_binding_hash: &str,
+) -> io::Result<Option<&'a GenerationTakeoverAttempt>> {
+    let mut latest = None;
+    for attempt in ledger
+        .takeover_attempts
+        .iter()
+        .filter(|attempt| attempt.request.operation_id == request.operation_id)
+    {
+        if attempt.request != *request {
+            return Err(generation_conflict(format!(
+                "generation takeover operation {} was already used by a different principal/request",
+                request.operation_id
+            )));
+        }
+        if attempt.worktree_binding_hash != expected_worktree_binding_hash {
+            return Err(generation_conflict(format!(
+                "generation takeover operation {} is bound to a different worktree",
+                request.operation_id
+            )));
+        }
+        latest = Some(attempt);
+    }
+    Ok(latest)
+}
+
+fn build_generation_takeover(
+    ledger: &ExecutionGenerationLedger,
+    request: &GenerationTakeoverRequest,
+    expected_worktree_binding_hash: &str,
+) -> io::Result<(
+    GenerationTakeoverAudit,
+    String,
+    gwt_agent::ExecutionBindingIdentity,
+)> {
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+        || current.identity.worktree_binding_hash != expected_worktree_binding_hash
+    {
+        return Err(generation_conflict(
+            "same-generation takeover requires the exact current Active worktree",
+        ));
+    }
+    let mut projection =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "current generation takeover projection is malformed: {error}"
+                ))
+            })?;
+    if projection.primary_session_id != request.from_session_id {
+        return Err(generation_conflict(
+            "same-generation takeover CAS lost: current owner Session changed",
+        ));
+    }
+    let transfer = OwnershipTransfer {
+        from_session_id: request.from_session_id.clone(),
+        to_session_id: request.to_session_id.clone(),
+        reason: request.reason.clone(),
+        transferred_at: request.requested_at,
+    };
+    projection.primary_session_id = request.to_session_id.clone();
+    projection.transfers.push(transfer);
+    let projection = serialized_execution_projection(&projection)?;
+    let event = GenerationTakeoverAudit {
+        sequence: 0,
+        generation_id: current.identity.generation_id.clone(),
+        from_session_id: request.from_session_id.clone(),
+        to_session_id: request.to_session_id.clone(),
+        reason: request.reason.clone(),
+        observed_at: request.requested_at,
+        execution_control_json: projection.clone(),
+        previous_event_hash: String::new(),
+        content_hash: String::new(),
+    };
+    let mut planned = ledger.clone();
+    append_takeover_event(&mut planned, event.clone());
+    let generation = planned
+        .current_generation()
+        .ok_or_else(|| invalid_generation_data("planned takeover generation is not current"))?;
+    let binding = execution_binding_for_generation(&planned, generation);
+    Ok((event, projection, binding))
+}
+
 fn successor_candidate_id(
     owner: ExecutionOwnerKey,
     ledger: &ExecutionGenerationLedger,
@@ -2420,6 +2756,482 @@ fn successor_candidate_id(
     )
 }
 
+fn build_successor_generation(
+    owner: ExecutionOwnerKey,
+    ledger: &ExecutionGenerationLedger,
+    predecessor: &ExecutionGeneration,
+    attempt: &ContinuationAttempt,
+    worktree_binding_hash: &str,
+) -> io::Result<(ExecutionGeneration, String)> {
+    let predecessor_head = effective_generation_head_hash(ledger, predecessor);
+    let predecessor_record = serde_json::from_str::<ExecutionControlRecord>(
+        ledger.effective_projection_for(predecessor),
+    )
+    .map(hydrate_recovery_envelopes)
+    .map_err(|error| {
+        invalid_generation_data(format!(
+            "predecessor execution snapshot is malformed: {error}"
+        ))
+    })?;
+    let request = &attempt.request;
+    let successor_record = ExecutionControlRecord {
+        owner_kind: owner.kind,
+        owner_number: owner.number,
+        primary_session_id: request.initial_session_id.clone(),
+        entrypoint: request.entrypoint.clone(),
+        bundled_required_owners: predecessor_record.bundled_required_owners,
+        status: ExecutionControlStatus::Active,
+        blocked_reason: None,
+        missing_verification: None,
+        launched_at: request.requested_at,
+        settled_at: None,
+        transfers: Vec::new(),
+        recoveries: Vec::new(),
+        content_hash: String::new(),
+    };
+    let projection =
+        String::from_utf8(serialize_execution_control(&successor_record)?).map_err(|error| {
+            invalid_generation_data(format!(
+                "serialized successor projection is not UTF-8: {error}"
+            ))
+        })?;
+    let mut successor = ExecutionGeneration {
+        identity: ExecutionGenerationIdentity {
+            owner,
+            generation_id: attempt.candidate_generation_id.clone(),
+            predecessor_generation_id: Some(predecessor.identity.generation_id.clone()),
+            predecessor_content_hash: Some(predecessor_head),
+            session_binding_id: request.session_binding_id.clone(),
+            initial_session_id: request.initial_session_id.clone(),
+            worktree_binding_hash: worktree_binding_hash.to_string(),
+            entrypoint: request.entrypoint.clone(),
+            activated_at: request.requested_at,
+        },
+        status: ExecutionControlStatus::Active,
+        execution_control_json: projection.clone(),
+        content_hash: String::new(),
+    };
+    successor.content_hash = compute_generation_hash(&successor);
+    Ok((successor, projection))
+}
+
+fn prepared_successor_generation(
+    context: &GenerationTransactionContext,
+    ledger: &ExecutionGenerationLedger,
+    request: &SuccessorRequest,
+) -> io::Result<Option<ExecutionGeneration>> {
+    let Some(latest) = latest_operation_attempt(ledger, request, &context.worktree_binding_hash)?
+    else {
+        return Ok(None);
+    };
+    if latest.status != ContinuationAttemptStatus::Prepared {
+        return Ok(None);
+    }
+    let predecessor = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    let predecessor_head = effective_generation_head_hash(ledger, predecessor);
+    if predecessor.identity != latest.predecessor
+        || predecessor_head != latest.predecessor_generation_content_hash
+        || ledger.effective_status_for(predecessor) != ExecutionControlStatus::Completed
+    {
+        return Err(generation_conflict(
+            "prepared successor CAS lost: current generation changed or is not Completed",
+        ));
+    }
+    build_successor_generation(
+        context.owner,
+        ledger,
+        predecessor,
+        latest,
+        &context.worktree_binding_hash,
+    )
+    .map(|(generation, _)| Some(generation))
+}
+
+/// Compute the exact non-secret binding that a Prepared successor will carry
+/// after its activation CAS. No current pointer or generation is advanced.
+pub fn prepared_successor_execution_binding(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+) -> io::Result<gwt_agent::ExecutionBindingIdentity> {
+    validate_successor_request(request)?;
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let successor =
+            prepared_successor_generation(context, &ledger, request)?.ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::NotFound,
+                    "Prepared successor attempt is missing or terminal",
+                )
+            })?;
+        let mut planned = ledger;
+        planned.current_generation_id = successor.identity.generation_id.clone();
+        planned.generations.push(successor);
+        let generation = planned.current_generation().ok_or_else(|| {
+            invalid_generation_data("planned successor generation is not current")
+        })?;
+        Ok(execution_binding_for_generation(&planned, generation))
+    })
+}
+
+/// Read the latest durable attempt for one continuation operation.
+///
+/// This is the response-loss reconciliation seam used by the Host
+/// coordinator. The operation id is correlation only; repository + owner
+/// scope remain mandatory authority inputs.
+pub fn continuation_attempt_for_operation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+) -> io::Result<Option<ContinuationAttempt>> {
+    if operation_id.trim() != operation_id
+        || operation_id.is_empty()
+        || operation_id.len() > 256
+        || operation_id.chars().any(char::is_control)
+    {
+        return Err(invalid_generation_data(
+            "continuation operation id must be canonical",
+        ));
+    }
+    Ok(
+        load_owner_generation_ledger(worktree, owner)?.and_then(|ledger| {
+            ledger
+                .continuation_attempts
+                .iter()
+                .rev()
+                .find(|attempt| attempt.request.operation_id == operation_id)
+                .cloned()
+        }),
+    )
+}
+
+/// Append a Prepared same-generation takeover without changing the current
+/// owner projection.
+pub fn prepare_generation_takeover(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &GenerationTakeoverRequest,
+) -> io::Result<GenerationTakeoverAttempt> {
+    validate_generation_takeover_request(request)?;
+    with_generation_owner_lease(worktree, owner, |context| {
+        let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        if ledger
+            .continuation_attempts
+            .iter()
+            .any(|attempt| attempt.request.operation_id == request.operation_id)
+        {
+            return Err(generation_conflict(
+                "operation id is already bound to a successor generation",
+            ));
+        }
+        if let Some(existing) =
+            latest_generation_takeover_attempt(&ledger, request, &context.worktree_binding_hash)?
+        {
+            return Ok(existing.clone());
+        }
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        let predecessor_head_hash = effective_generation_head_hash(&ledger, &current);
+        // Validate the exact Active owner and deterministic post-takeover
+        // projection before persisting a Prepared audit entry.
+        let _ = build_generation_takeover(&ledger, request, &context.worktree_binding_hash)?;
+        let attempt = append_generation_takeover_attempt(
+            &mut ledger,
+            GenerationTakeoverAttempt {
+                request: request.clone(),
+                worktree_binding_hash: context.worktree_binding_hash.clone(),
+                generation_id: current.identity.generation_id,
+                predecessor_head_hash,
+                status: GenerationTakeoverAttemptStatus::Prepared,
+                recorded_at: request.requested_at,
+                resolution_reason: None,
+                activated_binding: None,
+                previous_attempt_hash: String::new(),
+                content_hash: String::new(),
+            },
+        );
+        stamp_generation_ledger(&mut ledger);
+        write_owner_ledger(context, &ledger)?;
+        Ok(attempt)
+    })
+}
+
+/// Compute the exact current-generation binding after a Prepared takeover.
+pub fn prepared_generation_takeover_execution_binding(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &GenerationTakeoverRequest,
+) -> io::Result<gwt_agent::ExecutionBindingIdentity> {
+    validate_generation_takeover_request(request)?;
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let latest =
+            latest_generation_takeover_attempt(&ledger, request, &context.worktree_binding_hash)?
+                .ok_or_else(|| {
+                io::Error::new(ErrorKind::NotFound, "Prepared takeover attempt is missing")
+            })?;
+        if latest.status != GenerationTakeoverAttemptStatus::Prepared {
+            return Err(generation_conflict(
+                "generation takeover attempt is no longer Prepared",
+            ));
+        }
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        if current.identity.generation_id != latest.generation_id
+            || effective_generation_head_hash(&ledger, current) != latest.predecessor_head_hash
+        {
+            return Err(generation_conflict(
+                "Prepared takeover CAS lost: current generation/head changed",
+            ));
+        }
+        build_generation_takeover(&ledger, request, &context.worktree_binding_hash)
+            .map(|(_, _, binding)| binding)
+    })
+}
+
+/// Append an Aborted event for a Prepared same-generation takeover.
+pub fn abort_generation_takeover(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &GenerationTakeoverRequest,
+    reason: &str,
+) -> io::Result<GenerationTakeoverAttempt> {
+    validate_generation_takeover_request(request)?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "aborting a generation takeover requires a non-empty reason",
+        ));
+    }
+    with_generation_owner_lease(worktree, owner, |context| {
+        let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let latest =
+            latest_generation_takeover_attempt(&ledger, request, &context.worktree_binding_hash)?
+                .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "takeover attempt is missing"))?
+                .clone();
+        match latest.status {
+            GenerationTakeoverAttemptStatus::Aborted => {
+                if latest.resolution_reason.as_deref() == Some(reason) {
+                    return Ok(latest);
+                }
+                return Err(generation_conflict(
+                    "takeover attempt was already aborted with a different reason",
+                ));
+            }
+            GenerationTakeoverAttemptStatus::Activated => {
+                return Err(generation_conflict(
+                    "an Activated generation takeover cannot be aborted",
+                ));
+            }
+            GenerationTakeoverAttemptStatus::Prepared => {}
+        }
+        let mut aborted = latest;
+        aborted.status = GenerationTakeoverAttemptStatus::Aborted;
+        aborted.recorded_at = Utc::now();
+        aborted.resolution_reason = Some(reason.to_string());
+        aborted.activated_binding = None;
+        aborted.previous_attempt_hash.clear();
+        aborted.content_hash.clear();
+        let aborted = append_generation_takeover_attempt(&mut ledger, aborted);
+        stamp_generation_ledger(&mut ledger);
+        write_owner_ledger(context, &ledger)?;
+        Ok(aborted)
+    })
+}
+
+/// Commit the same-generation ownership transfer CAS.
+pub fn activate_generation_takeover(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &GenerationTakeoverRequest,
+) -> io::Result<gwt_agent::ExecutionBindingIdentity> {
+    validate_generation_takeover_request(request)?;
+    with_generation_owner_lease(worktree, owner, |context| {
+        let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let latest =
+            latest_generation_takeover_attempt(&ledger, request, &context.worktree_binding_hash)?
+                .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "takeover attempt is missing"))?
+                .clone();
+        match latest.status {
+            GenerationTakeoverAttemptStatus::Activated => {
+                let binding = latest.activated_binding.ok_or_else(|| {
+                    invalid_generation_data(
+                        "Activated generation takeover has no committed binding",
+                    )
+                })?;
+                let current = ledger.current_generation().ok_or_else(|| {
+                    invalid_generation_data("execution generation ledger current id is missing")
+                })?;
+                let projection = ledger.effective_projection_for(current).to_string();
+                write_activated_generation(context, &ledger, &projection)?;
+                return Ok(binding);
+            }
+            GenerationTakeoverAttemptStatus::Aborted => {
+                return Err(generation_conflict(
+                    "an Aborted generation takeover cannot be activated",
+                ));
+            }
+            GenerationTakeoverAttemptStatus::Prepared => {}
+        }
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        if current.identity.generation_id != latest.generation_id
+            || effective_generation_head_hash(&ledger, &current) != latest.predecessor_head_hash
+        {
+            return Err(generation_conflict(
+                "generation takeover activation CAS lost: current generation/head changed",
+            ));
+        }
+        let (event, projection, planned_binding) =
+            build_generation_takeover(&ledger, request, &context.worktree_binding_hash)?;
+        append_takeover_event(&mut ledger, event);
+        let committed_binding = {
+            let generation = ledger.current_generation().ok_or_else(|| {
+                invalid_generation_data("takeover generation disappeared before commit")
+            })?;
+            execution_binding_for_generation(&ledger, generation)
+        };
+        if committed_binding != planned_binding {
+            return Err(invalid_generation_data(
+                "planned generation takeover binding changed before commit",
+            ));
+        }
+        let mut activated = latest;
+        activated.status = GenerationTakeoverAttemptStatus::Activated;
+        activated.recorded_at = Utc::now();
+        activated.resolution_reason = None;
+        activated.activated_binding = Some(committed_binding.clone());
+        activated.previous_attempt_hash.clear();
+        activated.content_hash.clear();
+        append_generation_takeover_attempt(&mut ledger, activated);
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(context, &ledger, &projection)?;
+        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("takeover readback lost generation authority")
+        })?;
+        let readback_generation = readback
+            .current_generation()
+            .ok_or_else(|| invalid_generation_data("takeover readback lost current generation"))?;
+        if execution_binding_for_generation(&readback, readback_generation) != committed_binding {
+            return Err(invalid_generation_data(
+                "takeover readback does not match committed binding",
+            ));
+        }
+        Ok(committed_binding)
+    })
+}
+
+pub fn generation_takeover_attempt_for_operation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+) -> io::Result<Option<GenerationTakeoverAttempt>> {
+    if operation_id.trim() != operation_id
+        || operation_id.is_empty()
+        || operation_id.len() > 256
+        || operation_id.chars().any(char::is_control)
+    {
+        return Err(invalid_generation_data(
+            "generation takeover operation id must be canonical",
+        ));
+    }
+    Ok(
+        load_owner_generation_ledger(worktree, owner)?.and_then(|ledger| {
+            ledger
+                .takeover_attempts
+                .iter()
+                .rev()
+                .find(|attempt| attempt.request.operation_id == operation_id)
+                .cloned()
+        }),
+    )
+}
+
+/// Side-effect-free Host probe for a still-Prepared exact execution binding.
+pub fn prepared_execution_binding_matches(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let context = match GenerationTransactionContext::resolve(worktree, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let Some(ledger) = load_owner_generation_ledger_from_context(&context)? else {
+        return Ok(false);
+    };
+    if let Some(attempt) = ledger.continuation_attempts.iter().rev().find(|attempt| {
+        attempt.status == ContinuationAttemptStatus::Prepared
+            && attempt.request.initial_session_id == expected_session_id
+    }) {
+        let Some(successor) = prepared_successor_generation(&context, &ledger, &attempt.request)?
+        else {
+            return Ok(false);
+        };
+        let mut planned = ledger;
+        planned.current_generation_id = successor.identity.generation_id.clone();
+        planned.generations.push(successor);
+        let generation = planned.current_generation().ok_or_else(|| {
+            invalid_generation_data("planned successor generation is not current")
+        })?;
+        return Ok(execution_binding_for_generation(&planned, generation) == *expected_identity);
+    }
+    let Some(attempt) = ledger.takeover_attempts.iter().rev().find(|attempt| {
+        attempt.status == GenerationTakeoverAttemptStatus::Prepared
+            && attempt.request.to_session_id == expected_session_id
+    }) else {
+        return Ok(false);
+    };
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    if current.identity.generation_id != attempt.generation_id
+        || effective_generation_head_hash(&ledger, current) != attempt.predecessor_head_hash
+    {
+        return Ok(false);
+    }
+    let (_, _, planned) =
+        build_generation_takeover(&ledger, &attempt.request, &context.worktree_binding_hash)?;
+    Ok(planned == *expected_identity)
+}
+
 /// Append a Prepared attempt without changing the current generation.
 pub fn prepare_successor(
     worktree: &Path,
@@ -2434,6 +3246,15 @@ pub fn prepare_successor(
                 "owner generation ledger is not initialized",
             )
         })?;
+        if ledger
+            .takeover_attempts
+            .iter()
+            .any(|attempt| attempt.request.operation_id == request.operation_id)
+        {
+            return Err(generation_conflict(
+                "operation id is already bound to a same-generation takeover",
+            ));
+        }
         if let Some(existing) =
             latest_operation_attempt(&ledger, request, &context.worktree_binding_hash)?
         {
@@ -2616,53 +3437,13 @@ pub fn activate_successor(
             ));
         }
 
-        let predecessor_record = serde_json::from_str::<ExecutionControlRecord>(
-            ledger.effective_projection_for(&predecessor),
-        )
-        .map(hydrate_recovery_envelopes)
-        .map_err(|error| {
-            invalid_generation_data(format!(
-                "predecessor execution snapshot is malformed: {error}"
-            ))
-        })?;
-        let successor_record = ExecutionControlRecord {
-            owner_kind: owner.kind,
-            owner_number: owner.number,
-            primary_session_id: request.initial_session_id.clone(),
-            entrypoint: request.entrypoint.clone(),
-            bundled_required_owners: predecessor_record.bundled_required_owners,
-            status: ExecutionControlStatus::Active,
-            blocked_reason: None,
-            missing_verification: None,
-            launched_at: request.requested_at,
-            settled_at: None,
-            transfers: Vec::new(),
-            recoveries: Vec::new(),
-            content_hash: String::new(),
-        };
-        let projection = String::from_utf8(serialize_execution_control(&successor_record)?)
-            .map_err(|error| {
-                invalid_generation_data(format!(
-                    "serialized successor projection is not UTF-8: {error}"
-                ))
-            })?;
-        let mut successor = ExecutionGeneration {
-            identity: ExecutionGenerationIdentity {
-                owner,
-                generation_id: latest.candidate_generation_id.clone(),
-                predecessor_generation_id: Some(predecessor.identity.generation_id.clone()),
-                predecessor_content_hash: Some(predecessor_head),
-                session_binding_id: request.session_binding_id.clone(),
-                initial_session_id: request.initial_session_id.clone(),
-                worktree_binding_hash: context.worktree_binding_hash.clone(),
-                entrypoint: request.entrypoint.clone(),
-                activated_at: request.requested_at,
-            },
-            status: ExecutionControlStatus::Active,
-            execution_control_json: projection.clone(),
-            content_hash: String::new(),
-        };
-        successor.content_hash = compute_generation_hash(&successor);
+        let (successor, projection) = build_successor_generation(
+            owner,
+            &ledger,
+            &predecessor,
+            &latest,
+            &context.worktree_binding_hash,
+        )?;
         let identity = successor.identity.clone();
         ledger.current_generation_id = identity.generation_id.clone();
         ledger.generations.push(successor);
@@ -3857,6 +4638,7 @@ mod tests {
         SuccessorRequest {
             operation_id: operation_id.to_string(),
             principal_id: principal_id.to_string(),
+            work_id: None,
             source: source.to_string(),
             session_binding_id: format!("binding-{operation_id}"),
             initial_session_id: format!("session-{operation_id}"),
@@ -4123,6 +4905,46 @@ mod tests {
         let error = prepare_successor(other.path(), owner, &request).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn generation_ledger_operation_id_is_bound_to_original_continue_work() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut completed = active_record("session-original");
+        completed.owner_number = owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(dir.path(), &completed).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+
+        let mut original =
+            successor_request("operation-work", "principal-a", "continue-work:resume");
+        original.work_id = Some("work-original".to_string());
+        prepare_successor(dir.path(), owner, &original).unwrap();
+
+        let mut retargeted = original.clone();
+        retargeted.work_id = Some("work-foreign".to_string());
+        let error = prepare_successor(dir.path(), owner, &retargeted).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            continuation_attempt_for_operation(dir.path(), owner, "operation-work")
+                .unwrap()
+                .unwrap()
+                .request
+                .work_id
+                .as_deref(),
+            Some("work-original")
+        );
     }
 
     #[test]
@@ -4738,6 +5560,258 @@ mod tests {
                 .unwrap()
                 .current_generation_id,
             predecessor.generation_id
+        );
+    }
+
+    #[test]
+    fn prepared_successor_binding_predicts_exact_activated_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut completed = active_record("session-original");
+        completed.owner_number = owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(dir.path(), &completed).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+
+        let request =
+            successor_request("operation-planned-binding", "principal-a", "continue-work");
+        prepare_successor(dir.path(), owner, &request).unwrap();
+        let predecessor_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let planned = prepared_successor_execution_binding(dir.path(), owner, &request).unwrap();
+        assert_ne!(planned, predecessor_binding);
+        assert!(prepared_execution_binding_matches(
+            dir.path(),
+            owner,
+            &request.initial_session_id,
+            &planned,
+        )
+        .unwrap());
+        assert!(!prepared_execution_binding_matches(
+            dir.path(),
+            owner,
+            "another-session",
+            &planned,
+        )
+        .unwrap());
+        let mut mismatched = planned.clone();
+        mismatched.ledger_head_hash.push_str("-mismatch");
+        assert!(!prepared_execution_binding_matches(
+            dir.path(),
+            owner,
+            &request.initial_session_id,
+            &mismatched,
+        )
+        .unwrap());
+
+        activate_successor(dir.path(), owner, &request).unwrap();
+        assert_eq!(
+            current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap(),
+            planned,
+            "Prepared capability identity must equal the post-CAS Active identity byte-for-byte"
+        );
+        assert!(
+            !prepared_execution_binding_matches(
+                dir.path(),
+                owner,
+                &request.initial_session_id,
+                &planned,
+            )
+            .unwrap(),
+            "Activated attempts are no longer Prepared authority"
+        );
+    }
+
+    #[test]
+    fn prepared_takeover_binding_predicts_exact_same_generation_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        let imported =
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let generation_id = imported.current_generation_id.clone();
+        let predecessor_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let request = GenerationTakeoverRequest {
+            operation_id: "operation-takeover".to_string(),
+            principal_id: "gwt-host-continuation".to_string(),
+            work_id: Some("work-takeover".to_string()),
+            source: Some("continue-work:resume".to_string()),
+            from_session_id: "session-original".to_string(),
+            to_session_id: "session-successor".to_string(),
+            reason: "verified dead pane".to_string(),
+            requested_at: Utc::now(),
+        };
+
+        let prepared = prepare_generation_takeover(dir.path(), owner, &request).unwrap();
+        assert_eq!(prepared.status, GenerationTakeoverAttemptStatus::Prepared);
+        let mut retargeted = request.clone();
+        retargeted.work_id = Some("work-foreign".to_string());
+        assert_eq!(
+            prepare_generation_takeover(dir.path(), owner, &retargeted)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::AlreadyExists,
+            "the same takeover operation cannot be retargeted to another Work"
+        );
+        let planned =
+            prepared_generation_takeover_execution_binding(dir.path(), owner, &request).unwrap();
+        assert_eq!(planned.generation_id, predecessor_binding.generation_id);
+        assert_eq!(planned.binding_id, predecessor_binding.binding_id);
+        assert_ne!(
+            planned.ledger_head_hash,
+            predecessor_binding.ledger_head_hash
+        );
+        assert!(prepared_execution_binding_matches(
+            dir.path(),
+            owner,
+            &request.to_session_id,
+            &planned,
+        )
+        .unwrap());
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().primary_session_id,
+            request.from_session_id,
+            "Prepared takeover must not change the current owner"
+        );
+
+        let activated = activate_generation_takeover(dir.path(), owner, &request).unwrap();
+        assert_eq!(activated, planned);
+        assert_eq!(
+            current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap(),
+            planned
+        );
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().primary_session_id,
+            request.to_session_id
+        );
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(ledger.current_generation_id, generation_id);
+        assert_eq!(ledger.generations.len(), 1);
+        assert_eq!(ledger.takeovers.len(), 1);
+        assert_eq!(
+            ledger
+                .takeover_attempts
+                .iter()
+                .map(|attempt| attempt.status)
+                .collect::<Vec<_>>(),
+            vec![
+                GenerationTakeoverAttemptStatus::Prepared,
+                GenerationTakeoverAttemptStatus::Activated,
+            ]
+        );
+        assert!(
+            !prepared_execution_binding_matches(
+                dir.path(),
+                owner,
+                &request.to_session_id,
+                &planned,
+            )
+            .unwrap(),
+            "Activated takeover attempts are no longer Prepared authority"
+        );
+    }
+
+    #[test]
+    fn prepared_takeover_abort_and_lost_cas_leave_current_owner_unchanged() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let base_request = GenerationTakeoverRequest {
+            operation_id: "operation-abort".to_string(),
+            principal_id: "gwt-host-continuation".to_string(),
+            work_id: Some("work-takeover".to_string()),
+            source: Some("continue-work:resume".to_string()),
+            from_session_id: "session-original".to_string(),
+            to_session_id: "session-aborted".to_string(),
+            reason: "verified dead pane".to_string(),
+            requested_at: Utc::now(),
+        };
+        prepare_generation_takeover(dir.path(), owner, &base_request).unwrap();
+        abort_generation_takeover(
+            dir.path(),
+            owner,
+            &base_request,
+            "candidate launch failed before Ready",
+        )
+        .unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().primary_session_id,
+            "session-original"
+        );
+        assert!(activate_generation_takeover(dir.path(), owner, &base_request).is_err());
+
+        let mut winner = base_request.clone();
+        winner.operation_id = "operation-winner".to_string();
+        winner.to_session_id = "session-winner".to_string();
+        winner.requested_at = Utc::now();
+        let mut loser = base_request;
+        loser.operation_id = "operation-loser".to_string();
+        loser.to_session_id = "session-loser".to_string();
+        loser.requested_at = Utc::now();
+        prepare_generation_takeover(dir.path(), owner, &winner).unwrap();
+        prepare_generation_takeover(dir.path(), owner, &loser).unwrap();
+        activate_generation_takeover(dir.path(), owner, &winner).unwrap();
+        assert_eq!(
+            activate_generation_takeover(dir.path(), owner, &loser)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::AlreadyExists
+        );
+        abort_generation_takeover(
+            dir.path(),
+            owner,
+            &loser,
+            "takeover CAS lost to another Ready pane",
+        )
+        .unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().primary_session_id,
+            "session-winner"
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .generations
+                .len(),
+            1
         );
     }
 
@@ -5495,7 +6569,7 @@ mod tests {
         let error = ensure_generation_ledger(
             hashless_dir.path(),
             hashless_owner,
-            LegacyActiveDisposition::Live,
+            LegacyActiveDisposition::Unknown,
         )
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::WouldBlock);
@@ -5503,6 +6577,24 @@ mod tests {
             .unwrap()
             .exists());
         assert!(!generation_pointer_path(hashless_dir.path()).exists());
+        let imported_hashless = ensure_generation_ledger(
+            hashless_dir.path(),
+            hashless_owner,
+            LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        assert_eq!(
+            imported_hashless.current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+        assert!(
+            !load(hashless_dir.path())
+                .unwrap()
+                .unwrap()
+                .content_hash
+                .is_empty(),
+            "an explicitly classified hashless Active record is canonicalized during import"
+        );
 
         let old_writer_dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(old_writer_dir.path());

@@ -11,8 +11,8 @@ use crate::{
     launch::LaunchConfig,
     session::{
         runtime_state_path, Session, SessionRuntimeState, GWT_BIN_PATH_ENV,
-        GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
-        GWT_SESSION_RUNTIME_PATH_ENV,
+        GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
+        GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::{AgentId, DockerLifecycleIntent, LaunchRuntimeTarget},
 };
@@ -80,7 +80,10 @@ impl std::fmt::Debug for PreparedProcessLaunch {
 fn private_launch_env_key(key: &str) -> bool {
     matches!(
         key,
-        GWT_HOOK_FORWARD_TOKEN_ENV | GWT_SESSION_ID_ENV | GWT_SESSION_RUNTIME_PATH_ENV
+        GWT_CONTINUE_WORK_READY_NONCE_ENV
+            | GWT_HOOK_FORWARD_TOKEN_ENV
+            | GWT_SESSION_ID_ENV
+            | GWT_SESSION_RUNTIME_PATH_ENV
     )
 }
 

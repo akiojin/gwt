@@ -190,6 +190,38 @@ pub fn probe_authenticated_execution_binding(
     })
 }
 
+pub fn probe_authenticated_prepared_execution_binding(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    host_instance_id: &str,
+    request: AgentExecutionBindingProbeRequest,
+) -> std::result::Result<AgentExecutionBindingProbeReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "unsupported execution binding probe schema version",
+        ));
+    }
+    validate_ephemeral_probe_identifier(&request.operation_id, "operation id")?;
+    validate_ephemeral_probe_identifier(&request.nonce, "nonce")?;
+    validate_ephemeral_probe_identifier(host_instance_id, "Host instance id")?;
+    let validated = validate_prepared_execution_binding_authority(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+
+    Ok(AgentExecutionBindingProbeReceipt {
+        schema_version: AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+        operation_id: request.operation_id,
+        nonce: request.nonce,
+        host_instance_id: host_instance_id.to_string(),
+        execution_binding: validated.identity,
+        capability_generation: validated.capability_generation,
+    })
+}
+
 fn validate_ephemeral_probe_identifier(
     value: &str,
     identity: &str,
@@ -213,6 +245,59 @@ fn validate_current_execution_binding_authority(
     authenticated_session_id: &str,
     authenticated_binding: &SessionExecutionBinding,
 ) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    let (validated, worktree, owner) = validate_execution_binding_authority_structure(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+    let current = crate::cli::execution_state::current_active_execution_binding_matches(
+        &worktree,
+        owner,
+        authenticated_session_id,
+        &validated.identity,
+    )
+    .map_err(|_| execution_binding_error())?;
+    if !current {
+        return Err(execution_binding_error());
+    }
+    Ok(validated)
+}
+
+fn validate_prepared_execution_binding_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    let (validated, worktree, owner) = validate_execution_binding_authority_structure(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+    let prepared = crate::cli::execution_state::prepared_execution_binding_matches(
+        &worktree,
+        owner,
+        authenticated_session_id,
+        &validated.identity,
+    )
+    .map_err(|_| execution_binding_error())?;
+    if !prepared {
+        return Err(execution_binding_error());
+    }
+    Ok(validated)
+}
+
+fn validate_execution_binding_authority_structure(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+) -> std::result::Result<
+    (
+        SessionExecutionBinding,
+        PathBuf,
+        crate::cli::execution_state::ExecutionOwnerKey,
+    ),
+    AgentWorkspaceUpdateError,
+> {
     validate_mutation_session_id(authenticated_session_id)?;
     let session = load_session_for_mutation(authenticated_session_id)
         .map_err(|_| execution_binding_error())?;
@@ -269,18 +354,7 @@ fn validate_current_execution_binding_authority(
         kind: owner_kind,
         number: authenticated_binding.owner_number,
     };
-    let current = crate::cli::execution_state::current_active_execution_binding_matches(
-        &worktree,
-        owner,
-        authenticated_session_id,
-        &authenticated_binding.identity,
-    )
-    .map_err(|_| execution_binding_error())?;
-    if !current {
-        return Err(execution_binding_error());
-    }
-
-    Ok(authenticated_binding.clone())
+    Ok((authenticated_binding.clone(), worktree, owner))
 }
 
 pub fn observe_agent_runtime(
@@ -2302,6 +2376,110 @@ mod tests {
                 before,
                 "a probe must preserve Session, owner ledger, pointer, ECR, and Work bytes"
             );
+        });
+    }
+
+    #[test]
+    fn prepared_execution_binding_probe_is_observation_only_until_exact_activation() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, predecessor_binding) =
+                bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-prepared-probe");
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    repo,
+                    &session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("complete predecessor"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: predecessor_binding.owner_number,
+            };
+            let request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "continue-work-prepared-probe".to_string(),
+                principal_id: "host-instance-prepared-probe".to_string(),
+                work_id: Some("work-prepared-probe".to_string()),
+                source: "continue-work".to_string(),
+                requested_at: Utc::now(),
+                session_binding_id: "binding-prepared-probe".to_string(),
+                initial_session_id: session.id.clone(),
+                entrypoint: "continue-work".to_string(),
+            };
+            crate::cli::execution_state::prepare_successor(repo, owner, &request)
+                .expect("prepare successor");
+            let planned = crate::cli::execution_state::prepared_successor_execution_binding(
+                repo, owner, &request,
+            )
+            .expect("planned successor binding");
+            let prepared_binding = gwt_agent::SessionExecutionBinding {
+                identity: planned.clone(),
+                capability_generation: predecessor_binding.capability_generation + 1,
+                ..predecessor_binding
+            };
+            session
+                .set_execution_binding(Some(prepared_binding.clone()))
+                .expect("project Prepared binding into durable Session");
+            save_session_fixture(&session);
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+
+            let receipt = probe_authenticated_prepared_execution_binding(
+                repo,
+                &session.id,
+                &prepared_binding,
+                "host-instance-prepared-probe",
+                execution_binding_probe_request("operation-prepared-probe", "nonce-prepared-probe"),
+            )
+            .expect("Prepared exact binding probe");
+            assert_eq!(receipt.execution_binding, planned);
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before,
+                "Prepared probe must be byte-equivalent and side-effect free"
+            );
+            assert_execution_binding_denial(
+                &probe_authenticated_execution_binding(
+                    repo,
+                    &session.id,
+                    &prepared_binding,
+                    "host-instance-active-probe",
+                    execution_binding_probe_request(
+                        "operation-active-before-cas",
+                        "nonce-active-before-cas",
+                    ),
+                )
+                .expect_err("Prepared authority must not pass the Active probe"),
+            );
+
+            crate::cli::execution_state::activate_successor(repo, owner, &request)
+                .expect("activate exact successor");
+            assert_execution_binding_denial(
+                &probe_authenticated_prepared_execution_binding(
+                    repo,
+                    &session.id,
+                    &prepared_binding,
+                    "host-instance-prepared-after-cas",
+                    execution_binding_probe_request(
+                        "operation-prepared-after-cas",
+                        "nonce-prepared-after-cas",
+                    ),
+                )
+                .expect_err("Activated authority is no longer Prepared"),
+            );
+            probe_authenticated_execution_binding(
+                repo,
+                &session.id,
+                &prepared_binding,
+                "host-instance-active-after-cas",
+                execution_binding_probe_request(
+                    "operation-active-after-cas",
+                    "nonce-active-after-cas",
+                ),
+            )
+            .expect("same exact binding becomes Active only after CAS");
         });
     }
 

@@ -94,6 +94,7 @@ struct RuntimeStopThreads {
 
 mod attachments;
 mod board;
+mod continuation;
 mod file_windows;
 mod frontend_action_log;
 mod knowledge;
@@ -131,14 +132,14 @@ use knowledge::knowledge_error_event;
 use knowledge::KnowledgeRefreshTask;
 pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSearchRequest};
 #[cfg(test)]
-use launch::AgentLaunchCompletion;
-#[cfg(test)]
 use launch::{
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     maybe_register_codex_managed_hook_trust_for_launch,
 };
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
+#[cfg(test)]
+pub(crate) use launch::{AgentLaunchCompletion, AgentLaunchDisposition};
 pub use launch::{AgentLaunchResult, LaunchWizardMemoryCache, ProcessLaunch};
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
@@ -195,6 +196,38 @@ pub(crate) struct WorkspaceResumeContext {
     pub(crate) owner: Option<String>,
     pub(crate) summary: Option<String>,
     pub(crate) next_action: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingContinueWork {
+    pub(crate) client_id: ClientId,
+    pub(crate) operation_id: String,
+    pub(crate) work_id: String,
+    pub(crate) project_root: PathBuf,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) execution: PendingContinueWorkExecution,
+    pub(crate) binding: gwt_agent::SessionExecutionBinding,
+    pub(crate) readiness_nonce: String,
+    pub(crate) outcome: gwt::ContinueWorkOutcomeKind,
+    pub(crate) resume_context: WorkspaceResumeContext,
+    pub(crate) predecessor_session_id: String,
+    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PendingContinueWorkExecution {
+    Successor(gwt::cli::execution_state::SuccessorRequest),
+    Takeover(gwt::cli::execution_state::GenerationTakeoverRequest),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedContinueWorkOutcome {
+    pub(crate) work_id: String,
+    pub(crate) outcome: gwt::ContinueWorkOutcomeKind,
+    pub(crate) message: Option<String>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) retryable: bool,
 }
 
 impl WorkspaceResumeContext {
@@ -544,6 +577,16 @@ pub struct AppRuntime {
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
+    /// Prepared producing continuations keyed by their pending/active window.
+    /// The entry remains until an authenticated SessionStart finalizes the
+    /// generation + Work transaction and promotes the same bearer.
+    pub(crate) pending_continue_work: HashMap<String, PendingContinueWork>,
+    /// Process-local fast replay for a lost client response. Durable
+    /// reconciliation still uses the owner ledger + Work commit receipt.
+    pub(crate) continue_work_outcomes: HashMap<String, CachedContinueWorkOutcome>,
+    /// Additional WebSocket clients waiting on an in-flight operation after
+    /// reconnect/retry. The original requester remains on PendingContinueWork.
+    pub(crate) continue_work_waiters: HashMap<String, HashSet<ClientId>>,
     /// SPEC-2359 W-17 (FR-398, Issue #3034): launches whose window is
     /// registered but whose agent session is not live yet, keyed by
     /// (tab, branch, working dir). A re-click in this window focuses the
@@ -553,6 +596,9 @@ pub struct AppRuntime {
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Historical provider conversations that are deliberately detached from
+    /// Work execution authority. Input and attachment paths fail closed.
+    pub(crate) inspection_agent_windows: HashSet<String>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -849,9 +895,13 @@ impl AppRuntime {
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
+            pending_continue_work: HashMap::new(),
+            continue_work_outcomes: HashMap::new(),
+            continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            inspection_agent_windows: HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
@@ -2379,6 +2429,11 @@ impl AppRuntime {
             } => {
                 self.resume_workspace_agent_events(&client_id, session_id, agent_session_id, bounds)
             }
+            FrontendEvent::ContinueWork {
+                operation_id,
+                work_id,
+                bounds,
+            } => self.continue_work_events(&client_id, operation_id, work_id, bounds),
             FrontendEvent::ResumeBranchLatestAgent {
                 id,
                 branch_name,

@@ -44,10 +44,11 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
         tail.to_string()
     };
     if tail.contains(EXACT_RESUME_FAILURE_SIGNATURE) {
-        return Some(format!(
-            "Exact session restore failed: {tail}. The agent no longer has this \
-             conversation; launch a new agent session when you want to continue."
-        ));
+        return Some(
+            "Exact session restore failed. The agent no longer has this conversation; \
+             use Continue work to start a new conversation with handoff context."
+                .to_string(),
+        );
     }
     match base {
         Some(base) if !base.is_empty() => Some(format!("{base} — last output: {tail}")),
@@ -207,7 +208,9 @@ impl AppRuntime {
         {
             self.runtimes.remove(&id);
             self.remove_window_state_tracking(&id);
-            self.mark_agent_session_stopped(&id);
+            if !self.stop_pending_continue_work_session_without_projection(&id) {
+                self.mark_agent_session_stopped(&id);
+            }
         }
         let _ = self.persist();
 
@@ -280,13 +283,21 @@ impl AppRuntime {
         }
         let mut events = Vec::new();
         if Self::should_broadcast_runtime_hook_event_to_frontend(&event) {
+            let mut public_event = event.clone();
+            public_event.continuation_readiness_nonce = None;
             events.push(OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
-                event: event.clone(),
+                event: public_event,
             }));
         }
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
+        if event.source_event.as_deref() == Some("SessionStart") {
+            events.extend(self.finalize_continue_work_session_start(
+                &window_id,
+                event.continuation_readiness_nonce.as_deref(),
+            ));
+        }
         let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;

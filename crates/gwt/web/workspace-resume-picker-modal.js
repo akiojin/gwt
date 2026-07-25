@@ -1,12 +1,15 @@
 // SPEC-2359 US-42 — Workspace Resume Picker modal.
 //
-// Rendered when the user clicks the Resume button on a Workspace card.
-// Lists previously-assigned agents (filtered to resumable candidates by
-// the backend) so the user can pick which agent to restart in-place.
-// Spawning bypasses the Launch Wizard so Resume preserves the previous
-// conversation handle without re-prompting for runtime / model / etc.
+// Rendered when the user opens a historical Session from the Work surface.
+// Lists conversation-capable candidates so the user can inspect one in-place.
+// This path preserves conversation history without creating a producing
+// Execution generation; Work-level Continue work owns that transition.
 
 import { createFocusTrap } from "./focus-trap.js";
+
+function isInspectionResumeCandidate(agent) {
+  return Boolean(agent?.session_id) && agent.resume_kind !== "metadata_only";
+}
 
 // Trim a full worktree path down to the last two segments so the picker
 // row stays scannable on small modals. e.g.
@@ -84,8 +87,20 @@ export function renderWorkspaceResumePicker({
   }
 
   const wasOpen = modalEl.classList.contains("open");
+  const ownerDoc = modalEl.ownerDocument
+    || (typeof document !== "undefined" ? document : null);
+  const activeElement = ownerDoc?.activeElement || null;
+  const focusWasInside = Boolean(
+    wasOpen && activeElement && dialogEl.contains(activeElement),
+  );
+  const focusedSessionId = focusWasInside
+    ? activeElement?.dataset?.sessionId || null
+    : null;
+  const focusedCancel = Boolean(
+    focusWasInside
+      && activeElement?.classList?.contains("workspace-resume-picker-cancel"),
+  );
   if (!wasOpen) {
-    const ownerDoc = modalEl.ownerDocument || (typeof document !== "undefined" ? document : null);
     if (ownerDoc) {
       focusReturnMap.set(modalEl, ownerDoc.activeElement);
       const release = createFocusTrap(dialogEl, { document: ownerDoc });
@@ -94,32 +109,45 @@ export function renderWorkspaceResumePicker({
   }
   modalEl.classList.add("open");
   modalEl.removeAttribute("aria-hidden");
+  dialogEl.setAttribute("role", "dialog");
+  dialogEl.setAttribute("aria-modal", "true");
+  dialogEl.setAttribute("aria-labelledby", "workspace-resume-picker-title");
+  dialogEl.removeAttribute("aria-label");
   while (dialogEl.firstChild) dialogEl.removeChild(dialogEl.firstChild);
 
-  dialogEl.appendChild(createNode("h2", "workspace-resume-picker-title", "Resume Work"));
+  const title = createNode("h2", "workspace-resume-picker-title", "Inspect Session");
+  title.id = "workspace-resume-picker-title";
+  dialogEl.appendChild(title);
   dialogEl.appendChild(
     createNode(
       "p",
       "workspace-resume-picker-subtitle",
-      "Pick which previously-assigned agent to restart.",
+      "Open a previous conversation for history only. This does not continue the Work; use Continue work to start working again.",
     ),
   );
 
-  const agents = Array.isArray(state.agents) ? state.agents : [];
+  // SPEC-2359 W-24 (FR-572): metadata-only entries used to act as an implicit
+  // fresh start. Fresh producing continuation now belongs exclusively to the
+  // Work-level Continue work transaction, so this modal lists only sessions
+  // that can be opened as Inspection.
+  const agents = Array.isArray(state.agents)
+    ? state.agents.filter((agent) => isInspectionResumeCandidate(agent))
+    : [];
   if (agents.length === 0) {
-    dialogEl.appendChild(
-      createNode(
-        "div",
-        "workspace-resume-picker-empty",
-        "No resumable agents for this Work.",
-      ),
+    const empty = createNode(
+      "div",
+      "workspace-resume-picker-empty",
+      "No sessions are available for inspection. Use Continue work to start working again.",
     );
+    empty.setAttribute("role", "status");
+    dialogEl.appendChild(empty);
   } else {
     const list = createNode("div", "workspace-resume-picker-list");
     for (const agent of agents) {
       const row = createNode("button", "workspace-resume-picker-row");
       row.type = "button";
       row.dataset.sessionId = agent.session_id;
+      row.dataset.executionIntent = "inspection";
       const heading = createNode("div", "workspace-resume-picker-row-heading");
       heading.appendChild(
         createNode(
@@ -135,7 +163,10 @@ export function renderWorkspaceResumePicker({
             ? { className: "is-interrupted", label: "Interrupted" }
             : agent.lifecycle_status === "active"
               ? { className: "is-active", label: "Active" }
-              : null;
+            : null;
+      const resumeLabel = agent.resume_kind === "native_picker"
+        ? "Open picker"
+        : "Conversation";
       const tagClass = lifecycleTag
         ? `workspace-resume-picker-row-tag ${lifecycleTag.className}`
         : agent.resume_kind === "metadata_only"
@@ -150,10 +181,12 @@ export function renderWorkspaceResumePicker({
           lifecycleTag?.label
             || (agent.resume_kind === "metadata_only"
               ? "Fresh start"
-              : agent.resume_kind === "native_picker"
-                ? "Resume picker"
-                : "Conversation"),
+              : resumeLabel),
         ),
+      );
+      row.setAttribute(
+        "aria-label",
+        `Inspect ${agent.display_name || agent.agent_id} Session (${lifecycleTag?.label || resumeLabel})`,
       );
       row.appendChild(heading);
 
@@ -206,23 +239,28 @@ export function renderWorkspaceResumePicker({
   }
 
   if (state.pendingSessionId) {
-    dialogEl.appendChild(
-      createNode(
-        "div",
-        "workspace-resume-picker-pending",
-        "Resuming... waiting for the agent window to start.",
-      ),
+    const pending = createNode(
+      "div",
+      "workspace-resume-picker-pending",
+      "Opening for inspection... waiting for the agent window.",
     );
+    pending.setAttribute("role", "status");
+    pending.setAttribute("aria-live", "polite");
+    dialogEl.appendChild(pending);
   }
 
   if (state.error) {
-    dialogEl.appendChild(
-      createNode("div", "workspace-resume-picker-error", state.error),
-    );
+    const error = createNode("div", "workspace-resume-picker-error", state.error);
+    error.setAttribute("role", "alert");
+    dialogEl.appendChild(error);
   }
 
   const actions = createNode("div", "workspace-resume-picker-actions");
-  const cancel = createNode("button", "wizard-button", "Cancel");
+  const cancel = createNode(
+    "button",
+    "wizard-button workspace-resume-picker-cancel",
+    "Cancel",
+  );
   cancel.type = "button";
   cancel.addEventListener("click", (event) => {
     event.preventDefault();
@@ -231,6 +269,22 @@ export function renderWorkspaceResumePicker({
   });
   actions.appendChild(cancel);
   dialogEl.appendChild(actions);
+
+  const focusWithoutScroll = (element) => {
+    if (!element || typeof element.focus !== "function") return;
+    try { element.focus({ preventScroll: true }); }
+    catch { element.focus(); }
+  };
+  if (!wasOpen) {
+    focusWithoutScroll(dialogEl);
+  } else if (focusedSessionId) {
+    const nextRow = Array.from(
+      dialogEl.querySelectorAll(".workspace-resume-picker-row"),
+    ).find((row) => row.dataset.sessionId === focusedSessionId);
+    focusWithoutScroll(nextRow && !nextRow.disabled ? nextRow : cancel);
+  } else if (focusedCancel) {
+    focusWithoutScroll(cancel);
+  }
 }
 
 /**
@@ -259,6 +313,19 @@ export function createWorkspaceResumePickerController({
     pendingSessionId: null,
   };
 
+  function reconcilePendingTimeout() {
+    if (
+      !state.pendingSessionId
+      || !launchPending
+      || typeof launchPending.isPending !== "function"
+      || launchPending.isPending(`session:${state.pendingSessionId}`)
+    ) {
+      return;
+    }
+    state.pendingSessionId = null;
+    state.error = "Opening this Session timed out; check the connection and retry.";
+  }
+
   function close() {
     state.open = false;
     state.agents = [];
@@ -280,9 +347,9 @@ export function createWorkspaceResumePickerController({
     }
     if (
       launchPending
-      && !launchPending.begin(`session:${agent.session_id}`, "Resume")
+      && !launchPending.begin(`session:${agent.session_id}`, "Inspect session")
     ) {
-      // The same Work is already resuming from another surface.
+      // The same Session is already opening from another surface.
       return;
     }
     if (typeof send === "function") {
@@ -297,6 +364,7 @@ export function createWorkspaceResumePickerController({
   }
 
   function render() {
+    reconcilePendingTimeout();
     renderWorkspaceResumePicker({
       modalEl,
       dialogEl,
@@ -323,6 +391,10 @@ export function createWorkspaceResumePickerController({
         // the modal unexpectedly.
         return;
       }
+      const eventWorkspaceId = event?.workspace_id ?? null;
+      if (eventWorkspaceId !== state.workspaceId) {
+        return;
+      }
       state.agents = Array.isArray(event?.agents) ? event.agents : [];
       render();
     },
@@ -332,15 +404,22 @@ export function createWorkspaceResumePickerController({
     handleStarted: (event) => {
       const sessionId = event?.session_id;
       if (!state.open) return;
-      if (state.pendingSessionId && sessionId !== state.pendingSessionId) {
+      if (!state.pendingSessionId || sessionId !== state.pendingSessionId) {
         return;
       }
       close();
     },
     handleError: (event) => {
-      state.open = true;
+      const sessionId = event?.session_id;
+      if (
+        !state.open
+        || !state.pendingSessionId
+        || sessionId !== state.pendingSessionId
+      ) {
+        return;
+      }
       state.pendingSessionId = null;
-      state.error = event?.message || "Failed to resume the selected agent.";
+      state.error = event?.message || "Failed to open the selected session for inspection.";
       render();
     },
     dismiss: close,

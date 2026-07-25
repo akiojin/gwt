@@ -40,14 +40,16 @@ use gwt_terminal::Pane;
 use tracing::{field::Visit, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
+use super::continuation::ActiveOwnerLiveness;
 use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
     save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
-    AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
-    KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
-    LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchDisposition, AppEventProxy,
+    AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
+    DispatchTarget, KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    PendingContinueWork, PendingContinueWorkExecution, ProcessLaunch, ProjectTabRuntime, UserEvent,
+    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -58,11 +60,16 @@ use crate::{
 #[test]
 fn process_launch_debug_redacts_agent_capability_and_session_identity() {
     let secret = "agent-capability-secret-sentinel";
+    let readiness = "continue-readiness-secret-sentinel";
     let launch = ProcessLaunch {
         command: "docker".to_string(),
         args: vec![
             format!("{}={secret}", gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
             format!("{}=session-private", gwt_agent::GWT_SESSION_ID_ENV),
+            format!(
+                "{}={readiness}",
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV
+            ),
         ],
         env: HashMap::from([
             (
@@ -73,6 +80,10 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 "session-private".to_string(),
             ),
+            (
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
+                readiness.to_string(),
+            ),
         ]),
         remove_env: Vec::new(),
         cwd: None,
@@ -80,8 +91,56 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
 
     let debug = format!("{launch:?}");
     assert!(!debug.contains(secret));
+    assert!(!debug.contains(readiness));
     assert!(!debug.contains("session-private"));
     assert!(debug.contains("<redacted>"));
+}
+
+#[test]
+fn inspection_agent_window_rejects_terminal_input_and_attachment_staging() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.worktree_path = repo.clone();
+    session.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    runtime.inspection_agent_windows.insert(window_id.clone());
+
+    let terminal_events = runtime.terminal_input_events(&window_id, "mutating prompt\r");
+    assert!(terminal_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalOutput { id, data_base64 }
+            if id == &window_id
+                && String::from_utf8_lossy(
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(data_base64)
+                        .expect("decode inspection denial")
+                )
+                .contains("inspection-only")
+    )));
+
+    let attachment_events =
+        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("blocked.png"));
+    assert!(attachment_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalOutput { id, .. } if id == &window_id
+    )));
+    assert!(
+        !repo.join(".gwt").join("drop-files").exists(),
+        "inspection must reject attachments before staging any bytes"
+    );
 }
 
 #[test]
@@ -2265,6 +2324,7 @@ fn runtime_hook_state_for_event(
         kind: gwt::RuntimeHookEventKind::RuntimeState,
         source_event: Some(source_event.to_string()),
         gwt_session_id: Some(session_id.to_string()),
+        continuation_readiness_nonce: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -2280,6 +2340,7 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
         kind: gwt::RuntimeHookEventKind::CoordinationEvent,
         source_event: Some("PostToolUse".to_string()),
         gwt_session_id: Some(session_id.to_string()),
+        continuation_readiness_nonce: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -2387,9 +2448,13 @@ fn sample_runtime_with_events(
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
+        pending_continue_work: HashMap::new(),
+        continue_work_outcomes: HashMap::new(),
+        continue_work_waiters: HashMap::new(),
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        inspection_agent_windows: HashSet::new(),
         work_merged_branches: HashMap::new(),
         work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
@@ -3483,6 +3548,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
         None,
         None,
         gwt_agent::LaunchRuntimeTarget::Host,
+        AgentLaunchDisposition::WorkProducing,
         temp.path().display().to_string(),
     );
 
@@ -6515,6 +6581,2170 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
 }
 
 #[test]
+fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let selected_work_id = "work-selected";
+    let candidate_session_id = "candidate-session";
+    let now = chrono::Utc::now();
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        selected_work_id,
+        now,
+    );
+    start.title = Some("Continue selected Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some("predecessor-session".to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+        .expect("record selected Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            selected_work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("complete selected Work");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = candidate_session_id.to_string();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        "predecessor-session",
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "predecessor-session",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import predecessor");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "continue-op-1".to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(selected_work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "binding-candidate".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: now,
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare successor");
+    let planned =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive successor binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: candidate_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: planned,
+        capability_generation: 1,
+    };
+    let mut candidate_session =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate_session.id = candidate_session_id.to_string();
+    candidate_session.project_state_root = Some(repo.clone());
+    candidate_session.linked_issue_number = Some(owner.number);
+    candidate_session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind candidate Session");
+    candidate_session
+        .save(&runtime.sessions_dir)
+        .expect("save candidate Session");
+    let candidate_runtime_path =
+        gwt_agent::runtime_state_path(&runtime.sessions_dir, candidate_session_id);
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(&candidate_runtime_path)
+        .expect("save candidate runtime");
+    runtime.pending_continue_work.insert(
+        window_id.clone(),
+        PendingContinueWork {
+            client_id: "client-1".to_string(),
+            operation_id: "continue-op-1".to_string(),
+            work_id: selected_work_id.to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo.clone(),
+            owner,
+            execution: PendingContinueWorkExecution::Successor(request),
+            binding,
+            readiness_nonce: "continue-ready-1".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: Some("Continue selected Work".to_string()),
+                owner: Some("Issue #2359".to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: "predecessor-session".to_string(),
+            predecessor_binding,
+        },
+    );
+
+    let events = runtime
+        .handle_launch_complete(window_id.clone(), Err("candidate spawn failed".to_string()));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                operation_id,
+                work_id,
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(error_code),
+                ..
+            } if operation_id == "continue-op-1"
+                && work_id == selected_work_id
+                && error_code == "launch_failed"
+        )),
+        "pre-activation launch failure must settle the correlated operation",
+    );
+    assert!(!runtime.pending_continue_work.contains_key(&window_id));
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(
+        !runtime
+            .sessions_dir
+            .join(format!("{candidate_session_id}.toml"))
+            .exists(),
+        "the exact aborted candidate Session must be discarded",
+    );
+    assert!(
+        !candidate_runtime_path.exists(),
+        "the aborted candidate runtime sidecar must be discarded",
+    );
+
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work projection")
+        .expect("Work projection");
+    assert!(
+        projection
+            .work_items
+            .iter()
+            .all(|item| item.id != format!("work-session-{candidate_session_id}")),
+        "candidate failure must not materialize a ghost Paused Work",
+    );
+    let selected = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == selected_work_id)
+        .expect("selected Work");
+    assert_eq!(
+        selected.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+        "the settled predecessor Work must remain unchanged",
+    );
+}
+
+#[test]
+fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_attempt() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        "predecessor-session",
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "predecessor-session",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import predecessor");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "current-operation".to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some("work-current".to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "candidate-binding".to_string(),
+        initial_session_id: "candidate-session".to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: chrono::Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare successor");
+    let identity =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive successor binding");
+    let mut runtime = sample_runtime(&temp.path().join(".gwt"), Vec::new(), None);
+    let window_id = "tab-1::candidate".to_string();
+    runtime.pending_continue_work.insert(
+        window_id.clone(),
+        PendingContinueWork {
+            client_id: "client-1".to_string(),
+            operation_id: "current-operation".to_string(),
+            work_id: "work-current".to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo.clone(),
+            owner,
+            execution: PendingContinueWorkExecution::Successor(request),
+            binding: gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: "candidate-session".to_string(),
+                repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+                owner_kind: "issue".to_string(),
+                owner_number: 2359,
+                identity,
+                capability_generation: 1,
+            },
+            readiness_nonce: "private-ready".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: None,
+                owner: Some("Issue #2359".to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: "predecessor-session".to_string(),
+            predecessor_binding,
+        },
+    );
+
+    assert!(runtime
+        .handle_continue_work_ready_timeout(&window_id, "stale-operation")
+        .is_empty());
+    assert!(runtime.pending_continue_work.contains_key(&window_id));
+
+    let events = runtime.handle_continue_work_ready_timeout(&window_id, "current-operation");
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            ..
+        } if operation_id == "current-operation" && code == "launch_failed"
+    )));
+    assert!(!runtime.pending_continue_work.contains_key(&window_id));
+}
+
+#[test]
+fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_authority() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let identity = gwt_agent::ExecutionBindingIdentity {
+        generation_id: "candidate-generation".to_string(),
+        binding_id: "candidate-binding".to_string(),
+        ledger_head_hash: "candidate-head".to_string(),
+    };
+    runtime.pending_continue_work.insert(
+        "tab-1::candidate".to_string(),
+        PendingContinueWork {
+            client_id: "client-1".to_string(),
+            operation_id: "first-operation".to_string(),
+            work_id: "work-shared".to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo,
+            owner,
+            execution: PendingContinueWorkExecution::Successor(
+                gwt::cli::execution_state::SuccessorRequest {
+                    operation_id: "first-operation".to_string(),
+                    principal_id: "gwt-host-continuation".to_string(),
+                    work_id: Some("work-shared".to_string()),
+                    source: "continue-work:resume".to_string(),
+                    session_binding_id: "candidate-binding".to_string(),
+                    initial_session_id: "candidate-session".to_string(),
+                    entrypoint: "gwt-execute".to_string(),
+                    requested_at: chrono::Utc::now(),
+                },
+            ),
+            binding: gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: "candidate-session".to_string(),
+                repo_hash: "repo-hash".to_string(),
+                owner_kind: "issue".to_string(),
+                owner_number: 2359,
+                identity: identity.clone(),
+                capability_generation: 1,
+            },
+            readiness_nonce: "private-ready".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: None,
+                owner: Some("Issue #2359".to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: "predecessor-session".to_string(),
+            predecessor_binding: identity,
+        },
+    );
+
+    let events = runtime.continue_work_events(
+        "client-2",
+        "second-operation".to_string(),
+        "work-shared".to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable,
+            ..
+        } if operation_id == "second-operation"
+            && work_id == "work-shared"
+            && code == "continue_work_in_progress"
+            && *retryable
+    )));
+    assert_eq!(
+        runtime.pending_continue_work.len(),
+        1,
+        "the in-flight operation must remain the sole Prepared owner"
+    );
+}
+
+#[test]
+fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    runtime.continue_work_outcomes.insert(
+        "immutable-operation".to_string(),
+        CachedContinueWorkOutcome {
+            work_id: "work-a".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            message: None,
+            error_code: None,
+            retryable: false,
+        },
+    );
+
+    let conflict = runtime.continue_work_events(
+        "client-b",
+        "immutable-operation".to_string(),
+        "work-b".to_string(),
+        canvas_bounds(),
+    );
+    assert!(conflict.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            ..
+        } if work_id == "work-b" && code == "operation_conflict"
+    )));
+
+    let replay = runtime.continue_work_events(
+        "client-a",
+        "immutable-operation".to_string(),
+        "work-a".to_string(),
+        canvas_bounds(),
+    );
+    assert!(replay.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            error_code: None,
+            ..
+        } if work_id == "work-a"
+    )));
+    assert_eq!(
+        runtime
+            .continue_work_outcomes
+            .get("immutable-operation")
+            .map(|cached| cached.work_id.as_str()),
+        Some("work-a")
+    );
+}
+
+#[test]
+fn continue_work_handoff_context_carries_safe_lineage_and_redacts_private_text() {
+    let context = WorkspaceResumeContext {
+        title: Some("Continue safe Work".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: Some(
+            "Authorization: Bearer private-secret at /Users/alice/private/repo".to_string(),
+        ),
+        next_action: Some(
+            "Open https://user:password@example.com/private?token=hidden".to_string(),
+        ),
+    };
+    let predecessor = gwt_agent::ExecutionBindingIdentity {
+        generation_id: "generation-predecessor".to_string(),
+        binding_id: "binding-predecessor".to_string(),
+        ledger_head_hash: "head-private".to_string(),
+    };
+
+    let handoff = super::continuation::handoff_context(&context, "work-safe", &predecessor);
+
+    assert!(handoff.contains("Work: work-safe"));
+    assert!(handoff.contains("Predecessor generation: generation-predecessor"));
+    assert!(handoff.contains("Predecessor binding: binding-predecessor"));
+    for private in [
+        "private-secret",
+        "/Users/alice/private/repo",
+        "user:password",
+        "token=hidden",
+        "head-private",
+    ] {
+        assert!(
+            !handoff.contains(private),
+            "handoff must redact private input and omit ledger heads: {handoff}"
+        );
+    }
+}
+
+#[test]
+fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_conversations() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let claude_home = temp.path().join("claude-home");
+    let project_store = claude_home.join("projects").join("encoded-project");
+    fs::create_dir_all(&project_store).expect("create Claude project store");
+    let _claude_home = ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &claude_home);
+
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-2359", gwt_agent::AgentId::ClaudeCode);
+    session.agent_session_id = Some("conversation-present".to_string());
+    fs::write(
+        project_store.join("conversation-present.jsonl"),
+        format!(
+            "{{\"sessionId\":\"conversation-present\",\"cwd\":{}}}\n",
+            serde_json::to_string(&worktree.display().to_string()).expect("serialize cwd")
+        ),
+    )
+    .expect("write present transcript");
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Present
+    );
+    let mut present_config = super::launch_config_from_persisted_session(&session);
+    assert_eq!(
+        super::continuation::configure_provider_continuation(&mut present_config, &session),
+        gwt::ContinueWorkOutcomeKind::ContinuedConversation
+    );
+    assert_eq!(present_config.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(
+        present_config.resume_session_id.as_deref(),
+        Some("conversation-present")
+    );
+
+    session.agent_session_id = Some("conversation-missing".to_string());
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Missing
+    );
+    let mut missing_config = super::launch_config_from_persisted_session(&session);
+    assert_eq!(
+        super::continuation::configure_provider_continuation(&mut missing_config, &session),
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+    assert_eq!(missing_config.session_mode, gwt_agent::SessionMode::Normal);
+    assert!(missing_config.resume_session_id.is_none());
+
+    let foreign = temp.path().join("foreign-worktree");
+    fs::create_dir_all(&foreign).expect("create foreign worktree");
+    fs::write(
+        project_store.join("conversation-foreign.jsonl"),
+        format!(
+            "{{\"sessionId\":\"conversation-foreign\",\"cwd\":{}}}\n",
+            serde_json::to_string(&foreign.display().to_string()).expect("serialize foreign cwd")
+        ),
+    )
+    .expect("write foreign transcript");
+    session.agent_session_id = Some("conversation-foreign".to_string());
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Foreign
+    );
+
+    session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Unknown
+    );
+}
+
+#[test]
+fn continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let session_id = "owner-session";
+    let live_sidecar = gwt_agent::runtime_state_path_for_pid(
+        &runtime.sessions_dir,
+        std::process::id(),
+        session_id,
+    );
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(&live_sidecar)
+        .expect("save live runtime");
+    assert_eq!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Unknown,
+        "a live foreign/current Host PID must never be taken over automatically"
+    );
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped)
+        .save(&live_sidecar)
+        .expect("mark live-Host runtime stopped");
+    assert!(matches!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped")
+    ));
+
+    fs::remove_file(&live_sidecar).expect("remove live runtime");
+    let dead_sidecar =
+        gwt_agent::runtime_state_path_for_pid(&runtime.sessions_dir, i32::MAX as u32, session_id);
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(&dead_sidecar)
+        .expect("save dead runtime");
+    assert!(matches!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Stale("all owning Host runtimes are dead")
+    ));
+
+    fs::remove_file(&dead_sidecar).expect("remove dead runtime");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut stopped = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    stopped.id = session_id.to_string();
+    stopped.update_status(gwt_agent::AgentStatus::Stopped);
+    stopped
+        .save(&runtime.sessions_dir)
+        .expect("save stopped Session");
+    assert!(matches!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Stale("durable Session is stopped")
+    ));
+}
+
+#[test]
+fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let session_id = "legacy-live-session";
+    let work_id = "work-legacy-live";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize legacy Active projection");
+
+    let now = chrono::Utc::now();
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    start.title = Some("Legacy live Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+        .expect("record legacy live Work");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let runtime_root = temp.path().join(".gwt");
+    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut durable = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    durable.id = session_id.to_string();
+    durable.project_state_root = None;
+    durable.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
+    durable.linked_issue_number = Some(owner.number);
+    durable.execution_binding = None;
+    durable
+        .save(&runtime.sessions_dir)
+        .expect("save legacy durable Session");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = session_id.to_string();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let inspection = issuer
+        .issue(&repo, session_id)
+        .expect("issue legacy inspection capability");
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), inspection.token.clone());
+
+    let events = runtime.continue_work_events(
+        "client-1",
+        "legacy-focus-operation".to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::FocusedExisting,
+            retryable: false,
+            ..
+        }
+    )));
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("load imported generation")
+        .expect("imported generation");
+    assert_eq!(ledger.generations.len(), 1);
+    assert!(ledger.continuation_attempts.is_empty());
+    assert!(ledger.takeover_attempts.is_empty());
+    let current = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read current binding")
+        .expect("current binding");
+    let rebound = gwt_agent::Session::load_and_migrate(
+        &runtime.sessions_dir.join(format!("{session_id}.toml")),
+    )
+    .expect("read rebound Session")
+    .execution_binding
+    .expect("legacy Session must be rebound");
+    assert_eq!(rebound.identity, current);
+    assert!(issuer.active_token_is_current(&inspection.token, &rebound));
+}
+
+#[test]
+fn continue_work_readiness_nonce_mismatch_aborts_candidate_before_commit() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let session_id = "nonce-candidate";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        "predecessor-session",
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "predecessor-session",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import predecessor");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "nonce-operation".to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some("nonce-work".to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "binding-candidate".to_string(),
+        initial_session_id: session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: chrono::Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare successor");
+    let identity =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive successor binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let mut candidate =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate.id = session_id.to_string();
+    candidate.project_state_root = Some(repo.clone());
+    candidate.linked_issue_number = Some(owner.number);
+    candidate
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind candidate");
+    candidate
+        .save(&runtime.sessions_dir)
+        .expect("save candidate");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = session_id.to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    runtime.pending_continue_work.insert(
+        window_id.clone(),
+        PendingContinueWork {
+            client_id: "client-1".to_string(),
+            operation_id: "nonce-operation".to_string(),
+            work_id: "nonce-work".to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo.clone(),
+            owner,
+            execution: PendingContinueWorkExecution::Successor(request),
+            binding,
+            readiness_nonce: "expected-readiness".to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: None,
+                owner: Some("Issue #2359".to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: "predecessor-session".to_string(),
+            predecessor_binding,
+        },
+    );
+
+    let events = runtime.finalize_continue_work_session_start(&window_id, Some("wrong-readiness"));
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            ..
+        } if code == "launch_failed"
+    )));
+    assert!(!runtime.pending_continue_work.contains_key(&window_id));
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(
+        !runtime
+            .sessions_dir
+            .join(format!("{session_id}.toml"))
+            .exists(),
+        "nonce mismatch must discard only the exact candidate Session"
+    );
+}
+
+#[test]
+fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let predecessor_session_id = "crash-predecessor";
+    let candidate_session_id = "crash-candidate";
+    let work_id = "work-crash-recovery";
+    let operation_id = "continue-crash-operation";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            predecessor_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import predecessor");
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "crash-candidate-binding".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: chrono::Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare crash candidate");
+    let planned =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive crash candidate binding");
+
+    let now = chrono::Utc::now();
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    start.title = Some("Crash recovery Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start).expect("record Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("settle Work");
+
+    let runtime_root = temp.path().join(".gwt");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo.clone(),
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let mut predecessor =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    predecessor.id = predecessor_session_id.to_string();
+    predecessor.project_state_root = Some(repo.clone());
+    predecessor.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
+    predecessor.linked_issue_number = Some(owner.number);
+    predecessor.agent_session_id = Some("provider-conversation".to_string());
+    predecessor
+        .save(&runtime.sessions_dir)
+        .expect("save predecessor Session");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: candidate_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: planned,
+        capability_generation: 1,
+    };
+    let mut candidate =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate.id = candidate_session_id.to_string();
+    candidate.project_state_root = Some(repo.clone());
+    candidate.repo_hash = Some(binding.repo_hash.clone());
+    candidate.linked_issue_number = Some(owner.number);
+    candidate.status = gwt_agent::AgentStatus::Stopped;
+    candidate
+        .set_execution_binding(Some(binding))
+        .expect("bind candidate");
+    candidate
+        .save(&runtime.sessions_dir)
+        .expect("save stopped crash candidate");
+
+    let events = runtime.continue_work_events(
+        "client-retry",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                retryable: false,
+                ..
+            } if code == "continuation_aborted"
+        )),
+        "aborted retry outcome: {events:?}"
+    );
+    let attempt =
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
+            .expect("read crash attempt")
+            .expect("crash attempt");
+    assert_eq!(
+        attempt.status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read crash recovery ledger")
+        .expect("crash recovery ledger");
+    assert_eq!(ledger.generations.len(), 1);
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Completed)
+    );
+    assert!(!runtime
+        .sessions_dir
+        .join(format!("{candidate_session_id}.toml"))
+        .exists());
+    let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work")
+        .expect("Work")
+        .work_items
+        .into_iter()
+        .find(|item| item.id == work_id)
+        .expect("crash Work");
+    assert_eq!(
+        work.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+    );
+}
+
+#[test]
+fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let predecessor_session_id = "aborted-predecessor";
+    let candidate_session_id = "aborted-candidate";
+    let work_id = "work-aborted-recovery";
+    let operation_id = "continue-aborted-operation";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            predecessor_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import predecessor");
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "aborted-candidate-binding".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: chrono::Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare candidate");
+    gwt::cli::execution_state::abort_successor(&repo, owner, &request, "simulated Host failure")
+        .expect("abort candidate before Work cleanup");
+
+    let now = chrono::Utc::now();
+    let mut current =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo.clone());
+    current.id = work_id.to_string();
+    current.title = "Aborted recovery Work".to_string();
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &current)
+        .expect("save current Work projection");
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    start.title = Some("Aborted recovery Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start).expect("record Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("settle Work");
+
+    let staged = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+        &repo,
+        operation_id,
+        |projection, _, _| {
+            projection.id = work_id.to_string();
+            projection.title = "staged aborted continuation".to_string();
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Update,
+                work_id,
+                now + chrono::Duration::seconds(2),
+            );
+            event.summary = Some("staged aborted continuation".to_string());
+            Ok(((), vec![event]))
+        },
+        || {
+            Err(gwt_core::error::GwtError::Other(
+                "simulated response loss after durable abort".to_string(),
+            ))
+        },
+    );
+    assert!(
+        staged.is_err(),
+        "the Work transaction must remain Prepared: {staged:?}"
+    );
+    let blocked_before_retry = gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            work_id,
+            now + chrono::Duration::milliseconds(2500),
+        ),
+    );
+    assert!(
+        blocked_before_retry.is_err(),
+        "the unresolved external transaction must block ordinary Work writers before reconciliation"
+    );
+
+    let runtime_root = temp.path().join(".gwt");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo.clone(),
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let mut predecessor =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    predecessor.id = predecessor_session_id.to_string();
+    predecessor.project_state_root = Some(repo.clone());
+    predecessor.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
+    predecessor.linked_issue_number = Some(owner.number);
+    predecessor.agent_session_id = Some("provider-conversation".to_string());
+    predecessor
+        .save(&runtime.sessions_dir)
+        .expect("save predecessor Session");
+
+    let events = runtime.continue_work_events(
+        "client-retry",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                retryable: false,
+                ..
+            } if code == "continuation_aborted"
+        )),
+        "aborted retry outcome: {events:?}"
+    );
+
+    let follow_up = gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Blocked,
+            work_id,
+            now + chrono::Duration::seconds(3),
+        ),
+    );
+    assert!(
+        follow_up.is_ok(),
+        "Aborted reconciliation must reject the lingering Prepared Work transaction: {follow_up:?}"
+    );
+}
+
+#[test]
+fn continue_work_retry_repairs_activated_generation_before_work_publish() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let predecessor_session_id = "response-loss-predecessor";
+    let candidate_session_id = "response-loss-candidate";
+    let work_id = "work-response-loss";
+    let operation_id = "continue-response-loss-operation";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            predecessor_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import predecessor");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+    let now = chrono::Utc::now();
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "response-loss-binding".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: now,
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare successor");
+    let planned =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive successor binding");
+
+    let mut current =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo.clone());
+    current.id = work_id.to_string();
+    current.title = "Response-loss Work".to_string();
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &current)
+        .expect("save current Work projection");
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    start.title = Some("Response-loss Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start).expect("record Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("settle Work");
+
+    let runtime_root = temp.path().join(".gwt");
+    let runtime = sample_runtime(&runtime_root, Vec::new(), None);
+    let mut predecessor =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    predecessor.id = predecessor_session_id.to_string();
+    predecessor.project_state_root = Some(repo.clone());
+    predecessor.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
+    predecessor.linked_issue_number = Some(owner.number);
+    predecessor.agent_session_id = Some("provider-conversation".to_string());
+    predecessor
+        .save(&runtime.sessions_dir)
+        .expect("save predecessor Session");
+    let candidate_binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: candidate_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: planned.clone(),
+        capability_generation: 1,
+    };
+    let mut candidate =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate.id = candidate_session_id.to_string();
+    candidate.project_state_root = Some(repo.clone());
+    candidate.repo_hash = Some(candidate_binding.repo_hash.clone());
+    candidate.linked_issue_number = Some(owner.number);
+    candidate
+        .set_execution_binding(Some(candidate_binding))
+        .expect("bind candidate");
+    candidate
+        .save(&runtime.sessions_dir)
+        .expect("save candidate Session");
+
+    let mut active = sample_active_agent_session("tab-1", "tab-1::candidate");
+    active.session_id = candidate_session_id.to_string();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    let resume_context = WorkspaceResumeContext {
+        title: Some("Response-loss Work".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: None,
+        next_action: None,
+    };
+    let live_session_ids = HashSet::from([candidate_session_id.to_string()]);
+    let transaction = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+        &repo,
+        operation_id,
+        |projection, work_items, _| {
+            let matching = work_items
+                .work_items
+                .iter()
+                .filter(|item| item.id == work_id)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            let event = super::workspace::apply_workspace_launch_transition(
+                projection,
+                &active,
+                super::workspace::WorkspaceLaunchTransition {
+                    work_id: Some(work_id.to_string()),
+                    base_branch: None,
+                    linked_issue_number: Some(owner.number),
+                    resume_context: Some(&resume_context),
+                    kind: WorkspaceLaunchProjectionKind::Resume {
+                        created_by_start_work: true,
+                    },
+                    live_session_ids: &live_session_ids,
+                    now: now + chrono::Duration::seconds(2),
+                },
+            );
+            Ok(((), vec![event]))
+        },
+        || {
+            gwt::cli::execution_state::activate_successor(&repo, owner, &request)
+                .expect("activate durable successor");
+            Err(gwt_core::error::GwtError::Other(
+                "simulated response loss after generation activation".to_string(),
+            ))
+        },
+    );
+    assert!(transaction.is_err());
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
+            .expect("read attempt")
+            .expect("attempt")
+            .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+    );
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-retry",
+        "shell-retry",
+        repo.clone(),
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let mut restarted_runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-retry"));
+    let events = restarted_runtime.continue_work_events(
+        "client-retry",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            error_code: Some(code),
+            retryable: true,
+            ..
+        } if code == "continuation_reconciliation_required"
+    )));
+    let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load repaired Work")
+        .expect("repaired Work")
+        .work_items
+        .into_iter()
+        .find(|item| item.id == work_id)
+        .expect("continued Work");
+    assert_eq!(
+        work.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+    );
+    assert!(work
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == candidate_session_id));
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read repaired ledger")
+        .expect("repaired ledger");
+    assert_eq!(ledger.generations.len(), 2);
+    assert_eq!(
+        ledger.current_generation_id, planned.generation_id,
+        "repair must not append another generation"
+    );
+    assert!(
+        !gwt::cli::execution_state::current_active_execution_binding_matches(
+            &repo,
+            owner,
+            predecessor_session_id,
+            &predecessor_binding,
+        )
+        .expect("verify predecessor fence")
+    );
+}
+
+#[test]
+fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_once() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let predecessor_session_id = "predecessor-session";
+    let candidate_session_id = "candidate-session";
+    let selected_work_id = "work-selected";
+    let operation_id = "continue-op-commit";
+    let readiness_nonce = "continue-ready-commit";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor execution");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            predecessor_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    let ledger = gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import completed predecessor");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Completed)
+    );
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+
+    let now = chrono::Utc::now();
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(selected_work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "binding-candidate".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: now,
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare successor");
+    let planned_identity =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive Prepared binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: candidate_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: planned_identity.clone(),
+        capability_generation: 1,
+    };
+
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        selected_work_id,
+        now,
+    );
+    start.title = Some("Continue selected Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+        .expect("record selected Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            selected_work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("complete selected Work");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let runtime_root = temp.path().join(".gwt");
+    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = candidate_session_id.to_string();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+
+    let mut candidate_session =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate_session.id = candidate_session_id.to_string();
+    candidate_session.project_state_root = Some(repo.clone());
+    candidate_session.linked_issue_number = Some(owner.number);
+    candidate_session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind candidate Session");
+    candidate_session
+        .save(&runtime.sessions_dir)
+        .expect("save candidate Session");
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue_prepared(&repo, candidate_session_id, binding.clone())
+        .expect("issue Prepared capability");
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), capability.token.clone());
+    runtime.pending_continue_work.insert(
+        window_id.clone(),
+        PendingContinueWork {
+            client_id: "client-1".to_string(),
+            operation_id: operation_id.to_string(),
+            work_id: selected_work_id.to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo.clone(),
+            owner,
+            execution: PendingContinueWorkExecution::Successor(request),
+            binding: binding.clone(),
+            readiness_nonce: readiness_nonce.to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: Some("Continue selected Work".to_string()),
+                owner: Some("Issue #2359".to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: predecessor_session_id.to_string(),
+            predecessor_binding: predecessor_binding.clone(),
+        },
+    );
+    let committed_pending = runtime
+        .pending_continue_work
+        .get(&window_id)
+        .expect("pending continuation")
+        .clone();
+    let _retry_focus = runtime.continue_work_events(
+        "client-reconnected",
+        operation_id.to_string(),
+        selected_work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(
+        runtime
+            .continue_work_waiters
+            .get(operation_id)
+            .is_some_and(|waiters| waiters.contains("client-reconnected")),
+        "a reconnect retry must subscribe to the exact pending operation"
+    );
+    assert!(
+        gwt::cli::execution_state::prepared_execution_binding_matches(
+            &repo,
+            owner,
+            candidate_session_id,
+            &binding.identity,
+        )
+        .expect("read Prepared authority"),
+        "the candidate binding must match the durable Prepared attempt"
+    );
+    let prepared_probe = gwt::probe_authenticated_prepared_execution_binding(
+        &repo,
+        candidate_session_id,
+        &binding,
+        "continue-work-test-host",
+        gwt::AgentExecutionBindingProbeRequest {
+            schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+            operation_id: operation_id.to_string(),
+            nonce: "prepared-probe-nonce".to_string(),
+        },
+    );
+    assert!(
+        prepared_probe.is_ok(),
+        "the Prepared Host probe must succeed before activation: {prepared_probe:?}"
+    );
+
+    assert!(
+        runtime.continue_work_outcomes.is_empty(),
+        "PTY spawn alone must not produce success"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read Prepared ledger")
+            .expect("Prepared ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Completed),
+        "Prepared launch must leave the predecessor current"
+    );
+
+    let events = runtime.finalize_continue_work_session_start(&window_id, Some(readiness_nonce));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                operation_id: emitted_operation_id,
+                work_id,
+                outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                ..
+            } if emitted_operation_id == operation_id && work_id == selected_work_id
+        )),
+        "authenticated readiness must emit one correlated success; events={events:?}, attempt={:?}",
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
+            .expect("read continuation attempt")
+    );
+    assert!(events.iter().any(|event| {
+        matches!(
+            (&event.target, &event.event),
+            (
+                DispatchTarget::Client(client_id),
+                BackendEvent::ContinueWorkOutcome {
+                    operation_id: emitted_operation_id,
+                    outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                    ..
+                }
+            ) if client_id == "client-reconnected" && emitted_operation_id == operation_id
+        )
+    }));
+    assert!(!runtime.pending_continue_work.contains_key(&window_id));
+    assert!(issuer.active_token_is_current(&capability.token, &binding));
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&repo, owner)
+            .expect("read committed binding"),
+        Some(planned_identity)
+    );
+    assert!(
+        !gwt::cli::execution_state::current_active_execution_binding_matches(
+            &repo,
+            owner,
+            predecessor_session_id,
+            &predecessor_binding,
+        )
+        .expect("verify predecessor fence"),
+        "the predecessor binding must be rejected after activation"
+    );
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work projection")
+        .expect("Work projection");
+    let selected = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == selected_work_id)
+        .expect("selected Work");
+    assert_eq!(
+        selected.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+    );
+    assert!(selected
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == candidate_session_id));
+    assert!(
+        runtime
+            .finalize_continue_work_session_start(&window_id, Some(readiness_nonce))
+            .is_empty(),
+        "the consumed readiness receipt must not emit a second success"
+    );
+    runtime.continue_work_outcomes.remove(operation_id);
+    runtime
+        .pending_continue_work
+        .insert(window_id.clone(), committed_pending);
+    runtime.continue_work_waiters.insert(
+        operation_id.to_string(),
+        HashSet::from(["client-after-response-loss".to_string()]),
+    );
+    assert!(
+        runtime
+            .continue_work_launch_failed_events(
+                &window_id,
+                "late PTY error after committed response loss",
+            )
+            .is_empty(),
+        "a late launch error cannot roll back or report failure after Activated"
+    );
+    assert!(
+        !runtime.pending_continue_work.contains_key(&window_id),
+        "post-commit launch errors must discard only the stale process-local receipt",
+    );
+    assert!(
+        !runtime.continue_work_waiters.contains_key(operation_id),
+        "discarding an Activated process-local receipt must not orphan reconnect waiters",
+    );
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    let same_host_retry = runtime.continue_work_events(
+        "client-response-loss",
+        operation_id.to_string(),
+        selected_work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(same_host_retry.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            retryable: false,
+            ..
+        }
+    )));
+    assert!(
+        !runtime.pending_continue_work.contains_key(&window_id),
+        "durable response-loss reconciliation must consume the stale pending receipt"
+    );
+
+    let retry_tab = sample_project_tab_with_window_at(
+        "tab-retry",
+        "shell-retry",
+        repo.clone(),
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let mut restarted_runtime = sample_runtime(&runtime_root, vec![retry_tab], Some("tab-retry"));
+    let retry_events = restarted_runtime.continue_work_events(
+        "client-retry",
+        operation_id.to_string(),
+        selected_work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(
+        retry_events.iter().all(|event| !matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                ..
+            }
+        )),
+        "ledger + Work state without a live exact pane must not replay strong success: {retry_events:?}"
+    );
+    assert!(retry_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id: emitted_operation_id,
+            work_id,
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable: true,
+            ..
+        } if emitted_operation_id == operation_id
+            && work_id == selected_work_id
+            && code == "continuation_reconciliation_required"
+    )));
+    let readback = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("load response-loss retry ledger")
+        .expect("response-loss retry ledger");
+    assert_eq!(readback.generations.len(), 2);
+    assert_eq!(
+        readback
+            .continuation_attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+            })
+            .count(),
+        1,
+        "response-loss retry must not append another generation or activation"
+    );
+}
+
+#[test]
+fn continue_work_pre_dispatch_abort_surfaces_durable_write_failure() {
+    let temp = tempdir().expect("tempdir");
+    init_repo(temp.path());
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "continue-op-abort-write-failure".to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some("work-selected".to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "binding-candidate".to_string(),
+        initial_session_id: "candidate-session".to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: Utc::now(),
+    };
+    let execution = PendingContinueWorkExecution::Successor(request);
+
+    let error = super::continuation::abort_prepared_execution(
+        temp.path(),
+        owner,
+        &execution,
+        "prepared launch failed",
+    )
+    .expect_err("missing durable ledger must not be treated as a successful abort");
+
+    assert!(
+        error.to_string().contains("ledger") || error.to_string().contains("attempt"),
+        "abort failure must retain an actionable durable-state reason: {error}",
+    );
+}
+
+#[test]
+fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_generation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let predecessor_session_id = "stale-owner-session";
+    let candidate_session_id = "takeover-candidate-session";
+    let operation_id = "continue-op-takeover";
+    let work_id = "work-active";
+    let readiness_nonce = "continue-ready-takeover";
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize active predecessor");
+    let imported = gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("import active predecessor");
+    let generation_id = imported.current_generation_id;
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+    let now = chrono::Utc::now();
+    let request = gwt::cli::execution_state::GenerationTakeoverRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(work_id.to_string()),
+        source: Some("continue-work:resume".to_string()),
+        from_session_id: predecessor_session_id.to_string(),
+        to_session_id: candidate_session_id.to_string(),
+        reason: "continue-work-stale-takeover: all owning Host runtimes are dead".to_string(),
+        requested_at: now,
+    };
+    gwt::cli::execution_state::prepare_generation_takeover(&repo, owner, &request)
+        .expect("prepare same-generation takeover");
+    let planned_identity =
+        gwt::cli::execution_state::prepared_generation_takeover_execution_binding(
+            &repo, owner, &request,
+        )
+        .expect("derive takeover binding");
+
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    start.title = Some("Active stale Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+        .expect("record active Work");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let runtime_root = temp.path().join(".gwt");
+    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = candidate_session_id.to_string();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: candidate_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: planned_identity.clone(),
+        capability_generation: 1,
+    };
+    let mut candidate =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate.id = candidate_session_id.to_string();
+    candidate.project_state_root = Some(repo.clone());
+    candidate.linked_issue_number = Some(owner.number);
+    candidate
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind candidate");
+    candidate
+        .save(&runtime.sessions_dir)
+        .expect("save candidate");
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue_prepared(&repo, candidate_session_id, binding.clone())
+        .expect("issue Prepared capability");
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), capability.token.clone());
+    runtime.pending_continue_work.insert(
+        window_id.clone(),
+        PendingContinueWork {
+            client_id: "client-1".to_string(),
+            operation_id: operation_id.to_string(),
+            work_id: work_id.to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo.clone(),
+            owner,
+            execution: PendingContinueWorkExecution::Takeover(request),
+            binding: binding.clone(),
+            readiness_nonce: readiness_nonce.to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: Some("Active stale Work".to_string()),
+                owner: Some("Issue #2359".to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: predecessor_session_id.to_string(),
+            predecessor_binding: predecessor_binding.clone(),
+        },
+    );
+
+    let events = runtime.finalize_continue_work_session_start(&window_id, Some(readiness_nonce));
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            operation_id: emitted_operation_id,
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            ..
+        } if emitted_operation_id == operation_id
+    )));
+    assert!(issuer.active_token_is_current(&capability.token, &binding));
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&repo, owner)
+            .expect("read takeover binding"),
+        Some(planned_identity)
+    );
+    assert!(
+        !gwt::cli::execution_state::current_active_execution_binding_matches(
+            &repo,
+            owner,
+            predecessor_session_id,
+            &predecessor_binding,
+        )
+        .expect("verify predecessor fence")
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read ledger")
+        .expect("ledger");
+    assert_eq!(ledger.current_generation_id, generation_id);
+    assert_eq!(ledger.generations.len(), 1);
+    assert_eq!(ledger.takeovers.len(), 1);
+    assert_eq!(ledger.takeovers[0].to_session_id, candidate_session_id);
+    let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work")
+        .expect("Work")
+        .work_items
+        .into_iter()
+        .find(|item| item.id == work_id)
+        .expect("active Work");
+    assert_eq!(
+        work.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+    );
+    assert!(work
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == candidate_session_id));
+
+    let retry_tab = sample_project_tab_with_window_at(
+        "tab-retry",
+        "shell-retry",
+        repo.clone(),
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let mut restarted_runtime = sample_runtime(&runtime_root, vec![retry_tab], Some("tab-retry"));
+    let retry_events = restarted_runtime.continue_work_events(
+        "client-retry",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(retry_events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            ..
+        }
+    )));
+    assert!(retry_events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            retryable: true,
+            ..
+        } if code == "continuation_reconciliation_required"
+    )));
+    let retry_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read takeover retry ledger")
+        .expect("takeover retry ledger");
+    assert_eq!(retry_ledger.generations.len(), 1);
+    assert_eq!(retry_ledger.takeovers.len(), 1);
+}
+
+#[test]
 fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -6873,6 +9103,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             Some(42),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             repo.display().to_string(),
         )),
     );
@@ -6993,6 +9224,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             Some(42),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             repo.display().to_string(),
         )),
     );
@@ -7461,6 +9693,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
             None,
             Some("origin/main".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             worktree.display().to_string(),
         )),
     );
@@ -7547,6 +9780,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
             None,
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             repo.display().to_string(),
         )),
     );
@@ -7625,6 +9859,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
             Some(2359),
             None,
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             worktree.display().to_string(),
         )),
     );
@@ -7651,6 +9886,96 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
     assert_eq!(
         work_items.work_items[0].events[0].kind,
         gwt_core::workspace_projection::WorkEventKind::Resume
+    );
+}
+
+#[test]
+fn app_runtime_inspection_resume_launch_completion_does_not_mutate_work_projection() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-20260507-inspection");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        WorkspaceResumeContext {
+            title: Some("Historical inspection".to_string()),
+            owner: Some("SPEC-2359".to_string()),
+            summary: Some("Inspect the prior conversation only.".to_string()),
+            next_action: None,
+        },
+    );
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+
+    let _events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(worktree.clone()),
+            },
+            "session-inspection".to_string(),
+            "work/issue-2359".to_string(),
+            "Codex".to_string(),
+            worktree,
+            gwt_agent::AgentId::Codex,
+            Some(2359),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::Inspection,
+            repo.display().to_string(),
+        )),
+    );
+
+    assert!(
+        runtime.active_agent_sessions.contains_key(&window_id),
+        "inspection still owns a visible pane"
+    );
+    assert!(
+        runtime.inspection_agent_windows.contains(&window_id),
+        "the runtime must fence every input path for the inspection pane"
+    );
+    assert!(
+        gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .is_none(),
+        "inspection must not create or update the Workspace projection"
+    );
+    assert!(
+        gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load Work projection")
+            .is_none(),
+        "inspection must not append a Work Resume event"
     );
 }
 
@@ -7759,6 +10084,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
             Some(3096),
             Some("develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             worktree.display().to_string(),
         )),
     );
@@ -7856,6 +10182,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             None,
             Some("origin/main".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             worktree_one.display().to_string(),
         )),
     );
@@ -7871,6 +10198,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             None,
             Some("origin/main".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
             worktree_two.display().to_string(),
         )),
     );
@@ -10021,8 +12349,8 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
         "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}"
     );
     assert!(
-        detail.contains("resume-target-1"),
-        "diagnostic must carry the reported session id, got: {detail}"
+        !detail.contains("resume-target-1"),
+        "diagnostic must not persist the provider conversation id, got: {detail}"
     );
     assert!(
         !runtime.runtimes.contains_key(&window_id),
@@ -11045,6 +13373,47 @@ fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
         BackendEvent::WorkspaceResumeAgentError { session_id, message }
             if session_id == "stopped-session" && !message.is_empty()
     ));
+}
+
+#[test]
+fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session =
+        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Gemini);
+    session.id = "session-metadata-only".to_string();
+    session.agent_session_id = None;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ResumeWorkspaceAgent {
+            session_id: session.id.clone(),
+            agent_session_id: None,
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WorkspaceResumeAgentError {
+            session_id,
+            message,
+        } if session_id == "session-metadata-only"
+            && message.contains("saved conversation")
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::WorkspaceResumeAgentStarted { .. }
+    )));
 }
 
 // SPEC-2359 US-79: a Session whose worktree was removed on this machine can
@@ -13737,6 +16106,32 @@ fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
         events[0].event,
         BackendEvent::RuntimeHookEvent { .. }
     ));
+}
+
+#[test]
+fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "board-1",
+        WindowPreset::Board,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut event = runtime_hook_coordination_event("session-1");
+    event.continuation_readiness_nonce = Some("private-ready-nonce".to_string());
+
+    let events = runtime.handle_runtime_hook_event(event);
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::RuntimeHookEvent { event }
+            if event.continuation_readiness_nonce.is_none()
+    )));
+    let encoded =
+        serde_json::to_string(&events.iter().map(|event| &event.event).collect::<Vec<_>>())
+            .expect("serialize browser events");
+    assert!(!encoded.contains("private-ready-nonce"));
 }
 
 #[test]
@@ -18556,7 +20951,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
             })
             .expect("launch complete")
     };
-    let Ok((process, _, _, _, _, _, _, _, runtime_target, _)) = result else {
+    let Ok((process, _, _, _, _, _, _, _, runtime_target, _, _)) = result else {
         panic!("Issue Monitor auto launch failed: {result:?}");
     };
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
