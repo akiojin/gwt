@@ -110,9 +110,59 @@ fn install_agent_capability_env(
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
 ) -> Result<(), String> {
+    install_agent_capability_env_with_binding(
+        env,
+        issuer,
+        project_root,
+        session_id,
+        None,
+        runtime_target,
+        container_runtime,
+    )
+}
+
+fn install_agent_capability_env_with_binding(
+    env: &mut HashMap<String, String>,
+    issuer: Option<&AgentCapabilityIssuer>,
+    project_root: &Path,
+    session_id: &str,
+    execution_binding: Option<&gwt_agent::SessionExecutionBinding>,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<(), String> {
     let Some(issuer) = issuer else {
         return Ok(());
     };
+    let endpoints = preflight_agent_capability_endpoints(
+        issuer,
+        project_root,
+        session_id,
+        runtime_target,
+        container_runtime,
+    )?;
+    issue_preflighted_agent_capability_env(
+        env,
+        issuer,
+        project_root,
+        session_id,
+        execution_binding,
+        endpoints,
+    )
+}
+
+struct PreflightedAgentCapabilityEndpoints {
+    forward_url: String,
+    pane_websocket_url: String,
+}
+
+fn preflight_agent_capability_endpoints(
+    issuer: &AgentCapabilityIssuer,
+    project_root: &Path,
+    session_id: &str,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<PreflightedAgentCapabilityEndpoints, String> {
+    issuer.preflight_issue(project_root, session_id)?;
     let runtime_kind = container_runtime.map(gwt_docker::detect::ResolvedContainerRuntime::kind);
     let pane_websocket_url = gwt_agent::pane_websocket_url_for_launch_runtime(
         issuer.pane_websocket_url(),
@@ -120,28 +170,169 @@ fn install_agent_capability_env(
         runtime_target,
         runtime_kind,
     )?;
-    let target = issuer.issue(project_root, session_id)?;
-    let forward_url = match gwt_agent::hook_forward_url_for_launch_runtime(
-        &target.url,
+    let forward_url = gwt_agent::hook_forward_url_for_launch_runtime(
+        issuer.hook_forward_url(),
         runtime_target,
         runtime_kind,
-    ) {
-        Ok(url) => url,
-        Err(error) => {
-            issuer.revoke_token(&target.token);
-            return Err(error);
-        }
+    )?;
+    Ok(PreflightedAgentCapabilityEndpoints {
+        forward_url,
+        pane_websocket_url,
+    })
+}
+
+fn issue_preflighted_agent_capability_env(
+    env: &mut HashMap<String, String>,
+    issuer: &AgentCapabilityIssuer,
+    project_root: &Path,
+    session_id: &str,
+    execution_binding: Option<&gwt_agent::SessionExecutionBinding>,
+    endpoints: PreflightedAgentCapabilityEndpoints,
+) -> Result<(), String> {
+    let target = match execution_binding {
+        Some(binding) => issuer.issue_bound(project_root, session_id, binding.clone())?,
+        None => issuer.issue(project_root, session_id)?,
     };
-    env.insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), forward_url);
+    env.insert(
+        gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(),
+        endpoints.forward_url,
+    );
     env.insert(
         gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
         target.token,
     );
     env.insert(
         gwt_agent::GWT_PANE_WS_URL_ENV.to_string(),
-        pane_websocket_url,
+        endpoints.pane_websocket_url,
     );
     Ok(())
+}
+
+struct FinalizedAgentCapabilityLaunch<'a> {
+    issuer: Option<&'a AgentCapabilityIssuer>,
+    sessions_dir: &'a Path,
+    session: &'a mut gwt_agent::Session,
+    project_root: &'a Path,
+    worktree: &'a Path,
+    producing_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
+    execution_entrypoint: &'a str,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
+}
+
+impl FinalizedAgentCapabilityLaunch<'_> {
+    fn install(self, env: &mut HashMap<String, String>) -> Result<(), String> {
+        let Self {
+            issuer,
+            sessions_dir,
+            session,
+            project_root,
+            worktree,
+            producing_owner,
+            execution_entrypoint,
+            runtime_target,
+            container_runtime,
+        } = self;
+        let Some(owner) = producing_owner else {
+            return install_agent_capability_env(
+                env,
+                issuer,
+                project_root,
+                &session.id,
+                runtime_target,
+                container_runtime,
+            );
+        };
+        let issuer = issuer.ok_or_else(|| {
+            "producing launch is missing its Host capability issuer; no execution was materialized"
+                .to_string()
+        })?;
+        let endpoints = preflight_agent_capability_endpoints(
+            issuer,
+            project_root,
+            &session.id,
+            runtime_target,
+            container_runtime,
+        )?;
+
+        if gwt::cli::execution_state::current_execution_binding(worktree, owner)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err(
+                "an execution generation already exists; use Continue work to create a successor"
+                    .to_string(),
+            );
+        }
+
+        gwt::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            &session.id,
+            execution_entrypoint,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        gwt::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .map_err(|error| error.to_string())?;
+        let identity = gwt::cli::execution_state::current_execution_binding(worktree, owner)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "execution generation materialization did not publish a current binding".to_string()
+            })?;
+        let repo_hash = session
+            .repo_hash
+            .clone()
+            .filter(|repo_hash| !repo_hash.trim().is_empty())
+            .ok_or_else(|| {
+                "producing Session is missing its canonical repository hash".to_string()
+            })?;
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash,
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity,
+            capability_generation: 1,
+        };
+        session.set_execution_binding(Some(binding.clone()))?;
+        if let Err(error) = session.save(sessions_dir) {
+            let _ = session.set_execution_binding(None);
+            return Err(format!(
+            "failed to persist the producing Session binding after its execution generation was materialized: {error}; transactional recovery is required before retry"
+        ));
+        }
+
+        match issue_preflighted_agent_capability_env(
+            env,
+            issuer,
+            project_root,
+            &session.id,
+            Some(&binding),
+            endpoints,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let rollback_result = session.set_execution_binding(None).and_then(|()| {
+                    session
+                        .save(sessions_dir)
+                        .map_err(|error| error.to_string())
+                });
+                match rollback_result {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(format!(
+                        "{error}; failed to roll back Session execution binding: {rollback_error}"
+                    )),
+                }
+            }
+        }
+    }
 }
 
 fn persist_finalized_launch_session(
@@ -1763,18 +1954,6 @@ impl AppRuntime {
                 runtime_path.display().to_string(),
             );
             let runtime_target = config.runtime_target;
-            install_agent_capability_env(
-                &mut config.env_vars,
-                agent_capability_issuer.as_ref(),
-                Path::new(&project_root),
-                &session_id,
-                runtime_target,
-                container_runtime.as_ref(),
-            )?;
-            issued_capability_token = config
-                .env_vars
-                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
-                .cloned();
             config
                 .env_vars
                 .entry("COLORTERM".to_string())
@@ -1800,34 +1979,42 @@ impl AppRuntime {
                     .then_some(agent_project_root.as_str()),
             )?;
 
-            // SPEC-3248 P8a (T-107): materialize the Execution Control Record
-            // for linked-owner execution launches — SPEC and plain Issue alike
-            // — before prompt injection (the prompt rides the argv; the
-            // process spawns after this closure returns). Best-effort like
-            // the lane file: a write failure must not block the launch, and
-            // the Stop gate fails open when the record is absent. Intake
-            // (ephemeral) sessions own no execution lifecycle, and subordinate
-            // launches (independent review dispatch) are opted out.
-            if !config.is_ephemeral && !config.suppress_execution_control {
-                if let Some(owner_number) = config.linked_issue_number {
-                    let owner_kind =
-                        gwt::cli::execution_state::detect_owner_kind(&worktree_path, owner_number);
-                    if let Err(error) = gwt::cli::execution_state::materialize_at_launch(
-                        &worktree_path,
-                        owner_kind,
-                        owner_number,
-                        &session_id,
-                        &execution_entrypoint,
-                        config.session_mode == gwt_agent::SessionMode::Resume,
-                    ) {
-                        tracing::warn!(
-                            ?error,
-                            owner_number,
-                            "execution control record materialization failed"
-                        );
-                    }
-                }
+            // A plain Resume is inspection-only. Producing authority is
+            // created only for a linked non-ephemeral launch that owns its
+            // execution lifecycle. Continue work creates successor
+            // generations through its coordinator instead of falling through
+            // this genesis-only launch path.
+            let producing_owner = (!config.is_ephemeral
+                && !config.suppress_execution_control
+                && config.session_mode != gwt_agent::SessionMode::Resume)
+                .then(|| {
+                    config.linked_issue_number.map(|owner_number| {
+                        gwt::cli::execution_state::ExecutionOwnerKey {
+                            kind: gwt::cli::execution_state::detect_owner_kind(
+                                &worktree_path,
+                                owner_number,
+                            ),
+                            number: owner_number,
+                        }
+                    })
+                })
+                .flatten();
+            FinalizedAgentCapabilityLaunch {
+                issuer: agent_capability_issuer.as_ref(),
+                sessions_dir: &sessions_dir,
+                session: &mut session,
+                project_root: Path::new(&project_root),
+                worktree: &worktree_path,
+                producing_owner,
+                execution_entrypoint: &execution_entrypoint,
+                runtime_target,
+                container_runtime: container_runtime.as_ref(),
             }
+            .install(&mut config.env_vars)?;
+            issued_capability_token = config
+                .env_vars
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .cloned();
 
             let process_launch = ProcessLaunch {
                 command: config.command.clone(),
@@ -2413,6 +2600,360 @@ mod docker_session_persistence_tests {
 #[cfg(test)]
 mod agent_endpoint_env_tests {
     use super::*;
+    use std::ffi::OsString;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn init_execution_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).expect("create execution repository");
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/launch-binding.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    struct PersistedExecutionLaunch {
+        project: PathBuf,
+        sessions_dir: PathBuf,
+        owner: gwt::cli::execution_state::ExecutionOwnerKey,
+        session: gwt_agent::Session,
+    }
+
+    fn persisted_execution_launch(home: &Path) -> PersistedExecutionLaunch {
+        let project = home.join("project");
+        init_execution_repo(&project);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 2359,
+        };
+        let mut session =
+            gwt_agent::Session::new(&project, "work/issue-2359", gwt_agent::AgentId::Codex);
+        session.project_state_root = Some(project.clone());
+        session.linked_issue_number = Some(owner.number);
+        session.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)
+            .expect("persist finalized Session before authority");
+        PersistedExecutionLaunch {
+            project,
+            sessions_dir,
+            owner,
+            session,
+        }
+    }
+
+    #[test]
+    fn producing_launch_persists_exact_binding_before_issuing_bound_capability() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("install exact bound launch authority");
+
+        let persisted = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("reload bound Session");
+        let binding = persisted
+            .execution_binding
+            .expect("producing Session binding");
+        assert_eq!(binding.capability_generation, 1);
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read current generation")
+                .expect("current generation binding"),
+            binding.identity
+        );
+        let token = env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("bound capability token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate issued capability");
+        assert!(grant.principal().authorizes_producing_mutation());
+        assert_eq!(grant.principal().execution_binding(), Some(&binding));
+    }
+
+    #[test]
+    fn failed_bound_capability_install_rolls_back_the_persisted_session_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "not-a-hook-url",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let runtime = crate::resolved_test_docker_runtime(home.path());
+        let mut env = HashMap::new();
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            container_runtime: Some(&runtime),
+        }
+        .install(&mut env)
+        .expect_err("invalid Docker hook endpoint must fail");
+
+        assert!(error.contains("invalid host hook forward URL"));
+        let persisted = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("reload failed launch Session");
+        assert!(
+            persisted.execution_binding.is_none(),
+            "failed capability installation must not leave producing authority"
+        );
+        assert!(
+            !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "failed capability installation must not expose a bearer"
+        );
+        assert!(
+            gwt::cli::execution_state::load(&launch.project)
+                .expect("read failed launch ECR")
+                .is_none(),
+            "known endpoint failure must be rejected before flat ECR materialization"
+        );
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read failed launch generation")
+                .is_none(),
+            "known endpoint failure must not leave a ghost generation"
+        );
+    }
+
+    #[test]
+    fn producing_launch_without_host_issuer_refuses_before_execution_materialization() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let mut env = HashMap::new();
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: None,
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("producing launch requires its Host capability issuer");
+
+        assert!(error.contains("Host capability issuer"));
+        assert!(gwt::cli::execution_state::load(&launch.project)
+            .expect("read refused launch ECR")
+            .is_none());
+        assert!(gwt::cli::execution_state::current_execution_binding(
+            &launch.project,
+            launch.owner
+        )
+        .expect("read refused launch generation")
+        .is_none());
+        let persisted = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("reload refused launch Session");
+        assert!(persisted.execution_binding.is_none());
+    }
+
+    #[test]
+    fn producing_launch_preflights_a_closing_issuer_before_execution_materialization() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let inspection = issuer
+            .issue(&launch.project, &launch.session.id)
+            .expect("issue pre-existing inspection capability");
+        let grant = issuer
+            .grant_for_test(&inspection.token)
+            .expect("authenticate pre-existing capability");
+        let close_ticket = issuer
+            .begin_self_close_if_current(&grant)
+            .expect("hold issuer in closing state");
+        let mut env = HashMap::new();
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("closing Host issuer must refuse producing launch");
+
+        assert!(issuer.rollback_self_close(&close_ticket));
+        assert!(issuer.revoke_token(&inspection.token));
+        assert!(error.contains("closing"));
+        assert!(
+            gwt::cli::execution_state::load(&launch.project)
+                .expect("read closing launch ECR")
+                .is_none(),
+            "issuer availability must be rejected before flat ECR materialization"
+        );
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read closing launch generation")
+                .is_none(),
+            "issuer availability must be rejected before generation materialization"
+        );
+    }
+
+    #[test]
+    fn session_binding_io_failure_reports_the_materialized_generation_recovery_boundary() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let saved_sessions_dir = home.path().join("sessions-before-io-failure");
+        std::fs::rename(&launch.sessions_dir, &saved_sessions_dir)
+            .expect("move Session directory before injected failure");
+        std::fs::write(&launch.sessions_dir, "not-a-directory")
+            .expect("block Session directory recreation");
+        let mut env = HashMap::new();
+        let result = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env);
+        std::fs::remove_file(&launch.sessions_dir).expect("remove injected Session path blocker");
+        std::fs::rename(&saved_sessions_dir, &launch.sessions_dir)
+            .expect("restore Session directory after injected failure");
+        let error = result.expect_err("Session binding persistence must fail");
+
+        assert!(error.contains("execution generation was materialized"));
+        assert!(error.contains("transactional recovery"));
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read materialized generation")
+                .is_some(),
+            "the current ledger API has no safe genesis rollback seam yet"
+        );
+        let persisted = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("reload pre-binding Session");
+        assert!(persisted.execution_binding.is_none());
+        assert!(
+            !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "binding persistence failure must precede bearer issuance"
+        );
+    }
 
     #[test]
     fn launch_injects_the_runtime_specific_pane_websocket_endpoint() {
