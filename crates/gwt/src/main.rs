@@ -66,33 +66,37 @@ pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
-    ActiveAgentSession, AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner,
-    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
-    ProjectTabRuntime, WindowAddress,
+    ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
+    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
+    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
-    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_gwt_binary_setup,
-    ensure_docker_launch_service_ready, finalize_docker_agent_launch_config,
-    package_runner_version_spec, resolve_docker_launch_plan, resolve_docker_shell_command,
-    strip_package_runner_args,
+    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
+    finalize_docker_agent_launch_config_with_runtime, package_runner_version_spec,
+    resolve_docker_launch_plan, resolve_docker_shell_command, strip_package_runner_args,
 };
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action, DockerLaunchServiceAction,
-    PackageRunnerProgram,
+    mount_source_matches_project_root, normalize_docker_launch_action,
+    resolved_test_docker_runtime, DockerLaunchServiceAction, PackageRunnerProgram,
 };
-pub(crate) use embedded_server::AgentCapabilityIssuer;
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
+pub(crate) use embedded_server::{
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
+    AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
+    AgentSessionPrincipal,
+};
 use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
-    build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
-    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
+    build_shell_process_launch, ensure_docker_launch_runtime_ready_for_runtime,
+    install_launch_gwt_bin_env, prune_orphan_intake_worktrees, resolve_launch_worktree,
+    resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
@@ -347,6 +351,25 @@ enum GuiShutdownOutcome {
 #[derive(Debug, Default)]
 struct GuiShutdownCoordinator {
     started: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSelfCloseQuitAction {
+    Defer,
+    Shutdown,
+}
+
+fn agent_self_close_quit_action(
+    deferred: &mut bool,
+    has_pending_agent_self_closes: bool,
+) -> AgentSelfCloseQuitAction {
+    if has_pending_agent_self_closes {
+        *deferred = true;
+        AgentSelfCloseQuitAction::Defer
+    } else {
+        *deferred = false;
+        AgentSelfCloseQuitAction::Shutdown
+    }
 }
 
 fn request_gui_shutdown(
@@ -977,6 +1000,19 @@ enum UserEvent {
         client_id: ClientId,
         event: FrontendEvent,
     },
+    /// Internal request from the capability-authenticated pane bridge. The
+    /// server-side principal is the only project/Session routing authority.
+    AgentFrontend {
+        client_id: ClientId,
+        grant: AgentCapabilityGrant,
+        request: AgentFrontendRequest,
+    },
+    /// Finalize one self-close that has already transitioned its exact
+    /// capability generation to Closing and attempted a direct origin-socket
+    /// acknowledgement.
+    CommitAgentSelfClose {
+        ticket: AgentSelfCloseCapabilityTicket,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -1242,17 +1278,18 @@ mod tests {
     use gwt_terminal::PaneStatus;
 
     use super::{
-        app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        apply_windows_host_shell_wrapper, broadcast_log_entry, broadcast_runtime_hook_event,
-        build_frontend_sync_events, build_shell_process_launch, close_window_from_workspace,
-        combined_window_id, current_git_branch, docker_bundle_mounts_for_home,
-        docker_bundle_override_content, gui_front_door_launch_surface, hook_forward_authorized,
+        app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
+        apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
+        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
-        should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
-        AttachmentUploadStore, BlockingTaskSpawner, ClientHub, DispatchTarget,
-        KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
-        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
+        AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
+        DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1262,6 +1299,26 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[test]
+    fn stale_agent_frontend_outcome_unregisters_and_closes_pane_client() {
+        let clients = ClientHub::default();
+        let queue = clients.register("stale-pane-client".to_string());
+
+        apply_agent_frontend_dispatch_outcome(
+            &clients,
+            "stale-pane-client",
+            AgentFrontendDispatchOutcome::StaleCapability,
+        );
+
+        assert!(
+            matches!(
+                queue.try_next(),
+                Some(crate::embedded_server::DrainStep::Closed)
+            ),
+            "a capability rotated while queued must close the agent socket"
+        );
     }
 
     #[cfg(unix)]
@@ -1470,6 +1527,45 @@ mod tests {
             2,
             "duplicate shutdown must not rerun cleanup"
         );
+    }
+
+    #[test]
+    fn pending_agent_self_close_does_not_consume_gui_shutdown_backstop_grace() {
+        let mut deferred = false;
+        let mut coordinator = super::GuiShutdownCoordinator::default();
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        assert_eq!(
+            super::agent_self_close_quit_action(&mut deferred, true),
+            super::AgentSelfCloseQuitAction::Defer
+        );
+        assert!(
+            calls.borrow().is_empty(),
+            "the cleanup backstop must not start while ACK delivery is pending"
+        );
+
+        assert_eq!(
+            super::agent_self_close_quit_action(&mut deferred, false),
+            super::AgentSelfCloseQuitAction::Shutdown
+        );
+        let outcome = super::request_gui_shutdown(
+            &mut coordinator,
+            super::GuiShutdownReason::QuitApp,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("cleanup".to_string()),
+        );
+
+        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            vec!["backstop:QuitApp:5s".to_string(), "cleanup".to_string()].as_slice(),
+            "the full cleanup grace must begin only after pending ACK delivery finishes"
+        );
+        assert!(!deferred);
     }
 
     #[test]
@@ -2477,6 +2573,8 @@ mod tests {
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             agent_capability_issuer: None,
+            agent_capability_tokens: HashMap::new(),
+            pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
@@ -4138,7 +4236,10 @@ mod tests {
             runtime
                 .handle_frontend_event(
                     "client-1".to_string(),
-                    gwt::FrontendEvent::CloseWindow { id: settings_id },
+                    gwt::FrontendEvent::CloseWindow {
+                        id: settings_id,
+                        request_id: None,
+                    },
                 )
                 .len(),
             1
@@ -6747,12 +6848,17 @@ mod tests {
         config
             .env_vars
             .insert("EXTRA_FLAG".to_string(), "1".to_string());
+        let runtime = super::resolved_test_docker_runtime(temp.path());
 
-        let runtime_worktree = super::finalize_docker_agent_launch_config(&project, &mut config)
-            .expect("finalize docker launch")
-            .expect("Docker runtime worktree");
+        let runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
+            &project,
+            &mut config,
+            Some(&runtime),
+        )
+        .expect("finalize docker launch")
+        .expect("Docker runtime worktree");
 
-        assert_eq!(config.command, super::docker_binary_for_launch());
+        assert_eq!(config.command, runtime.binary());
         assert_eq!(runtime_worktree, "/workspace/app");
         assert_eq!(
             config.args,
@@ -6798,10 +6904,16 @@ mod tests {
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
+        let runtime = super::resolved_test_docker_runtime(temp.path());
 
-        let _runtime_worktree = super::finalize_docker_agent_launch_config(&project, &mut config)
-            .expect("finalize docker launch");
+        let _runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
+            &project,
+            &mut config,
+            Some(&runtime),
+        )
+        .expect("finalize docker launch");
 
+        assert_eq!(config.command, runtime.binary());
         assert_eq!(
             config.args[..6],
             [
@@ -7054,6 +7166,17 @@ mod tests {
             Ok(true)
         );
         assert_eq!(super::local_branch_exists(&repo, "missing"), Ok(false));
+    }
+}
+
+fn apply_agent_frontend_dispatch_outcome(
+    clients: &ClientHub,
+    client_id: &str,
+    outcome: AgentFrontendDispatchOutcome,
+) {
+    match outcome {
+        AgentFrontendDispatchOutcome::Dispatched(events) => clients.dispatch(events),
+        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister(client_id),
     }
 }
 
@@ -7455,6 +7578,8 @@ fn main() -> std::io::Result<()> {
     // so always arm it (the legacy headless-only gate is gone).
     let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
+    let mut agent_self_close_quit_deferred = false;
+    let mut gui_shutdown_backstop_armed = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -7473,12 +7598,27 @@ fn main() -> std::io::Result<()> {
             // (`UserEvent::QuitApp`), SIGINT/SIGTERM, or
             // `Event::LoopDestroyed` instead.
             Event::UserEvent(UserEvent::QuitApp) => {
+                let self_close_was_deferred = agent_self_close_quit_deferred;
+                if agent_self_close_quit_action(
+                    &mut agent_self_close_quit_deferred,
+                    app.has_pending_agent_self_closes(),
+                ) == AgentSelfCloseQuitAction::Defer
+                {
+                    if !self_close_was_deferred {
+                        tracing::info!(
+                            target: "gwt::shutdown",
+                            "deferring GUI shutdown until accepted agent self-close ACK attempts finish"
+                        );
+                    }
+                    return;
+                }
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     GuiShutdownReason::QuitApp,
                     |reason, grace| {
-                        if !is_headless {
+                        if !is_headless && !gui_shutdown_backstop_armed {
                             spawn_gui_exit_backstop(reason, grace);
+                            gui_shutdown_backstop_armed = true;
                         }
                     },
                     || {
@@ -7531,6 +7671,23 @@ fn main() -> std::io::Result<()> {
                         proxy.clone(),
                         app.active_project_root().map(Path::to_path_buf),
                     );
+                }
+            }
+            Event::UserEvent(UserEvent::AgentFrontend {
+                client_id,
+                grant,
+                request,
+            }) => {
+                let outcome =
+                    app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
+                apply_agent_frontend_dispatch_outcome(&clients, &client_id, outcome);
+            }
+            Event::UserEvent(UserEvent::CommitAgentSelfClose { ticket }) => {
+                let events = app.commit_agent_self_close(ticket);
+                clients.dispatch(events);
+                if agent_self_close_quit_deferred && !app.has_pending_agent_self_closes() {
+                    agent_self_close_quit_deferred = false;
+                    let _ = proxy.send_event(UserEvent::QuitApp);
                 }
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {

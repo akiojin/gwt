@@ -70,7 +70,17 @@ pub fn read(worktree: &Path, file_name: &str) -> io::Result<Option<String>> {
     let Some(dir) = trusted_dir_for_worktree(worktree) else {
         return Ok(None);
     };
-    match fs::read_to_string(dir.join(file_name)) {
+    read_from_resolved_dir(&dir, file_name)
+}
+
+/// Read from a trusted directory that the caller already resolved. Use this
+/// inside a write lease so a mutable repository identity cannot redirect the
+/// read-modify-write cycle to a different store.
+pub(crate) fn read_from_resolved_dir(
+    trusted_dir: &Path,
+    file_name: &str,
+) -> io::Result<Option<String>> {
+    match fs::read_to_string(trusted_dir.join(file_name)) {
         Ok(contents) => Ok(Some(contents)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
@@ -84,7 +94,18 @@ pub fn write(worktree: &Path, file_name: &str, bytes: &[u8]) -> io::Result<()> {
     let Some(dir) = trusted_dir_for_worktree(worktree) else {
         return Ok(());
     };
-    gwt_github::cache::write_atomic(&dir.join(file_name), bytes)
+    write_to_resolved_dir(&dir, file_name, bytes)
+}
+
+/// Write to a trusted directory that the caller already resolved and leased.
+/// This prevents a second resolver call from moving the authoritative write
+/// beneath a directory whose lease is not held.
+pub(crate) fn write_to_resolved_dir(
+    trusted_dir: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> io::Result<()> {
+    gwt_github::cache::write_atomic(&trusted_dir.join(file_name), bytes)
 }
 
 /// Write the authoritative trusted copy, then the worktree mirror. Once the
@@ -122,6 +143,32 @@ pub fn write_with_mirror(
 const WRITE_LEASE_WAIT: Duration = Duration::from_secs(2);
 const WRITE_LEASE_POLL: Duration = Duration::from_millis(25);
 
+#[cfg(test)]
+std::thread_local! {
+    static WRITE_LEASE_ACQUIRED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_write_lease_acquired_hook(hook: impl FnOnce() + 'static) {
+    WRITE_LEASE_ACQUIRED_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "write-lease acquired hook must not be installed recursively"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_write_lease_acquired_hook() {
+    WRITE_LEASE_ACQUIRED_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 /// SPEC-3248 T-149 owner write lease: serialize gwt-originated
 /// read-modify-write cycles on this worktree's execution/verification/intake
 /// state records across processes. The lease is an fs2 advisory lock on
@@ -149,7 +196,25 @@ pub fn with_write_lease_wait<T>(
 ) -> io::Result<T> {
     let dir = trusted_dir_for_worktree(worktree)
         .unwrap_or_else(|| worktree.join(".gwt").join("skill-state"));
-    fs::create_dir_all(&dir)?;
+    with_write_lease_for_resolved_dir_wait(&dir, wait, operation)
+}
+
+/// Hold the write lease beneath one directory that the caller already
+/// resolved. The same directory can then be passed to resolved read/write
+/// helpers for one stable read-modify-write transaction.
+pub(crate) fn with_write_lease_for_resolved_dir<T>(
+    trusted_dir: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_write_lease_for_resolved_dir_wait(trusted_dir, WRITE_LEASE_WAIT, operation)
+}
+
+fn with_write_lease_for_resolved_dir_wait<T>(
+    dir: &Path,
+    wait: Duration,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    fs::create_dir_all(dir)?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -181,6 +246,8 @@ pub fn with_write_lease_wait<T>(
             Err(err) => return Err(err),
         }
     }
+    #[cfg(test)]
+    run_write_lease_acquired_hook();
     let result = operation();
     let _ = FileExt::unlock(&lock);
     result

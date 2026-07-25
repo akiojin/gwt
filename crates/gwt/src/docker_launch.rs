@@ -87,9 +87,9 @@ impl DockerLaunchPlan {
 pub fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
+) -> Result<Option<gwt_docker::detect::ResolvedContainerRuntime>, String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
 
     let worktree = gwt_core::paths::normalize_windows_child_process_path(
@@ -99,8 +99,11 @@ pub fn apply_docker_runtime_to_launch_config(
             .unwrap_or_else(|| repo_path.to_path_buf()),
     );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
-    let managed_override_changed = ensure_docker_gwt_binary_setup(&launch)?;
+    let runtime =
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(&docker_binary_for_launch())?;
+    ensure_docker_launch_runtime_ready_for_runtime(&runtime)?;
+    let managed_override_changed =
+        ensure_docker_gwt_binary_setup_for_runtime(&launch, runtime.kind())?;
     let lifecycle_intent = if managed_override_changed {
         gwt_agent::DockerLifecycleIntent::Recreate
     } else {
@@ -116,16 +119,51 @@ pub fn apply_docker_runtime_to_launch_config(
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
-    Ok(())
+    Ok(Some(runtime))
 }
 
-pub fn finalize_docker_agent_launch_config(
+#[cfg(test)]
+pub fn resolved_test_docker_runtime(
+    directory: &Path,
+) -> gwt_docker::detect::ResolvedContainerRuntime {
+    #[cfg(windows)]
+    let wrapper = directory.join("docker.cmd");
+    #[cfg(not(windows))]
+    let wrapper = directory.join("docker");
+    #[cfg(windows)]
+    std::fs::write(&wrapper, "@echo Docker version 28.3.0, build test\r\n")
+        .expect("write fake Docker CLI");
+    #[cfg(not(windows))]
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\n",
+    )
+    .expect("write fake Docker CLI");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("fake Docker CLI metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod fake Docker CLI");
+    }
+    gwt_docker::detect::ResolvedContainerRuntime::resolve(
+        wrapper.to_str().expect("UTF-8 fake Docker CLI path"),
+    )
+    .expect("resolve fake Docker runtime")
+}
+
+pub fn finalize_docker_agent_launch_config_with_runtime(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
+    runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
 ) -> Result<Option<String>, String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
         return Ok(None);
     }
+    let runtime = runtime
+        .ok_or_else(|| "Docker launch finalization requires a resolved runtime".to_string())?;
 
     let worktree = gwt_core::paths::normalize_windows_child_process_path(
         &config
@@ -155,7 +193,7 @@ pub fn finalize_docker_agent_launch_config(
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
-    config.command = docker_binary_for_launch();
+    config.command = runtime.binary().to_string();
     config.args = args;
     Ok(Some(runtime_worktree_path))
 }
@@ -183,18 +221,29 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+#[cfg(test)]
 pub fn docker_bundle_override_content(
     service: &str,
     bundle: &DockerBundleMounts,
     container_runtime_binary: &str,
 ) -> Result<String, String> {
     let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    Ok(docker_bundle_override_content_for_runtime(
+        service, bundle, runtime,
+    ))
+}
+
+pub fn docker_bundle_override_content_for_runtime(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     let extra_hosts = runtime
         .compose_extra_host()
         .map(|mapping| format!("    extra_hosts:\n      - \"{mapping}\"\n"))
         .unwrap_or_default();
-    Ok(format!(
+    format!(
         concat!(
             "{header}\n",
             "services:\n",
@@ -208,19 +257,29 @@ pub fn docker_bundle_override_content(
         host_gwtd = host_gwtd,
         path = DOCKER_GWTD_BIN_PATH,
         extra_hosts = extra_hosts,
-    ))
+    )
 }
 
+#[cfg(test)]
 fn ensure_docker_bundle_override_file(
     override_path: &Path,
     service: &str,
     bundle: &DockerBundleMounts,
     container_runtime_binary: &str,
 ) -> Result<bool, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    ensure_docker_bundle_override_file_for_runtime(override_path, service, bundle, runtime)
+}
+
+fn ensure_docker_bundle_override_file_for_runtime(
+    override_path: &Path,
+    service: &str,
+    bundle: &DockerBundleMounts,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> Result<bool, String> {
     use std::fs;
 
-    let override_content =
-        docker_bundle_override_content(service, bundle, container_runtime_binary)?;
+    let override_content = docker_bundle_override_content_for_runtime(service, bundle, runtime);
     if let Ok(existing) = fs::read_to_string(override_path) {
         if existing == override_content {
             return Ok(false);
@@ -250,7 +309,10 @@ fn ensure_docker_bundle_override_file(
     Ok(true)
 }
 
-pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<bool, String> {
+pub fn ensure_docker_gwt_binary_setup_for_runtime(
+    launch: &DockerLaunchPlan,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> Result<bool, String> {
     let home = resolve_user_home_dir()?;
     let bundle = docker_bundle_mounts_for_home(&home);
     let override_path = &launch.managed_override_file;
@@ -267,12 +329,7 @@ pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<bool,
         );
     }
 
-    ensure_docker_bundle_override_file(
-        override_path,
-        &launch.service,
-        &bundle,
-        &docker_binary_for_launch(),
-    )
+    ensure_docker_bundle_override_file_for_runtime(override_path, &launch.service, &bundle, runtime)
 }
 
 fn maybe_inject_docker_sandbox_env(
@@ -798,6 +855,56 @@ mod docker_exec_env_tests {
         assert!(!podman.contains("extra_hosts"));
         assert!(docker.contains(DOCKER_GWTD_BIN_PATH));
         assert!(podman.contains(DOCKER_GWTD_BIN_PATH));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_override_pins_stateful_wrapper_runtime_for_one_launch_contract() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+counter="$0.count"
+count=0
+if [ -f "$counter" ]; then
+  read count < "$counter"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  printf 'Docker version 28.3.0, build test\n'
+else
+  printf 'podman version 5.4.2\n'
+fi
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+        )
+        .expect("resolve launch runtime once");
+        let first = docker_bundle_override_content_for_runtime("app", &bundle, runtime.kind());
+        let second = docker_bundle_override_content_for_runtime("app", &bundle, runtime.kind());
+
+        assert!(first.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert!(second.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert_eq!(
+            std::fs::read_to_string(wrapper.with_extension("count"))
+                .expect("read wrapper probe count")
+                .trim(),
+            "1",
+            "one launch contract must resolve a stateful wrapper exactly once"
+        );
     }
 
     #[test]
