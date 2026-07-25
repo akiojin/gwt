@@ -71,6 +71,37 @@ pub struct DockerRuntimeBinding {
     pub project_state_scope_hash: String,
 }
 
+/// Non-secret identity of one owner-scoped Execution generation.
+///
+/// The owner ledger remains authoritative. This value is only a durable
+/// Session projection used to reject stale panes and predecessor evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionBindingIdentity {
+    pub generation_id: String,
+    pub binding_id: String,
+    pub ledger_head_hash: String,
+}
+
+/// Durable, non-secret projection from a gwt Session to its producing
+/// Execution generation.
+///
+/// Bearer capabilities, provider conversation ids, Host routes, and readiness
+/// nonces must remain process-local and are intentionally absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionExecutionBinding {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub repo_hash: String,
+    pub owner_kind: String,
+    pub owner_number: u64,
+    pub identity: ExecutionBindingIdentity,
+    pub capability_generation: u64,
+}
+
+impl SessionExecutionBinding {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -116,6 +147,10 @@ pub struct Session {
     pub docker_service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_runtime_binding: Option<DockerRuntimeBinding>,
+    /// Optional producing authority projection. Legacy and Inspection Resume
+    /// Sessions keep this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<SessionExecutionBinding>,
     #[serde(default)]
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
@@ -217,6 +252,7 @@ impl Session {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_runtime_binding: None,
+            execution_binding: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             workflow_bypass: None,
@@ -283,6 +319,26 @@ impl Session {
                 .as_str()
                 .to_string(),
         });
+        Ok(())
+    }
+
+    /// Set or clear the Session's non-secret Execution generation projection.
+    ///
+    /// Validation binds every identity component back to the durable Session
+    /// before persistence. The owner ledger, not this projection, authorizes
+    /// mutations.
+    pub fn set_execution_binding(
+        &mut self,
+        binding: Option<SessionExecutionBinding>,
+    ) -> Result<(), String> {
+        if let Some(binding) = binding.as_ref() {
+            validate_session_execution_binding(self, binding)?;
+        }
+        if self.execution_binding == binding {
+            return Ok(());
+        }
+        self.execution_binding = binding;
+        self.updated_at = Utc::now();
         Ok(())
     }
 
@@ -478,6 +534,46 @@ impl Session {
     pub fn fast_mode_enabled(&self) -> bool {
         self.fast_mode || self.codex_fast_mode
     }
+}
+
+fn validate_session_execution_binding(
+    session: &Session,
+    binding: &SessionExecutionBinding,
+) -> Result<(), String> {
+    if binding.schema_version != SessionExecutionBinding::CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported execution binding schema version: {}",
+            binding.schema_version
+        ));
+    }
+    if binding.session_id != session.id {
+        return Err("execution binding session does not match the durable Session".to_string());
+    }
+    if session.repo_hash.as_deref() != Some(binding.repo_hash.as_str()) {
+        return Err(
+            "execution binding repository does not match the durable Session repository"
+                .to_string(),
+        );
+    }
+    if !matches!(binding.owner_kind.as_str(), "spec" | "issue") {
+        return Err("execution binding owner kind must be `spec` or `issue`".to_string());
+    }
+    if session.linked_issue_number != Some(binding.owner_number) {
+        return Err("execution binding owner does not match the linked Session owner".to_string());
+    }
+    if binding.identity.generation_id.trim().is_empty() {
+        return Err("execution binding generation id must be non-empty".to_string());
+    }
+    if binding.identity.binding_id.trim().is_empty() {
+        return Err("execution binding id must be non-empty".to_string());
+    }
+    if binding.identity.ledger_head_hash.trim().is_empty() {
+        return Err("execution binding ledger head hash must be non-empty".to_string());
+    }
+    if binding.capability_generation == 0 {
+        return Err("execution binding capability generation must be positive".to_string());
+    }
+    Ok(())
 }
 
 /// Validate the exact container cwd stored for a Docker-backed Session.
@@ -841,6 +937,21 @@ pub fn persist_agent_session_id(
     .map(|_| ())
 }
 
+/// Persist or clear a Session's Execution generation projection under the
+/// same per-Session lock used by hook and conversation metadata updates.
+pub fn persist_session_execution_binding(
+    sessions_dir: &Path,
+    session_id: &str,
+    binding: Option<SessionExecutionBinding>,
+) -> std::io::Result<()> {
+    update_session(sessions_dir, session_id, move |session| {
+        session
+            .set_execution_binding(binding)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    })
+    .map(|_| ())
+}
+
 /// Persist whether the GUI should recreate this session's agent window during
 /// startup. This is intentionally separate from agent status/conversation
 /// persistence so manual close can opt out without deleting history.
@@ -970,6 +1081,221 @@ display_name = "Codex"
 
         assert!(!roundtrip.contains("docker_runtime_binding"));
         assert!(!host.contains("docker_runtime_binding"));
+    }
+
+    fn test_session_execution_binding(session: &Session) -> SessionExecutionBinding {
+        SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session
+                .repo_hash
+                .clone()
+                .expect("test Session must carry a repo hash"),
+            owner_kind: "spec".to_string(),
+            owner_number: session
+                .linked_issue_number
+                .expect("test Session must carry an owner"),
+            identity: ExecutionBindingIdentity {
+                generation_id: "generation-2".to_string(),
+                binding_id: "binding-2".to_string(),
+                ledger_head_hash: "ledger-head-2".to_string(),
+            },
+            capability_generation: 2,
+        }
+    }
+
+    fn session_with_execution_owner() -> Session {
+        let mut session = Session::new("/host/worktree", "work/issue-2359", AgentId::Codex);
+        session.repo_hash = Some("repo-hash-2359".to_string());
+        session.linked_issue_number = Some(2359);
+        session
+    }
+
+    #[test]
+    fn session_execution_binding_new_and_legacy_sessions_default_to_none() {
+        let session = Session::new("/host/worktree", "work/legacy", AgentId::Codex);
+        assert!(session.execution_binding.is_none());
+
+        let legacy = r#"
+id = "1d3d2d2d-3333-4444-5555-777777777779"
+worktree_path = "/tmp/wt"
+branch = "work/legacy"
+agent_id = { type = "Codex" }
+status = "WaitingInput"
+created_at = "2026-07-24T00:00:00Z"
+updated_at = "2026-07-24T00:00:00Z"
+last_activity_at = "2026-07-24T00:00:00Z"
+display_name = "Codex"
+"#;
+        let loaded: Session = toml::from_str(legacy).expect("deserialize legacy Session");
+        assert!(
+            loaded.execution_binding.is_none(),
+            "legacy and Inspection Resume sessions must remain non-producing"
+        );
+        assert!(
+            !toml::to_string(&loaded)
+                .expect("serialize legacy Session")
+                .contains("execution_binding"),
+            "optional projection must not be synthesized during a legacy read"
+        );
+    }
+
+    #[test]
+    fn session_execution_binding_roundtrips_without_schema_bump_and_is_secret_free() {
+        let mut session = session_with_execution_owner();
+        let session_schema_version = session.schema_version;
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind exact Session/owner/repository identity");
+
+        let serialized = toml::to_string_pretty(&session).expect("serialize bound Session");
+        let value: toml::Value = toml::from_str(&serialized).expect("parse Session TOML");
+        let table = value
+            .get("execution_binding")
+            .and_then(toml::Value::as_table)
+            .expect("execution binding table");
+        let mut top_level_keys = table.keys().map(String::as_str).collect::<Vec<_>>();
+        top_level_keys.sort_unstable();
+        assert_eq!(
+            top_level_keys,
+            vec![
+                "capability_generation",
+                "identity",
+                "owner_kind",
+                "owner_number",
+                "repo_hash",
+                "schema_version",
+                "session_id",
+            ],
+            "durable binding must contain only the exact non-secret allowlist"
+        );
+        let identity = table
+            .get("identity")
+            .and_then(toml::Value::as_table)
+            .expect("execution identity table");
+        let mut identity_keys = identity.keys().map(String::as_str).collect::<Vec<_>>();
+        identity_keys.sort_unstable();
+        assert_eq!(
+            identity_keys,
+            vec!["binding_id", "generation_id", "ledger_head_hash"]
+        );
+        for forbidden in [
+            "bearer",
+            "forward_token",
+            "conversation",
+            "host_url",
+            "socket",
+            "nonce",
+        ] {
+            assert!(
+                !serialized.to_ascii_lowercase().contains(forbidden),
+                "binding projection leaked forbidden field {forbidden}: {serialized}"
+            );
+        }
+
+        let loaded: Session = toml::from_str(&serialized).expect("roundtrip bound Session");
+        assert_eq!(loaded.execution_binding.as_ref(), Some(&binding));
+        assert_eq!(loaded.schema_version, session_schema_version);
+    }
+
+    #[test]
+    fn persist_session_execution_binding_is_atomic_idempotent_and_preserves_history() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.agent_session_id = Some("conversation-current".to_string());
+        session.session_history.push(AgentSessionHistoryEntry {
+            agent_session_id: "conversation-current".to_string(),
+            started_at: Utc::now(),
+        });
+        session.record_hook_event("UserPromptSubmit");
+        let expected_history = session.session_history.clone();
+        let expected_hook = session.last_hook_event.clone();
+        let binding = test_session_execution_binding(&session);
+        let session_id = session.id.clone();
+        session.save(dir.path()).expect("save Session");
+
+        persist_session_execution_binding(dir.path(), &session_id, Some(binding.clone()))
+            .expect("persist execution binding");
+        let path = dir.path().join(format!("{session_id}.toml"));
+        let first = fs::read_to_string(&path).expect("read first binding write");
+        persist_session_execution_binding(dir.path(), &session_id, Some(binding.clone()))
+            .expect("duplicate binding write is idempotent");
+        let second = fs::read_to_string(&path).expect("read duplicate binding write");
+        assert_eq!(
+            first, second,
+            "exact duplicate must not mutate Session TOML"
+        );
+
+        let loaded = Session::load(&path).expect("reload bound Session");
+        assert_eq!(loaded.execution_binding.as_ref(), Some(&binding));
+        assert_eq!(loaded.session_history, expected_history);
+        assert_eq!(loaded.last_hook_event, expected_hook);
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("read sessions dir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-")),
+            "atomic persistence must not leave temporary Session files"
+        );
+
+        persist_session_execution_binding(dir.path(), &session_id, None)
+            .expect("clear producing binding for Inspection Resume");
+        assert!(Session::load(&path)
+            .expect("reload cleared Session")
+            .execution_binding
+            .is_none());
+    }
+
+    #[test]
+    fn persist_session_execution_binding_rejects_session_repo_owner_and_identity_mismatch() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let session = session_with_execution_owner();
+        let session_id = session.id.clone();
+        session.save(dir.path()).expect("save Session");
+        let path = dir.path().join(format!("{session_id}.toml"));
+        let original = fs::read_to_string(&path).expect("read original Session");
+
+        let mut cases = Vec::new();
+        let mut wrong_session = test_session_execution_binding(&session);
+        wrong_session.session_id = "different-session".to_string();
+        cases.push(("session", wrong_session));
+        let mut wrong_repo = test_session_execution_binding(&session);
+        wrong_repo.repo_hash = "different-repo".to_string();
+        cases.push(("repository", wrong_repo));
+        let mut wrong_owner = test_session_execution_binding(&session);
+        wrong_owner.owner_number = 3248;
+        cases.push(("owner", wrong_owner));
+        let mut wrong_kind = test_session_execution_binding(&session);
+        wrong_kind.owner_kind = "workspace".to_string();
+        cases.push(("owner kind", wrong_kind));
+        let mut missing_generation = test_session_execution_binding(&session);
+        missing_generation.identity.generation_id = " ".to_string();
+        cases.push(("generation", missing_generation));
+        let mut missing_binding = test_session_execution_binding(&session);
+        missing_binding.identity.binding_id.clear();
+        cases.push(("binding", missing_binding));
+        let mut missing_head = test_session_execution_binding(&session);
+        missing_head.identity.ledger_head_hash.clear();
+        cases.push(("ledger head", missing_head));
+        let mut zero_capability = test_session_execution_binding(&session);
+        zero_capability.capability_generation = 0;
+        cases.push(("capability", zero_capability));
+
+        for (expected, invalid) in cases {
+            let error = persist_session_execution_binding(dir.path(), &session_id, Some(invalid))
+                .expect_err("mismatched binding must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} diagnostic, got {error}"
+            );
+            assert_eq!(
+                fs::read_to_string(&path).expect("read unchanged Session"),
+                original,
+                "rejected binding must preserve Session bytes"
+            );
+        }
     }
 
     #[test]
