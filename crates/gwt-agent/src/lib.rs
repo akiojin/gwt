@@ -56,15 +56,17 @@ pub use presets::{
     PresetDefinition, PresetError, PresetId,
 };
 pub use session::{
-    persist_agent_session_id, persist_session_completed_stop, persist_session_execution_binding,
-    persist_session_hook_event, persist_session_restore_window_on_startup, persist_session_status,
-    reset_runtime_state_dir, reset_runtime_state_dir_for_pid, rotate_session_execution_capability,
+    current_thread_holds_session_lease, persist_agent_session_id, persist_session_completed_stop,
+    persist_session_execution_binding, persist_session_hook_event,
+    persist_session_restore_window_on_startup, persist_session_status, reset_runtime_state_dir,
+    reset_runtime_state_dir_for_pid, rotate_session_execution_capability,
     runtime_state_dir_for_pid, runtime_state_path, runtime_state_path_for_pid,
     sessions_dir_from_runtime_path, update_session, validate_docker_runtime_worktree_path,
-    validate_session_id_path_component, AgentSessionHistoryEntry, DockerRuntimeBinding,
-    ExecutionBindingIdentity, PendingDiscussionResume, Session, SessionExecutionBinding,
-    SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    validate_session_id_path_component, with_session_lease, with_session_lease_wait,
+    AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionBindingIdentity,
+    PendingDiscussionResume, Session, SessionExecutionBinding, SessionRuntimeState,
+    GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV,
+    GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

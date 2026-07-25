@@ -5,6 +5,7 @@ use std::{
     io,
     io::Write,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -23,6 +24,44 @@ use crate::{
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
 const CODEX_PLACEHOLDER_SESSION_ID: &str = "agent-session";
+const SESSION_LEASE_WAIT: Duration = Duration::from_secs(2);
+const SESSION_LEASE_POLL: Duration = Duration::from_millis(25);
+
+std::thread_local! {
+    static SESSION_LEASE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct SessionLeaseThreadGuard;
+
+impl SessionLeaseThreadGuard {
+    fn enter() -> io::Result<Self> {
+        SESSION_LEASE_DEPTH.with(|depth| {
+            if depth.get() != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "nested Session lease is refused; retry after the current Session operation",
+                ));
+            }
+            depth.set(1);
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for SessionLeaseThreadGuard {
+    fn drop(&mut self) {
+        SESSION_LEASE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Return whether this thread already holds a Session persistence lease.
+///
+/// Owner+Session transactions use this to reject the reverse Session→owner
+/// acquisition order before taking the owner lease.
+#[doc(hidden)]
+pub fn current_thread_holds_session_lease() -> bool {
+    SESSION_LEASE_DEPTH.with(|depth| depth.get() != 0)
+}
 
 /// Environment variable injected into agent PTYs so hooks can identify the
 /// backing gwt session.
@@ -655,6 +694,7 @@ fn with_session_lock<T, F>(dir: &Path, session_id: &str, action: F) -> io::Resul
 where
     F: FnOnce() -> io::Result<T>,
 {
+    let _thread_guard = SessionLeaseThreadGuard::enter()?;
     fs::create_dir_all(dir)?;
     let lock_path = session_lock_path(dir, session_id);
     let lock_file = OpenOptions::new()
@@ -670,6 +710,80 @@ where
         Err(unlock_error) => match result {
             Ok(_) => Err(unlock_error),
             Err(action_error) => Err(action_error),
+        },
+    }
+}
+
+/// Hold the per-Session lease while reading one exact durable Session and
+/// running an already-authorized operation.
+///
+/// This is an exclusive, bounded lease because capability rotation and
+/// Session persistence use the same lock file. Callers combining this with an
+/// owner ledger lease must acquire the owner lease first and must not persist
+/// the same Session from `operation`.
+pub fn with_session_lease<T, F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    operation: F,
+) -> io::Result<T>
+where
+    F: FnOnce(&Session) -> io::Result<T>,
+{
+    with_session_lease_wait(sessions_dir, session_id, SESSION_LEASE_WAIT, operation)
+}
+
+/// [`with_session_lease`] with an explicit wait bound for retry-aware callers
+/// and deterministic contention tests.
+pub fn with_session_lease_wait<T, F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    wait: Duration,
+    operation: F,
+) -> io::Result<T>
+where
+    F: FnOnce(&Session) -> io::Result<T>,
+{
+    let _thread_guard = SessionLeaseThreadGuard::enter()?;
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    fs::create_dir_all(sessions_dir)?;
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(session_lock_path(sessions_dir, session_id))?;
+    let deadline = Instant::now() + wait;
+    let is_contended = |error: &io::Error| {
+        error.kind() == io::ErrorKind::WouldBlock
+            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+    };
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if is_contended(&error) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Session lease is held by another gwt operation; retry after it settles",
+                    ));
+                }
+                std::thread::sleep(SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let session = Session::load(&session_file_path(sessions_dir, session_id));
+    let result = match session {
+        Ok(session) => operation(&session),
+        Err(error) => Err(error),
+    };
+    match lock_file.unlock() {
+        Ok(()) => result,
+        Err(unlock_error) => match result {
+            Ok(_) => Err(unlock_error),
+            Err(operation_error) => Err(operation_error),
         },
     }
 }
@@ -1396,6 +1510,120 @@ display_name = "Codex"
             fs::read_to_string(&unbound_path).expect("read unchanged unbound Session"),
             before
         );
+    }
+
+    #[test]
+    fn session_lease_holds_epoch_rotation_until_authorized_operation_finishes() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let session = session_with_execution_owner();
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session.save(dir.path()).expect("save Session");
+        persist_session_execution_binding(dir.path(), &session_id, Some(initial.clone()))
+            .expect("persist initial binding");
+
+        let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
+        let sessions_dir = dir.path().to_path_buf();
+        let leased_session_id = session_id.clone();
+        let leased_binding = initial.clone();
+        let lease_worker = std::thread::spawn(move || {
+            with_session_lease_wait(
+                &sessions_dir,
+                &leased_session_id,
+                std::time::Duration::from_secs(1),
+                |locked| {
+                    assert_eq!(
+                        locked.execution_binding.as_ref(),
+                        Some(&leased_binding),
+                        "the leased read must observe the exact producing epoch"
+                    );
+                    lease_acquired_tx.send(()).expect("signal Session lease");
+                    release_lease_rx.recv().expect("release Session lease");
+                    Ok(())
+                },
+            )
+            .expect("leased operation")
+        });
+        lease_acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Session lease acquired");
+
+        let (rotation_tx, rotation_rx) = std::sync::mpsc::sync_channel(1);
+        let sessions_dir = dir.path().to_path_buf();
+        let rotated_session_id = session_id.clone();
+        let rotation_worker = std::thread::spawn(move || {
+            let rotated = rotate_session_execution_capability(&sessions_dir, &rotated_session_id);
+            rotation_tx.send(rotated).expect("report Host rotation");
+        });
+        assert!(
+            rotation_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "Host epoch rotation must wait while an authorized operation holds the Session lease"
+        );
+
+        release_lease_tx.send(()).expect("release Session lease");
+        lease_worker.join().expect("join leased operation");
+        let rotated = rotation_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Host rotation resumes")
+            .expect("rotate Host epoch");
+        rotation_worker.join().expect("join Host rotation");
+        assert_eq!(
+            rotated.capability_generation,
+            initial.capability_generation + 1
+        );
+    }
+
+    #[test]
+    fn session_lease_contention_returns_retryable_timeout_then_succeeds() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let session = session_with_execution_owner();
+        let session_id = session.id.clone();
+        session.save(dir.path()).expect("save Session");
+
+        let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
+        let sessions_dir = dir.path().to_path_buf();
+        let leased_session_id = session_id.clone();
+        let lease_worker = std::thread::spawn(move || {
+            with_session_lease_wait(
+                &sessions_dir,
+                &leased_session_id,
+                std::time::Duration::from_secs(1),
+                |_| {
+                    lease_acquired_tx.send(()).expect("signal Session lease");
+                    release_lease_rx.recv().expect("release Session lease");
+                    Ok(())
+                },
+            )
+            .expect("hold Session lease")
+        });
+        lease_acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("Session lease acquired");
+
+        let timeout = with_session_lease_wait(
+            dir.path(),
+            &session_id,
+            std::time::Duration::from_millis(25),
+            |_| Ok(()),
+        )
+        .expect_err("contended Session lease must return a bounded retry error");
+        assert_eq!(timeout.kind(), io::ErrorKind::WouldBlock);
+        assert!(timeout.to_string().contains("retry"));
+        assert!(!timeout.to_string().contains(&session_id));
+
+        release_lease_tx.send(()).expect("release Session lease");
+        lease_worker.join().expect("join Session lease holder");
+        with_session_lease_wait(
+            dir.path(),
+            &session_id,
+            std::time::Duration::from_millis(100),
+            |_| Ok(()),
+        )
+        .expect("retry succeeds after the concurrent lease is released");
     }
 
     #[test]

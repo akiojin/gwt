@@ -33,6 +33,7 @@ use std::{
     fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -55,6 +56,7 @@ const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
 const GENERATION_BINDING_MISMATCH_PREFIX: &str = "generation settlement binding mismatch:";
+const ACTIVE_BINDING_LEASE_WAIT: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1489,7 +1491,19 @@ pub fn current_active_execution_binding_matches(
         Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(false),
         Err(error) => return Err(error),
     };
-    let Some(ledger) = load_generation_ledger_from_context(&context)? else {
+    current_active_execution_binding_matches_context(
+        &context,
+        expected_session_id,
+        expected_identity,
+    )
+}
+
+fn current_active_execution_binding_matches_context(
+    context: &GenerationTransactionContext,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let Some(ledger) = load_generation_ledger_from_context(context)? else {
         return Ok(false);
     };
     let current = ledger.current_generation().ok_or_else(|| {
@@ -1510,6 +1524,97 @@ pub fn current_active_execution_binding_matches(
             })?;
     Ok(projection.primary_session_id == expected_session_id
         && execution_binding_for_generation(&ledger, current) == *expected_identity)
+}
+
+/// Execute one producing operation while its owner generation and durable
+/// Session capability epoch are both leased.
+///
+/// The acquisition order is always owner → Session. The caller may acquire a
+/// process-local capability registry lock inside `operation`, yielding the
+/// full owner → Session → registry → mutation order.
+pub fn with_current_active_execution_binding_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_active_execution_binding_lease_wait(
+        sessions_dir,
+        expected,
+        ACTIVE_BINDING_LEASE_WAIT,
+        operation,
+    )
+}
+
+/// [`with_current_active_execution_binding_lease`] with a bounded Session
+/// wait for retry-aware callers and deterministic contention tests.
+pub fn with_current_active_execution_binding_lease_wait<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    session_wait: Duration,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "owner lease must be acquired before the Session lease; retry outside the nested Session operation",
+        ));
+    }
+    if gwt_agent::validate_session_id_path_component(&expected.session_id).is_err() {
+        return Ok(None);
+    }
+    let owner = match expected.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: expected.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: expected.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let session_path = sessions_dir.join(format!("{}.toml", expected.session_id));
+    let route_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => session,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if route_session.execution_binding.as_ref() != Some(expected) {
+        return Ok(None);
+    }
+    let context = match GenerationTransactionContext::resolve(&route_session.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    with_resolved_generation_owner_lease(&context, |context| {
+        gwt_agent::with_session_lease_wait(
+            sessions_dir,
+            &expected.session_id,
+            session_wait,
+            |session| {
+                let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
+                    Ok(path) => path,
+                    Err(_) => return Ok(None),
+                };
+                if session.id != expected.session_id
+                    || session.execution_binding.as_ref() != Some(expected)
+                    || session.repo_hash.as_deref() != Some(expected.repo_hash.as_str())
+                    || session.linked_issue_number != Some(expected.owner_number)
+                    || canonical_worktree != context.worktree
+                    || !current_active_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &expected.identity,
+                    )?
+                {
+                    return Ok(None);
+                }
+                Ok(Some(operation()))
+            },
+        )
+    })
 }
 
 /// Reachable repair guidance for an integrity failure. Adoption can rewrite
@@ -4904,6 +5009,190 @@ mod tests {
             &terminal_binding,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn leased_active_binding_fences_epoch_rotation_before_operation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let identity = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, "session-original", identity);
+        let session_path = gwt_core::paths::gwt_sessions_dir().join("session-original.toml");
+        let expected = gwt_agent::Session::load(&session_path)
+            .unwrap()
+            .execution_binding
+            .unwrap();
+        let dispatches = std::cell::Cell::new(0_u8);
+
+        let current = with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected,
+            || {
+                dispatches.set(dispatches.get() + 1);
+                "current"
+            },
+        )
+        .unwrap();
+        assert_eq!(current, Some("current"));
+        assert_eq!(dispatches.get(), 1);
+
+        gwt_agent::rotate_session_execution_capability(
+            &gwt_core::paths::gwt_sessions_dir(),
+            "session-original",
+        )
+        .unwrap();
+        let stale = with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected,
+            || {
+                dispatches.set(dispatches.get() + 1);
+                "stale"
+            },
+        )
+        .unwrap();
+        assert_eq!(stale, None);
+        assert_eq!(
+            dispatches.get(),
+            1,
+            "an old Host epoch must be rejected before its operation closure"
+        );
+    }
+
+    #[test]
+    fn leased_active_binding_times_out_session_contention_and_retries_without_stranding_owner() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let identity = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, "session-original", identity);
+        let expected = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join("session-original.toml"),
+        )
+        .unwrap()
+        .execution_binding
+        .unwrap();
+
+        let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let holder = std::thread::spawn(move || {
+            gwt_agent::with_session_lease_wait(
+                &sessions_dir,
+                "session-original",
+                std::time::Duration::from_secs(1),
+                |_| {
+                    lease_acquired_tx.send(()).unwrap();
+                    release_lease_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap()
+        });
+        lease_acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let error = with_current_active_execution_binding_lease_wait(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected,
+            std::time::Duration::from_millis(25),
+            || "must-not-run",
+        )
+        .expect_err("Session contention must return a bounded retry error");
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert!(error.to_string().contains("retry"));
+        assert!(!error.to_string().contains("session-original"));
+        with_generation_owner_lease(dir.path(), owner, |_| Ok(()))
+            .expect("Session timeout must release the owner lease before returning");
+
+        release_lease_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let retried = with_current_active_execution_binding_lease_wait(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &expected,
+            std::time::Duration::from_millis(100),
+            || "retried",
+        )
+        .unwrap();
+        assert_eq!(retried, Some("retried"));
+    }
+
+    #[test]
+    fn leased_active_binding_refuses_session_to_owner_reverse_nesting() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let identity = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, "session-original", identity);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let expected = gwt_agent::Session::load(&sessions_dir.join("session-original.toml"))
+            .unwrap()
+            .execution_binding
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let error = gwt_agent::with_session_lease_wait(
+            &sessions_dir,
+            "session-original",
+            std::time::Duration::from_secs(1),
+            |_| {
+                with_current_active_execution_binding_lease_wait(
+                    &sessions_dir,
+                    &expected,
+                    std::time::Duration::from_secs(1),
+                    || (),
+                )
+                .map(|_| ())
+            },
+        )
+        .expect_err("Session-to-owner reverse nesting must be refused");
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert!(error.to_string().contains("owner lease"));
+        assert!(error.to_string().contains("before the Session lease"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "reverse nesting must fail immediately rather than waiting for its own Session lock"
+        );
     }
 
     #[test]

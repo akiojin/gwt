@@ -2620,6 +2620,116 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+fn materialize_active_agent_pane_binding(
+    project: &Path,
+    session_id: &str,
+) -> gwt_agent::SessionExecutionBinding {
+    fs::create_dir_all(project).expect("create repository fixture");
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/acme/pane-lease.git",
+        ],
+        vec!["commit", "--allow-empty", "-m", "initial"],
+    ] {
+        let output =
+            gwt_core::process::run_git_logged(&args, Some(project)).expect("run fixture git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let mut session =
+        gwt_agent::Session::new(project, "work/pane-lease", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(project.to_path_buf());
+    session.linked_issue_number = Some(owner.number);
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save durable Session");
+    gwt::cli::execution_state::materialize_at_launch(
+        project,
+        owner.kind,
+        owner.number,
+        session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize active execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        project,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize owner generation ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(project, owner)
+        .expect("read active execution identity")
+        .expect("active generation identity");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: session.repo_hash.clone().expect("Session repository hash"),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind durable Session");
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("persist active binding");
+    binding
+}
+
+fn active_bound_agent_pane_runtime(
+    temp_root: &Path,
+    project: &Path,
+    session_id: &str,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> (
+    AppRuntime,
+    crate::embedded_server::AgentCapabilityIssuer,
+    crate::embedded_server::AgentCapabilityGrant,
+) {
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some(session_id.to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp_root, vec![tab], Some("tab-project"));
+    insert_test_pane_runtime(&mut runtime, "tab-project::agent-project");
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let target = issuer
+        .issue_bound(project, session_id, binding.clone())
+        .expect("issue active pane capability");
+    let grant = issuer
+        .grant_for_test(&target.token)
+        .expect("active pane grant");
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    (runtime, issuer, grant)
+}
+
 #[test]
 fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dispatch() {
     let temp = tempdir().expect("tempdir");
@@ -2680,6 +2790,129 @@ fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dis
         ),
         "a process-local current token with stale durable authority must fail closed"
     );
+}
+
+#[test]
+fn bound_agent_pane_rotation_after_precheck_rejects_before_pty_write() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated HOME");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    let binding = materialize_active_agent_pane_binding(&project, "session-pane-race");
+    let (mut runtime, _issuer, grant) = active_bound_agent_pane_runtime(
+        &temp.path().join("runtime"),
+        &project,
+        "session-pane-race",
+        &binding,
+    );
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (rotation_tx, rotation_rx) = std::sync::mpsc::sync_channel(1);
+    super::set_agent_after_durable_check_test_hook(move || {
+        let rotated =
+            gwt_agent::rotate_session_execution_capability(&sessions_dir, "session-pane-race");
+        rotation_tx.send(rotated).expect("report Host rotation");
+    });
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-reach-pty\r".to_string(),
+        },
+    );
+
+    rotation_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("durable-check race hook runs")
+        .expect("rotate Host epoch");
+    assert!(
+        matches!(
+            outcome,
+            super::AgentFrontendDispatchOutcome::StaleCapability
+        ),
+        "a Host rotation between the preliminary check and leased dispatch must reject before PTY mutation"
+    );
+}
+
+#[test]
+fn bound_agent_pane_write_holds_epoch_lease_until_actual_pty_mutation_finishes() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated HOME");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    let binding = materialize_active_agent_pane_binding(&project, "session-pane-write");
+    let initial_epoch = binding.capability_generation;
+    let (mut runtime, _issuer, grant) = active_bound_agent_pane_runtime(
+        &temp.path().join("runtime"),
+        &project,
+        "session-pane-write",
+        &binding,
+    );
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (rotation_started_tx, rotation_started_rx) = std::sync::mpsc::sync_channel(1);
+    let (rotation_done_tx, rotation_done_rx) = std::sync::mpsc::sync_channel(1);
+    let rotation_done_rx = Arc::new(Mutex::new(rotation_done_rx));
+    let hook_rotation_done_rx = Arc::clone(&rotation_done_rx);
+    super::set_agent_leased_mutation_test_hook(move || {
+        std::thread::spawn(move || {
+            rotation_started_tx
+                .send(())
+                .expect("signal Host rotation attempt");
+            let rotated =
+                gwt_agent::rotate_session_execution_capability(&sessions_dir, "session-pane-write");
+            rotation_done_tx
+                .send(rotated)
+                .expect("report Host rotation result");
+        });
+        rotation_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Host rotation attempted");
+        assert!(
+            hook_rotation_done_rx
+                .lock()
+                .expect("rotation result receiver")
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "Host rotation must wait until the leased PTY mutation returns"
+        );
+    });
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::SendInput {
+            text: "linearized-input\r".to_string(),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(ref events)
+            if matches!(
+                events.as_slice(),
+                [OutboundEvent {
+                    event: BackendEvent::PaneSendResult {
+                        ok: true,
+                        window_id: Some(window_id),
+                        error: None,
+                    },
+                    ..
+                }] if window_id == "tab-project::agent-project"
+            )
+    ));
+    let rotated = rotation_done_rx
+        .lock()
+        .expect("rotation result receiver")
+        .recv_timeout(Duration::from_secs(1))
+        .expect("Host rotation resumes after PTY mutation")
+        .expect("rotate Host epoch");
+    assert_eq!(rotated.capability_generation, initial_epoch + 1);
 }
 
 #[test]

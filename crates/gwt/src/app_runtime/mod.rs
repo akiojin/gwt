@@ -234,6 +234,40 @@ pub(crate) enum AgentFrontendDispatchOutcome {
     ExecutionAuthorityUnavailable,
 }
 
+#[cfg(test)]
+type AgentDispatchTestHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+#[cfg(test)]
+std::thread_local! {
+    static AGENT_AFTER_DURABLE_CHECK_TEST_HOOK: AgentDispatchTestHook =
+        const { AgentDispatchTestHook::new(None) };
+    static AGENT_LEASED_MUTATION_TEST_HOOK: AgentDispatchTestHook =
+        const { AgentDispatchTestHook::new(None) };
+}
+
+#[cfg(test)]
+fn set_agent_after_durable_check_test_hook(hook: impl FnOnce() + 'static) {
+    AGENT_AFTER_DURABLE_CHECK_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+#[cfg(test)]
+fn set_agent_leased_mutation_test_hook(hook: impl FnOnce() + 'static) {
+    AGENT_LEASED_MUTATION_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+#[cfg(test)]
+fn run_agent_dispatch_test_hook(slot: &'static std::thread::LocalKey<AgentDispatchTestHook>) {
+    slot.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 impl OutboundEvent {
     pub(crate) fn broadcast(event: BackendEvent) -> Self {
         Self {
@@ -2684,7 +2718,9 @@ impl AppRuntime {
             );
             return AgentFrontendDispatchOutcome::StaleCapability;
         }
-        if grant.principal().authorizes_producing_mutation() && request.mutates_host_state() {
+        let durable_mutation =
+            grant.principal().authorizes_producing_mutation() && request.mutates_host_state();
+        if durable_mutation {
             match issuer.durable_authority(&grant) {
                 AgentDurableAuthority::Current => {}
                 AgentDurableAuthority::Stale | AgentDurableAuthority::ObservationOnly => {
@@ -2702,7 +2738,54 @@ impl AppRuntime {
                     return AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable;
                 }
             }
+            #[cfg(test)]
+            run_agent_dispatch_test_hook(&AGENT_AFTER_DURABLE_CHECK_TEST_HOOK);
+            if request.requires_producing_authority() {
+                let binding = grant
+                    .principal()
+                    .active_execution_binding()
+                    .expect("producing principal carries an active binding")
+                    .clone();
+                return match gwt::cli::execution_state::with_current_active_execution_binding_lease(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &binding,
+                    || {
+                        #[cfg(test)]
+                        run_agent_dispatch_test_hook(&AGENT_LEASED_MUTATION_TEST_HOOK);
+                        self.dispatch_agent_frontend_event_with_current_grant(
+                            &issuer, client_id, grant, request,
+                        )
+                    },
+                ) {
+                    Ok(Some(outcome)) => outcome,
+                    Ok(None) => {
+                        tracing::warn!(
+                            target: "gwt_security",
+                            "queued agent pane request rejected after leased execution authority changed"
+                        );
+                        AgentFrontendDispatchOutcome::StaleCapability
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "gwt_security",
+                            "queued agent pane request rejected because leased execution authority is unavailable"
+                        );
+                        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
+                    }
+                };
+            }
         }
+
+        self.dispatch_agent_frontend_event_with_current_grant(&issuer, client_id, grant, request)
+    }
+
+    fn dispatch_agent_frontend_event_with_current_grant(
+        &mut self,
+        issuer: &AgentCapabilityIssuer,
+        client_id: ClientId,
+        grant: AgentCapabilityGrant,
+        request: AgentFrontendRequest,
+    ) -> AgentFrontendDispatchOutcome {
         match request {
             AgentFrontendRequest::CloseWindow {
                 id,
