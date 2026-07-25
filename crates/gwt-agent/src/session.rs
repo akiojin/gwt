@@ -337,6 +337,19 @@ impl Session {
         if self.execution_binding == binding {
             return Ok(());
         }
+        if let (Some(current), Some(next)) = (self.execution_binding.as_ref(), binding.as_ref()) {
+            if next.capability_generation < current.capability_generation {
+                return Err(format!(
+                    "execution binding capability generation downgrade is forbidden: current {}, requested {}",
+                    current.capability_generation, next.capability_generation
+                ));
+            }
+            if next.capability_generation == current.capability_generation {
+                return Err(
+                    "changed execution authority must advance capability generation".to_string(),
+                );
+            }
+        }
         self.execution_binding = binding;
         self.updated_at = Utc::now();
         Ok(())
@@ -1245,6 +1258,40 @@ display_name = "Codex"
             .expect("reload cleared Session")
             .execution_binding
             .is_none());
+    }
+
+    #[test]
+    fn persist_session_execution_binding_rejects_capability_generation_replay_or_downgrade() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let session = session_with_execution_owner();
+        let session_id = session.id.clone();
+        let current = test_session_execution_binding(&session);
+        session.save(dir.path()).expect("save Session");
+        persist_session_execution_binding(dir.path(), &session_id, Some(current.clone()))
+            .expect("persist current capability generation");
+        let path = dir.path().join(format!("{session_id}.toml"));
+        let bound_bytes = fs::read_to_string(&path).expect("read current binding");
+
+        let mut replayed_epoch = current.clone();
+        replayed_epoch.identity.ledger_head_hash = "different-ledger-head".to_string();
+        let replay_error =
+            persist_session_execution_binding(dir.path(), &session_id, Some(replayed_epoch))
+                .expect_err("changed authority must advance capability generation");
+        assert_eq!(replay_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(replay_error.to_string().contains("advance"));
+
+        let mut downgraded = current;
+        downgraded.capability_generation -= 1;
+        let downgrade_error =
+            persist_session_execution_binding(dir.path(), &session_id, Some(downgraded))
+                .expect_err("capability generation downgrade must fail closed");
+        assert_eq!(downgrade_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(downgrade_error.to_string().contains("downgrade"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("read unchanged Session"),
+            bound_bytes,
+            "epoch replay/downgrade rejection must preserve Session bytes"
+        );
     }
 
     #[test]
