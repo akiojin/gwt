@@ -44,7 +44,16 @@ use super::CliEnv;
 /// Worktree-relative path of the Execution Control Record's mirror (the
 /// authoritative copy lives in the repo-scoped trusted store, P9b).
 pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-control.json";
+/// Worktree-local mirror of the trusted link from a worktree projection to
+/// its owner-scoped generation. The link deliberately lives outside the flat
+/// ECR schema: an older typed writer may strip unknown ECR fields, but cannot
+/// silently rewrite this independently hashed record.
+pub const EXECUTION_GENERATION_POINTER_STATE_RELATIVE: &str =
+    ".gwt/skill-state/execution-generation-pointer.json";
 const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
+const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
+const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
+const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
 
 /// Linked owner kind. A `gwt-spec`-labeled Issue is a SPEC owner; everything
 /// else is a plain Issue owner.
@@ -155,6 +164,219 @@ pub struct ExecutionControlRecord {
     /// guard independently blocks agent edits to this file).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+}
+
+/// Stable owner key within one canonical repository identity.
+///
+/// Repository identity is represented by the parent trusted-store directory,
+/// so the serialized key contains only the linked Issue/SPEC identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionOwnerKey {
+    pub kind: ExecutionOwnerKind,
+    pub number: u64,
+}
+
+impl ExecutionOwnerKey {
+    fn storage_key(self) -> String {
+        format!("{}-{}", self.kind.as_str(), self.number)
+    }
+}
+
+/// Immutable identity/header for one Execution generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionGenerationIdentity {
+    pub owner: ExecutionOwnerKey,
+    pub generation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_content_hash: Option<String>,
+    /// Opaque, non-secret binding identifier. Capability material must never
+    /// be persisted in the ledger.
+    pub session_binding_id: String,
+    pub initial_session_id: String,
+    pub worktree_binding_hash: String,
+    pub entrypoint: String,
+    pub activated_at: DateTime<Utc>,
+}
+
+/// Immutable snapshot created at generation activation/import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionGeneration {
+    pub identity: ExecutionGenerationIdentity,
+    pub status: ExecutionControlStatus,
+    /// Exact canonical ECR projection at import/activation time. In
+    /// particular, terminal legacy imports retain these bytes unchanged.
+    pub execution_control_json: String,
+    /// Hash over this generation with this field emptied.
+    pub content_hash: String,
+}
+
+/// Input identity for an idempotent successor operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuccessorRequest {
+    pub operation_id: String,
+    pub principal_id: String,
+    pub source: String,
+    pub session_binding_id: String,
+    pub initial_session_id: String,
+    pub entrypoint: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationAttemptStatus {
+    Prepared,
+    Aborted,
+    Activated,
+}
+
+/// Append-only successor-attempt event. Prepared/Aborted events are audit
+/// records only and can never become the ledger's current generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationAttempt {
+    pub request: SuccessorRequest,
+    pub predecessor: ExecutionGenerationIdentity,
+    pub predecessor_generation_content_hash: String,
+    pub candidate_generation_id: String,
+    pub status: ContinuationAttemptStatus,
+    pub recorded_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_generation: Option<ExecutionGenerationIdentity>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous_attempt_hash: String,
+    pub content_hash: String,
+}
+
+/// Audited stale-owner transfer that keeps the same generation identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationTakeoverAudit {
+    pub sequence: u64,
+    pub generation_id: String,
+    pub from_session_id: String,
+    pub to_session_id: String,
+    pub reason: String,
+    pub observed_at: DateTime<Utc>,
+    pub execution_control_json: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous_event_hash: String,
+    pub content_hash: String,
+}
+
+/// Append-only lifecycle transition for one immutable generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationLifecycleEvent {
+    pub sequence: u64,
+    pub generation_id: String,
+    pub from_status: ExecutionControlStatus,
+    pub to_status: ExecutionControlStatus,
+    pub session_id: String,
+    pub reason: String,
+    pub recorded_at: DateTime<Utc>,
+    pub execution_control_json: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous_event_hash: String,
+    pub content_hash: String,
+}
+
+/// Versioned owner-scoped append-only generation ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionGenerationLedger {
+    pub schema_version: u32,
+    pub owner: ExecutionOwnerKey,
+    pub generations: Vec<ExecutionGeneration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_attempts: Vec<ContinuationAttempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takeovers: Vec<GenerationTakeoverAudit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifecycle_events: Vec<GenerationLifecycleEvent>,
+    pub current_generation_id: String,
+    pub content_hash: String,
+}
+
+impl ExecutionGenerationLedger {
+    #[must_use]
+    pub fn current_generation(&self) -> Option<&ExecutionGeneration> {
+        self.generations
+            .iter()
+            .find(|generation| generation.identity.generation_id == self.current_generation_id)
+    }
+
+    fn lifecycle_events_for<'a>(
+        &'a self,
+        generation_id: &'a str,
+    ) -> impl Iterator<Item = &'a GenerationLifecycleEvent> + 'a {
+        self.lifecycle_events
+            .iter()
+            .filter(move |event| event.generation_id == generation_id)
+    }
+
+    fn effective_status_for(&self, generation: &ExecutionGeneration) -> ExecutionControlStatus {
+        self.lifecycle_events_for(&generation.identity.generation_id)
+            .max_by_key(|event| event.sequence)
+            .map_or(generation.status, |event| event.to_status)
+    }
+
+    fn effective_projection_for<'a>(&'a self, generation: &'a ExecutionGeneration) -> &'a str {
+        let lifecycle = self
+            .lifecycle_events_for(&generation.identity.generation_id)
+            .map(|event| (event.sequence, event.execution_control_json.as_str()));
+        let takeovers = self
+            .takeovers
+            .iter()
+            .filter(|event| event.generation_id == generation.identity.generation_id)
+            .map(|event| (event.sequence, event.execution_control_json.as_str()));
+        lifecycle
+            .chain(takeovers)
+            .max_by_key(|(sequence, _)| *sequence)
+            .map_or(generation.execution_control_json.as_str(), |(_, json)| json)
+    }
+
+    #[must_use]
+    pub fn current_effective_status(&self) -> Option<ExecutionControlStatus> {
+        self.current_generation()
+            .map(|generation| self.effective_status_for(generation))
+    }
+
+    fn next_generation_event_sequence(&self) -> u64 {
+        self.lifecycle_events
+            .iter()
+            .map(|event| event.sequence)
+            .chain(self.takeovers.iter().map(|event| event.sequence))
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+}
+
+/// Caller-provided classification for a verified legacy Active record.
+///
+/// Unknown (and every hashless Active record) is a zero-mutation,
+/// backfill-required refusal. A stale takeover appends audit data while
+/// retaining the imported generation identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyActiveDisposition {
+    Live,
+    Stale {
+        new_session_id: String,
+        reason: String,
+        observed_at: DateTime<Utc>,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ExecutionGenerationPointer {
+    schema_version: u32,
+    owner: ExecutionOwnerKey,
+    current_generation_id: String,
+    current_generation_content_hash: String,
+    projection_content_hash: String,
+    content_hash: String,
 }
 
 /// Compute the integrity hash for a record (content with the hash field
@@ -305,6 +527,714 @@ pub fn integrity_ok(record: &ExecutionControlRecord) -> bool {
         })
 }
 
+fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes.as_ref()))
+}
+
+fn compute_generation_hash(generation: &ExecutionGeneration) -> String {
+    let mut canonical = generation.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
+fn compute_continuation_attempt_hash(attempt: &ContinuationAttempt) -> String {
+    let mut canonical = attempt.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
+fn compute_takeover_event_hash(event: &GenerationTakeoverAudit) -> String {
+    let mut canonical = event.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
+fn compute_lifecycle_event_hash(event: &GenerationLifecycleEvent) -> String {
+    let mut canonical = event.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
+fn compute_generation_ledger_hash(ledger: &ExecutionGenerationLedger) -> String {
+    let mut canonical = ledger.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
+fn compute_generation_pointer_hash(pointer: &ExecutionGenerationPointer) -> String {
+    let mut canonical = pointer.clone();
+    canonical.content_hash.clear();
+    sha256_hex(serde_json::to_vec(&canonical).unwrap_or_default())
+}
+
+fn invalid_generation_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, message.into())
+}
+
+fn generation_conflict(message: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::AlreadyExists, message.into())
+}
+
+fn generation_backfill_required(message: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::WouldBlock, message.into())
+}
+
+fn validate_owner(owner: ExecutionOwnerKey) -> io::Result<()> {
+    if owner.number == 0 {
+        return Err(invalid_generation_data(
+            "execution generation owner number must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+fn generation_owner_dir(worktree: &Path, owner: ExecutionOwnerKey) -> io::Result<PathBuf> {
+    validate_owner(owner)?;
+    if let Some(worktree_trusted_dir) =
+        crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+    {
+        let trusted_root = worktree_trusted_dir.parent().ok_or_else(|| {
+            invalid_generation_data(
+                "trusted worktree directory has no repository-scoped trusted parent",
+            )
+        })?;
+        return Ok(trusted_root
+            .join("execution-owners")
+            .join(owner.storage_key()));
+    }
+    Ok(worktree
+        .join(".gwt")
+        .join("skill-state")
+        .join("execution-owners")
+        .join(owner.storage_key()))
+}
+
+#[cfg(test)]
+fn generation_ledger_path(worktree: &Path, owner: ExecutionOwnerKey) -> io::Result<PathBuf> {
+    Ok(generation_owner_dir(worktree, owner)?.join(GENERATION_LEDGER_FILE))
+}
+
+fn generation_pointer_path(worktree: &Path) -> PathBuf {
+    worktree.join(EXECUTION_GENERATION_POINTER_STATE_RELATIVE)
+}
+
+fn read_owner_ledger_from_dir(owner_dir: &Path) -> io::Result<Option<String>> {
+    crate::cli::trusted_store::read_from_resolved_dir(owner_dir, GENERATION_LEDGER_FILE)
+}
+
+fn owner_generation_ledger_exists(worktree: &Path, owner: ExecutionOwnerKey) -> io::Result<bool> {
+    Ok(read_owner_ledger_from_dir(&generation_owner_dir(worktree, owner)?)?.is_some())
+}
+
+fn read_generation_pointer_contents(worktree: &Path) -> io::Result<Option<String>> {
+    if let Some(worktree_trusted_dir) =
+        crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+    {
+        return crate::cli::trusted_store::read_from_resolved_dir(
+            &worktree_trusted_dir,
+            GENERATION_POINTER_FILE,
+        );
+    }
+    match fs::read_to_string(generation_pointer_path(worktree)) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Once a ledger exists, trusted projections never fall back to a mirror.
+/// Missing trusted bytes mean an old/foreign writer raced ledger ownership,
+/// so the generation reader fails closed instead of accepting the mirror.
+fn read_owned_projection_contents(worktree: &Path) -> io::Result<Option<String>> {
+    if let Some(worktree_trusted_dir) =
+        crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+    {
+        return crate::cli::trusted_store::read_from_resolved_dir(
+            &worktree_trusted_dir,
+            "execution-control.json",
+        );
+    }
+    match fs::read_to_string(state_path(worktree)) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn worktree_binding_hash(worktree: &Path) -> String {
+    let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let normalized = canonical
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    #[cfg(windows)]
+    let normalized = normalized.to_lowercase();
+    sha256_hex(normalized)
+}
+
+fn validate_generation_ledger(
+    ledger: &ExecutionGenerationLedger,
+    expected_owner: ExecutionOwnerKey,
+) -> io::Result<()> {
+    if ledger.schema_version != GENERATION_LEDGER_SCHEMA_VERSION {
+        return Err(invalid_generation_data(format!(
+            "unsupported execution generation ledger schema {}",
+            ledger.schema_version
+        )));
+    }
+    if ledger.owner != expected_owner {
+        return Err(invalid_generation_data(
+            "execution generation ledger owner does not match its owner-scoped path",
+        ));
+    }
+    if ledger.content_hash.is_empty()
+        || ledger.content_hash != compute_generation_ledger_hash(ledger)
+    {
+        return Err(invalid_generation_data(
+            "execution generation ledger failed integrity validation",
+        ));
+    }
+    if ledger.generations.is_empty() {
+        return Err(invalid_generation_data(
+            "execution generation ledger has no genesis generation",
+        ));
+    }
+
+    let mut generation_ids = std::collections::HashSet::new();
+    for (index, generation) in ledger.generations.iter().enumerate() {
+        if !generation_ids.insert(generation.identity.generation_id.as_str()) {
+            return Err(invalid_generation_data(
+                "execution generation id appears more than once",
+            ));
+        }
+        if generation.identity.owner != expected_owner
+            || generation.identity.generation_id.trim().is_empty()
+            || generation.identity.session_binding_id.trim().is_empty()
+            || generation.identity.initial_session_id.trim().is_empty()
+            || generation.identity.worktree_binding_hash.trim().is_empty()
+            || generation.identity.entrypoint.trim().is_empty()
+        {
+            return Err(invalid_generation_data(
+                "execution generation contains an incomplete immutable header",
+            ));
+        }
+        if generation.content_hash.is_empty()
+            || generation.content_hash != compute_generation_hash(generation)
+        {
+            return Err(invalid_generation_data(
+                "execution generation failed integrity validation",
+            ));
+        }
+        let snapshot =
+            serde_json::from_str::<ExecutionControlRecord>(&generation.execution_control_json)
+                .map(hydrate_recovery_envelopes)
+                .map_err(|error| {
+                    invalid_generation_data(format!(
+                        "execution generation snapshot is malformed: {error}"
+                    ))
+                })?;
+        if snapshot.owner_kind != expected_owner.kind
+            || snapshot.owner_number != expected_owner.number
+            || snapshot.status != generation.status
+            || !integrity_ok(&snapshot)
+        {
+            return Err(invalid_generation_data(
+                "execution generation snapshot owner/status/integrity does not match its header",
+            ));
+        }
+        if generation.status != ExecutionControlStatus::Active && snapshot.settled_at.is_none() {
+            return Err(invalid_generation_data(
+                "terminal execution generation snapshot has no settlement timestamp",
+            ));
+        }
+        if index == 0 {
+            if generation.identity.predecessor_generation_id.is_some()
+                || generation.identity.predecessor_content_hash.is_some()
+            {
+                return Err(invalid_generation_data(
+                    "genesis execution generation must not name a predecessor",
+                ));
+            }
+        } else {
+            let predecessor = &ledger.generations[index - 1];
+            let predecessor_head = effective_generation_head_hash(ledger, predecessor);
+            if generation.identity.predecessor_generation_id.as_deref()
+                != Some(predecessor.identity.generation_id.as_str())
+                || generation.identity.predecessor_content_hash.as_deref()
+                    != Some(predecessor_head.as_str())
+            {
+                return Err(invalid_generation_data(
+                    "execution generation predecessor id/hash chain is invalid",
+                ));
+            }
+        }
+    }
+
+    let mut previous_attempt_hash = "";
+    let mut operations: std::collections::HashMap<
+        &str,
+        (
+            &SuccessorRequest,
+            &ExecutionGenerationIdentity,
+            &str,
+            ContinuationAttemptStatus,
+        ),
+    > = std::collections::HashMap::new();
+    for attempt in &ledger.continuation_attempts {
+        if attempt.request.operation_id.trim().is_empty()
+            || attempt.request.principal_id.trim().is_empty()
+            || attempt.request.source.trim().is_empty()
+            || attempt.request.session_binding_id.trim().is_empty()
+            || attempt.request.initial_session_id.trim().is_empty()
+            || attempt.request.entrypoint.trim().is_empty()
+            || attempt.candidate_generation_id.trim().is_empty()
+            || attempt
+                .predecessor_generation_content_hash
+                .trim()
+                .is_empty()
+            || attempt.content_hash.is_empty()
+            || attempt.previous_attempt_hash != previous_attempt_hash
+            || attempt.content_hash != compute_continuation_attempt_hash(attempt)
+        {
+            return Err(invalid_generation_data(
+                "continuation attempt chain failed identity/integrity validation",
+            ));
+        }
+        previous_attempt_hash = &attempt.content_hash;
+        match operations.get(attempt.request.operation_id.as_str()) {
+            None => {
+                if attempt.status != ContinuationAttemptStatus::Prepared
+                    || attempt.activated_generation.is_some()
+                    || attempt.reason.is_some()
+                {
+                    return Err(invalid_generation_data(
+                        "continuation operation must begin with one Prepared event",
+                    ));
+                }
+                operations.insert(
+                    attempt.request.operation_id.as_str(),
+                    (
+                        &attempt.request,
+                        &attempt.predecessor,
+                        &attempt.candidate_generation_id,
+                        attempt.status,
+                    ),
+                );
+            }
+            Some((request, predecessor, candidate, previous_status)) => {
+                if *request != &attempt.request
+                    || *predecessor != &attempt.predecessor
+                    || *candidate != attempt.candidate_generation_id
+                    || *previous_status != ContinuationAttemptStatus::Prepared
+                    || attempt.status == ContinuationAttemptStatus::Prepared
+                {
+                    return Err(invalid_generation_data(
+                        "continuation operation id was reused or has a non-append-only lifecycle",
+                    ));
+                }
+                if attempt.status == ContinuationAttemptStatus::Aborted
+                    && (attempt.reason.as_deref().is_none_or(str::is_empty)
+                        || attempt.activated_generation.is_some())
+                {
+                    return Err(invalid_generation_data(
+                        "Aborted continuation attempt is missing its audit reason",
+                    ));
+                }
+                if attempt.status == ContinuationAttemptStatus::Activated {
+                    let activated = attempt.activated_generation.as_ref().ok_or_else(|| {
+                        invalid_generation_data(
+                            "Activated continuation attempt does not name its generation",
+                        )
+                    })?;
+                    if activated.generation_id != attempt.candidate_generation_id
+                        || !ledger
+                            .generations
+                            .iter()
+                            .any(|generation| generation.identity == *activated)
+                    {
+                        return Err(invalid_generation_data(
+                            "Activated continuation attempt does not match a generation",
+                        ));
+                    }
+                }
+                operations.insert(
+                    attempt.request.operation_id.as_str(),
+                    (
+                        &attempt.request,
+                        &attempt.predecessor,
+                        &attempt.candidate_generation_id,
+                        attempt.status,
+                    ),
+                );
+            }
+        }
+    }
+    for generation in ledger.generations.iter().skip(1) {
+        if !ledger.continuation_attempts.iter().any(|attempt| {
+            attempt.status == ContinuationAttemptStatus::Activated
+                && attempt
+                    .activated_generation
+                    .as_ref()
+                    .is_some_and(|identity| identity == &generation.identity)
+        }) {
+            return Err(invalid_generation_data(
+                "non-genesis execution generation has no Activated CAS event",
+            ));
+        }
+    }
+    enum ProjectionEventRef<'a> {
+        Takeover(&'a GenerationTakeoverAudit),
+        Lifecycle(&'a GenerationLifecycleEvent),
+    }
+    impl ProjectionEventRef<'_> {
+        fn sequence(&self) -> u64 {
+            match self {
+                Self::Takeover(event) => event.sequence,
+                Self::Lifecycle(event) => event.sequence,
+            }
+        }
+    }
+
+    let mut effective_statuses = ledger
+        .generations
+        .iter()
+        .map(|generation| {
+            (
+                generation.identity.generation_id.as_str(),
+                generation.status,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut projection_events = ledger
+        .takeovers
+        .iter()
+        .map(ProjectionEventRef::Takeover)
+        .chain(
+            ledger
+                .lifecycle_events
+                .iter()
+                .map(ProjectionEventRef::Lifecycle),
+        )
+        .collect::<Vec<_>>();
+    projection_events.sort_by_key(ProjectionEventRef::sequence);
+    let mut previous_projection_event_hash = String::new();
+    for (index, event) in projection_events.iter().enumerate() {
+        if event.sequence() != index as u64 + 1 {
+            return Err(invalid_generation_data(
+                "execution generation projection event sequence is not contiguous",
+            ));
+        }
+        let (stored_previous_hash, stored_hash, computed_hash) = match event {
+            ProjectionEventRef::Takeover(event) => (
+                event.previous_event_hash.as_str(),
+                event.content_hash.as_str(),
+                compute_takeover_event_hash(event),
+            ),
+            ProjectionEventRef::Lifecycle(event) => (
+                event.previous_event_hash.as_str(),
+                event.content_hash.as_str(),
+                compute_lifecycle_event_hash(event),
+            ),
+        };
+        if stored_previous_hash != previous_projection_event_hash
+            || stored_hash.is_empty()
+            || stored_hash != computed_hash
+        {
+            return Err(invalid_generation_data(
+                "execution generation projection event hash chain is invalid",
+            ));
+        }
+        previous_projection_event_hash = stored_hash.to_string();
+        match event {
+            ProjectionEventRef::Takeover(takeover) => {
+                let Some(status) = effective_statuses
+                    .get(takeover.generation_id.as_str())
+                    .copied()
+                else {
+                    return Err(invalid_generation_data(
+                        "execution generation takeover names an unknown generation",
+                    ));
+                };
+                if takeover.from_session_id.trim().is_empty()
+                    || takeover.to_session_id.trim().is_empty()
+                    || takeover.from_session_id == takeover.to_session_id
+                    || takeover.reason.trim().is_empty()
+                {
+                    return Err(invalid_generation_data(
+                        "execution generation takeover audit is incomplete",
+                    ));
+                }
+                let projection = serde_json::from_str::<ExecutionControlRecord>(
+                    &takeover.execution_control_json,
+                )
+                .map(hydrate_recovery_envelopes)
+                .map_err(|error| {
+                    invalid_generation_data(format!(
+                        "takeover execution projection is malformed: {error}"
+                    ))
+                })?;
+                if projection.owner_kind != expected_owner.kind
+                    || projection.owner_number != expected_owner.number
+                    || projection.status != status
+                    || projection.primary_session_id != takeover.to_session_id
+                    || !integrity_ok(&projection)
+                {
+                    return Err(invalid_generation_data(
+                        "takeover execution projection failed owner/status/session/integrity validation",
+                    ));
+                }
+            }
+            ProjectionEventRef::Lifecycle(lifecycle) => {
+                let Some(status) = effective_statuses.get_mut(lifecycle.generation_id.as_str())
+                else {
+                    return Err(invalid_generation_data(
+                        "execution lifecycle event names an unknown generation",
+                    ));
+                };
+                let transition_allowed = matches!(
+                    (lifecycle.from_status, lifecycle.to_status),
+                    (
+                        ExecutionControlStatus::Active,
+                        ExecutionControlStatus::Completed | ExecutionControlStatus::Blocked
+                    ) | (
+                        ExecutionControlStatus::Blocked,
+                        ExecutionControlStatus::Active
+                    )
+                );
+                if *status != lifecycle.from_status
+                    || !transition_allowed
+                    || lifecycle.session_id.trim().is_empty()
+                    || lifecycle.reason.trim().is_empty()
+                {
+                    return Err(invalid_generation_data(
+                        "execution lifecycle event has an invalid append-only transition",
+                    ));
+                }
+                let projection = serde_json::from_str::<ExecutionControlRecord>(
+                    &lifecycle.execution_control_json,
+                )
+                .map(hydrate_recovery_envelopes)
+                .map_err(|error| {
+                    invalid_generation_data(format!(
+                        "lifecycle execution projection is malformed: {error}"
+                    ))
+                })?;
+                if projection.owner_kind != expected_owner.kind
+                    || projection.owner_number != expected_owner.number
+                    || projection.status != lifecycle.to_status
+                    || projection.primary_session_id != lifecycle.session_id
+                    || !integrity_ok(&projection)
+                    || (lifecycle.to_status != ExecutionControlStatus::Active
+                        && projection.settled_at.is_none())
+                {
+                    return Err(invalid_generation_data(
+                        "lifecycle execution projection failed owner/status/session/integrity validation",
+                    ));
+                }
+                *status = lifecycle.to_status;
+            }
+        }
+    }
+
+    for (index, generation) in ledger.generations.iter().enumerate().skip(1) {
+        let predecessor = &ledger.generations[index - 1];
+        if effective_statuses[predecessor.identity.generation_id.as_str()]
+            == ExecutionControlStatus::Active
+            || generation.identity.predecessor_generation_id.as_deref()
+                != Some(predecessor.identity.generation_id.as_str())
+        {
+            return Err(invalid_generation_data(
+                "successor generation follows a non-terminal predecessor",
+            ));
+        }
+    }
+    let active_generation_ids = effective_statuses
+        .iter()
+        .filter_map(|(generation_id, status)| {
+            (*status == ExecutionControlStatus::Active).then_some(*generation_id)
+        })
+        .collect::<Vec<_>>();
+    if active_generation_ids.len() > 1 {
+        return Err(invalid_generation_data(
+            "execution generation ledger contains more than one effective Active generation",
+        ));
+    }
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    if active_generation_ids
+        .first()
+        .is_some_and(|generation_id| **generation_id != current.identity.generation_id)
+    {
+        return Err(invalid_generation_data(
+            "the sole effective Active execution generation is not current",
+        ));
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn generation_ledger_integrity_ok(ledger: &ExecutionGenerationLedger) -> bool {
+    validate_generation_ledger(ledger, ledger.owner).is_ok()
+}
+
+fn validate_generation_pointer(
+    pointer: &ExecutionGenerationPointer,
+    ledger: &ExecutionGenerationLedger,
+    projection: &str,
+) -> io::Result<()> {
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    let effective_status = ledger.effective_status_for(current);
+    let effective_projection = ledger.effective_projection_for(current);
+    if pointer.schema_version != GENERATION_LEDGER_SCHEMA_VERSION
+        || pointer.owner != ledger.owner
+        || pointer.current_generation_id != current.identity.generation_id
+        || pointer.current_generation_content_hash != current.content_hash
+        || pointer.projection_content_hash != sha256_hex(projection)
+        || projection != effective_projection
+        || pointer.content_hash.is_empty()
+        || pointer.content_hash != compute_generation_pointer_hash(pointer)
+    {
+        return Err(invalid_generation_data(
+            "execution generation pointer/projection is stale, missing, or mismatched",
+        ));
+    }
+    let projection_record = serde_json::from_str::<ExecutionControlRecord>(projection)
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "execution generation projection is malformed: {error}"
+            ))
+        })?;
+    if projection_record.owner_kind != ledger.owner.kind
+        || projection_record.owner_number != ledger.owner.number
+        || projection_record.status != effective_status
+        || !integrity_ok(&projection_record)
+    {
+        return Err(invalid_generation_data(
+            "execution generation projection failed owner/status/integrity validation",
+        ));
+    }
+    Ok(())
+}
+
+/// Load and validate only the repository/owner-scoped authoritative ledger.
+///
+/// This intentionally does not require a pointer in the caller's worktree:
+/// cross-worktree preparation/activation races must CAS on one owner ledger.
+pub fn load_owner_generation_ledger(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<Option<ExecutionGenerationLedger>> {
+    let owner_dir = generation_owner_dir(worktree, owner)?;
+    let Some(contents) = read_owner_ledger_from_dir(&owner_dir)? else {
+        return Ok(None);
+    };
+    let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
+        invalid_generation_data(format!("malformed generation ledger: {error}"))
+    })?;
+    validate_generation_ledger(&ledger, owner)?;
+    Ok(Some(ledger))
+}
+
+/// Load and validate an owner-scoped ledger together with the caller
+/// worktree's independent pointer/projection. Mutation/verification gates use
+/// this strict view so stale worktrees and old flat writers fail closed.
+pub fn load_generation_ledger(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<Option<ExecutionGenerationLedger>> {
+    let Some(ledger) = load_owner_generation_ledger(worktree, owner)? else {
+        return Ok(None);
+    };
+    let pointer_contents = read_generation_pointer_contents(worktree)?.ok_or_else(|| {
+        invalid_generation_data(
+            "execution generation pointer is missing after ledger ownership was established",
+        )
+    })?;
+    let pointer =
+        serde_json::from_str::<ExecutionGenerationPointer>(&pointer_contents).map_err(|error| {
+            invalid_generation_data(format!("malformed execution generation pointer: {error}"))
+        })?;
+    let projection = read_owned_projection_contents(worktree)?.ok_or_else(|| {
+        invalid_generation_data(
+            "flat execution projection is missing after ledger ownership was established",
+        )
+    })?;
+    validate_generation_pointer(&pointer, &ledger, &projection)?;
+    Ok(Some(ledger))
+}
+
+pub fn current_generation_identity(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<Option<ExecutionGenerationIdentity>> {
+    Ok(
+        load_owner_generation_ledger(worktree, owner)?.and_then(|ledger| {
+            ledger
+                .current_generation()
+                .map(|generation| generation.identity.clone())
+        }),
+    )
+}
+
+fn effective_generation_head_hash(
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+) -> String {
+    let mut events = ledger
+        .lifecycle_events_for(&generation.identity.generation_id)
+        .map(|event| {
+            (
+                event.sequence,
+                "lifecycle",
+                sha256_hex(serde_json::to_vec(event).unwrap_or_default()),
+            )
+        })
+        .chain(
+            ledger
+                .takeovers
+                .iter()
+                .filter(|event| event.generation_id == generation.identity.generation_id)
+                .map(|event| {
+                    (
+                        event.sequence,
+                        "takeover",
+                        sha256_hex(serde_json::to_vec(event).unwrap_or_default()),
+                    )
+                }),
+        )
+        .collect::<Vec<_>>();
+    events.sort_by_key(|(sequence, _, _)| *sequence);
+    sha256_hex(serde_json::to_vec(&(generation.content_hash.as_str(), events)).unwrap_or_default())
+}
+
+/// Exact non-secret identity consumed by Session/verification projections.
+///
+/// Prepared/Aborted attempt audit is deliberately excluded. The head changes
+/// only when the current generation changes or its effective lifecycle /
+/// takeover projection advances.
+pub fn current_execution_binding(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<Option<gwt_agent::session::ExecutionBindingIdentity>> {
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(None);
+    };
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    Ok(Some(gwt_agent::session::ExecutionBindingIdentity {
+        generation_id: current.identity.generation_id.clone(),
+        binding_id: current.identity.session_binding_id.clone(),
+        ledger_head_hash: effective_generation_head_hash(&ledger, current),
+    }))
+}
+
 /// Reachable repair guidance for an integrity failure. Adoption can rewrite
 /// only Active records; terminal records require a fresh linked-owner launch.
 #[must_use]
@@ -345,9 +1275,34 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
     let Some(contents) = read_record_contents(worktree)? else {
         return Ok(None);
     };
-    let record = serde_json::from_str::<ExecutionControlRecord>(&contents)
+    let mut record = serde_json::from_str::<ExecutionControlRecord>(&contents)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-    Ok(Some(hydrate_recovery_envelopes(record)))
+    record = hydrate_recovery_envelopes(record);
+
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    let pointer_exists = read_generation_pointer_contents(worktree)?.is_some();
+    let owner_ledger_exists = owner_generation_ledger_exists(worktree, owner)?;
+    if pointer_exists || owner_ledger_exists {
+        match load_generation_ledger(worktree, owner) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                // Existing authority readers historically treat malformed I/O
+                // as unavailable/fail-open. Return a deliberately
+                // integrity-failed Active sentinel instead: Stop/PR gates
+                // block it, completion projections stay false, and no stale
+                // terminal status can be accepted after an old writer or a
+                // missing/mismatched generation pointer.
+                record.status = ExecutionControlStatus::Active;
+                record.settled_at = None;
+                record.content_hash =
+                    format!("invalid-generation-authority:{}", record.content_hash);
+            }
+        }
+    }
+    Ok(Some(record))
 }
 
 /// Whether the execution for `worktree` has settled as `Completed`.
@@ -361,7 +1316,8 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
 pub fn is_completed(worktree: &Path) -> bool {
     matches!(
         load(worktree),
-        Ok(Some(record)) if record.status == ExecutionControlStatus::Completed
+        Ok(Some(record))
+            if record.status == ExecutionControlStatus::Completed && integrity_ok(&record)
     )
 }
 
@@ -414,10 +1370,31 @@ fn load_existing_for_save(worktree: &Path) -> io::Result<Option<ExecutionControl
     load(worktree)
 }
 
+fn serialize_execution_control(record: &ExecutionControlRecord) -> io::Result<Vec<u8>> {
+    let mut canonical = record.clone();
+    stamp_recovery_chain(&mut canonical.recoveries);
+    let mut stored = recovery_storage_projection(&canonical);
+    stored.content_hash = compute_content_hash(&canonical);
+    serde_json::to_vec_pretty(&stored)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+}
+
 /// Persist the record atomically (hooks read this file concurrently). The
 /// integrity hash is recomputed on every save (P9a).
 pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> {
-    let mut record = record.clone();
+    let record = record.clone();
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    if read_generation_pointer_contents(worktree)?.is_some()
+        || owner_generation_ledger_exists(worktree, owner)?
+    {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "flat execution-control writes are refused after owner generation ledger ownership; use the generation-aware lifecycle/CAS operation",
+        ));
+    }
     if record.transfers.iter().any(is_recovery_envelope_transfer) {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
@@ -449,11 +1426,7 @@ pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> 
             }
         }
     }
-    stamp_recovery_chain(&mut record.recoveries);
-    let mut stored = recovery_storage_projection(&record);
-    stored.content_hash = compute_content_hash(&record);
-    let serialized = serde_json::to_vec_pretty(&stored)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    let serialized = serialize_execution_control(&record)?;
     // P9b: trusted copy is authoritative; the mirror is informational.
     crate::cli::trusted_store::write_with_mirror(
         worktree,
@@ -461,6 +1434,772 @@ pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> 
         &state_path(worktree),
         &serialized,
     )
+}
+
+fn with_generation_owner_lease<T>(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation: impl FnOnce(&Path) -> io::Result<T>,
+) -> io::Result<T> {
+    let owner_dir = generation_owner_dir(worktree, owner)?;
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&owner_dir, || {
+        operation(&owner_dir)
+    })
+}
+
+fn stamp_generation_ledger(ledger: &mut ExecutionGenerationLedger) {
+    ledger.content_hash = compute_generation_ledger_hash(ledger);
+}
+
+fn append_continuation_attempt(
+    ledger: &mut ExecutionGenerationLedger,
+    mut attempt: ContinuationAttempt,
+) -> ContinuationAttempt {
+    attempt.previous_attempt_hash = ledger
+        .continuation_attempts
+        .last()
+        .map_or_else(String::new, |previous| previous.content_hash.clone());
+    attempt.content_hash = compute_continuation_attempt_hash(&attempt);
+    ledger.continuation_attempts.push(attempt.clone());
+    attempt
+}
+
+fn latest_generation_event_hash(ledger: &ExecutionGenerationLedger) -> String {
+    ledger
+        .takeovers
+        .iter()
+        .map(|event| (event.sequence, event.content_hash.as_str()))
+        .chain(
+            ledger
+                .lifecycle_events
+                .iter()
+                .map(|event| (event.sequence, event.content_hash.as_str())),
+        )
+        .max_by_key(|(sequence, _)| *sequence)
+        .map_or_else(String::new, |(_, hash)| hash.to_string())
+}
+
+fn append_takeover_event(
+    ledger: &mut ExecutionGenerationLedger,
+    mut event: GenerationTakeoverAudit,
+) {
+    event.sequence = ledger.next_generation_event_sequence();
+    event.previous_event_hash = latest_generation_event_hash(ledger);
+    event.content_hash = compute_takeover_event_hash(&event);
+    ledger.takeovers.push(event);
+}
+
+fn append_lifecycle_event(
+    ledger: &mut ExecutionGenerationLedger,
+    mut event: GenerationLifecycleEvent,
+) {
+    event.sequence = ledger.next_generation_event_sequence();
+    event.previous_event_hash = latest_generation_event_hash(ledger);
+    event.content_hash = compute_lifecycle_event_hash(&event);
+    ledger.lifecycle_events.push(event);
+}
+
+fn write_owner_ledger(owner_dir: &Path, ledger: &ExecutionGenerationLedger) -> io::Result<()> {
+    validate_generation_ledger(ledger, ledger.owner)?;
+    let serialized = serde_json::to_vec_pretty(ledger).map_err(|error| {
+        invalid_generation_data(format!("serialize generation ledger: {error}"))
+    })?;
+    crate::cli::trusted_store::write_to_resolved_dir(owner_dir, GENERATION_LEDGER_FILE, &serialized)
+}
+
+fn generation_pointer(
+    ledger: &ExecutionGenerationLedger,
+    projection: &str,
+) -> io::Result<ExecutionGenerationPointer> {
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    let mut pointer = ExecutionGenerationPointer {
+        schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
+        owner: ledger.owner,
+        current_generation_id: current.identity.generation_id.clone(),
+        current_generation_content_hash: current.content_hash.clone(),
+        projection_content_hash: sha256_hex(projection),
+        content_hash: String::new(),
+    };
+    pointer.content_hash = compute_generation_pointer_hash(&pointer);
+    Ok(pointer)
+}
+
+fn write_generation_pointer(
+    worktree: &Path,
+    ledger: &ExecutionGenerationLedger,
+    projection: &str,
+) -> io::Result<()> {
+    let pointer = generation_pointer(ledger, projection)?;
+    let serialized = serde_json::to_vec_pretty(&pointer).map_err(|error| {
+        invalid_generation_data(format!("serialize execution generation pointer: {error}"))
+    })?;
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        GENERATION_POINTER_FILE,
+        &generation_pointer_path(worktree),
+        &serialized,
+    )
+}
+
+fn write_execution_projection(worktree: &Path, projection: &str) -> io::Result<()> {
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        "execution-control.json",
+        &state_path(worktree),
+        projection.as_bytes(),
+    )
+}
+
+fn write_activated_generation(
+    worktree: &Path,
+    owner_dir: &Path,
+    ledger: &ExecutionGenerationLedger,
+    projection: &str,
+) -> io::Result<()> {
+    // The ledger is authoritative and is committed first. A crash before the
+    // projection/pointer pair completes is intentionally fail-closed on the
+    // next read; the coordinator can then abort/repair the uncommitted launch
+    // rather than accepting a ghost flat ECR.
+    write_owner_ledger(owner_dir, ledger)?;
+    write_execution_projection(worktree, projection)?;
+    write_generation_pointer(worktree, ledger, projection)
+}
+
+fn deterministic_generation_id(seed: &[u8]) -> String {
+    let digest = sha256_hex(seed);
+    format!("gen-{}", &digest[..24])
+}
+
+fn parse_legacy_generation_source(
+    contents: &str,
+    owner: ExecutionOwnerKey,
+) -> io::Result<ExecutionControlRecord> {
+    let record = serde_json::from_str::<ExecutionControlRecord>(contents)
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!("legacy execution record is malformed: {error}"))
+        })?;
+    if record.owner_kind != owner.kind || record.owner_number != owner.number {
+        return Err(invalid_generation_data(
+            "legacy execution record owner does not match the requested generation owner",
+        ));
+    }
+    Ok(record)
+}
+
+fn legacy_genesis(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    record: &ExecutionControlRecord,
+    exact_projection: String,
+) -> ExecutionGeneration {
+    let projection_digest = sha256_hex(exact_projection.as_bytes());
+    let generation_id = deterministic_generation_id(
+        format!(
+            "legacy-genesis:{}:{}:{projection_digest}",
+            owner.kind.as_str(),
+            owner.number
+        )
+        .as_bytes(),
+    );
+    let mut generation = ExecutionGeneration {
+        identity: ExecutionGenerationIdentity {
+            owner,
+            generation_id,
+            predecessor_generation_id: None,
+            predecessor_content_hash: None,
+            session_binding_id: format!("legacy-ecr-{}", &record.content_hash[..16]),
+            initial_session_id: record.primary_session_id.clone(),
+            worktree_binding_hash: worktree_binding_hash(worktree),
+            entrypoint: record.entrypoint.clone(),
+            activated_at: record.launched_at,
+        },
+        status: record.status,
+        execution_control_json: exact_projection,
+        content_hash: String::new(),
+    };
+    generation.content_hash = compute_generation_hash(&generation);
+    generation
+}
+
+/// Import one verified flat ECR as deterministic owner-scoped genesis.
+///
+/// Completed/Blocked imports preserve the exact terminal projection bytes.
+/// A verified legacy Active record requires a caller liveness classification;
+/// Unknown or hashless state is refused before a lease/file is created.
+pub fn ensure_generation_ledger(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    active_disposition: LegacyActiveDisposition,
+) -> io::Result<ExecutionGenerationLedger> {
+    if let Some(ledger) = load_owner_generation_ledger(worktree, owner)? {
+        return Ok(ledger);
+    }
+
+    let source_projection = read_record_contents(worktree)?.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "no legacy execution record exists to import as generation genesis",
+        )
+    })?;
+    let source_record = parse_legacy_generation_source(&source_projection, owner)?;
+    if source_record.content_hash.is_empty() {
+        return if source_record.status == ExecutionControlStatus::Active {
+            Err(generation_backfill_required(
+                "hashless legacy Active execution requires an explicit liveness backfill; no generation state was written",
+            ))
+        } else {
+            Err(invalid_generation_data(
+                "only integrity-verified legacy terminal executions can be imported",
+            ))
+        };
+    }
+    if !integrity_ok(&source_record) {
+        return Err(invalid_generation_data(
+            "legacy execution record failed integrity validation; no generation state was written",
+        ));
+    }
+    if source_record.status == ExecutionControlStatus::Active
+        && matches!(active_disposition, LegacyActiveDisposition::Unknown)
+    {
+        return Err(generation_backfill_required(
+            "legacy Active execution liveness is unknown; classify it before generation backfill",
+        ));
+    }
+    if let LegacyActiveDisposition::Stale {
+        new_session_id,
+        reason,
+        ..
+    } = &active_disposition
+    {
+        if source_record.status == ExecutionControlStatus::Active
+            && (new_session_id.trim().is_empty()
+                || reason.trim().is_empty()
+                || new_session_id == &source_record.primary_session_id)
+        {
+            return Err(invalid_generation_data(
+                "stale legacy takeover requires a distinct non-empty session and reason",
+            ));
+        }
+    }
+
+    with_generation_owner_lease(worktree, owner, |owner_dir| {
+        if read_owner_ledger_from_dir(owner_dir)?.is_some() {
+            return load_owner_generation_ledger(worktree, owner)?.ok_or_else(|| {
+                invalid_generation_data(
+                    "owner generation ledger appeared without a valid worktree pointer",
+                )
+            });
+        }
+        let current_projection = read_record_contents(worktree)?.ok_or_else(|| {
+            generation_conflict("legacy execution projection disappeared during import")
+        })?;
+        if current_projection != source_projection {
+            return Err(generation_conflict(
+                "legacy execution projection changed during generation import; retry",
+            ));
+        }
+
+        let genesis = legacy_genesis(worktree, owner, &source_record, source_projection.clone());
+        let mut ledger = ExecutionGenerationLedger {
+            schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
+            owner,
+            generations: vec![genesis],
+            continuation_attempts: Vec::new(),
+            takeovers: Vec::new(),
+            lifecycle_events: Vec::new(),
+            current_generation_id: String::new(),
+            content_hash: String::new(),
+        };
+        ledger.current_generation_id = ledger.generations[0].identity.generation_id.clone();
+
+        let mut committed_projection = source_projection.clone();
+        if source_record.status == ExecutionControlStatus::Active {
+            if let LegacyActiveDisposition::Stale {
+                new_session_id,
+                reason,
+                observed_at,
+            } = &active_disposition
+            {
+                let mut transferred = source_record.clone();
+                let from_session_id = transferred.primary_session_id.clone();
+                transferred.primary_session_id.clone_from(new_session_id);
+                transferred.transfers.push(OwnershipTransfer {
+                    from_session_id: from_session_id.clone(),
+                    to_session_id: new_session_id.clone(),
+                    reason: format!("continue-work-stale-takeover: {reason}"),
+                    transferred_at: *observed_at,
+                });
+                committed_projection = String::from_utf8(serialize_execution_control(
+                    &transferred,
+                )?)
+                .map_err(|error| {
+                    invalid_generation_data(format!(
+                        "serialized execution projection is not UTF-8: {error}"
+                    ))
+                })?;
+                let generation_id = ledger.current_generation_id.clone();
+                append_takeover_event(
+                    &mut ledger,
+                    GenerationTakeoverAudit {
+                        sequence: 0,
+                        generation_id,
+                        from_session_id,
+                        to_session_id: new_session_id.clone(),
+                        reason: reason.clone(),
+                        observed_at: *observed_at,
+                        execution_control_json: committed_projection.clone(),
+                        previous_event_hash: String::new(),
+                        content_hash: String::new(),
+                    },
+                );
+            }
+        }
+        stamp_generation_ledger(&mut ledger);
+        if committed_projection == source_projection {
+            write_owner_ledger(owner_dir, &ledger)?;
+            write_generation_pointer(worktree, &ledger, &committed_projection)?;
+        } else {
+            write_activated_generation(worktree, owner_dir, &ledger, &committed_projection)?;
+        }
+        Ok(ledger)
+    })
+}
+
+fn validate_successor_request(request: &SuccessorRequest) -> io::Result<()> {
+    if request.operation_id.trim().is_empty()
+        || request.principal_id.trim().is_empty()
+        || request.source.trim().is_empty()
+        || request.session_binding_id.trim().is_empty()
+        || request.initial_session_id.trim().is_empty()
+        || request.entrypoint.trim().is_empty()
+    {
+        return Err(invalid_generation_data(
+            "successor request contains an empty identity/binding field",
+        ));
+    }
+    Ok(())
+}
+
+fn latest_operation_attempt<'a>(
+    ledger: &'a ExecutionGenerationLedger,
+    request: &SuccessorRequest,
+) -> io::Result<Option<&'a ContinuationAttempt>> {
+    let mut latest = None;
+    for attempt in ledger
+        .continuation_attempts
+        .iter()
+        .filter(|attempt| attempt.request.operation_id == request.operation_id)
+    {
+        if attempt.request != *request {
+            return Err(generation_conflict(format!(
+                "continuation operation {} was already used by a different principal/source/request",
+                request.operation_id
+            )));
+        }
+        latest = Some(attempt);
+    }
+    Ok(latest)
+}
+
+fn successor_candidate_id(
+    owner: ExecutionOwnerKey,
+    ledger: &ExecutionGenerationLedger,
+    predecessor: &ExecutionGeneration,
+    request: &SuccessorRequest,
+    worktree: &Path,
+) -> String {
+    deterministic_generation_id(
+        &serde_json::to_vec(&(
+            owner,
+            predecessor.identity.generation_id.as_str(),
+            effective_generation_head_hash(ledger, predecessor),
+            request,
+            worktree_binding_hash(worktree),
+        ))
+        .unwrap_or_default(),
+    )
+}
+
+/// Append a Prepared attempt without changing the current generation.
+pub fn prepare_successor(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+) -> io::Result<ContinuationAttempt> {
+    validate_successor_request(request)?;
+    with_generation_owner_lease(worktree, owner, |owner_dir| {
+        let mut ledger = load_owner_generation_ledger(worktree, owner)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        if let Some(existing) = latest_operation_attempt(&ledger, request)? {
+            return Ok(existing.clone());
+        }
+        let predecessor = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        if ledger.effective_status_for(&predecessor) == ExecutionControlStatus::Active {
+            return Err(generation_conflict(
+                "cannot prepare a successor while the current generation is Active",
+            ));
+        }
+        let predecessor_head = effective_generation_head_hash(&ledger, &predecessor);
+        let attempt = ContinuationAttempt {
+            request: request.clone(),
+            predecessor: predecessor.identity.clone(),
+            predecessor_generation_content_hash: predecessor_head,
+            candidate_generation_id: successor_candidate_id(
+                owner,
+                &ledger,
+                &predecessor,
+                request,
+                worktree,
+            ),
+            status: ContinuationAttemptStatus::Prepared,
+            recorded_at: request.requested_at,
+            reason: None,
+            activated_generation: None,
+            previous_attempt_hash: String::new(),
+            content_hash: String::new(),
+        };
+        let attempt = append_continuation_attempt(&mut ledger, attempt);
+        stamp_generation_ledger(&mut ledger);
+        write_owner_ledger(owner_dir, &ledger)?;
+        Ok(attempt)
+    })
+}
+
+/// Append an Aborted event for a Prepared attempt. Current generation and
+/// generation count remain unchanged.
+pub fn abort_successor(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+    reason: &str,
+) -> io::Result<ContinuationAttempt> {
+    validate_successor_request(request)?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "aborting a successor requires a non-empty reason",
+        ));
+    }
+    with_generation_owner_lease(worktree, owner, |owner_dir| {
+        let mut ledger = load_owner_generation_ledger(worktree, owner)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let latest = latest_operation_attempt(&ledger, request)?
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "successor attempt is missing"))?
+            .clone();
+        match latest.status {
+            ContinuationAttemptStatus::Aborted => {
+                if latest.reason.as_deref() == Some(reason) {
+                    return Ok(latest);
+                }
+                return Err(generation_conflict(
+                    "successor attempt was already aborted with a different reason",
+                ));
+            }
+            ContinuationAttemptStatus::Activated => {
+                return Err(generation_conflict(
+                    "an Activated successor cannot be aborted",
+                ));
+            }
+            ContinuationAttemptStatus::Prepared => {}
+        }
+        let mut aborted = latest;
+        aborted.status = ContinuationAttemptStatus::Aborted;
+        aborted.recorded_at = Utc::now();
+        aborted.reason = Some(reason.to_string());
+        aborted.previous_attempt_hash.clear();
+        aborted.content_hash.clear();
+        let aborted = append_continuation_attempt(&mut ledger, aborted);
+        stamp_generation_ledger(&mut ledger);
+        write_owner_ledger(owner_dir, &ledger)?;
+        Ok(aborted)
+    })
+}
+
+/// Commit the successor CAS. This is the only operation in this module that
+/// appends a successor generation and advances `current_generation_id`.
+pub fn activate_successor(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+) -> io::Result<ExecutionGenerationIdentity> {
+    validate_successor_request(request)?;
+    with_generation_owner_lease(worktree, owner, |owner_dir| {
+        let mut ledger = load_owner_generation_ledger(worktree, owner)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let latest = latest_operation_attempt(&ledger, request)?
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "successor attempt is missing"))?
+            .clone();
+        match latest.status {
+            ContinuationAttemptStatus::Activated => {
+                return latest.activated_generation.ok_or_else(|| {
+                    invalid_generation_data(
+                        "Activated successor attempt does not name its generation",
+                    )
+                });
+            }
+            ContinuationAttemptStatus::Aborted => {
+                return Err(generation_conflict(
+                    "an Aborted successor cannot be activated",
+                ));
+            }
+            ContinuationAttemptStatus::Prepared => {}
+        }
+
+        let predecessor = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        let predecessor_head = effective_generation_head_hash(&ledger, &predecessor);
+        if predecessor.identity != latest.predecessor
+            || predecessor_head != latest.predecessor_generation_content_hash
+            || ledger.effective_status_for(&predecessor) == ExecutionControlStatus::Active
+        {
+            return Err(generation_conflict(
+                "successor activation CAS lost: current generation changed or is Active",
+            ));
+        }
+
+        let predecessor_record = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(&predecessor),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "predecessor execution snapshot is malformed: {error}"
+            ))
+        })?;
+        let successor_record = ExecutionControlRecord {
+            owner_kind: owner.kind,
+            owner_number: owner.number,
+            primary_session_id: request.initial_session_id.clone(),
+            entrypoint: request.entrypoint.clone(),
+            bundled_required_owners: predecessor_record.bundled_required_owners,
+            status: ExecutionControlStatus::Active,
+            blocked_reason: None,
+            missing_verification: None,
+            launched_at: request.requested_at,
+            settled_at: None,
+            transfers: Vec::new(),
+            recoveries: Vec::new(),
+            content_hash: String::new(),
+        };
+        let projection = String::from_utf8(serialize_execution_control(&successor_record)?)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "serialized successor projection is not UTF-8: {error}"
+                ))
+            })?;
+        let mut successor = ExecutionGeneration {
+            identity: ExecutionGenerationIdentity {
+                owner,
+                generation_id: latest.candidate_generation_id.clone(),
+                predecessor_generation_id: Some(predecessor.identity.generation_id.clone()),
+                predecessor_content_hash: Some(predecessor_head),
+                session_binding_id: request.session_binding_id.clone(),
+                initial_session_id: request.initial_session_id.clone(),
+                worktree_binding_hash: worktree_binding_hash(worktree),
+                entrypoint: request.entrypoint.clone(),
+                activated_at: request.requested_at,
+            },
+            status: ExecutionControlStatus::Active,
+            execution_control_json: projection.clone(),
+            content_hash: String::new(),
+        };
+        successor.content_hash = compute_generation_hash(&successor);
+        let identity = successor.identity.clone();
+        ledger.current_generation_id = identity.generation_id.clone();
+        ledger.generations.push(successor);
+
+        let mut activated = latest;
+        activated.status = ContinuationAttemptStatus::Activated;
+        activated.recorded_at = Utc::now();
+        activated.activated_generation = Some(identity.clone());
+        activated.reason = None;
+        activated.previous_attempt_hash.clear();
+        activated.content_hash.clear();
+        append_continuation_attempt(&mut ledger, activated);
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(worktree, owner_dir, &ledger, &projection)?;
+        Ok(identity)
+    })
+}
+
+fn serialized_execution_projection(record: &ExecutionControlRecord) -> io::Result<String> {
+    String::from_utf8(serialize_execution_control(record)?).map_err(|error| {
+        invalid_generation_data(format!(
+            "serialized execution projection is not UTF-8: {error}"
+        ))
+    })
+}
+
+fn persist_generation_lifecycle_transition_if_owned(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+    from_status: ExecutionControlStatus,
+    reason: &str,
+) -> io::Result<bool> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    if !owner_generation_ledger_exists(worktree, owner)? {
+        return Ok(false);
+    }
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "generation lifecycle transition requires a non-empty reason",
+        ));
+    }
+    let projection = serialized_execution_projection(record)?;
+    with_generation_owner_lease(worktree, owner, |owner_dir| {
+        let mut ledger = load_generation_ledger(worktree, owner)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during lifecycle transition")
+        })?;
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        if current.identity.worktree_binding_hash != worktree_binding_hash(worktree) {
+            return Err(generation_conflict(
+                "current execution generation is bound to a different worktree",
+            ));
+        }
+        let effective_status = ledger.effective_status_for(&current);
+        if effective_status != from_status {
+            return Err(generation_conflict(format!(
+                "generation lifecycle CAS expected {from_status:?}, found {effective_status:?}"
+            )));
+        }
+        let prior_projection = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(&current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "current generation projection is malformed: {error}"
+            ))
+        })?;
+        if prior_projection.primary_session_id != record.primary_session_id {
+            return Err(generation_conflict(
+                "generation lifecycle session binding changed before commit",
+            ));
+        }
+        let allowed = matches!(
+            (from_status, record.status),
+            (
+                ExecutionControlStatus::Active,
+                ExecutionControlStatus::Completed | ExecutionControlStatus::Blocked
+            ) | (
+                ExecutionControlStatus::Blocked,
+                ExecutionControlStatus::Active
+            )
+        );
+        if !allowed {
+            return Err(generation_conflict(
+                "requested generation lifecycle transition is not allowed",
+            ));
+        }
+        let recorded_at = if record.status == ExecutionControlStatus::Active {
+            record
+                .recoveries
+                .last()
+                .map_or_else(Utc::now, |recovery| recovery.reopened_at)
+        } else {
+            record.settled_at.unwrap_or_else(Utc::now)
+        };
+        append_lifecycle_event(
+            &mut ledger,
+            GenerationLifecycleEvent {
+                sequence: 0,
+                generation_id: current.identity.generation_id,
+                from_status,
+                to_status: record.status,
+                session_id: record.primary_session_id.clone(),
+                reason: reason.to_string(),
+                recorded_at,
+                execution_control_json: projection.clone(),
+                previous_event_hash: String::new(),
+                content_hash: String::new(),
+            },
+        );
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(worktree, owner_dir, &ledger, &projection)?;
+        Ok(true)
+    })
+}
+
+fn persist_generation_takeover_if_owned(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+    transfer: &OwnershipTransfer,
+) -> io::Result<bool> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    if !owner_generation_ledger_exists(worktree, owner)? {
+        return Ok(false);
+    }
+    let projection = serialized_execution_projection(record)?;
+    with_generation_owner_lease(worktree, owner, |owner_dir| {
+        let mut ledger = load_generation_ledger(worktree, owner)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during ownership transfer")
+        })?;
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| {
+                invalid_generation_data("execution generation ledger current id is missing")
+            })?
+            .clone();
+        if ledger.effective_status_for(&current) != record.status
+            || current.identity.worktree_binding_hash != worktree_binding_hash(worktree)
+            || record.primary_session_id != transfer.to_session_id
+        {
+            return Err(generation_conflict(
+                "generation takeover CAS does not match the current worktree/session/status",
+            ));
+        }
+        append_takeover_event(
+            &mut ledger,
+            GenerationTakeoverAudit {
+                sequence: 0,
+                generation_id: current.identity.generation_id,
+                from_session_id: transfer.from_session_id.clone(),
+                to_session_id: transfer.to_session_id.clone(),
+                reason: transfer.reason.clone(),
+                observed_at: transfer.transferred_at,
+                execution_control_json: projection.clone(),
+                previous_event_hash: String::new(),
+                content_hash: String::new(),
+            },
+        );
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(worktree, owner_dir, &ledger, &projection)?;
+        Ok(true)
+    })
 }
 
 /// T-107: materialize a fresh active record at launch. A fresh launch (or a
@@ -655,22 +2394,31 @@ fn settle_locked(
     if record.status != ExecutionControlStatus::Active {
         return Ok(SettleResult::AlreadySettled(record));
     }
-    match settlement {
+    let lifecycle_reason = match settlement {
         ExecutionSettlement::Completed => {
             record.status = ExecutionControlStatus::Completed;
+            "completed".to_string()
         }
         ExecutionSettlement::Blocked {
             reason,
             missing_verification,
         } => {
             record.status = ExecutionControlStatus::Blocked;
-            record.blocked_reason = Some(reason);
+            record.blocked_reason = Some(reason.clone());
             record.missing_verification = missing_verification;
+            reason
         }
-    }
+    };
     record.settled_at = Some(Utc::now());
-    save(worktree, &record)?;
-    Ok(SettleResult::Settled(record))
+    if !persist_generation_lifecycle_transition_if_owned(
+        worktree,
+        &record,
+        ExecutionControlStatus::Active,
+        &lifecycle_reason,
+    )? {
+        save(worktree, &record)?;
+    }
+    Ok(SettleResult::Settled(load(worktree)?.unwrap_or(record)))
 }
 
 /// Complete an active execution only when the exact plan/run snapshot is
@@ -1039,6 +2787,14 @@ fn run_reopen_locked(
             // no-op and cannot fail because of an unnecessary rewrite.
             if recovery_storage_needs_upgrade(worktree)
                 .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+                && !owner_generation_ledger_exists(
+                    worktree,
+                    ExecutionOwnerKey {
+                        kind: record.owner_kind,
+                        number: record.owner_number,
+                    },
+                )
+                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
             {
                 save(worktree, &record)
                     .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
@@ -1198,8 +2954,17 @@ fn run_reopen_locked(
     });
     record.status = ExecutionControlStatus::Active;
     record.settled_at = None;
-    save(worktree, &record)
-        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    let generation_updated = persist_generation_lifecycle_transition_if_owned(
+        worktree,
+        &record,
+        ExecutionControlStatus::Blocked,
+        reason.trim(),
+    )
+    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    if !generation_updated {
+        save(worktree, &record)
+            .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    }
     out.push_str(&format!(
         "execution: reopened {kind} #{number} for session {session} using verification record {record_id}; completion remains pending\n",
         kind = record.owner_kind.as_str(),
@@ -1267,15 +3032,20 @@ fn run_adopt_locked(
         out.push_str("execution: the current session already owns this record\n");
         return Ok(0);
     }
-    record.transfers.push(OwnershipTransfer {
+    let transfer = OwnershipTransfer {
         from_session_id: record.primary_session_id.clone(),
         to_session_id: session_id.to_string(),
         reason: reason.trim().to_string(),
         transferred_at: Utc::now(),
-    });
+    };
+    record.transfers.push(transfer.clone());
     record.primary_session_id = session_id.to_string();
-    save(worktree, &record)
+    let generation_updated = persist_generation_takeover_if_owned(worktree, &record, &transfer)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    if !generation_updated {
+        save(worktree, &record)
+            .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    }
     out.push_str(&format!(
         "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record)\n",
         kind = record.owner_kind.as_str(),
@@ -1375,6 +3145,756 @@ mod tests {
             previous_recovery_hash: String::new(),
             content_hash: String::new(),
         }
+    }
+
+    fn generation_owner() -> ExecutionOwnerKey {
+        ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: 2359,
+        }
+    }
+
+    fn successor_request(operation_id: &str, principal_id: &str, source: &str) -> SuccessorRequest {
+        SuccessorRequest {
+            operation_id: operation_id.to_string(),
+            principal_id: principal_id.to_string(),
+            source: source.to_string(),
+            session_binding_id: format!("binding-{operation_id}"),
+            initial_session_id: format!("session-{operation_id}"),
+            entrypoint: "continue-work".to_string(),
+            requested_at: Utc::now(),
+        }
+    }
+
+    fn unset_live_session_env() -> Vec<ScopedEnvVar> {
+        vec![
+            ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+            ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV),
+            ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV),
+        ]
+    }
+
+    #[test]
+    fn generation_ledger_imports_verified_completed_and_preserves_terminal_bytes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+
+        let mut completed = active_record("session-original");
+        completed.owner_number = owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(dir.path(), &completed).unwrap();
+        let terminal_bytes = crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+            .unwrap()
+            .unwrap();
+
+        let ledger =
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+        assert_eq!(ledger.schema_version, 1);
+        assert_eq!(ledger.owner, owner);
+        assert_eq!(ledger.generations.len(), 1);
+        assert_eq!(
+            ledger.current_generation_id,
+            ledger.generations[0].identity.generation_id
+        );
+        assert_eq!(
+            ledger.generations[0].status,
+            ExecutionControlStatus::Completed
+        );
+        assert_eq!(ledger.generations[0].execution_control_json, terminal_bytes);
+        assert!(generation_ledger_integrity_ok(&ledger));
+        assert_eq!(
+            crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+                .unwrap()
+                .unwrap(),
+            terminal_bytes,
+            "terminal projection must remain byte-for-byte unchanged during import"
+        );
+
+        let identity = current_generation_identity(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity, ledger.generations[0].identity);
+        assert!(
+            generation_ledger_path(dir.path(), owner)
+                .unwrap()
+                .starts_with(home.path()),
+            "git-backed owner ledger must live in the repo-scoped trusted store"
+        );
+    }
+
+    #[test]
+    fn generation_ledger_imports_verified_blocked_for_reopen_compatibility() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut blocked = active_record("session-original");
+        blocked.owner_number = owner.number;
+        blocked.status = ExecutionControlStatus::Blocked;
+        blocked.blocked_reason = Some("verification dependency unresolved".to_string());
+        blocked.missing_verification = Some("derived matrix".to_string());
+        blocked.settled_at = Some(Utc::now());
+        save(dir.path(), &blocked).unwrap();
+        let terminal_bytes = crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+            .unwrap()
+            .unwrap();
+
+        let ledger =
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+        assert_eq!(ledger.generations.len(), 1);
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+        assert_eq!(
+            ledger.current_generation().unwrap().execution_control_json,
+            terminal_bytes
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner).unwrap().unwrap(),
+            ledger
+        );
+    }
+
+    #[test]
+    fn generation_ledger_prepared_and_aborted_attempts_never_become_current() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut completed = active_record("session-original");
+        completed.owner_number = owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(dir.path(), &completed).unwrap();
+        let imported =
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+        let predecessor = imported.generations[0].identity.clone();
+
+        let request = successor_request("operation-prepare", "principal-a", "quick-start");
+        let prepared = prepare_successor(dir.path(), owner, &request).unwrap();
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
+        assert_eq!(prepared.predecessor, predecessor);
+        let after_prepare = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(after_prepare.generations.len(), 1);
+        assert_eq!(
+            after_prepare.current_generation_id,
+            predecessor.generation_id
+        );
+
+        let aborted =
+            abort_successor(dir.path(), owner, &request, "candidate launch failed").unwrap();
+        assert_eq!(aborted.status, ContinuationAttemptStatus::Aborted);
+        let after_abort = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(after_abort.generations.len(), 1);
+        assert_eq!(after_abort.current_generation_id, predecessor.generation_id);
+        assert_eq!(
+            after_abort
+                .continuation_attempts
+                .iter()
+                .map(|attempt| attempt.status)
+                .collect::<Vec<_>>(),
+            vec![
+                ContinuationAttemptStatus::Prepared,
+                ContinuationAttemptStatus::Aborted
+            ]
+        );
+
+        let mut conflicting = request.clone();
+        conflicting.principal_id = "principal-b".to_string();
+        let conflict = prepare_successor(dir.path(), owner, &conflicting).unwrap_err();
+        assert_eq!(conflict.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_generation_id,
+            predecessor.generation_id
+        );
+    }
+
+    #[test]
+    fn generation_ledger_activation_cas_has_exactly_one_winner() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let competing_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(competing_dir.path());
+        let owner = generation_owner();
+        let mut completed = active_record("session-original");
+        completed.owner_number = owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(dir.path(), &completed).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+
+        let request_a = successor_request("operation-a", "principal-a", "quick-start");
+        let request_b = successor_request("operation-b", "principal-b", "work-detail");
+        prepare_successor(dir.path(), owner, &request_a).unwrap();
+        prepare_successor(competing_dir.path(), owner, &request_b).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for (worktree, request) in [
+            (dir.path().to_path_buf(), request_a.clone()),
+            (competing_dir.path().to_path_buf(), request_b.clone()),
+        ] {
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                activate_successor(&worktree, owner, &request)
+            }));
+        }
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+        let winner_index = results.iter().position(Result::is_ok).unwrap();
+        let winner_worktree = if winner_index == 0 {
+            dir.path()
+        } else {
+            competing_dir.path()
+        };
+        let loser_worktree = if winner_index == 0 {
+            competing_dir.path()
+        } else {
+            dir.path()
+        };
+        let ledger = load_generation_ledger(winner_worktree, owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.generations.len(), 2);
+        assert_eq!(
+            ledger
+                .generations
+                .iter()
+                .filter(|generation| generation.status == ExecutionControlStatus::Active)
+                .count(),
+            1
+        );
+        let current = ledger.current_generation().unwrap();
+        assert_eq!(current.status, ExecutionControlStatus::Active);
+        assert_eq!(
+            results
+                .iter()
+                .find_map(|result| result.as_ref().ok())
+                .unwrap(),
+            &current.identity
+        );
+
+        let winner_request = if winner_index == 0 {
+            &request_a
+        } else {
+            &request_b
+        };
+        assert_eq!(
+            activate_successor(winner_worktree, owner, winner_request).unwrap(),
+            current.identity
+        );
+        assert_eq!(
+            load_generation_ledger(loser_worktree, owner)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData,
+            "losing/stale worktree pointer must not follow the owner-wide winner"
+        );
+    }
+
+    #[test]
+    fn generation_ledger_terminal_transition_updates_binding_head_not_attempts() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+
+        let initial_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let result = settle(
+            dir.path(),
+            "session-original",
+            ExecutionSettlement::Completed,
+        )
+        .unwrap();
+        assert!(matches!(result, SettleResult::Settled(_)));
+        let settled_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled_binding.generation_id, initial_binding.generation_id);
+        assert_eq!(settled_binding.binding_id, initial_binding.binding_id);
+        assert_ne!(
+            settled_binding.ledger_head_hash, initial_binding.ledger_head_hash,
+            "same-generation terminal lifecycle must advance the exact binding head"
+        );
+        let settled = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(
+            settled.current_effective_status(),
+            Some(ExecutionControlStatus::Completed)
+        );
+
+        let request = successor_request("operation-after-settle", "principal-a", "quick-start");
+        prepare_successor(dir.path(), owner, &request).unwrap();
+        assert_eq!(
+            current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap(),
+            settled_binding,
+            "Prepared audit must not advance the effective generation lifecycle head"
+        );
+        abort_successor(dir.path(), owner, &request, "cancelled before launch").unwrap();
+        assert_eq!(
+            current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap(),
+            settled_binding,
+            "Aborted audit must not advance the effective generation lifecycle head"
+        );
+
+        let successor_request =
+            successor_request("operation-activate", "principal-b", "work-detail");
+        prepare_successor(dir.path(), owner, &successor_request).unwrap();
+        let successor = activate_successor(dir.path(), owner, &successor_request).unwrap();
+        assert_eq!(
+            successor.predecessor_content_hash.as_deref(),
+            Some(settled_binding.ledger_head_hash.as_str()),
+            "successor predecessor must bind the terminal lifecycle head"
+        );
+        let activated = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(activated.generations.len(), 2);
+        assert_eq!(
+            activated
+                .generations
+                .iter()
+                .filter(|generation| {
+                    activated.effective_status_for(generation) == ExecutionControlStatus::Active
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            activated.current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+        assert_eq!(
+            activated.effective_status_for(&activated.generations[0]),
+            ExecutionControlStatus::Completed
+        );
+
+        let before_flat_refusal =
+            crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+                .unwrap()
+                .unwrap();
+        active.owner_kind = ExecutionOwnerKind::Issue;
+        active.owner_number = owner.number + 999;
+        active.primary_session_id = "flat-only-writer".to_string();
+        let refusal = save(dir.path(), &active).unwrap_err();
+        assert_eq!(refusal.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+                .unwrap()
+                .unwrap(),
+            before_flat_refusal,
+            "pointer-owned projection bytes must remain unchanged even when a flat writer changes owner"
+        );
+    }
+
+    #[test]
+    fn generation_ledger_adopt_keeps_generation_and_advances_binding_head() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let before = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+
+        let mut out = String::new();
+        assert_eq!(
+            run_adopt(dir.path(), "session-adopting", "explicit handoff", &mut out).unwrap(),
+            0,
+            "{out}"
+        );
+        let after = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.generation_id, before.generation_id);
+        assert_eq!(after.binding_id, before.binding_id);
+        assert_ne!(after.ledger_head_hash, before.ledger_head_hash);
+        let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+        assert_eq!(ledger.generations.len(), 1);
+        assert_eq!(ledger.takeovers.len(), 1);
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().primary_session_id,
+            "session-adopting"
+        );
+    }
+
+    #[test]
+    fn generation_ledger_rejects_hash_predecessor_and_terminal_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let owner = generation_owner();
+
+        let terminal_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(terminal_dir.path());
+        let mut completed = active_record("session-original");
+        completed.owner_number = owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(terminal_dir.path(), &completed).unwrap();
+        ensure_generation_ledger(terminal_dir.path(), owner, LegacyActiveDisposition::Unknown)
+            .unwrap();
+        let terminal_path = generation_ledger_path(terminal_dir.path(), owner).unwrap();
+        let original_terminal_ledger = fs::read(&terminal_path).unwrap();
+        let mut terminal_ledger: ExecutionGenerationLedger =
+            serde_json::from_slice(&original_terminal_ledger).unwrap();
+        terminal_ledger.generations[0].execution_control_json = terminal_ledger.generations[0]
+            .execution_control_json
+            .replace("\"completed\"", "\"active\"");
+        fs::write(
+            &terminal_path,
+            serde_json::to_vec_pretty(&terminal_ledger).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_generation_ledger(terminal_dir.path(), owner)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+
+        let predecessor_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(predecessor_dir.path());
+        let predecessor_owner = ExecutionOwnerKey {
+            kind: owner.kind,
+            number: owner.number + 1,
+        };
+        let mut predecessor_completed = completed.clone();
+        predecessor_completed.owner_number = predecessor_owner.number;
+        save(predecessor_dir.path(), &predecessor_completed).unwrap();
+        ensure_generation_ledger(
+            predecessor_dir.path(),
+            predecessor_owner,
+            LegacyActiveDisposition::Unknown,
+        )
+        .unwrap();
+        let request = successor_request("operation-successor", "principal-a", "quick-start");
+        prepare_successor(predecessor_dir.path(), predecessor_owner, &request).unwrap();
+        activate_successor(predecessor_dir.path(), predecessor_owner, &request).unwrap();
+        let predecessor_path =
+            generation_ledger_path(predecessor_dir.path(), predecessor_owner).unwrap();
+        let mut predecessor_ledger: ExecutionGenerationLedger =
+            serde_json::from_slice(&fs::read(&predecessor_path).unwrap()).unwrap();
+        predecessor_ledger.generations[1]
+            .identity
+            .predecessor_content_hash = Some("validly-rehashed-but-wrong".to_string());
+        predecessor_ledger.generations[1].content_hash =
+            compute_generation_hash(&predecessor_ledger.generations[1]);
+        predecessor_ledger.content_hash = compute_generation_ledger_hash(&predecessor_ledger);
+        fs::write(
+            &predecessor_path,
+            serde_json::to_vec_pretty(&predecessor_ledger).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_generation_ledger(predecessor_dir.path(), predecessor_owner)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn generation_ledger_projection_event_chain_rejects_truncate_reorder_and_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        settle(
+            dir.path(),
+            "session-original",
+            ExecutionSettlement::Blocked {
+                reason: "dependency blocked".to_string(),
+                missing_verification: Some("focused matrix".to_string()),
+            },
+        )
+        .unwrap();
+
+        let mut reopened = load(dir.path()).unwrap().unwrap();
+        reopened
+            .recoveries
+            .push(test_recovery("session-original", 1));
+        reopened.blocked_reason = None;
+        reopened.missing_verification = None;
+        reopened.status = ExecutionControlStatus::Active;
+        reopened.settled_at = None;
+        assert!(persist_generation_lifecycle_transition_if_owned(
+            dir.path(),
+            &reopened,
+            ExecutionControlStatus::Blocked,
+            "verified recovery",
+        )
+        .unwrap());
+
+        let path = generation_ledger_path(dir.path(), owner).unwrap();
+        let original = fs::read(&path).unwrap();
+        let baseline: ExecutionGenerationLedger = serde_json::from_slice(&original).unwrap();
+        assert_eq!(baseline.lifecycle_events.len(), 2);
+
+        let write_and_reject = |ledger: &mut ExecutionGenerationLedger| {
+            ledger.content_hash = compute_generation_ledger_hash(ledger);
+            fs::write(&path, serde_json::to_vec_pretty(ledger).unwrap()).unwrap();
+            assert_eq!(
+                load_owner_generation_ledger(dir.path(), owner)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidData
+            );
+            fs::write(&path, &original).unwrap();
+        };
+
+        let mut mutated = baseline.clone();
+        mutated.lifecycle_events[0].execution_control_json = mutated.lifecycle_events[0]
+            .execution_control_json
+            .replace("\"blocked\"", "\"completed\"");
+        write_and_reject(&mut mutated);
+
+        let mut truncated = baseline.clone();
+        truncated.lifecycle_events.remove(0);
+        truncated.lifecycle_events[0].sequence = 1;
+        truncated.lifecycle_events[0].previous_event_hash.clear();
+        truncated.lifecycle_events[0].content_hash =
+            compute_lifecycle_event_hash(&truncated.lifecycle_events[0]);
+        write_and_reject(&mut truncated);
+
+        let mut reordered = baseline;
+        reordered.lifecycle_events.swap(0, 1);
+        let mut previous_hash = String::new();
+        for (index, event) in reordered.lifecycle_events.iter_mut().enumerate() {
+            event.sequence = index as u64 + 1;
+            event.previous_event_hash.clone_from(&previous_hash);
+            event.content_hash = compute_lifecycle_event_hash(event);
+            previous_hash.clone_from(&event.content_hash);
+        }
+        write_and_reject(&mut reordered);
+    }
+
+    #[test]
+    fn generation_ledger_classifies_legacy_active_and_refuses_old_writer() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let unknown_owner = generation_owner();
+
+        let unknown_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(unknown_dir.path());
+        let mut active = active_record("session-original");
+        active.owner_number = unknown_owner.number;
+        save(unknown_dir.path(), &active).unwrap();
+        let active_bytes =
+            crate::cli::trusted_store::read(unknown_dir.path(), "execution-control.json")
+                .unwrap()
+                .unwrap();
+        let error = ensure_generation_ledger(
+            unknown_dir.path(),
+            unknown_owner,
+            LegacyActiveDisposition::Unknown,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert!(!generation_ledger_path(unknown_dir.path(), unknown_owner)
+            .unwrap()
+            .exists());
+        assert!(!generation_pointer_path(unknown_dir.path()).exists());
+        assert_eq!(
+            crate::cli::trusted_store::read(unknown_dir.path(), "execution-control.json")
+                .unwrap()
+                .unwrap(),
+            active_bytes,
+            "unknown legacy liveness must be a zero-mutation refusal"
+        );
+
+        let stale_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(stale_dir.path());
+        let stale_owner = ExecutionOwnerKey {
+            kind: unknown_owner.kind,
+            number: unknown_owner.number + 1,
+        };
+        let mut stale_active = active.clone();
+        stale_active.owner_number = stale_owner.number;
+        save(stale_dir.path(), &stale_active).unwrap();
+        let stale = ensure_generation_ledger(
+            stale_dir.path(),
+            stale_owner,
+            LegacyActiveDisposition::Stale {
+                new_session_id: "session-successor".to_string(),
+                reason: "dead pane takeover".to_string(),
+                observed_at: Utc::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(stale.generations.len(), 1);
+        assert_eq!(stale.takeovers.len(), 1);
+        assert_eq!(
+            stale.takeovers[0].generation_id,
+            stale.current_generation_id
+        );
+        assert_eq!(
+            stale
+                .current_generation()
+                .unwrap()
+                .identity
+                .initial_session_id,
+            "session-original"
+        );
+        assert_eq!(
+            load(stale_dir.path()).unwrap().unwrap().primary_session_id,
+            "session-successor"
+        );
+
+        let hashless_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(hashless_dir.path());
+        let hashless_owner = ExecutionOwnerKey {
+            kind: unknown_owner.kind,
+            number: unknown_owner.number + 2,
+        };
+        let mut hashless_active = active.clone();
+        hashless_active.owner_number = hashless_owner.number;
+        let hashless_bytes = serde_json::to_vec_pretty(&hashless_active).unwrap();
+        gwt_github::cache::write_atomic(&state_path(hashless_dir.path()), &hashless_bytes).unwrap();
+        let error = ensure_generation_ledger(
+            hashless_dir.path(),
+            hashless_owner,
+            LegacyActiveDisposition::Live,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert!(!generation_ledger_path(hashless_dir.path(), hashless_owner)
+            .unwrap()
+            .exists());
+        assert!(!generation_pointer_path(hashless_dir.path()).exists());
+
+        let old_writer_dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(old_writer_dir.path());
+        let old_writer_owner = ExecutionOwnerKey {
+            kind: unknown_owner.kind,
+            number: unknown_owner.number + 3,
+        };
+        let mut completed = active.clone();
+        completed.owner_number = old_writer_owner.number;
+        completed.status = ExecutionControlStatus::Completed;
+        completed.settled_at = Some(Utc::now());
+        save(old_writer_dir.path(), &completed).unwrap();
+        ensure_generation_ledger(
+            old_writer_dir.path(),
+            old_writer_owner,
+            LegacyActiveDisposition::Unknown,
+        )
+        .unwrap();
+        let mut old_writer_projection = load(old_writer_dir.path()).unwrap().unwrap();
+        old_writer_projection.primary_session_id = "session-old-writer".to_string();
+        old_writer_projection.content_hash = compute_content_hash(&old_writer_projection);
+        let old_writer_bytes = serde_json::to_vec_pretty(&old_writer_projection).unwrap();
+        crate::cli::trusted_store::write_with_mirror(
+            old_writer_dir.path(),
+            "execution-control.json",
+            &state_path(old_writer_dir.path()),
+            &old_writer_bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            load_generation_ledger(old_writer_dir.path(), old_writer_owner)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData,
+            "a flat projection rewrite after ledger ownership must be refused"
+        );
+        let normal_reader = load(old_writer_dir.path()).unwrap().unwrap();
+        assert_eq!(normal_reader.status, ExecutionControlStatus::Active);
+        assert!(
+            !integrity_ok(&normal_reader),
+            "canonical flat reader must return a fail-closed integrity sentinel"
+        );
+        assert!(
+            !is_completed(old_writer_dir.path()),
+            "stale terminal projection must never release completion gates"
+        );
     }
 
     // T-106: roundtrip with owner kind/number, primary session id,
@@ -2018,7 +4538,9 @@ mod tests {
         }
 
         fn settle_blocked(repo: &Path, session: &str) -> ExecutionControlRecord {
-            save(repo, &active_record(session)).unwrap();
+            if load(repo).unwrap().is_none() {
+                save(repo, &active_record(session)).unwrap();
+            }
             let result = settle(
                 repo,
                 session,
@@ -2070,8 +4592,25 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
 
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let active_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap();
             let blocked = settle_blocked(dir.path(), "sess-reopen");
             let blocked_at = blocked.settled_at.unwrap();
+            let blocked_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap();
+            assert_eq!(blocked_binding.generation_id, active_binding.generation_id);
+            assert_ne!(
+                blocked_binding.ledger_head_hash,
+                active_binding.ledger_head_hash
+            );
             let verification_record_id = save_covering_evidence(dir.path(), "sess-reopen", true);
 
             let (code, out) = run_cmd(
@@ -2091,6 +4630,21 @@ mod tests {
             assert_eq!(reopened.missing_verification, None);
             assert_eq!(reopened.settled_at, None);
             assert_eq!(reopened.recoveries.len(), 1);
+            let reopened_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap();
+            assert_eq!(reopened_binding.generation_id, active_binding.generation_id);
+            assert_ne!(
+                reopened_binding.ledger_head_hash,
+                blocked_binding.ledger_head_hash
+            );
+            let generation_ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+            assert_eq!(generation_ledger.generations.len(), 1);
+            assert_eq!(generation_ledger.lifecycle_events.len(), 2);
+            assert_eq!(
+                generation_ledger.current_effective_status(),
+                Some(ExecutionControlStatus::Active)
+            );
             let recovery = &reopened.recoveries[0];
             assert_eq!(recovery.session_id, "sess-reopen");
             assert_eq!(
