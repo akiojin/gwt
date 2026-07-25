@@ -130,7 +130,7 @@ export function createFleetMinimap({
       cell.dataset.windowId = windowId;
       cell.addEventListener("click", (event) => {
         event.stopPropagation();
-        frameWindow(windowId);
+        frameWindow(windowId, { animate: false });
       });
       cellMap.set(windowId, cell);
       worldLayer.appendChild(cell);

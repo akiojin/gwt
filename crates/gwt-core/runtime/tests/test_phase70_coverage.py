@@ -245,7 +245,7 @@ class SearchClassificationBranchTests(unittest.TestCase):
                 )
             self.assertEqual(state, expected, health)
 
-    def test_search_multi_marks_scope_corrupt_when_query_blows_up(self):
+    def test_search_multi_keeps_healthy_query_failure_out_of_corrupt_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(
                 os.environ,
@@ -272,8 +272,11 @@ class SearchClassificationBranchTests(unittest.TestCase):
                     scopes=["works"],
                     db_root=Path(tmp),
                 )
-        self.assertTrue(payload.get("ok"), payload)
-        self.assertEqual(payload["scopes"]["works"]["state"], "corrupt", payload)
+        self.assertFalse(payload.get("ok"), payload)
+        self.assertEqual(payload.get("error_code"), "SEARCH_FAILED", payload)
+        self.assertIs(payload.get("retryable"), False, payload)
+        self.assertEqual(payload.get("affected_scopes"), ["works"], payload)
+        self.assertNotIn("scopes", payload)
 
     def test_search_scope_collection_emits_all_terms_suggestions(self):
         with tempfile.TemporaryDirectory() as tmp:

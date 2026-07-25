@@ -41,7 +41,11 @@ use crate::cli::{improvement, intake_outcome};
 /// normalization for provider bridges is a dependent follow-up.
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
+    handle_user_prompt_submit_for_resolved_worktree(&resolved, input);
+}
+
+pub(crate) fn handle_user_prompt_submit_for_resolved_worktree(worktree: &Path, input: &str) {
+    let lane = HookContext::for_worktree(worktree).lane;
     if !lane.policy_flags.completion_gate {
         return;
     }
@@ -53,7 +57,7 @@ pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
             return;
         }
     }
-    if let Err(error) = intake_outcome::mark_required_since(&resolved, &session_id, Utc::now()) {
+    if let Err(error) = intake_outcome::mark_required_since(worktree, &session_id, Utc::now()) {
         tracing::warn!(?error, "intake required_since marking failed");
     }
 }

@@ -19,11 +19,13 @@ type LatencySummary = {
   exactFieldsOk: boolean;
   invalidInputCount: number;
   inputWhileBusyCount: number;
+  longTaskMaxMs: number;
   longTaskOverBudgetCount: number;
   maxMs: number;
   orderingOk: boolean;
   p95Ms: number;
   privacyOk: boolean;
+  rafGapMaxMs: number;
   rafGapOverBudgetCount: number;
   sampleCount: number;
   segmentP95Ms: Record<string, number>;
@@ -415,6 +417,12 @@ async function installLatencyBackend(page: Page): Promise<void> {
           exactFieldsOk,
           invalidInputCount,
           inputWhileBusyCount,
+          longTaskMaxMs: Math.max(
+            0,
+            ...entries
+              .filter((entry) => entry.kind === "long_task")
+              .map((entry) => Number(entry.duration_ms ?? 0)),
+          ),
           longTaskOverBudgetCount: entries.filter(
             (entry) =>
               entry.kind === "long_task" && Number(entry.duration_ms ?? 0) > 50,
@@ -430,6 +438,12 @@ async function installLatencyBackend(page: Page): Promise<void> {
               : Number.POSITIVE_INFINITY,
           privacyOk: [...forbiddenTraceValues].every(
             (value) => !serialized.includes(value),
+          ),
+          rafGapMaxMs: Math.max(
+            0,
+            ...entries
+              .filter((entry) => entry.kind === "raf_gap")
+              .map((entry) => Number(entry.gap_ms ?? 0)),
           ),
           rafGapOverBudgetCount: entries.filter(
             (entry) =>
@@ -794,6 +808,13 @@ async function runLatencyScenario(
   expect(evidence.exactFieldsOk).toBe(true);
   expect(evidence.invalidInputCount).toBe(0);
   expect(evidence.inputWhileBusyCount).toBe(SAMPLE_KEYS.length + 1);
+  console.log(
+    `[agent-input-latency] long_tasks_over_50=${evidence.longTaskOverBudgetCount} ` +
+      `max_long_task=${evidence.longTaskMaxMs.toFixed(1)}ms ` +
+      `raf_gaps_over_100=${evidence.rafGapOverBudgetCount} ` +
+      `max_raf_gap=${evidence.rafGapMaxMs.toFixed(1)}ms ` +
+      `p95=${evidence.p95Ms.toFixed(1)}ms max=${evidence.maxMs.toFixed(1)}ms`,
+  );
   expect(evidence.longTaskOverBudgetCount).toBe(0);
   expect(evidence.orderingOk).toBe(true);
   expect(evidence.privacyOk).toBe(true);

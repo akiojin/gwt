@@ -1,11 +1,11 @@
 // SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
 // app.js: the per-project index status map (setIndexStatus), the Index
 // window search state/render/search/open helpers, and the Index window
-// mount (Search + Health tabs). Pure movement from app.js: behavior, DOM
-// output, and the WS protocol (search_project_index /
-// project_index_search_results / project_index_search_error /
-// refresh_index_status) are unchanged; the moved code keeps its original
-// app.js indentation.
+// mount (Search + Health tabs). The extraction preserved the DOM and WS
+// protocol (search_project_index / project_index_search_results /
+// project_index_search_error / refresh_index_status). SPEC-1939 Phase 70a
+// adds per-window latest-only search scheduling without changing that wire
+// shape.
 import {
   buildIndexHealthSummary,
   renderIndexSettingsPanel,
@@ -97,6 +97,8 @@ export function createProjectIndexSearchSurface({
             requestId: 0,
             inFlightRequestId: 0,
             inFlightSignature: "",
+            queuedSearchIntent: null,
+            searchIntentPending: false,
             searching: false,
             results: [],
             suggestions: [],
@@ -112,6 +114,8 @@ export function createProjectIndexSearchSurface({
         state.requestId += 1;
         state.inFlightRequestId = 0;
         state.inFlightSignature = "";
+        state.queuedSearchIntent = null;
+        state.searchIntentPending = false;
       }
 
       function clearProjectIndexSearchState(state) {
@@ -119,7 +123,12 @@ export function createProjectIndexSearchSurface({
           clearTimeout(state.searchTimer);
           state.searchTimer = 0;
         }
-        invalidateProjectIndexSearchRequest(state);
+        if (state.inFlightRequestId) {
+          state.queuedSearchIntent = { status: "empty" };
+          state.searchIntentPending = false;
+        } else {
+          invalidateProjectIndexSearchRequest(state);
+        }
         state.results = [];
         state.suggestions = [];
         state.selectedResultIndex = -1;
@@ -128,7 +137,8 @@ export function createProjectIndexSearchSurface({
       }
 
       function markProjectIndexSearchPending(state) {
-        invalidateProjectIndexSearchRequest(state);
+        state.queuedSearchIntent = null;
+        state.searchIntentPending = true;
         state.error = "";
       }
 
@@ -248,47 +258,101 @@ export function createProjectIndexSearchSurface({
         }, 250);
       }
 
-      function sendProjectIndexSearch(windowId) {
-        const state = ensureIndexSearchState(windowId);
+      function buildProjectIndexSearchIntent(windowId, state) {
         const query = state.query.trim();
         if (!query) {
-          clearProjectIndexSearchState(state);
-          renderProjectIndexSearch(windowId);
-          return;
+          return { status: "empty" };
         }
         const scopes = Array.from(state.selectedScopes);
         if (scopes.length === 0) {
-          invalidateProjectIndexSearchRequest(state);
-          state.error = "Select at least one scope.";
-          state.searching = false;
-          renderProjectIndexSearch(windowId);
-          return;
+          return { status: "invalid", error: "Select at least one scope." };
         }
-        const requestId = state.requestId + 1;
         const status = activeIndexStatus();
         const worktreeHash = indexFileScopesSelected(state)
           ? selectedIndexWorktreeHash(state, status)
           : "";
         const matchMode = state.matchMode || "semantic";
         const searchSignature = JSON.stringify({ query, scopes, worktreeHash, matchMode });
-        if (state.searching && state.inFlightSignature === searchSignature) {
-          renderProjectIndexSearch(windowId);
-          return;
-        }
+        return {
+          status: "ready",
+          signature: searchSignature,
+          windowId,
+          query,
+          scopes,
+          matchMode,
+          worktreeHash,
+        };
+      }
+
+      function startProjectIndexSearch(state, intent) {
+        const requestId = state.requestId + 1;
         state.requestId = requestId;
         state.inFlightRequestId = requestId;
-        state.inFlightSignature = searchSignature;
+        state.inFlightSignature = intent.signature;
+        state.queuedSearchIntent = null;
+        state.searchIntentPending = false;
         state.searching = true;
         state.error = "";
         send({
           kind: "search_project_index",
-          id: windowId,
-          query,
+          id: intent.windowId,
+          query: intent.query,
           request_id: requestId,
-          scopes,
-          match_mode: state.matchMode,
-          worktree_hash: worktreeHash || null,
+          scopes: intent.scopes,
+          match_mode: intent.matchMode,
+          worktree_hash: intent.worktreeHash || null,
         });
+      }
+
+      function applyUnsendableProjectIndexSearchIntent(state, intent) {
+        if (intent.status === "empty") {
+          clearProjectIndexSearchState(state);
+          return;
+        }
+        invalidateProjectIndexSearchRequest(state);
+        state.error = intent.error;
+        state.searching = false;
+      }
+
+      function sendProjectIndexSearch(windowId) {
+        const state = ensureIndexSearchState(windowId);
+        const intent = buildProjectIndexSearchIntent(windowId, state);
+        const hasInFlightRequest = state.inFlightRequestId !== 0;
+        if (hasInFlightRequest) {
+          state.searchIntentPending = false;
+          if (
+            intent.status === "ready" &&
+            intent.signature === state.inFlightSignature
+          ) {
+            state.queuedSearchIntent = null;
+            state.searching = true;
+            renderProjectIndexSearch(windowId);
+            return;
+          }
+          state.queuedSearchIntent = intent;
+          state.searching = intent.status === "ready";
+          state.error = intent.status === "invalid" ? intent.error : "";
+          if (intent.status !== "ready") {
+            state.results = [];
+            state.suggestions = [];
+            state.selectedResultIndex = -1;
+          }
+          renderProjectIndexSearch(windowId);
+          return;
+        }
+        if (intent.status !== "ready") {
+          applyUnsendableProjectIndexSearchIntent(state, intent);
+          renderProjectIndexSearch(windowId);
+          return;
+        }
+        state.searchIntentPending = false;
+        const searchSignature = intent.signature;
+        if (state.inFlightSignature === searchSignature) {
+          state.queuedSearchIntent = null;
+          renderProjectIndexSearch(windowId);
+          return;
+        }
+        startProjectIndexSearch(state, intent);
         renderProjectIndexSearch(windowId);
       }
 
@@ -562,9 +626,41 @@ export function createProjectIndexSearchSurface({
         return node;
       }
 
+      function continueWithLatestProjectIndexSearch(windowId, state) {
+        if (!state.searchIntentPending && !state.queuedSearchIntent) {
+          return false;
+        }
+        let intent = state.queuedSearchIntent;
+        if (state.searchIntentPending) {
+          if (state.searchTimer) {
+            clearTimeout(state.searchTimer);
+            state.searchTimer = 0;
+          }
+          intent = buildProjectIndexSearchIntent(windowId, state);
+        }
+        state.queuedSearchIntent = null;
+        state.searchIntentPending = false;
+        if (intent.status === "ready" && intent.signature === state.inFlightSignature) {
+          return false;
+        }
+        state.searching = false;
+        state.inFlightRequestId = 0;
+        state.inFlightSignature = "";
+        if (intent.status === "ready") {
+          startProjectIndexSearch(state, intent);
+        } else {
+          applyUnsendableProjectIndexSearchIntent(state, intent);
+        }
+        renderProjectIndexSearch(windowId);
+        return true;
+      }
+
       function handleProjectIndexSearchResults(event) {
         const state = indexSearchStateMap.get(event.id);
         if (!state || event.request_id !== state.inFlightRequestId) {
+          return;
+        }
+        if (continueWithLatestProjectIndexSearch(event.id, state)) {
           return;
         }
         state.searching = false;
@@ -580,6 +676,9 @@ export function createProjectIndexSearchSurface({
       function handleProjectIndexSearchError(event) {
         const state = indexSearchStateMap.get(event.id);
         if (!state || event.request_id !== state.inFlightRequestId) {
+          return;
+        }
+        if (continueWithLatestProjectIndexSearch(event.id, state)) {
           return;
         }
         state.searching = false;

@@ -13,7 +13,12 @@ use super::{
     skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
     workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
 };
-use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
+use crate::discussion_resume::{
+    load_pending_goal, load_pending_goal_from_worktree_files, PendingDiscussionGoal,
+};
+
+pub(super) const USER_PROMPT_SUBMIT_HOOK_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(200);
 
 pub fn handle_with_input(
     event: &str,
@@ -21,14 +26,40 @@ pub fn handle_with_input(
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
-    match event {
+    let started = Instant::now();
+    diagnostics::begin_event();
+    let _deadline = enter_event_deadline(event, started);
+    let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root),
         "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
         "PreToolUse" => handle_pre_tool_use(event, input),
         "PostToolUse" => handle_post_tool_use(event, input),
         "Stop" => handle_stop(event, input, worktree_root, current_session),
         other => Err(HookError::InvalidEvent(other.to_string())),
-    }
+    };
+    let additional_context_bytes = result
+        .as_ref()
+        .ok()
+        .map(additional_context_bytes)
+        .unwrap_or_default();
+    diagnostics::record_event_total(
+        event,
+        started.elapsed(),
+        if result.is_ok() { "ok" } else { "error" },
+        diagnostics::event_metrics(additional_context_bytes),
+    );
+    result
+}
+
+fn enter_event_deadline(
+    event: &str,
+    started: Instant,
+) -> Option<gwt_core::operation_deadline::ScopedOperationDeadline> {
+    (event == "UserPromptSubmit").then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + USER_PROMPT_SUBMIT_HOOK_DEADLINE,
+        )
+    })
 }
 
 fn handle_session_start(
@@ -66,7 +97,7 @@ fn handle_session_start(
         session_start_diagnostic,
     );
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal_for_hook_worktree(worktree_root)
+        load_pending_goal_for_hook_worktree(worktree_root, None)
     });
     Ok(append_pending_discussion_goal_context(
         output,
@@ -80,31 +111,43 @@ fn handle_user_prompt_submit(
     input: &str,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
-    run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
-    })?;
-    run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward(input)
+    let prepared_session = run_step(event, "runtime-state", || {
+        crate::daemon_runtime::handle_runtime_state_prepared(event, input)
     })?;
     // SPEC-2359 Phase W-11 (US-58): the workspace-identity step no longer
     // derives a title from the prompt; it only performs the Phase W-10
     // canonical Project State split repair. Fail-open so a repair error does
     // not abort prompt handling.
     run_value(event, "workspace-identity", || {
-        if let Err(error) = workspace_identity::handle_user_prompt_submit(input) {
+        let result = prepared_session
+            .as_ref()
+            .map(workspace_identity::handle_user_prompt_submit_for_session)
+            .unwrap_or_else(|| workspace_identity::handle_user_prompt_submit(input));
+        if let Err(error) = result {
             tracing::warn!(?error, "workspace-identity hook step failed");
         }
     });
     // SPEC-3248 P7A (FR-016): mark the intake artifact requirement dirty for
     // curation/producing prompts. Fail-open state writer.
     run_value(event, "intake-outcome-required-since", || {
-        intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
+        if let Some(session) = prepared_session.as_ref() {
+            intake_completion_stop_check::handle_user_prompt_submit_for_resolved_worktree(
+                &session.worktree_path,
+                input,
+            );
+        } else {
+            intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
+        }
     });
     let output = run_step(event, "board-reminder", || {
-        board_reminder::handle_with_input(event, input)
+        if let Some(session) = prepared_session.as_ref() {
+            board_reminder::handle_with_input_for_session(event, input, session)
+        } else {
+            board_reminder::handle_with_input(event, input)
+        }
     })?;
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal_for_hook_worktree(worktree_root)
+        load_pending_goal_for_hook_worktree(worktree_root, prepared_session.as_ref())
     });
     Ok(append_pending_discussion_goal_context(
         output,
@@ -272,7 +315,25 @@ fn run_value<T>(event: &str, handler: &str, operation: impl FnOnce() -> T) -> T 
     value
 }
 
-fn load_pending_goal_for_hook_worktree(worktree_root: &Path) -> Option<PendingDiscussionGoal> {
+fn additional_context_bytes(output: &HookOutput) -> usize {
+    match output {
+        HookOutput::HookSpecificAdditionalContext { text, .. } => text.len(),
+        HookOutput::PreToolUsePermission { .. }
+        | HookOutput::SystemMessage(_)
+        | HookOutput::Silent
+        | HookOutput::StopBlock { .. } => 0,
+    }
+}
+
+fn load_pending_goal_for_hook_worktree(
+    worktree_root: &Path,
+    prepared_session: Option<&gwt_agent::Session>,
+) -> Option<PendingDiscussionGoal> {
+    if let Some(session) = prepared_session {
+        return load_pending_goal_from_worktree_files(&session.worktree_path)
+            .ok()
+            .flatten();
+    }
     let resolved_worktree_root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
     load_pending_goal(&resolved_worktree_root).ok().flatten()
 }
@@ -330,9 +391,233 @@ After a successful start, run JSON operation `discuss.goal_started` with `params
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board_remote::{http::ReqwestHttpClient, slack::SlackProvider};
     use crate::discussion_resume::PendingDiscussionGoal;
+    use axum::{extract::State, routing::get, Json, Router};
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
+    use gwt_core::coordination::BoardProvider;
     use gwt_core::test_support::ScopedEnvVar;
+    use serde_json::Value;
+    use std::{collections::BTreeMap, rc::Rc, sync::mpsc, time::Duration};
+    use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
+
+    #[derive(Debug)]
+    enum DegradedEndpointCall {
+        BoardHistory,
+    }
+
+    #[derive(Clone)]
+    struct DegradedEndpointState {
+        calls: mpsc::Sender<DegradedEndpointCall>,
+    }
+
+    struct DegradedEndpointServer {
+        runtime: Runtime,
+        shutdown: Option<oneshot::Sender<()>>,
+        calls: mpsc::Receiver<DegradedEndpointCall>,
+        base_url: String,
+    }
+
+    impl DegradedEndpointServer {
+        fn start() -> Self {
+            let runtime = Runtime::new().expect("degraded endpoint runtime");
+            let listener = runtime
+                .block_on(TcpListener::bind(("127.0.0.1", 0)))
+                .expect("bind degraded endpoint");
+            let address = listener.local_addr().expect("degraded endpoint address");
+            let (calls_tx, calls) = mpsc::channel();
+            let (shutdown, shutdown_rx) = oneshot::channel();
+            let app = Router::new()
+                .route("/api/conversations.history", get(delayed_board_history))
+                .with_state(DegradedEndpointState { calls: calls_tx });
+            runtime.spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("serve degraded endpoints");
+            });
+            Self {
+                runtime,
+                shutdown: Some(shutdown),
+                calls,
+                base_url: format!("http://127.0.0.1:{}", address.port()),
+            }
+        }
+
+        fn slack_api_base(&self) -> String {
+            format!("{}/api", self.base_url)
+        }
+
+        fn collected_calls(&self) -> Vec<DegradedEndpointCall> {
+            self.calls.try_iter().collect()
+        }
+    }
+
+    impl Drop for DegradedEndpointServer {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            self.runtime
+                .block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        }
+    }
+
+    async fn delayed_board_history(State(state): State<DegradedEndpointState>) -> Json<Value> {
+        state
+            .calls
+            .send(DegradedEndpointCall::BoardHistory)
+            .expect("record Board history request");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Json(serde_json::json!({
+            "ok": true,
+            "messages": [],
+            "response_metadata": {"next_cursor": ""}
+        }))
+    }
+
+    #[test]
+    fn only_user_prompt_submit_enters_the_aggregate_deadline() {
+        assert!(
+            gwt_core::operation_deadline::current().is_none(),
+            "test must start without a scoped deadline"
+        );
+        let started = Instant::now();
+        let guard = enter_event_deadline("UserPromptSubmit", started)
+            .expect("UserPromptSubmit deadline guard");
+        let deadline =
+            gwt_core::operation_deadline::current().expect("aggregate deadline must be visible");
+        assert!(deadline > started);
+        assert!(deadline <= started + USER_PROMPT_SUBMIT_HOOK_DEADLINE);
+        drop(guard);
+        assert!(gwt_core::operation_deadline::current().is_none());
+
+        assert!(enter_event_deadline("SessionStart", started).is_none());
+        assert!(enter_event_deadline("PreToolUse", started).is_none());
+        assert!(enter_event_deadline("PostToolUse", started).is_none());
+        assert!(enter_event_deadline("Stop", started).is_none());
+    }
+
+    #[test]
+    fn degraded_remote_board_and_hook_live_fail_open_within_prompt_budget() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated HOME");
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        let sessions_dir = home.path().join(".gwt/sessions");
+        let mut session = Session::new(&worktree, "work/degraded-prompt", AgentId::Codex);
+        session.agent_session_id = Some("agent-degraded-prompt".to_string());
+        session.save(&sessions_dir).expect("save Session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        let profile_path = home.path().join("hook-profile.jsonl");
+        let server = DegradedEndpointServer::start();
+        let unavailable_hook =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve unavailable hook port");
+        let unavailable_hook_port = unavailable_hook
+            .local_addr()
+            .expect("unavailable hook address")
+            .port();
+        drop(unavailable_hook);
+
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            format!("http://127.0.0.1:{unavailable_hook_port}/internal/hook-live"),
+        );
+        let _forward_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+
+        let provider: Rc<dyn BoardProvider> = Rc::new(SlackProvider::new_with_base(
+            server.slack_api_base(),
+            "board-token",
+            "channel-1",
+            BTreeMap::new(),
+            Box::new(ReqwestHttpClient::new()),
+            0,
+        ));
+        let _provider =
+            crate::board_provider::test_provider_override::force_prompt_provider(provider);
+        let input = serde_json::json!({
+            "prompt": "continue",
+            "session_id": "agent-degraded-prompt",
+            "cwd": worktree,
+        })
+        .to_string();
+
+        let started = Instant::now();
+        let result = handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id));
+        let elapsed = started.elapsed();
+        let records: Vec<Value> = std::fs::read_to_string(&profile_path)
+            .expect("read hook profile")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("profile JSON"))
+            .collect();
+        let timing_summary = records
+            .iter()
+            .map(|record| {
+                (
+                    record["handler"].as_str().unwrap_or("<missing>"),
+                    record["duration_ms"].as_f64().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            result.is_ok(),
+            "degraded endpoints must fail open, got {result:?} after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "degraded prompt must stay below 250ms, got {elapsed:?}: {timing_summary:?}"
+        );
+
+        let calls = server.collected_calls();
+        let board_history_calls = calls
+            .iter()
+            .filter(|call| matches!(call, DegradedEndpointCall::BoardHistory))
+            .count();
+        assert!(
+            board_history_calls <= 1,
+            "remote history must materialize at most once: {calls:?}"
+        );
+
+        let total = records
+            .iter()
+            .find(|record| {
+                record["event"] == "UserPromptSubmit" && record["handler"] == "event-total"
+            })
+            .expect("UserPromptSubmit event-total");
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| {
+                    record["event"] == "UserPromptSubmit" && record["handler"] == "runtime-state"
+                })
+                .count(),
+            1,
+            "UserPromptSubmit must retain exactly one RuntimeState handler"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| {
+                    record["event"] == "UserPromptSubmit" && record["handler"] == "forward"
+                })
+                .count(),
+            0,
+            "UserPromptSubmit must not run the Forward handler"
+        );
+        assert_eq!(total["provider_read_count"], 1);
+        assert_eq!(total["history_materialization_count"], 1);
+    }
 
     fn write_pending_goal(worktree: &Path) {
         let discussion_path = worktree.join(".gwt/discussion.md");
@@ -443,6 +728,55 @@ mod tests {
         };
         assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
         assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
+        assert!(text.contains("Proposal A - Goal handoff"), "{text}");
+    }
+
+    #[test]
+    fn managed_user_prompt_uses_session_worktree_without_git_discovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let subdir = worktree.path().join("nested/agent");
+        let empty_bin = worktree.path().join("empty-bin");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::create_dir_all(&empty_bin).unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let sessions_dir = worktree.path().join(".gwt/sessions");
+        let mut session = Session::new(
+            worktree.path(),
+            "work/prompt-fast-path",
+            AgentId::ClaudeCode,
+        );
+        session.agent_session_id = Some("agent-fast-path".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_env = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _path = ScopedEnvVar::set("PATH", &empty_bin);
+        write_pending_goal(worktree.path());
+
+        let input = serde_json::json!({
+            "prompt": "continue",
+            "session_id": "agent-fast-path",
+        })
+        .to_string();
+        let output = handle_with_input("UserPromptSubmit", &input, &subdir, Some(&session_id))
+            .expect("managed prompt hook output");
+
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("expected pending goal context");
+        };
+        assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
+        assert!(
+            text.contains("pending gwt-discussion Goal Start"),
+            "managed UserPromptSubmit must use the prepared Session worktree instead of spawning git: {text}"
+        );
         assert!(text.contains("Proposal A - Goal handoff"), "{text}");
     }
 

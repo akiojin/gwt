@@ -87,6 +87,10 @@
       // /project-shell-surface.js.
       import { createProjectShellSurface } from "/project-shell-surface.js";
       import {
+        createNavigationPendingController,
+        isNavigationRequest,
+      } from "/navigation-pending-controller.js";
+      import {
         applyVisibilityTransition,
         attachContainerResizeReflow,
         attachHostResizeReflow,
@@ -399,6 +403,7 @@
       let socketReceiveDispatcherGeneration = 0;
       let reconnectTimer = null;
       let focusedId = null;
+      let localWindowZCounter = 0;
       let dragState = null;
       let windowTabDragState = null;
       let panState = null;
@@ -437,6 +442,7 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let navigationPendingController = null;
       let improvementCandidates = [];
       let improvementCandidatesRevision = 0;
       let improvementCandidatesProjectRoot = null;
@@ -837,12 +843,41 @@
         return null;
       }
 
-      function send(message) {
+      function sendRaw(message) {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify(message));
           return;
         }
+        if (isNavigationRequest(message)) {
+          return;
+        }
         pendingMessages.push(message);
+      }
+
+      function navigationWindowTargetId(message) {
+        if (
+          message?.kind === "focus_window" ||
+          message?.kind === "activate_window_tab"
+        ) {
+          return typeof message.id === "string" ? message.id : "";
+        }
+        return "";
+      }
+
+      function send(message) {
+        let outgoing = message;
+        if (
+          navigationPendingController &&
+          isNavigationRequest(message) &&
+          !message.interaction_id
+        ) {
+          const localWindowTargetId = navigationWindowTargetId(message);
+          if (localWindowTargetId) {
+            focusWindowLocally(localWindowTargetId);
+          }
+          outgoing = navigationPendingController.begin(message);
+        }
+        sendRaw(outgoing);
       }
 
       const uiTraceWiring = createUiTraceWiring({
@@ -1123,6 +1158,7 @@
 
       function handleSocketOpen() {
         socketReceiveDispatcherGeneration += 1;
+        navigationPendingController?.resetConnection();
         const ownGeneration = socketReceiveDispatcherGeneration;
         socketReceiveDispatcher = createSocketReceiveDispatcher({
           receive: (event, traceMetadata) => {
@@ -1631,6 +1667,11 @@
           },
         );
       }
+
+      navigationPendingController = createNavigationPendingController({
+        initialState: appState,
+        onState: renderAppState,
+      });
 
       let presetModalFocusReturn = null;
       let presetModalFocusTrapRelease = null;
@@ -2321,7 +2362,7 @@
         const baseIndex = currentIndex === -1 ? 0 : currentIndex;
         const nextIndex =
           (baseIndex + delta + windows.length) % windows.length;
-        frameWindow(windows[nextIndex].id);
+        frameWindow(windows[nextIndex].id, { animate: false });
       }
 
       function shouldHandleFocusShortcut(event) {
@@ -3258,7 +3299,6 @@
       function focusWindowLocally(windowId) {
         const targetElement = windowMap.get(windowId);
         if (focusedId === windowId && targetElement?.classList.contains("focused")) {
-          raiseWindowElementLocally(targetElement);
           return;
         }
         const previousFocusedId = focusedId;
@@ -3283,16 +3323,9 @@
           return;
         }
         const targetZ = numericZIndex(targetElement.style.zIndex);
-        let maxPeerZ = 0;
-        for (const element of windowMap.values()) {
-          if (element === targetElement) {
-            continue;
-          }
-          maxPeerZ = Math.max(maxPeerZ, numericZIndex(element.style.zIndex));
-        }
-        if (targetZ <= maxPeerZ) {
-          targetElement.style.zIndex = String(maxPeerZ + 1);
-        }
+        localWindowZCounter =
+          Math.max(localWindowZCounter, targetZ) + 1;
+        targetElement.style.zIndex = String(localWindowZCounter);
       }
 
       function focusWindowRemotely(windowId, { center = false } = {}) {
@@ -4983,6 +5016,10 @@
           element.style.height = `${windowData.geometry.height}px`;
         }
         element.style.zIndex = String(windowData.z_index);
+        localWindowZCounter = Math.max(
+          localWindowZCounter,
+          numericZIndex(windowData.z_index),
+        );
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
         renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (
@@ -5139,15 +5176,22 @@
             // with agent status events.
             recomputeOperatorTelemetry();
 
-            const topmostId = topmostWindowId(workspace);
-            if (topmostId && activeWindowIdSet.has(topmostId)) {
-              focusWindowLocally(topmostId);
-              scheduleTerminalFocusActivation(topmostId, {
-                shouldPersistGeometry: false,
-                reason: "topmost_focus",
-              });
-            } else {
-              focusedId = null;
+            const focusedWindow = (workspace?.windows || []).find(
+              (windowData) => windowData.id === focusedId,
+            );
+            const focusedWindowStillVisible =
+              Boolean(focusedWindow) && visibleWindowData(focusedWindow);
+            if (!focusedWindowStillVisible) {
+              const topmostId = topmostWindowId(workspace);
+              if (topmostId && activeWindowIdSet.has(topmostId)) {
+                focusWindowLocally(topmostId);
+                scheduleTerminalFocusActivation(topmostId, {
+                  shouldPersistGeometry: false,
+                  reason: "topmost_focus",
+                });
+              } else {
+                focusedId = null;
+              }
             }
           },
         );
@@ -5318,10 +5362,13 @@
         switch (event.kind) {
           case "workspace_state": {
             projectError = "";
-            frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            navigationPendingController.handleWorkspace(event);
             sendStartupAutoResumeReady();
             break;
           }
+          case "navigation_result":
+            navigationPendingController.handleResult(event);
+            break;
           case "workspace_projection_prune_result": {
             // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
             // A richer Drawer surface lands in a follow-up; for now an alert

@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use gwt_core::coordination::{
     BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
-    BoardProjection, BoardProvider, CoordinationSnapshot,
+    BoardProjection, BoardProvider, CoordinationSnapshot, PromptBoardRead,
 };
 use gwt_core::{GwtError, Result};
 
@@ -609,6 +609,30 @@ impl BoardProvider for SlackProvider {
         Ok(self.cached_history(worktree_root)?.iter().any(|entry| {
             entry.author == author && entry.kind == *kind && entry.updated_at > threshold
         }))
+    }
+
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        _scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<PromptBoardRead> {
+        let history_since = diff_since.min(status_since);
+        let history = self
+            .cached_history(worktree_root)?
+            .into_iter()
+            .filter(|entry| entry.updated_at > history_since)
+            .collect();
+        Ok(PromptBoardRead::from_channel_history(
+            history,
+            diff_since,
+            status_author,
+            status_kind,
+            status_since,
+        ))
     }
 
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -1426,6 +1450,22 @@ mod tests {
                 .len(),
             3
         );
+        let prompt = prov
+            .load_prompt_reminder(
+                &root,
+                epoch,
+                &BoardAudienceScope::Workspace("not-this-channel".to_string()),
+                "U",
+                &BoardEntryKind::Status,
+                epoch,
+            )
+            .unwrap();
+        assert_eq!(
+            prompt.recent_entries.len(),
+            3,
+            "the configured Slack channel remains the sole scope"
+        );
+        assert!(prompt.has_recent_own_status);
 
         // has_recent_post_by executes the predicate over every entry.
         let wide = chrono::Duration::days(1_000_000);

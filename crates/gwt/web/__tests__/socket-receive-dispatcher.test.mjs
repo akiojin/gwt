@@ -54,6 +54,350 @@ test("idempotent kinds collapse to the most recent occurrence", () => {
   ]);
 });
 
+test("navigation results segment workspace coalescing without losing order", () => {
+  const resultB = {
+    kind: "navigation_result",
+    interaction_id: "to-b",
+    revision: 1,
+  };
+  const stateB = { kind: "workspace_state", revision: 1, target: "b" };
+  const resultA = {
+    kind: "navigation_result",
+    interaction_id: "back-to-a",
+    revision: 2,
+  };
+  const stateA = { kind: "workspace_state", revision: 2, target: "a" };
+
+  assert.deepEqual(
+    coalesceEvents(
+      [resultB, stateB, resultA, stateA],
+      DEFAULT_COALESCE_KINDS,
+    ),
+    [resultB, stateB, resultA, stateA],
+    "workspace snapshots may coalesce only inside one navigation segment",
+  );
+});
+
+test("same-flush workspace coalescing keeps the highest safe revision", () => {
+  const revision10 = {
+    kind: "workspace_state",
+    revision: 10,
+    workspace: { active_tab_id: "tab-new" },
+  };
+  const revision9 = {
+    kind: "workspace_state",
+    revision: 9,
+    workspace: { active_tab_id: "tab-stale" },
+  };
+
+  assert.deepEqual(
+    coalesceEvents(
+      [revision10, revision9],
+      DEFAULT_COALESCE_KINDS,
+    ),
+    [revision10],
+    "a stale later arrival must not replace the newer canonical snapshot",
+  );
+});
+
+test("raw same-flush workspace coalescing reads the top-level revision without full eager parse", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  dispatcher.handle({
+    data: JSON.stringify({
+      kind: "workspace_state",
+      revision: 10,
+      workspace: { active_tab_id: "tab-new" },
+    }),
+  });
+  dispatcher.handle({
+    data: JSON.stringify({
+      kind: "workspace_state",
+      revision: 9,
+      workspace: { active_tab_id: "tab-stale" },
+    }),
+  });
+  scheduler.runAll();
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].revision, 10);
+  assert.equal(received[0].workspace.active_tab_id, "tab-new");
+});
+
+test("dispatcher drops workspace revisions older than the delivered fence", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 8, target: "new" });
+  scheduler.runOnce();
+  dispatcher.enqueue({ kind: "workspace_state", revision: 7, target: "stale" });
+  scheduler.runOnce();
+
+  assert.deepEqual(received, [
+    { kind: "workspace_state", revision: 8, target: "new" },
+  ]);
+});
+
+test("dropping a stale workspace still honors the frame budget before the next result", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  let clock = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => clock++,
+    budgetMs: 0,
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 8 });
+  scheduler.runAll();
+  dispatcher.enqueue({ kind: "workspace_state", revision: 7 });
+  dispatcher.enqueue({
+    kind: "navigation_result",
+    interaction_id: "newer-result",
+    revision: 9,
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(received, [{ kind: "workspace_state", revision: 8 }]);
+  assert.equal(
+    scheduler.pendingCount(),
+    1,
+    "the result after a stale snapshot must move to the next frame",
+  );
+
+  scheduler.runOnce();
+  assert.equal(received.at(-1).kind, "navigation_result");
+});
+
+test("versioned workspace state rejects later unversioned state on one connection", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 3, target: "new" });
+  scheduler.runOnce();
+  dispatcher.handle({
+    data: JSON.stringify({ kind: "workspace_state", target: "legacy-stale" }),
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(received, [
+    { kind: "workspace_state", revision: 3, target: "new" },
+  ]);
+});
+
+test("parsed workspace state accepts absent legacy revision but rejects invalid-present values", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  for (const [target, revision] of [
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+    ["negative", -1],
+    ["string", "7"],
+  ]) {
+    dispatcher.enqueue({ kind: "workspace_state", revision, target });
+    scheduler.runOnce();
+  }
+  dispatcher.enqueue({
+    kind: "workspace_state",
+    target: "legacy",
+    workspace: { revision: "nested-only" },
+  });
+  scheduler.runOnce();
+  dispatcher.enqueue({
+    kind: "workspace_state",
+    revision: Number.MAX_SAFE_INTEGER,
+    target: "max-safe",
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    received.map((event) => event.target),
+    ["legacy", "max-safe"],
+  );
+});
+
+test("raw workspace state accepts absent legacy revision but rejects invalid-present values", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  for (const [target, revision] of [
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+    ["negative", -1],
+    ["string", "7"],
+  ]) {
+    dispatcher.handle({
+      data: JSON.stringify({ kind: "workspace_state", revision, target }),
+    });
+    scheduler.runOnce();
+  }
+  dispatcher.handle({
+    data: JSON.stringify({
+      kind: "workspace_state",
+      target: "legacy",
+      workspace: { revision: "nested-only" },
+    }),
+  });
+  scheduler.runOnce();
+  dispatcher.handle({
+    data: JSON.stringify({
+      kind: "workspace_state",
+      revision: Number.MAX_SAFE_INTEGER,
+      target: "max-safe",
+    }),
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    received.map((event) => event.target),
+    ["legacy", "max-safe"],
+  );
+});
+
+test("invalid-present workspace cannot displace an absent legacy state during coalescing", () => {
+  for (const mode of ["parsed", "raw"]) {
+    const received = [];
+    const scheduler = manualScheduler();
+    const dispatcher = createSocketReceiveDispatcher({
+      receive: (event) => received.push(event),
+      schedule: scheduler.schedule,
+      now: () => 0,
+    });
+    const legacy = {
+      kind: "workspace_state",
+      target: `${mode}-legacy`,
+      workspace: { revision: "nested-only" },
+    };
+    const invalid = {
+      kind: "workspace_state",
+      revision: "invalid",
+      target: `${mode}-invalid`,
+    };
+
+    if (mode === "raw") {
+      dispatcher.handle({ data: JSON.stringify(legacy) });
+      dispatcher.handle({ data: JSON.stringify(invalid) });
+    } else {
+      dispatcher.enqueue(legacy);
+      dispatcher.enqueue(invalid);
+    }
+    scheduler.runAll();
+
+    assert.deepEqual(
+      received.map((event) => event.target),
+      [`${mode}-legacy`],
+      `${mode} coalescing must retain the valid legacy state`,
+    );
+  }
+});
+
+test("raw revision hints reject fractional and post-workspace invalid values without displacing legacy state", () => {
+  for (const invalidPayload of [
+    JSON.stringify({
+      kind: "workspace_state",
+      revision: 1.5,
+      target: "fractional-invalid",
+    }),
+    '{"kind":"workspace_state","workspace":{},"revision":"invalid","target":"post-workspace-invalid"}',
+  ]) {
+    const received = [];
+    const scheduler = manualScheduler();
+    const dispatcher = createSocketReceiveDispatcher({
+      receive: (event) => received.push(event),
+      schedule: scheduler.schedule,
+      now: () => 0,
+    });
+
+    dispatcher.handle({
+      data: JSON.stringify({
+        kind: "workspace_state",
+        target: "legacy",
+        workspace: { revision: "nested-only" },
+      }),
+    });
+    dispatcher.handle({ data: invalidPayload });
+    scheduler.runAll();
+
+    assert.deepEqual(
+      received.map((event) => event.target),
+      ["legacy"],
+      "an invalid-present raw revision must not replace a valid legacy snapshot",
+    );
+  }
+});
+
+test("raw revision coalescing is invariant to revision field order", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  dispatcher.handle({
+    data: '{"kind":"workspace_state","workspace":{},"revision":10,"target":"newer"}',
+  });
+  dispatcher.handle({
+    data: '{"kind":"workspace_state","workspace":{},"revision":9,"target":"older"}',
+  });
+  scheduler.runAll();
+
+  assert.deepEqual(received.map((event) => event.target), ["newer"]);
+});
+
+test("a new dispatcher generation accepts a lower bootstrap revision", () => {
+  const received = [];
+  const firstScheduler = manualScheduler();
+  const first = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: firstScheduler.schedule,
+    now: () => 0,
+  });
+  first.enqueue({ kind: "workspace_state", revision: 8, target: "old-process" });
+  firstScheduler.runAll();
+
+  const nextScheduler = manualScheduler();
+  const next = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: nextScheduler.schedule,
+    now: () => 0,
+  });
+  next.enqueue({ kind: "workspace_state", revision: 1, target: "new-process" });
+  nextScheduler.runAll();
+
+  assert.deepEqual(received, [
+    { kind: "workspace_state", revision: 8, target: "old-process" },
+    { kind: "workspace_state", revision: 1, target: "new-process" },
+  ]);
+});
+
 test("non-coalesce kinds preserve order and multiplicity", () => {
   const queue = [
     { kind: "terminal_output", data: "a" },
@@ -269,6 +613,61 @@ test("budget overflow defers remaining events to the next frame", () => {
   assert.equal(scheduler.pendingCount(), 1, "remaining events scheduled for next frame");
   scheduler.runOnce();
   assert.equal(scheduler.pendingCount(), 0, "all events drained across two frames");
+});
+
+test("large budget deferral prepends the backlog with bounded front insertion work", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  let clockReads = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      received.push(event.data);
+      if (event.data === "0") {
+        dispatcher.enqueue({ kind: "terminal_output", data: "late" });
+      }
+    },
+    schedule: scheduler.schedule,
+    now: () => {
+      clockReads += 1;
+      return clockReads >= 3 ? 1 : 0;
+    },
+    budgetMs: 0,
+  });
+  const backlogSize = 2_048;
+  for (let index = 0; index < backlogSize; index += 1) {
+    dispatcher.enqueue({
+      kind: "terminal_output",
+      data: String(index),
+    });
+  }
+
+  const originalUnshift = Array.prototype.unshift;
+  let frontInsertionCalls = 0;
+  Array.prototype.unshift = function instrumentedUnshift(...items) {
+    frontInsertionCalls += 1;
+    return originalUnshift.apply(this, items);
+  };
+  try {
+    scheduler.runOnce();
+  } finally {
+    Array.prototype.unshift = originalUnshift;
+  }
+
+  assert.ok(
+    frontInsertionCalls <= 1,
+    `deferring ${backlogSize - 1} entries must use one linear prepend, not ${frontInsertionCalls} front insertions`,
+  );
+  scheduler.runAll();
+  assert.equal(received.length, backlogSize + 1);
+  assert.deepEqual(
+    received.slice(0, backlogSize),
+    Array.from({ length: backlogSize }, (_, index) => String(index)),
+  );
+  assert.equal(
+    received.at(-1),
+    "late",
+    "entries enqueued during receive must stay behind the deferred backlog",
+  );
 });
 
 test("handle() accepts both WebSocket message events and pre-parsed payloads", () => {

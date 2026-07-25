@@ -220,6 +220,8 @@ pub enum FrontendEvent {
     },
     SelectProjectTab {
         tab_id: String,
+        #[serde(default)]
+        interaction_id: Option<String>,
     },
     CloseProjectTab {
         tab_id: String,
@@ -231,6 +233,8 @@ pub enum FrontendEvent {
     FocusWindow {
         id: String,
         bounds: Option<WindowGeometry>,
+        #[serde(default)]
+        interaction_id: Option<String>,
     },
     CycleFocus {
         direction: FocusCycleDirection,
@@ -249,6 +253,8 @@ pub enum FrontendEvent {
     },
     ActivateWindowTab {
         id: String,
+        #[serde(default)]
+        interaction_id: Option<String>,
     },
     DetachWindowTab {
         id: String,
@@ -1443,6 +1449,41 @@ pub struct RuntimeHealthProcessView {
     pub focus_window_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationScope {
+    ProjectTab,
+    WindowTab,
+    Canvas,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationOutcome {
+    Accepted,
+    AlreadyCurrent,
+    NotFound,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavigationWindowDelta {
+    pub id: String,
+    pub z_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_group_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavigationCanonicalDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub window_updates: Vec<NavigationWindowDelta>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -1451,7 +1492,15 @@ pub enum BackendEvent {
     /// frontend/client breaks.
     #[serde(rename = "workspace_state")]
     WindowCanvasState {
+        revision: u64,
         workspace: AppStateView,
+    },
+    NavigationResult {
+        interaction_id: String,
+        revision: u64,
+        scope: NavigationScope,
+        outcome: NavigationOutcome,
+        canonical: NavigationCanonicalDelta,
     },
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
@@ -2162,6 +2211,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "navigation_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "active_work_projection",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2626,6 +2680,7 @@ impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
+            BackendEvent::NavigationResult { .. } => "navigation_result",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
@@ -2788,12 +2843,108 @@ mod tests {
     };
 
     use super::{
-        backend_event_policy, AttachmentProgressPhase, BackendEvent,
+        backend_event_policy, AppStateView, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         FrontendEvent, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-        IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+        IndexSearchTarget, NavigationCanonicalDelta, NavigationOutcome, NavigationScope,
+        NavigationWindowDelta, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
         UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn navigation_requests_deserialize_modern_and_legacy_interaction_ids() {
+        let modern_project = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "select_project_tab",
+            "tab_id": "tab-b",
+            "interaction_id": "interaction-project"
+        }))
+        .expect("modern project navigation");
+        assert!(matches!(
+            modern_project,
+            FrontendEvent::SelectProjectTab {
+                tab_id,
+                interaction_id: Some(interaction_id),
+            } if tab_id == "tab-b" && interaction_id == "interaction-project"
+        ));
+
+        let legacy_focus = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "focus_window",
+            "id": "tab-b::shell-1",
+            "bounds": null
+        }))
+        .expect("legacy canvas navigation");
+        assert!(matches!(
+            legacy_focus,
+            FrontendEvent::FocusWindow {
+                id,
+                interaction_id: None,
+                ..
+            } if id == "tab-b::shell-1"
+        ));
+
+        let modern_group = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "activate_window_tab",
+            "id": "tab-b::agent-2",
+            "interaction_id": "interaction-group"
+        }))
+        .expect("modern grouped-tab navigation");
+        assert!(matches!(
+            modern_group,
+            FrontendEvent::ActivateWindowTab {
+                id,
+                interaction_id: Some(interaction_id),
+            } if id == "tab-b::agent-2" && interaction_id == "interaction-group"
+        ));
+    }
+
+    #[test]
+    fn ordered_navigation_result_and_workspace_revision_serialize_at_top_level() {
+        let result = BackendEvent::NavigationResult {
+            interaction_id: "interaction-7".to_string(),
+            revision: 7,
+            scope: NavigationScope::WindowTab,
+            outcome: NavigationOutcome::Accepted,
+            canonical: NavigationCanonicalDelta {
+                active_tab_id: Some("tab-b".to_string()),
+                target_id: Some("tab-b::agent-2".to_string()),
+                window_updates: vec![NavigationWindowDelta {
+                    id: "tab-b::agent-2".to_string(),
+                    z_index: 12,
+                    tab_group_active: Some(true),
+                }],
+            },
+        };
+        let result_value = serde_json::to_value(&result).expect("navigation result json");
+        assert_eq!(result_value["kind"], "navigation_result");
+        assert_eq!(result_value["scope"], "window_tab");
+        assert_eq!(result_value["outcome"], "accepted");
+        assert_eq!(
+            result_value["canonical"]["window_updates"][0]["z_index"],
+            12
+        );
+
+        let workspace = BackendEvent::WindowCanvasState {
+            revision: 7,
+            workspace: AppStateView {
+                app_version: "test".to_string(),
+                tabs: Vec::new(),
+                active_tab_id: Some("tab-b".to_string()),
+                recent_projects: Vec::new(),
+            },
+        };
+        let workspace_value = serde_json::to_value(workspace).expect("workspace state json");
+        assert_eq!(workspace_value["kind"], "workspace_state");
+        assert_eq!(workspace_value["revision"], 7);
+        assert!(workspace_value["workspace"].get("revision").is_none());
+
+        let policy = backend_event_policy("navigation_result").expect("navigation result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+        assert!(!policy.coalesces_on_frontend());
+    }
 
     #[test]
     fn pane_send_input_deserializes_session_scoped_injection_contract() {

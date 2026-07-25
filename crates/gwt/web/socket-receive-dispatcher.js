@@ -20,6 +20,14 @@
 
 const DEFAULT_BUDGET_MS = 8;
 export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
+const WORKSPACE_REVISION_ABSENT = Object.freeze({
+  status: "absent",
+  value: null,
+});
+const WORKSPACE_REVISION_INVALID = Object.freeze({
+  status: "invalid",
+  value: null,
+});
 
 // Snapshot kinds that must preserve multiplicity and their position relative
 // to coalesced state. They are not latency-sensitive streams: moving them
@@ -31,6 +39,14 @@ export const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(
     "improvement_action_result",
     "improvement_action_error",
   ]),
+);
+
+// Result events delimit independent navigation/coalescing segments. A later
+// workspace_state may replace an earlier state only inside the same segment;
+// crossing a result would let a rapid A→B→A acknowledgement overtake the
+// canonical snapshot that belongs before it.
+export const DEFAULT_ORDERING_BARRIER_KINDS = Object.freeze(
+  new Set(["navigation_result"]),
 );
 
 // Idempotent kinds where only the latest occurrence carries information. Any
@@ -60,6 +76,7 @@ export function createSocketReceiveDispatcher({
   budgetMs = DEFAULT_BUDGET_MS,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
   orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+  orderingBarrierKinds = DEFAULT_ORDERING_BARRIER_KINDS,
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
   shouldTrace,
@@ -93,9 +110,37 @@ export function createSocketReceiveDispatcher({
       ? nextTerminalOutputSequence
       : null;
 
-  const queue = [];
+  let queue = [];
   let scheduled = false;
   let terminalOutputTraceSequence = 0;
+  let lastWorkspaceRevision = null;
+  let receivedVersionedWorkspace = false;
+
+  function acceptsWorkspaceRevision(event) {
+    if (!event || event.kind !== "workspace_state") {
+      return true;
+    }
+    const revisionInfo = workspaceRevisionInfo(event);
+    if (revisionInfo.status === "invalid") {
+      return false;
+    }
+    if (revisionInfo.status === "absent") {
+      return !receivedVersionedWorkspace;
+    }
+    const revision = revisionInfo.value;
+    if (
+      lastWorkspaceRevision !== null
+      && revision < lastWorkspaceRevision
+    ) {
+      return false;
+    }
+    receivedVersionedWorkspace = true;
+    lastWorkspaceRevision =
+      lastWorkspaceRevision === null
+        ? revision
+        : Math.max(lastWorkspaceRevision, revision);
+    return true;
+  }
 
   function traceActive() {
     if (!traceImpl) {
@@ -187,6 +232,7 @@ export function createSocketReceiveDispatcher({
     const ready = coalesceQueuedEntries(queue, coalesceKinds, {
       maxStreamedBeforeState,
       orderedStateKinds,
+      orderingBarrierKinds,
     });
     queue.length = 0;
     const start = nowImpl();
@@ -200,18 +246,27 @@ export function createSocketReceiveDispatcher({
       const receiveStart = nowImpl();
       try {
         const event = queuedEntryPayload(entry);
-        const traceMetadata = terminalOutputTraceMetadata(event);
-        if (traceMetadata) {
-          emitTerminalOutputTrace("terminal_output_ws_receive", traceMetadata);
-          receive(event, traceMetadata);
+        if (!acceptsWorkspaceRevision(event)) {
+          trace("ws_receive", () => ({
+            event_kind: event && event.kind,
+            duration_ms: nowImpl() - receiveStart,
+            deferred_parse: entry && entry.type === "raw",
+            stale_revision: true,
+          }));
         } else {
-          receive(event);
+          const traceMetadata = terminalOutputTraceMetadata(event);
+          if (traceMetadata) {
+            emitTerminalOutputTrace("terminal_output_ws_receive", traceMetadata);
+            receive(event, traceMetadata);
+          } else {
+            receive(event);
+          }
+          trace("ws_receive", () => ({
+            event_kind: event && event.kind,
+            duration_ms: nowImpl() - receiveStart,
+            deferred_parse: entry && entry.type === "raw",
+          }));
         }
-        trace("ws_receive", () => ({
-          event_kind: event && event.kind,
-          duration_ms: nowImpl() - receiveStart,
-          deferred_parse: entry && entry.type === "raw",
-        }));
       } catch (error) {
         trace("ws_receive", () => ({
           event_kind: eventKind,
@@ -227,9 +282,7 @@ export function createSocketReceiveDispatcher({
       }
       cursor += 1;
       if (cursor < ready.length && nowImpl() - start > budgetMs) {
-        for (let i = ready.length - 1; i >= cursor; i -= 1) {
-          queue.unshift(ready[i]);
-        }
+        queue = ready.slice(cursor).concat(queue);
         trace("ws_flush_defer", () => ({
           processed_count: cursor,
           remaining_count: ready.length - cursor,
@@ -303,16 +356,24 @@ function parsedQueueEntry(event) {
   return {
     type: "parsed",
     kind: event && event.kind,
+    revisionInfo: workspaceRevisionInfo(event),
     payload: event,
   };
 }
 
 const KIND_HINT_PATTERN = /"kind"\s*:\s*"([^"\\]*)"/;
+const REVISION_KEY_HINT = '"revision"';
+const NON_NEGATIVE_INTEGER_PATTERN = /^(?:0|[1-9]\d*)$/;
 
 function rawQueueEntry(data) {
+  const kind = extractKindHint(data);
   return {
     type: "raw",
-    kind: extractKindHint(data),
+    kind,
+    revisionInfo:
+      kind === "workspace_state"
+        ? extractWorkspaceRevisionInfoHint(data)
+        : WORKSPACE_REVISION_ABSENT,
     payload: data,
   };
 }
@@ -325,8 +386,89 @@ function extractKindHint(data) {
   return match ? match[1] : "";
 }
 
+function extractWorkspaceRevisionInfoHint(data) {
+  if (typeof data !== "string") {
+    return WORKSPACE_REVISION_ABSENT;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < data.length; index += 1) {
+    const char = data[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      if (depth === 1 && data.startsWith(REVISION_KEY_HINT, index)) {
+        let cursor = index + REVISION_KEY_HINT.length;
+        while (/\s/.test(data[cursor] || "")) {
+          cursor += 1;
+        }
+        if (data[cursor] === ":") {
+          cursor += 1;
+          while (/\s/.test(data[cursor] || "")) {
+            cursor += 1;
+          }
+          const valueStart = cursor;
+          while (
+            cursor < data.length &&
+            data[cursor] !== "," &&
+            data[cursor] !== "}"
+          ) {
+            cursor += 1;
+          }
+          const token = data.slice(valueStart, cursor).trim();
+          if (!NON_NEGATIVE_INTEGER_PATTERN.test(token)) {
+            return WORKSPACE_REVISION_INVALID;
+          }
+          const revision = safeRevision(Number(token));
+          return revision === null
+            ? WORKSPACE_REVISION_INVALID
+            : { status: "valid", value: revision };
+        }
+      }
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      depth += 1;
+    } else if (char === "}" || char === "]") {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return WORKSPACE_REVISION_ABSENT;
+}
+
+function safeRevision(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function workspaceRevisionInfo(event) {
+  if (
+    event?.kind !== "workspace_state" ||
+    !Object.hasOwn(event, "revision")
+  ) {
+    return WORKSPACE_REVISION_ABSENT;
+  }
+  const revision = safeRevision(event.revision);
+  return revision === null
+    ? WORKSPACE_REVISION_INVALID
+    : { status: "valid", value: revision };
+}
+
 function queuedEntryKind(entry) {
   return entry && entry.kind;
+}
+
+function queuedEntryRevisionInfo(entry) {
+  return entry?.revisionInfo ?? WORKSPACE_REVISION_ABSENT;
 }
 
 function queuedEntryPayload(entry) {
@@ -342,12 +484,15 @@ function coalesceQueuedEntries(
   {
     maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
     orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+    orderingBarrierKinds = DEFAULT_ORDERING_BARRIER_KINDS,
   } = {},
 ) {
   return coalesceByKind(queue, coalesceKinds, {
     maxStreamedBeforeState,
     orderedStateKinds,
+    orderingBarrierKinds,
     kindFor: queuedEntryKind,
+    revisionInfoFor: queuedEntryRevisionInfo,
   });
 }
 
@@ -357,12 +502,15 @@ export function coalesceEvents(
   {
     maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
     orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+    orderingBarrierKinds = DEFAULT_ORDERING_BARRIER_KINDS,
   } = {},
 ) {
   return coalesceByKind(queue, coalesceKinds, {
     maxStreamedBeforeState,
     orderedStateKinds,
+    orderingBarrierKinds,
     kindFor: (event) => event && event.kind,
+    revisionInfoFor: workspaceRevisionInfo,
   });
 }
 
@@ -372,8 +520,55 @@ function coalesceByKind(
   {
     maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
     orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+    orderingBarrierKinds = DEFAULT_ORDERING_BARRIER_KINDS,
     kindFor,
+    revisionInfoFor,
   } = {},
+) {
+  if (!queue || queue.length <= 1) {
+    return queue ? queue.slice() : [];
+  }
+  const result = [];
+  let segmentStart = 0;
+  for (let index = 0; index < queue.length; index += 1) {
+    if (!orderingBarrierKinds.has(kindFor(queue[index]))) {
+      continue;
+    }
+    result.push(
+      ...coalesceSegmentByKind(
+        queue.slice(segmentStart, index),
+        coalesceKinds,
+        {
+          maxStreamedBeforeState,
+          orderedStateKinds,
+          kindFor,
+          revisionInfoFor,
+        },
+      ),
+      queue[index],
+    );
+    segmentStart = index + 1;
+  }
+  result.push(
+    ...coalesceSegmentByKind(queue.slice(segmentStart), coalesceKinds, {
+      maxStreamedBeforeState,
+      orderedStateKinds,
+      kindFor,
+      revisionInfoFor,
+    }),
+  );
+  return result;
+}
+
+function coalesceSegmentByKind(
+  queue,
+  coalesceKinds,
+  {
+    maxStreamedBeforeState,
+    orderedStateKinds,
+    kindFor,
+    revisionInfoFor,
+  },
 ) {
   if (!queue || queue.length <= 1) {
     return queue ? queue.slice() : [];
@@ -383,7 +578,18 @@ function coalesceByKind(
   for (let i = 0; i < queue.length; i += 1) {
     const kind = kindFor(queue[i]);
     if (kind && coalesceKinds.has(kind)) {
-      lastIndexByKind.set(kind, i);
+      const currentIndex = lastIndexByKind.get(kind);
+      if (
+        currentIndex === undefined
+        || shouldReplaceCoalescedEntry(
+          kind,
+          queue[currentIndex],
+          queue[i],
+          revisionInfoFor,
+        )
+      ) {
+        lastIndexByKind.set(kind, i);
+      }
     }
   }
   if (lastIndexByKind.size === 0) {
@@ -426,6 +632,35 @@ function coalesceByKind(
   return streamed
     .slice(0, streamedChunkLimit)
     .concat(orderedState, streamed.slice(streamedChunkLimit));
+}
+
+function shouldReplaceCoalescedEntry(
+  kind,
+  current,
+  candidate,
+  revisionInfoFor,
+) {
+  if (
+    kind !== "workspace_state" ||
+    typeof revisionInfoFor !== "function"
+  ) {
+    return true;
+  }
+  const currentRevision = revisionInfoFor(current);
+  const candidateRevision = revisionInfoFor(candidate);
+  if (candidateRevision.status === "invalid") {
+    return false;
+  }
+  if (currentRevision.status === "invalid") {
+    return true;
+  }
+  if (candidateRevision.status === "absent") {
+    return currentRevision.status === "absent";
+  }
+  if (currentRevision.status === "absent") {
+    return true;
+  }
+  return candidateRevision.value >= currentRevision.value;
 }
 
 function normalizeStreamedChunkLimit(value) {

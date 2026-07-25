@@ -14,6 +14,8 @@ use gwt::cli::hook::board_reminder;
 use serde_json::Value;
 use std::{ffi::OsString, path::Path, sync::Mutex};
 
+const BOARD_REMINDER_SOURCE: &str = include_str!("../src/cli/hook/board_reminder/mod.rs");
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<OsString>,
@@ -113,6 +115,77 @@ fn reminder_payload_shape_matches_claude_code_contract() {
         assert!(additional.contains("phase"));
         assert!(additional.contains("Do NOT") || additional.contains("手動で作成"));
     });
+}
+
+#[test]
+fn repeated_user_prompt_without_board_delta_serializes_no_context_after_initial_policy() {
+    use chrono::{Duration, Utc};
+    use gwt::cli::hook::HookOutput;
+    use gwt_agent::{AgentId, Session};
+    use gwt_core::coordination::write_reminders_state;
+
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let session = {
+            let mut s = Session::new(dir.path(), "feature/test", AgentId::Codex);
+            s.display_name = "Codex".to_string();
+            s
+        };
+        let started_at = Utc::now();
+        let initial = board_reminder::compute_plan("SessionStart", &session, started_at)
+            .unwrap()
+            .expect("SessionStart must introduce the Board policy");
+        assert!(
+            !matches!(initial.output, HookOutput::Silent),
+            "SessionStart must introduce policy before no-delta silence begins"
+        );
+        write_reminders_state(&session.worktree_path, &session.id, &initial.next_reminders)
+            .unwrap();
+
+        for turn in 1..=100 {
+            let plan = board_reminder::compute_plan(
+                "UserPromptSubmit",
+                &session,
+                started_at + Duration::seconds(turn),
+            )
+            .unwrap()
+            .expect("UserPromptSubmit plan");
+            assert_eq!(
+                plan.output,
+                HookOutput::Silent,
+                "no-delta turn {turn} must not re-inject Board policy"
+            );
+            let mut stdout = Vec::new();
+            plan.output.serialize_to(&mut stdout).unwrap();
+            assert!(
+                stdout.is_empty(),
+                "no-delta turn {turn} must serialize zero context bytes"
+            );
+            write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders)
+                .unwrap();
+        }
+    });
+}
+
+#[test]
+fn compute_plan_uses_invocation_context_for_projection_reuse() {
+    let start = BOARD_REMINDER_SOURCE
+        .find("pub fn compute_plan(")
+        .expect("compute_plan source");
+    let end = BOARD_REMINDER_SOURCE[start..]
+        .find("\nfn terminal_work_state_reminders_suppressed")
+        .map(|offset| start + offset)
+        .expect("compute_plan end");
+    let source = &BOARD_REMINDER_SOURCE[start..end];
+
+    assert!(
+        source.contains("HookContext::for_board_reminder(session)"),
+        "compute_plan must load audience/canonical projections through one invocation context"
+    );
+    assert!(
+        !source.contains("agent_title_summary_missing(session)"),
+        "title/stale/progress must share the canonical projection instead of reloading it"
+    );
 }
 
 #[test]

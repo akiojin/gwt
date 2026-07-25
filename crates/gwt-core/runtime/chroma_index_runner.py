@@ -12,6 +12,7 @@ import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -1489,7 +1490,21 @@ class E5EmbeddingFunction:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "query")
         out = self._model_or_default().encode(prepared)
-        return [list(v) for v in out]
+        normalized: List[List[float]] = []
+        for vector in out:
+            native_vector: List[float] = []
+            for value in vector:
+                try:
+                    native_value = float(value)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError(
+                        "query embedding values must be finite numbers"
+                    ) from error
+                if not math.isfinite(native_value):
+                    raise ValueError("query embedding values must be finite numbers")
+                native_vector.append(native_value)
+            normalized.append(native_vector)
+        return normalized
 
     # Chroma EmbeddingFunction protocol: callable on a sequence of strings.
     # Default to passage mode (used during indexing).
@@ -4922,6 +4937,25 @@ def _search_scope_collection(
     return payload
 
 
+def _search_failed_payload(
+    affected_scopes: Sequence[str],
+    stage: str,
+    error: Exception,
+) -> Dict[str, Any]:
+    error_type = type(error).__name__[:64] or "Error"
+    scopes = list(dict.fromkeys(affected_scopes))
+    return {
+        "ok": False,
+        "error_code": "SEARCH_FAILED",
+        "retryable": False,
+        "error": (
+            f"semantic search {stage} failed for scopes "
+            f"[{', '.join(scopes)}] ({error_type})"
+        ),
+        "affected_scopes": scopes,
+    }
+
+
 def action_search_multi_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
@@ -4974,7 +5008,17 @@ def action_search_multi_v2(
             }
             continue
         if query_embedding is None:
-            query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+            try:
+                query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+            except Exception as error:
+                affected_scopes = [
+                    candidate for candidate in scopes if candidate in valid_scopes
+                ]
+                return _search_failed_payload(
+                    affected_scopes,
+                    "query embedding",
+                    error,
+                )
         try:
             result = _search_scope_collection(
                 repo_hash,
@@ -4986,9 +5030,20 @@ def action_search_multi_v2(
                 db_root,
                 query_embedding,
             )
-        except Exception as error:  # store broke between classify and query
-            scope_states[scope] = {"state": "corrupt", "reason": str(error)}
-            continue
+        except Exception as error:
+            try:
+                failure_state, failure_health = _classify_scope_for_search(
+                    repo_hash, scope_worktree, scope, db_root=db_root
+                )
+            except Exception:
+                failure_state, failure_health = state, health
+            if failure_state in ("missing", "corrupt"):
+                scope_states[scope] = {
+                    "state": failure_state,
+                    "reason": failure_health.get("reason", failure_state),
+                }
+                continue
+            return _search_failed_payload([scope], "query", error)
         scope_states[scope] = {"state": state}
         if state == "stale":
             stale_scopes.append(scope)

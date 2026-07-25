@@ -25,13 +25,19 @@ mod texts;
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
-use crate::board_provider::{has_recent_post_by, load_entries_since_for_scope};
+use crate::board_provider::{
+    has_recent_post_by, load_entries_since_for_scope, load_prompt_reminder_for_repo_hash,
+};
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
+#[cfg(test)]
+use gwt_core::coordination::{load_reminders_state, write_reminders_state};
 use gwt_core::coordination::{
-    load_reminders_state, write_reminders_state, BoardEntryKind, RemindersState,
+    load_reminders_state_for_repo_hash, write_reminders_state_for_repo_hash, BoardEntryKind,
+    PromptBoardRead, RemindersState,
 };
 use gwt_core::workspace_projection::WorkspaceProjection;
 
@@ -51,8 +57,15 @@ const PROGRESS_SUMMARY_STALE_TURN_THRESHOLD: u32 = 4;
 /// long session does not pay the reminder on every UserPromptSubmit turn.
 const MEMORY_REMINDER_THROTTLE_WINDOW_HOURS: i64 = 6;
 
+use super::context::HookContext;
 use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
-use crate::board_audience::current_session_board_scope;
+use crate::board_audience::current_session_board_scope_from_projection;
+
+/// Leave enough of the aggregate prompt budget for state persistence,
+/// diagnostics, and required runtime notification after a degraded remote
+/// Board read fails open.
+const USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(25);
 
 pub use plan::{plan_reminder, ReminderInputs, ReminderPlan};
 
@@ -67,20 +80,35 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookError> {
-    let hook_event = HookEvent::read_from_str(input)?;
-    let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
-        return Ok(HookOutput::Silent);
-    };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let Some(session) = current_session_from_env(&sessions_dir) else {
         return Ok(HookOutput::Silent);
     };
-    let session = session_scoped_to_hook_cwd(session, hook_event.as_ref());
+    handle_with_input_for_session(event, input, &session)
+}
+
+pub(crate) fn handle_with_input_for_session(
+    event: &str,
+    input: &str,
+    session: &Session,
+) -> Result<HookOutput, HookError> {
+    let hook_event = HookEvent::read_from_str(input)?;
+    let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
+        return Ok(HookOutput::Silent);
+    };
+    let session = session_scoped_to_hook_cwd(session.clone(), hook_event.as_ref());
     let Some(plan) = compute_plan(event, &session, Utc::now())? else {
         return Ok(HookOutput::Silent);
     };
-    write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders)?;
-    debug_assert_eq!(intent_event, plan_event(&plan.output));
+    write_reminders_state_for_repo_hash(
+        &session.worktree_path,
+        session.repo_hash.as_deref(),
+        &session.id,
+        &plan.next_reminders,
+    )?;
+    if !matches!(&plan.output, HookOutput::Silent) {
+        debug_assert_eq!(intent_event, plan_event(&plan.output));
+    }
     Ok(plan.output)
 }
 
@@ -151,19 +179,6 @@ fn build_self_match_keys(session: &Session) -> Vec<String> {
         keys.push(format!("agent:{agent_command}"));
     }
     keys
-}
-
-fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
-    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
-        session,
-        &session.worktree_path,
-    );
-    let projection =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
-    Ok(title_summary_missing_in_projection(
-        projection.as_ref(),
-        &session.id,
-    ))
 }
 
 /// Pure decision for whether `session_id`'s agent still needs a `title_summary`.
@@ -477,7 +492,73 @@ fn append_memory_update_context(
         HookOutput::SystemMessage(text) => {
             HookOutput::system_message(format!("{text}\n\n{reminder}"))
         }
+        HookOutput::Silent if event == IntentBoundaryEvent::Stop => {
+            HookOutput::system_message(reminder.to_string())
+        }
+        HookOutput::Silent => {
+            HookOutput::hook_specific_additional_context(event, reminder.to_string())
+        }
         other => other,
+    }
+}
+
+fn load_user_prompt_board_read(
+    session: &Session,
+    diff_since: DateTime<Utc>,
+    audience_scope: &gwt_core::coordination::BoardAudienceScope,
+    status_author: &str,
+    status_since: DateTime<Utc>,
+) -> PromptBoardReadOutcome {
+    load_user_prompt_board_read_with(|| {
+        load_prompt_reminder_for_repo_hash(
+            &session.worktree_path,
+            session.repo_hash.as_deref(),
+            diff_since,
+            audience_scope,
+            status_author,
+            &BoardEntryKind::Status,
+            status_since,
+        )
+    })
+}
+
+struct PromptBoardReadOutcome {
+    read: PromptBoardRead,
+    succeeded: bool,
+}
+
+fn load_user_prompt_board_read_with(
+    load: impl FnOnce() -> gwt_core::Result<PromptBoardRead>,
+) -> PromptBoardReadOutcome {
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE,
+    );
+    match load() {
+        Ok(read) => PromptBoardReadOutcome {
+            read,
+            succeeded: true,
+        },
+        Err(_) => {
+            tracing::warn!(
+                "UserPromptSubmit Board read failed within the hook deadline; continuing without a Board delta"
+            );
+            PromptBoardReadOutcome {
+                read: PromptBoardRead::default(),
+                succeeded: false,
+            }
+        }
+    }
+}
+
+fn own_status_history_since(
+    reminders: &RemindersState,
+    diff_since: DateTime<Utc>,
+    status_since: DateTime<Utc>,
+) -> DateTime<Utc> {
+    if reminders.last_own_status_checked_at.is_some() {
+        diff_since
+    } else {
+        diff_since.min(status_since)
     }
 }
 
@@ -493,8 +574,30 @@ pub fn compute_plan(
         return Ok(None);
     };
 
-    let reminders = load_reminders_state(&session.worktree_path, &session.id)?;
-    let audience_scope = current_session_board_scope(&session.worktree_path, Some(&session.id))?;
+    let stage_started = Instant::now();
+    let reminders = load_reminders_state_for_repo_hash(
+        &session.worktree_path,
+        session.repo_hash.as_deref(),
+        &session.id,
+    )?;
+    super::diagnostics::record_handler_duration(
+        event,
+        "board-reminder-state",
+        stage_started.elapsed(),
+        "ok",
+    );
+    let stage_started = Instant::now();
+    let context = HookContext::for_board_reminder(session)?;
+    super::diagnostics::record_handler_duration(
+        event,
+        "board-reminder-context",
+        stage_started.elapsed(),
+        "ok",
+    );
+    let audience_scope = current_session_board_scope_from_projection(
+        context.audience_projection(),
+        Some(&session.id),
+    );
     let self_workspace_id = match &audience_scope {
         gwt_core::coordination::BoardAudienceScope::Workspace(workspace_id) => {
             Some(workspace_id.clone())
@@ -502,26 +605,63 @@ pub fn compute_plan(
         _ => None,
     };
 
-    let recent_entries = match intent_event {
-        IntentBoundaryEvent::SessionStart => {
-            let threshold = now - session_start_window();
-            load_entries_since_for_scope(&session.worktree_path, threshold, &audience_scope)?
-        }
+    let mut latest_own_status_at = reminders.last_own_status_at;
+    let mut own_status_check_succeeded = false;
+    let stage_started = Instant::now();
+    let (recent_entries, has_recent_own_status) = match intent_event {
+        IntentBoundaryEvent::SessionStart => (
+            {
+                let threshold = now - session_start_window();
+                load_entries_since_for_scope(&session.worktree_path, threshold, &audience_scope)?
+            },
+            has_recent_post_by(
+                &session.worktree_path,
+                &session.display_name,
+                &BoardEntryKind::Status,
+                redundancy_window(),
+            )?,
+        ),
         IntentBoundaryEvent::UserPromptSubmit => {
-            let since = reminders
+            let diff_since = reminders
                 .last_injected_at
                 .unwrap_or(now - session_start_window());
-            load_entries_since_for_scope(&session.worktree_path, since, &audience_scope)?
+            let status_since = now - redundancy_window();
+            let status_history_since =
+                own_status_history_since(&reminders, diff_since, status_since);
+            let outcome = load_user_prompt_board_read(
+                session,
+                diff_since,
+                &audience_scope,
+                &session.display_name,
+                status_history_since,
+            );
+            own_status_check_succeeded = outcome.succeeded;
+            latest_own_status_at = [latest_own_status_at, outcome.read.latest_own_status_at]
+                .into_iter()
+                .flatten()
+                .max();
+            (
+                outcome.read.recent_entries,
+                latest_own_status_at.is_some_and(|updated_at| updated_at > status_since),
+            )
         }
-        IntentBoundaryEvent::Stop => Vec::new(),
+        IntentBoundaryEvent::Stop => (
+            Vec::new(),
+            has_recent_post_by(
+                &session.worktree_path,
+                &session.display_name,
+                &BoardEntryKind::Status,
+                redundancy_window(),
+            )?,
+        ),
     };
-
-    let has_recent_own_status = has_recent_post_by(
-        &session.worktree_path,
-        &session.display_name,
-        &BoardEntryKind::Status,
-        redundancy_window(),
-    )?;
+    super::diagnostics::record_handler_duration(
+        event,
+        "board-reminder-read",
+        stage_started.elapsed(),
+        "ok",
+    );
+    let stage_started = Instant::now();
 
     let self_match_keys = build_self_match_keys(session);
     let language = resolve_narrative_language();
@@ -532,7 +672,7 @@ pub fn compute_plan(
     // from the worktree lane file (source of truth), falling back to the env
     // fast-path and then execution (FR-009). Replaces the SPEC-3247 ad-hoc
     // `SessionKind::from_env()` branch.
-    let lane = super::context::HookContext::for_worktree(&session.worktree_path).lane;
+    let lane = context.lane;
     let suppress_work_state_reminders =
         terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
     let emit_work_state_reminders =
@@ -550,6 +690,10 @@ pub fn compute_plan(
         language: language.clone(),
         self_workspace_id,
     });
+    if intent_event == IntentBoundaryEvent::UserPromptSubmit && own_status_check_succeeded {
+        plan.next_reminders.last_own_status_checked_at = Some(now);
+        plan.next_reminders.last_own_status_at = latest_own_status_at;
+    }
     if suppress_work_state_reminders {
         plan.output =
             replace_with_terminal_settlement_reminder(plan.output, intent_event, &language);
@@ -559,7 +703,10 @@ pub fn compute_plan(
         plan.output = append_title_summary_required_context(
             plan.output,
             intent_event,
-            agent_title_summary_missing(session)?,
+            title_summary_missing_in_projection(
+                context.canonical_project_projection(),
+                &session.id,
+            ),
             &language,
         );
     }
@@ -567,15 +714,9 @@ pub fn compute_plan(
     // The stale/progress reminder state is still advanced for intake to keep a
     // single, uniform compute path (no divergent intake state machine); only
     // the Work-state *text* injection is suppressed by the guards below.
-    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
-        session,
-        &session.worktree_path,
-    );
-    let projection_for_stale =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
     let (stale, updated_state) = compute_title_summary_stale_state(
         intent_event,
-        projection_for_stale.as_ref(),
+        context.canonical_project_projection(),
         &session.id,
         &plan.next_reminders,
     );
@@ -586,7 +727,7 @@ pub fn compute_plan(
     }
     let (progress_missing, progress_stale, progress_state) = compute_progress_summary_state(
         intent_event,
-        projection_for_stale.as_ref(),
+        context.canonical_project_projection(),
         &session.id,
         &plan.next_reminders,
     );
@@ -635,6 +776,12 @@ pub fn compute_plan(
         plan.output = append_intake_completion_reminder(plan.output, &language);
     }
 
+    super::diagnostics::record_handler_duration(
+        event,
+        "board-reminder-decision",
+        stage_started.elapsed(),
+        "ok",
+    );
     Ok(Some(plan))
 }
 
@@ -688,6 +835,12 @@ fn replace_with_terminal_settlement_reminder(
             HookOutput::hook_specific_additional_context(event, replace_base(text))
         }
         HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
+        HookOutput::Silent if event == IntentBoundaryEvent::Stop => {
+            HookOutput::system_message(replacement.to_string())
+        }
+        HookOutput::Silent => {
+            HookOutput::hook_specific_additional_context(event, replacement.to_string())
+        }
         other => other,
     }
 }
@@ -942,6 +1095,62 @@ mod tests {
     }
 
     #[test]
+    fn memory_update_context_injects_even_when_board_is_silent() {
+        let output = append_memory_update_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::UserPromptSubmit,
+            true,
+            false,
+            "en",
+        );
+        let text = additional_context(&output);
+        assert!(text.contains("Memory Reminder"), "{text}");
+        assert!(text.contains("memory.add"), "{text}");
+    }
+
+    #[test]
+    fn user_prompt_board_read_inherits_deadline_and_fails_open() {
+        let outcome = load_user_prompt_board_read_with(|| {
+            let deadline = gwt_core::operation_deadline::current()
+                .expect("UserPromptSubmit Board read must inherit a deadline");
+            assert!(
+                deadline.saturating_duration_since(std::time::Instant::now())
+                    <= USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE,
+                "Board deadline must not extend the hook aggregate deadline"
+            );
+            Err(gwt_core::GwtError::Other(
+                "injected remote Board failure".to_string(),
+            ))
+        });
+
+        assert_eq!(
+            outcome.read,
+            gwt_core::coordination::PromptBoardRead::default(),
+            "remote Board errors must become an empty delta without local fallback"
+        );
+        assert!(!outcome.succeeded);
+    }
+
+    #[test]
+    fn initialized_own_status_cache_uses_only_the_prompt_diff_cursor() {
+        let status_since = Utc.with_ymd_and_hms(2026, 7, 24, 10, 0, 0).unwrap();
+        let diff_since = Utc.with_ymd_and_hms(2026, 7, 24, 10, 20, 0).unwrap();
+        let initialized = RemindersState {
+            last_own_status_checked_at: Some(diff_since),
+            ..RemindersState::default()
+        };
+
+        assert_eq!(
+            own_status_history_since(&initialized, diff_since, status_since),
+            diff_since
+        );
+        assert_eq!(
+            own_status_history_since(&RemindersState::default(), diff_since, status_since),
+            status_since
+        );
+    }
+
+    #[test]
     fn title_summary_guard_is_silent_when_agent_title_is_set() {
         let output = HookOutput::hook_specific_additional_context(
             IntentBoundaryEvent::SessionStart,
@@ -1029,7 +1238,11 @@ mod tests {
         let plan = compute_plan("UserPromptSubmit", &session, t1)
             .expect("compute plan")
             .expect("plan");
-        assert!(!additional_context(&plan.output).contains("Memory Reminder"));
+        assert_eq!(
+            plan.output,
+            HookOutput::Silent,
+            "a throttled memory nudge with no Board delta must stay silent"
+        );
         write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
         assert_eq!(
             load_reminders_state(&session.worktree_path, &session.id)
@@ -1195,7 +1408,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_title_summary_missing_reads_workspace_projection() {
+    fn board_reminder_context_reads_title_from_workspace_projection() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1204,8 +1417,12 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo");
         let session = make_session(&repo, "work/title", "Codex");
 
+        let context = HookContext::for_board_reminder(&session).expect("context");
         assert!(
-            !agent_title_summary_missing(&session).expect("missing title check"),
+            !title_summary_missing_in_projection(
+                context.canonical_project_projection(),
+                &session.id,
+            ),
             "sessions without a Workspace projection are Unassigned and must not require a title update"
         );
 
@@ -1234,14 +1451,18 @@ mod tests {
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
 
+        let context = HookContext::for_board_reminder(&session).expect("context");
         assert!(
-            !agent_title_summary_missing(&session).expect("title check"),
+            !title_summary_missing_in_projection(
+                context.canonical_project_projection(),
+                &session.id,
+            ),
             "saved non-empty title_summary must satisfy the guard"
         );
     }
 
     #[test]
-    fn agent_title_summary_missing_reads_canonical_project_state_root() {
+    fn board_reminder_context_reads_canonical_project_state_root() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1277,8 +1498,12 @@ mod tests {
         gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
             .expect("save projection");
 
+        let context = HookContext::for_board_reminder(&session).expect("context");
         assert!(
-            !agent_title_summary_missing(&session).expect("title check"),
+            !title_summary_missing_in_projection(
+                context.canonical_project_projection(),
+                &session.id,
+            ),
             "title guard must read the canonical Project State root, not the worktree root"
         );
     }
@@ -2318,6 +2543,25 @@ mod tests {
     }
 
     #[test]
+    fn terminal_settlement_injects_even_when_board_is_silent() {
+        for event in [
+            IntentBoundaryEvent::SessionStart,
+            IntentBoundaryEvent::UserPromptSubmit,
+            IntentBoundaryEvent::Stop,
+        ] {
+            let output = replace_with_terminal_settlement_reminder(HookOutput::Silent, event, "en");
+            let text = match output {
+                HookOutput::HookSpecificAdditionalContext { text, .. }
+                | HookOutput::SystemMessage(text) => text,
+                other => panic!("terminal settlement must survive silent Board output: {other:?}"),
+            };
+            assert!(text.contains("commit"), "{event:?}: {text}");
+            assert!(text.contains("verification"), "{event:?}: {text}");
+            assert!(text.contains("completion"), "{event:?}: {text}");
+        }
+    }
+
+    #[test]
     fn terminal_work_reminder_suppression_is_session_scoped_and_survives_settlement() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -2366,6 +2610,10 @@ mod tests {
     fn reminders_state_round_trips_phase_u9_fields() {
         let original = RemindersState {
             last_injected_at: None,
+            last_own_status_checked_at: Some(
+                "2026-06-04T11:55:00Z".parse::<DateTime<Utc>>().unwrap(),
+            ),
+            last_own_status_at: Some("2026-06-04T11:50:00Z".parse::<DateTime<Utc>>().unwrap()),
             last_reminded_kind: Default::default(),
             last_title_summary_seen: Some("Title".to_string()),
             unchanged_turn_count: 12,
@@ -2384,6 +2632,8 @@ mod tests {
         // Legacy state without the new fields must round-trip via serde defaults.
         let legacy = r#"{"last_injected_at":null,"last_reminded_kind":{}}"#;
         let restored_legacy: RemindersState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(restored_legacy.last_own_status_checked_at, None);
+        assert_eq!(restored_legacy.last_own_status_at, None);
         assert_eq!(restored_legacy.last_title_summary_seen, None);
         assert_eq!(restored_legacy.unchanged_turn_count, 0);
         assert_eq!(restored_legacy.last_current_focus_seen, None);

@@ -150,7 +150,7 @@ pub(crate) fn handle_user_prompt_submit(_input: &str) -> Result<(), HookError> {
     handle_user_prompt_submit_for_session(&session)
 }
 
-fn handle_user_prompt_submit_for_session(session: &Session) -> Result<(), HookError> {
+pub(crate) fn handle_user_prompt_submit_for_session(session: &Session) -> Result<(), HookError> {
     let project_state_root = project_state_root_for_session(session);
     crate::agent_project_state::repair_split_agent_state_if_needed(
         &project_state_root,

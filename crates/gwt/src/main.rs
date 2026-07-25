@@ -983,6 +983,9 @@ enum UserEvent {
         client_id: ClientId,
         hydration: FrontendHydrationCompletion,
     },
+    /// SPEC-3170 FR-039: ordered navigation replies are dispatched before
+    /// persistence and whole-workspace reconciliation in a later loop turn.
+    NavigationFollowup,
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -2102,6 +2105,7 @@ mod tests {
 
         let events = build_frontend_sync_events(
             "browser-1",
+            0,
             workspace,
             vec![(
                 "tab-1::shell-1".to_string(),
@@ -2156,7 +2160,7 @@ mod tests {
         )];
         let workspace = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
         let mut events =
-            build_frontend_sync_events("primary", workspace, Vec::new(), Vec::new(), None, None);
+            build_frontend_sync_events("primary", 0, workspace, Vec::new(), Vec::new(), None, None);
         events.push(OutboundEvent::broadcast(
             gwt::BackendEvent::ProjectOpenError {
                 message: "shared".to_string(),
@@ -2469,12 +2473,16 @@ mod tests {
             repo_activity_scan_generations: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
             frontend_hydration_context_generation: 0,
+            navigation_revision: 0,
+            pending_navigation_followup: crate::app_runtime::PendingNavigationFollowup::default(),
+            navigation_followup_scheduled: false,
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
+            knowledge_related_snapshots: Default::default(),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -3468,6 +3476,7 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
+                refresh_if_stale: true,
             },
         );
         assert_eq!(knowledge_missing.len(), 1);
@@ -3484,6 +3493,7 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
+                refresh_if_stale: true,
             },
         );
         assert_eq!(knowledge_wrong.len(), 1);
@@ -4030,14 +4040,16 @@ mod tests {
                 },
             )
             .is_empty());
-        assert!(!runtime
+        assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::SelectProjectTab {
                     tab_id: "tab-1".to_string(),
+                    interaction_id: None,
                 },
             )
             .is_empty());
+        assert!(!runtime.handle_navigation_followup().is_empty());
         assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
@@ -4061,18 +4073,17 @@ mod tests {
         );
         let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
 
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::FocusWindow {
-                        id: branches_id.clone(),
-                        bounds: Some(bounds.clone()),
-                    },
-                )
-                .len(),
-            1
-        );
+        assert!(runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::FocusWindow {
+                    id: branches_id.clone(),
+                    bounds: Some(bounds.clone()),
+                    interaction_id: None,
+                },
+            )
+            .is_empty());
+        assert!(!runtime.handle_navigation_followup().is_empty());
         assert_eq!(
             runtime
                 .handle_frontend_event(
@@ -7543,6 +7554,9 @@ fn main() -> std::io::Result<()> {
             }) => {
                 let events = app.handle_frontend_hydration_ready(&client_id, hydration);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::NavigationFollowup) => {
+                clients.dispatch(app.handle_navigation_followup());
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

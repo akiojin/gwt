@@ -69,12 +69,14 @@ fn frontend_event_deserializes_window_state_commands() {
 
     let activate = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "activate_window_tab",
-        "id": "project-1::board-1"
+        "id": "project-1::board-1",
+        "interaction_id": "interaction-1"
     }))
     .expect("activate_window_tab should deserialize");
     match activate {
-        FrontendEvent::ActivateWindowTab { id } => {
+        FrontendEvent::ActivateWindowTab { id, interaction_id } => {
             assert_eq!(id, "project-1::board-1");
+            assert_eq!(interaction_id.as_deref(), Some("interaction-1"));
         }
         other => panic!("unexpected event: {other:?}"),
     }

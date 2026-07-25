@@ -23,10 +23,73 @@ use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
     close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus,
+    WindowAddress, WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
 impl AppRuntime {
+    fn navigation_window_is_current(&self, address: &WindowAddress) -> bool {
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return false;
+        };
+        let Some(target) = tab.workspace.window(&address.raw_id) else {
+            return false;
+        };
+        if self.active_tab_id.as_deref() != Some(address.tab_id.as_str())
+            || !target.placement.is_canvas()
+            || (target.tab_group_id.is_some() && !target.tab_group_active)
+        {
+            return false;
+        }
+        let topmost_z = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| {
+                window.placement.is_canvas()
+                    && (window.tab_group_id.is_none() || window.tab_group_active)
+            })
+            .map(|window| window.z_index)
+            .max();
+        topmost_z == Some(target.z_index)
+    }
+
+    fn navigation_window_canonical(
+        &self,
+        target_id: &str,
+        address: Option<&WindowAddress>,
+    ) -> gwt::protocol::NavigationCanonicalDelta {
+        let window_updates = address
+            .and_then(|address| {
+                let tab = self.tab(&address.tab_id)?;
+                let target = tab.workspace.window(&address.raw_id)?;
+                let group_id = target.tab_group_id.as_deref();
+                Some(
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .filter(|window| {
+                            group_id.map_or(window.id == address.raw_id, |group_id| {
+                                window.tab_group_id.as_deref() == Some(group_id)
+                            })
+                        })
+                        .map(|window| gwt::protocol::NavigationWindowDelta {
+                            id: combined_window_id(&address.tab_id, &window.id),
+                            z_index: window.z_index,
+                            tab_group_active: group_id.map(|_| window.tab_group_active),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_default();
+        gwt::protocol::NavigationCanonicalDelta {
+            active_tab_id: self.active_tab_id.clone(),
+            target_id: Some(target_id.to_string()),
+            window_updates,
+        }
+    }
+
     pub(crate) fn create_window_events(
         &mut self,
         preset: WindowPreset,
@@ -67,6 +130,79 @@ impl AppRuntime {
             return Vec::new();
         }
         self.activate_tab_for_window_events(address.tab_id)
+    }
+
+    pub(crate) fn navigate_focus_window_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        bounds: Option<WindowGeometry>,
+        interaction_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::Canvas,
+                gwt::protocol::NavigationOutcome::NotFound,
+                self.navigation_window_canonical(id, None),
+            );
+        };
+        let Some(target) = self
+            .tab(&address.tab_id)
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+        else {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::Canvas,
+                gwt::protocol::NavigationOutcome::NotFound,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        };
+        if !target.placement.is_canvas() {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::Canvas,
+                gwt::protocol::NavigationOutcome::Rejected,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        }
+        let modern = interaction_id.is_some();
+        if modern && self.navigation_window_is_current(&address) {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::Canvas,
+                gwt::protocol::NavigationOutcome::AlreadyCurrent,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        }
+        if !self.advance_navigation_revision() {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::Canvas,
+                gwt::protocol::NavigationOutcome::Rejected,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        }
+
+        let focused = self.tab_mut(&address.tab_id).is_some_and(|tab| {
+            tab.workspace
+                .focus_window(&address.raw_id, (!modern).then_some(bounds).flatten())
+        });
+        debug_assert!(focused, "validated canvas window must remain focusable");
+        let change = self.apply_active_tab(address.tab_id.clone());
+        self.queue_navigation_followup(change, None, false);
+        self.navigation_result(
+            client_id,
+            interaction_id,
+            gwt::protocol::NavigationScope::Canvas,
+            gwt::protocol::NavigationOutcome::Accepted,
+            self.navigation_window_canonical(id, Some(&address)),
+        )
     }
 
     fn activate_tab_for_window_events(&mut self, tab_id: String) -> Vec<OutboundEvent> {
@@ -200,6 +336,7 @@ impl AppRuntime {
         self.activate_tab_for_window_events(address.tab_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn activate_window_tab_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
@@ -219,6 +356,76 @@ impl AppRuntime {
         // maximized tab groups where shared window geometry is only an
         // approximation of the visible terminal body.
         self.activate_tab_for_window_events(address.tab_id)
+    }
+
+    pub(crate) fn navigate_activate_window_tab_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        interaction_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::WindowTab,
+                gwt::protocol::NavigationOutcome::NotFound,
+                self.navigation_window_canonical(id, None),
+            );
+        };
+        let Some(target) = self
+            .tab(&address.tab_id)
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+        else {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::WindowTab,
+                gwt::protocol::NavigationOutcome::NotFound,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        };
+        if !target.placement.is_canvas() {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::WindowTab,
+                gwt::protocol::NavigationOutcome::Rejected,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        }
+        if interaction_id.is_some() && self.navigation_window_is_current(&address) {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::WindowTab,
+                gwt::protocol::NavigationOutcome::AlreadyCurrent,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        }
+        if !self.advance_navigation_revision() {
+            return self.navigation_result(
+                client_id,
+                interaction_id,
+                gwt::protocol::NavigationScope::WindowTab,
+                gwt::protocol::NavigationOutcome::Rejected,
+                self.navigation_window_canonical(id, Some(&address)),
+            );
+        }
+
+        let activated = self
+            .tab_mut(&address.tab_id)
+            .is_some_and(|tab| tab.workspace.activate_window_tab(&address.raw_id));
+        debug_assert!(activated, "validated canvas window must remain activatable");
+        let change = self.apply_active_tab(address.tab_id.clone());
+        self.queue_navigation_followup(change, None, false);
+        self.navigation_result(
+            client_id,
+            interaction_id,
+            gwt::protocol::NavigationScope::WindowTab,
+            gwt::protocol::NavigationOutcome::Accepted,
+            self.navigation_window_canonical(id, Some(&address)),
+        )
     }
 
     pub(crate) fn detach_window_tab_events(

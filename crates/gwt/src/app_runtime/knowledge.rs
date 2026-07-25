@@ -19,8 +19,9 @@
 //! `crate::knowledge_bridge` / `crate::index_search`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use gwt::KnowledgeKind;
@@ -45,6 +46,7 @@ pub struct KnowledgeLoadRequest<'a> {
     pub(crate) request_id: Option<u64>,
     pub(crate) selected_number: Option<u64>,
     pub(crate) refresh: bool,
+    pub(crate) refresh_if_stale: bool,
 }
 
 pub struct ProjectIndexSearchRequest<'a> {
@@ -89,6 +91,165 @@ struct ProjectIndexSearchTask {
     scopes: Vec<gwt::IndexSearchScope>,
     worktree_hash: Option<String>,
     match_mode: gwt::IndexSearchMatchMode,
+}
+
+type KnowledgeRelatedWorksByNumber = HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>>;
+
+const KNOWLEDGE_RELATED_SNAPSHOT_CAPACITY: usize = 8;
+
+struct KnowledgeRelatedSnapshotEntry {
+    project_root: PathBuf,
+    kind: KnowledgeKind,
+    generation: u64,
+    snapshot: Option<Arc<KnowledgeRelatedWorksByNumber>>,
+}
+
+#[derive(Default)]
+pub(crate) struct KnowledgeRelatedSnapshotCache {
+    entries: VecDeque<KnowledgeRelatedSnapshotEntry>,
+    next_generation: u64,
+    full_scan_count: usize,
+}
+
+impl KnowledgeRelatedSnapshotCache {
+    fn entry_index(&self, project_root: &Path, kind: KnowledgeKind) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.project_root == project_root && entry.kind == kind)
+    }
+
+    fn get(
+        &mut self,
+        project_root: &Path,
+        kind: KnowledgeKind,
+    ) -> Option<Arc<KnowledgeRelatedWorksByNumber>> {
+        let index = self.entry_index(project_root, kind)?;
+        let entry = self.entries.remove(index)?;
+        let snapshot = entry.snapshot.as_ref().map(Arc::clone);
+        self.entries.push_back(entry);
+        snapshot
+    }
+
+    fn reserve_generation(&mut self, project_root: &Path, kind: KnowledgeKind) -> u64 {
+        if self.next_generation == u64::MAX {
+            self.entries.clear();
+            self.next_generation = 0;
+        }
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        if let Some(index) = self.entry_index(project_root, kind) {
+            if let Some(mut entry) = self.entries.remove(index) {
+                entry.generation = generation;
+                self.entries.push_back(entry);
+            }
+        } else {
+            self.entries.push_back(KnowledgeRelatedSnapshotEntry {
+                project_root: project_root.to_path_buf(),
+                kind,
+                generation,
+                snapshot: None,
+            });
+        }
+        self.trim_to_capacity();
+        generation
+    }
+
+    fn reserve_generation_if_needed(
+        &mut self,
+        project_root: &Path,
+        kind: KnowledgeKind,
+        reuse_existing: bool,
+    ) -> Option<u64> {
+        if !matches!(kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
+            return None;
+        }
+        if reuse_existing
+            && self
+                .entry_index(project_root, kind)
+                .and_then(|index| self.entries.get(index))
+                .is_some_and(|entry| entry.snapshot.is_some())
+        {
+            return None;
+        }
+        Some(self.reserve_generation(project_root, kind))
+    }
+
+    fn replace_if_current(
+        &mut self,
+        project_root: &Path,
+        kind: KnowledgeKind,
+        generation: u64,
+        snapshot: Arc<KnowledgeRelatedWorksByNumber>,
+    ) -> bool {
+        let index = self
+            .entry_index(project_root, kind)
+            .filter(|index| self.entries[*index].generation == generation);
+        let Some(index) = index else {
+            return false;
+        };
+        let Some(mut entry) = self.entries.remove(index) else {
+            return false;
+        };
+        entry.snapshot = Some(snapshot);
+        self.entries.push_back(entry);
+        true
+    }
+
+    fn trim_to_capacity(&mut self) {
+        while self.entries.len() > KNOWLEDGE_RELATED_SNAPSHOT_CAPACITY {
+            self.entries.pop_front();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_scan_count(&self) -> usize {
+        self.full_scan_count
+    }
+}
+
+#[cfg(test)]
+mod related_snapshot_cache_tests {
+    use super::*;
+
+    #[test]
+    fn stale_refresh_second_commit_cannot_replace_a_newer_related_work_snapshot() {
+        let root = Path::new("/repo");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+        let older = cache.reserve_generation(root, KnowledgeKind::Issue);
+        let mut older_initial_snapshot = KnowledgeRelatedWorksByNumber::new();
+        older_initial_snapshot.insert(21, Vec::new());
+        assert!(cache.replace_if_current(
+            root,
+            KnowledgeKind::Issue,
+            older,
+            Arc::new(older_initial_snapshot),
+        ));
+
+        let newer = cache.reserve_generation(root, KnowledgeKind::Issue);
+        let mut newer_snapshot = KnowledgeRelatedWorksByNumber::new();
+        newer_snapshot.insert(84, Vec::new());
+        assert!(cache.replace_if_current(
+            root,
+            KnowledgeKind::Issue,
+            newer,
+            Arc::new(newer_snapshot),
+        ));
+
+        let mut older_refreshed_snapshot = KnowledgeRelatedWorksByNumber::new();
+        older_refreshed_snapshot.insert(42, Vec::new());
+        assert!(!cache.replace_if_current(
+            root,
+            KnowledgeKind::Issue,
+            older,
+            Arc::new(older_refreshed_snapshot),
+        ));
+        assert!(
+            cache
+                .get(root, KnowledgeKind::Issue)
+                .is_some_and(|snapshot| snapshot.contains_key(&84)),
+            "the later request's snapshot must survive an older late completion",
+        );
+    }
 }
 
 /// SPEC-2359 US-80: a debounced Start Work duplicate-work advisory query.
@@ -164,12 +325,67 @@ fn knowledge_view_events(
     ]
 }
 
-fn augment_knowledge_bridge_related_works_from_paths(
+fn augment_knowledge_bridge_related_works_with_snapshot(
+    snapshots: &Arc<Mutex<KnowledgeRelatedSnapshotCache>>,
     project_root: &Path,
     sessions_dir: &Path,
     issue_link_cache_dir: &Path,
     view: &mut gwt::KnowledgeBridgeView,
+    reuse_existing: bool,
+    snapshot_generation: Option<u64>,
 ) {
+    let kind = view.kind;
+    if !matches!(kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
+        return;
+    }
+    let existing = reuse_existing.then(|| {
+        snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root, kind)
+    });
+    let related_by_number = existing.flatten().unwrap_or_else(|| {
+        let related_by_number = Arc::new(load_knowledge_bridge_related_works_from_paths(
+            project_root,
+            sessions_dir,
+            issue_link_cache_dir,
+            view,
+        ));
+        let mut snapshots = snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshots.full_scan_count += 1;
+        if let Some(generation) = snapshot_generation {
+            snapshots.replace_if_current(
+                project_root,
+                kind,
+                generation,
+                Arc::clone(&related_by_number),
+            );
+        }
+        related_by_number
+    });
+    apply_knowledge_bridge_related_works(view, &related_by_number);
+}
+
+fn reserve_related_snapshot_generation(
+    snapshots: &Arc<Mutex<KnowledgeRelatedSnapshotCache>>,
+    project_root: &Path,
+    kind: KnowledgeKind,
+    reuse_existing: bool,
+) -> Option<u64> {
+    snapshots
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reserve_generation_if_needed(project_root, kind, reuse_existing)
+}
+
+fn load_knowledge_bridge_related_works_from_paths(
+    project_root: &Path,
+    sessions_dir: &Path,
+    issue_link_cache_dir: &Path,
+    view: &gwt::KnowledgeBridgeView,
+) -> KnowledgeRelatedWorksByNumber {
     let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(sessions_dir);
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(project_root)
         .ok()
@@ -177,24 +393,24 @@ fn augment_knowledge_bridge_related_works_from_paths(
         .map(|projection| projection.work_items)
         .unwrap_or_default();
     let issue_by_branch = load_issue_branch_links(project_root, issue_link_cache_dir);
-    augment_knowledge_bridge_related_works(
+    load_knowledge_bridge_related_works(
         project_root,
         view,
         &work_items,
         &sessions,
         &issue_by_branch,
-    );
+    )
 }
 
-fn augment_knowledge_bridge_related_works(
+fn load_knowledge_bridge_related_works(
     project_root: &Path,
-    view: &mut gwt::KnowledgeBridgeView,
+    view: &gwt::KnowledgeBridgeView,
     work_items: &[gwt_core::workspace_projection::WorkItem],
     sessions: &[gwt_agent::Session],
     issue_by_branch: &HashMap<String, u64>,
-) {
+) -> KnowledgeRelatedWorksByNumber {
     if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-        return;
+        return HashMap::new();
     }
     let relevant_numbers = view
         .entries
@@ -203,11 +419,11 @@ fn augment_knowledge_bridge_related_works(
         .chain(view.detail.number)
         .collect::<HashSet<_>>();
     if relevant_numbers.is_empty() {
-        return;
+        return HashMap::new();
     }
 
     let session_index = work_session_index(sessions);
-    let mut related_by_number: HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> = HashMap::new();
+    let mut related_by_number = KnowledgeRelatedWorksByNumber::new();
     let mut represented_sessions_by_number: HashMap<u64, HashSet<String>> = HashMap::new();
 
     for item in work_items {
@@ -262,17 +478,27 @@ fn augment_knowledge_bridge_related_works(
         dedupe_related_work_sessions(works, &session_index);
     }
 
+    related_by_number
+}
+
+fn apply_knowledge_bridge_related_works(
+    view: &mut gwt::KnowledgeBridgeView,
+    related_by_number: &KnowledgeRelatedWorksByNumber,
+) {
     for entry in &mut view.entries {
-        if let Some(works) = related_by_number.get(&entry.number) {
-            entry.related_work_count = works.len();
-            entry.related_session_count = related_session_count(works);
-        }
+        let works = related_by_number
+            .get(&entry.number)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        entry.related_work_count = works.len();
+        entry.related_session_count = related_session_count(works);
     }
-    if let Some(number) = view.detail.number {
-        if let Some(works) = related_by_number.get(&number) {
-            view.detail.related_works = works.clone();
-        }
-    }
+    view.detail.related_works = view
+        .detail
+        .number
+        .and_then(|number| related_by_number.get(&number))
+        .cloned()
+        .unwrap_or_default();
 }
 
 fn issue_number_for_work_item(
@@ -734,17 +960,29 @@ impl AppRuntime {
         let project_root = tab.project_root.clone();
         let request_id = request.request_id;
         let selected_number = request.selected_number;
+        let refresh_if_stale = request.refresh_if_stale;
         let sessions_dir = self.sessions_dir.clone();
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
+        let reuse_related_snapshot = !refresh_if_stale;
+        let related_snapshot_generation = reserve_related_snapshot_generation(
+            &related_snapshots,
+            &project_root,
+            kind,
+            reuse_related_snapshot,
+        );
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
                 Ok(mut view) => {
-                    augment_knowledge_bridge_related_works_from_paths(
+                    augment_knowledge_bridge_related_works_with_snapshot(
+                        &related_snapshots,
                         &project_root,
                         &sessions_dir,
                         &issue_link_cache_dir,
                         &mut view,
+                        reuse_related_snapshot,
+                        related_snapshot_generation,
                     );
                     view
                 }
@@ -756,7 +994,7 @@ impl AppRuntime {
                     return;
                 }
             };
-            let refresh_after = request_id.is_some() && view.refresh_enabled;
+            let refresh_after = refresh_if_stale && request_id.is_some() && view.refresh_enabled;
             proxy.send(UserEvent::Dispatch(knowledge_view_events(
                 client_id.clone(),
                 id.clone(),
@@ -776,11 +1014,14 @@ impl AppRuntime {
             }
             if let Ok(mut view) = load_knowledge_bridge(&project_root, kind, selected_number, false)
             {
-                augment_knowledge_bridge_related_works_from_paths(
+                augment_knowledge_bridge_related_works_with_snapshot(
+                    &related_snapshots,
                     &project_root,
                     &sessions_dir,
                     &issue_link_cache_dir,
                     &mut view,
+                    false,
+                    related_snapshot_generation,
                 );
                 proxy.send(UserEvent::Dispatch(knowledge_view_events(
                     client_id, id, kind, request_id, view,
@@ -802,6 +1043,9 @@ impl AppRuntime {
             sessions_dir,
             issue_link_cache_dir,
         } = task;
+        let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
+        let related_snapshot_generation =
+            reserve_related_snapshot_generation(&related_snapshots, &project_root, kind, false);
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let refreshed = match gwt::refresh_knowledge_bridge_cache(&project_root, force) {
@@ -822,11 +1066,14 @@ impl AppRuntime {
             let event =
                 match gwt::load_knowledge_bridge(&project_root, kind, selected_number, false) {
                     Ok(mut view) => {
-                        augment_knowledge_bridge_related_works_from_paths(
+                        augment_knowledge_bridge_related_works_with_snapshot(
+                            &related_snapshots,
                             &project_root,
                             &sessions_dir,
                             &issue_link_cache_dir,
                             &mut view,
+                            false,
+                            related_snapshot_generation,
                         );
                         knowledge_view_events(client_id, id, kind, request_id, view)
                     }
@@ -921,16 +1168,20 @@ impl AppRuntime {
             sessions_dir,
             issue_link_cache_dir,
         } = task;
+        let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let event =
                 match gwt::search_knowledge_bridge(&project_root, kind, &query, selected_number) {
                     Ok(mut view) => {
-                        augment_knowledge_bridge_related_works_from_paths(
+                        augment_knowledge_bridge_related_works_with_snapshot(
+                            &related_snapshots,
                             &project_root,
                             &sessions_dir,
                             &issue_link_cache_dir,
                             &mut view,
+                            true,
+                            None,
                         );
                         BackendEvent::KnowledgeSearchResults {
                             id: id.clone(),

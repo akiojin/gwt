@@ -243,19 +243,26 @@ pub fn send_work_terminalization_via_agent_bridge(
 }
 
 pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
+    handle_runtime_state_prepared(event, input).map(|_| ())
+}
+
+pub(crate) fn handle_runtime_state_prepared(
+    event: &str,
+    input: &str,
+) -> Result<Option<Session>, HookError> {
     if std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
-        return Ok(());
+        return Ok(None);
     }
-    runtime_state::handle_with_input(event, input)?;
+    let session = runtime_state::handle_with_input_prepared(event, input)?;
     emit_live_event_fail_open(RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
         Some(event),
         runtime_state::status_for_event(event).map(str::to_string),
         None,
-        current_session_from_env(),
+        session.clone(),
         parse_hook_event_best_effort(input),
     ));
-    Ok(())
+    Ok(session)
 }
 
 pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
@@ -385,15 +392,17 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
         return Ok(());
     };
     target.validate()?;
+    let timeout = hook_live_request_timeout()?;
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(HOOK_LIVE_TIMEOUT_MS))
+        .timeout(timeout)
         .build()
         .map_err(|err| format!("build hook live client failed: {err}"))?;
     let response = client
         .post(&target.url)
         .bearer_auth(&target.token)
         .json(event)
+        .timeout(timeout)
         .send()
         .map_err(|err| format!("send hook live event failed: {err}"))?;
 
@@ -402,6 +411,18 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn hook_live_request_timeout() -> Result<Duration, String> {
+    let default = Duration::from_millis(HOOK_LIVE_TIMEOUT_MS);
+    let Some(deadline) = gwt_core::operation_deadline::current() else {
+        return Ok(default);
+    };
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err("hook aggregate deadline expired before live event transport".to_string());
+    }
+    Ok(default.min(remaining))
 }
 
 fn parse_hook_event_best_effort(input: &str) -> Option<RawHookEvent> {
@@ -493,6 +514,22 @@ mod tests {
         let debug = format!("{target:?}");
         assert!(!debug.contains("agent-capability-secret-sentinel"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn hook_live_timeout_inherits_the_earlier_aggregate_deadline() {
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(20),
+        );
+
+        let timeout = hook_live_request_timeout().expect("remaining hook-live timeout");
+
+        assert!(timeout > Duration::ZERO);
+        assert!(
+            timeout <= Duration::from_millis(20),
+            "hook-live timeout must not extend the aggregate deadline: {timeout:?}"
+        );
     }
 
     #[test]

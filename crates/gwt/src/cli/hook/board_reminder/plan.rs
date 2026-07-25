@@ -94,6 +94,7 @@ fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
 
 fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
     let language = reminder_language(&inputs.language);
+    let policy_already_introduced = inputs.reminders.last_injected_at.is_some();
     let entries = filter_and_cap_latest(
         inputs.recent_entries,
         &inputs.self_session_id,
@@ -103,24 +104,26 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
 
     let reminder = user_prompt_reminder(language, inputs.has_recent_own_status);
 
-    let mut context = if entries.is_empty() {
-        reminder.to_string()
+    let output = if entries.is_empty() && policy_already_introduced {
+        HookOutput::Silent
     } else {
-        format!(
-            "{}\n\n{}",
-            injection_text_with_language(&entries, &inputs.self_match_keys, language),
-            reminder
-        )
+        let mut context = if entries.is_empty() {
+            reminder.to_string()
+        } else {
+            format!(
+                "{}\n\n{}",
+                injection_text_with_language(&entries, &inputs.self_match_keys, language),
+                reminder
+            )
+        };
+        context.push_str(&format_language_directive(&inputs.language));
+        HookOutput::hook_specific_additional_context(IntentBoundaryEvent::UserPromptSubmit, context)
     };
-    context.push_str(&format_language_directive(&inputs.language));
 
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
     ReminderPlan {
-        output: HookOutput::hook_specific_additional_context(
-            IntentBoundaryEvent::UserPromptSubmit,
-            context,
-        ),
+        output,
         next_reminders: next,
     }
 }
@@ -584,7 +587,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_user_prompt_submit_empty_diff_still_emits_reminder() {
+    fn plan_user_prompt_submit_empty_diff_is_silent_after_policy_introduction() {
+        let now = Utc::now();
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now,
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState {
+                last_injected_at: Some(now - chrono::Duration::seconds(1)),
+                ..RemindersState::default()
+            },
+            has_recent_own_status: false,
+            language: "en".to_string(),
+            self_workspace_id: None,
+        });
+        assert_eq!(plan.output, HookOutput::Silent);
+        assert_eq!(plan.next_reminders.last_injected_at, Some(now));
+    }
+
+    #[test]
+    fn plan_user_prompt_submit_empty_diff_emits_initial_policy_for_legacy_state() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
             now: Utc::now(),

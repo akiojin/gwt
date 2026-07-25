@@ -118,6 +118,10 @@ root_js_modules! {
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
+    // SPEC-3170 FR-040: local-first navigation overlays remain visible until
+    // an ordered backend result or revisioned workspace snapshot reconciles
+    // them.
+    "navigation-pending-controller.js" => "createNavigationPendingController",
     // SPEC-1939 Phase 24 — per-window terminal output batching before xterm
     // write.
     "terminal-output-buffer.js" => "createTerminalOutputBatcher",

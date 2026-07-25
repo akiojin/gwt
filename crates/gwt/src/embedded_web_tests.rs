@@ -1645,8 +1645,8 @@ fn embedded_web_window_list_selection_frames_window_via_camera() {
     let js = project_shell_surface_js();
 
     assert!(
-        js.contains("frameWindow(entry.id);"),
-        "expected window list selection to frame the chosen window via the camera",
+        js.contains("frameWindow(entry.id, { animate: false });"),
+        "expected window list selection to frame the chosen window immediately via the camera",
     );
     assert!(
         !js.contains("send({ kind: \"restore_window\", id: entry.id });")
@@ -1769,10 +1769,16 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
 fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render() {
     let html = frontend_bundle_source();
     let readiness_flow = regex::Regex::new(
-            r#"case\s+"workspace_state":\s*\{[\s\S]*?projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?sendStartupAutoResumeReady\(\);[\s\S]*?break;"#,
+            r#"case\s+"workspace_state":\s*\{[\s\S]*?navigationPendingController\.handleWorkspace\(event\);[\s\S]*?sendStartupAutoResumeReady\(\);[\s\S]*?break;"#,
         )
         .expect("valid regex");
 
+    assert!(
+        html.contains(
+            "createNavigationPendingController({\n        initialState: appState,\n        onState: renderAppState,"
+        ),
+        "expected navigation reconciliation to publish workspace state synchronously through renderAppState",
+    );
     assert!(
         html.contains("function sendStartupAutoResumeReady()"),
         "expected a named one-shot startup auto-resume readiness helper",
@@ -1817,7 +1823,7 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
     // breaking. Tolerate the optional `{` and additional code
     // between renderAppState and break.
     let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*navigationPendingController\.handleWorkspace\(event\);[\s\S]*?\bbreak;"#,
         )
         .expect("valid regex");
 
@@ -3035,7 +3041,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // the optional `{` and additional code between renderAppState
     // and break.
     let workspace_event = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*navigationPendingController\.handleWorkspace\(event\);[\s\S]*?\bbreak;"#,
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
@@ -3081,7 +3087,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     );
     assert!(
         workspace_event.is_match(html),
-        "expected workspace_state events to flow through the project workspace shell unit",
+        "expected workspace_state events to flow through the navigation reconciliation unit",
     );
     assert!(
         terminal_event.is_match(html),

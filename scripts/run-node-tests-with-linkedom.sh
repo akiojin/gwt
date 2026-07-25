@@ -15,6 +15,7 @@ if ! bun install --cwd "$TMPDIR" linkedom@0.18.12 >/dev/null 2>"$TMPDIR/bun-inst
 fi
 
 ln -s "$ROOT/crates" "$TMPDIR/crates"
+ln -s "$ROOT/scripts" "$TMPDIR/scripts"
 
 cd "$TMPDIR"
 node --preserve-symlinks --preserve-symlinks-main --test "$@"

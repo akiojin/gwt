@@ -171,6 +171,7 @@ struct PreparedOutbound {
     kind: &'static str,
     pane_id: Option<String>,
     class: QueueClass,
+    navigation_revision: Option<u64>,
 }
 
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
@@ -180,11 +181,16 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         | gwt::BackendEvent::TerminalSnapshot { id, .. } => Some(id.clone()),
         _ => None,
     };
+    let navigation_revision = match event {
+        gwt::BackendEvent::WindowCanvasState { revision, .. } => Some(*revision),
+        _ => None,
+    };
     PreparedOutbound {
         payload: serde_json::to_string(event).expect("backend event json"),
         kind,
         pane_id,
         class: queue_class_for_kind(kind),
+        navigation_revision,
     }
 }
 
@@ -192,6 +198,8 @@ struct QueuedOutbound {
     payload: String,
     kind: &'static str,
     pane_id: Option<String>,
+    coalesce_segment: u64,
+    navigation_revision: Option<u64>,
 }
 
 #[derive(Default)]
@@ -200,6 +208,11 @@ struct ClientQueueState {
     dirty_panes: std::collections::HashSet<String>,
     dropped_lossy: u64,
     dead: bool,
+    coalesce_segment: u64,
+}
+
+fn is_ordering_barrier(kind: &str) -> bool {
+    kind == "navigation_result"
 }
 
 /// One step handed to the per-client drain loop in [`client_session`].
@@ -244,27 +257,38 @@ impl ClientQueue {
             QueueClass::SnapshotLatest if message.pane_id.is_none() => QueueClass::Lossless,
             other => other,
         };
+        let coalesce_segment = state.coalesce_segment;
         match effective_class {
             QueueClass::IdempotentLatest => {
-                if let Some(entry) = state
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.kind == message.kind)
-                {
-                    entry.payload = message.payload.clone();
+                if let Some(entry) = state.entries.iter_mut().find(|entry| {
+                    entry.kind == message.kind && entry.coalesce_segment == coalesce_segment
+                }) {
+                    if message.kind != "workspace_state"
+                        || should_replace_navigation_revision(
+                            entry.navigation_revision,
+                            message.navigation_revision,
+                        )
+                    {
+                        entry.payload = message.payload.clone();
+                        entry.navigation_revision = message.navigation_revision;
+                    }
                 } else {
-                    state.entries.push_back(Self::queued(message));
+                    state
+                        .entries
+                        .push_back(Self::queued(message, coalesce_segment));
                 }
             }
             QueueClass::SnapshotLatest => {
-                if let Some(entry) = state
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.kind == message.kind && entry.pane_id == message.pane_id)
-                {
+                if let Some(entry) = state.entries.iter_mut().find(|entry| {
+                    entry.kind == message.kind
+                        && entry.pane_id == message.pane_id
+                        && entry.coalesce_segment == coalesce_segment
+                }) {
                     entry.payload = message.payload.clone();
                 } else {
-                    state.entries.push_back(Self::queued(message));
+                    state
+                        .entries
+                        .push_back(Self::queued(message, coalesce_segment));
                 }
             }
             QueueClass::Lossy => {
@@ -275,7 +299,9 @@ impl ClientQueue {
                     }
                     return false;
                 }
-                state.entries.push_back(Self::queued(message));
+                state
+                    .entries
+                    .push_back(Self::queued(message, coalesce_segment));
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -284,19 +310,26 @@ impl ClientQueue {
                     self.notify.notify_one();
                     return true;
                 }
-                state.entries.push_back(Self::queued(message));
+                state
+                    .entries
+                    .push_back(Self::queued(message, coalesce_segment));
             }
+        }
+        if is_ordering_barrier(message.kind) {
+            state.coalesce_segment = state.coalesce_segment.saturating_add(1);
         }
         drop(state);
         self.notify.notify_one();
         false
     }
 
-    fn queued(message: &PreparedOutbound) -> QueuedOutbound {
+    fn queued(message: &PreparedOutbound, coalesce_segment: u64) -> QueuedOutbound {
         QueuedOutbound {
             payload: message.payload.clone(),
             kind: message.kind,
             pane_id: message.pane_id.clone(),
+            coalesce_segment,
+            navigation_revision: message.navigation_revision,
         }
     }
 
@@ -393,6 +426,14 @@ impl ClientQueue {
             DrainStep::Message { payload, .. } => Some(payload),
             DrainStep::Closed => None,
         }
+    }
+}
+
+fn should_replace_navigation_revision(existing: Option<u64>, incoming: Option<u64>) -> bool {
+    match (existing, incoming) {
+        (Some(existing), Some(incoming)) => incoming >= existing,
+        (Some(_), None) => false,
+        _ => true,
     }
 }
 
@@ -2765,6 +2806,32 @@ mod tests {
         }
     }
 
+    fn navigation_result(interaction_id: &str, revision: u64) -> BackendEvent {
+        BackendEvent::NavigationResult {
+            interaction_id: interaction_id.to_string(),
+            revision,
+            scope: gwt::protocol::NavigationScope::ProjectTab,
+            outcome: gwt::protocol::NavigationOutcome::Accepted,
+            canonical: gwt::protocol::NavigationCanonicalDelta {
+                active_tab_id: Some(format!("tab-{revision}")),
+                target_id: Some(format!("tab-{revision}")),
+                window_updates: Vec::new(),
+            },
+        }
+    }
+
+    fn workspace_state(revision: u64) -> BackendEvent {
+        BackendEvent::WindowCanvasState {
+            revision,
+            workspace: gwt::AppStateView {
+                app_version: "test".to_string(),
+                tabs: Vec::new(),
+                active_tab_id: Some(format!("tab-{revision}")),
+                recent_projects: Vec::new(),
+            },
+        }
+    }
+
     fn drain_all(queue: &ClientQueue) -> (Vec<String>, Vec<String>) {
         let mut payloads = Vec::new();
         let mut repairs = Vec::new();
@@ -2880,6 +2947,62 @@ mod tests {
         assert!(
             payloads[0].contains("project_index_status"),
             "replacement keeps the original queue position"
+        );
+    }
+
+    #[test]
+    fn client_queue_navigation_results_segment_workspace_state_coalescing() {
+        let queue = ClientQueue::default();
+        for event in [
+            navigation_result("to-b", 1),
+            workspace_state(1),
+            navigation_result("back-to-a", 2),
+            workspace_state(2),
+        ] {
+            queue.enqueue(&prepare_outbound(&event));
+        }
+
+        let (payloads, repairs) = drain_all(&queue);
+        let delivered = payloads
+            .iter()
+            .map(|payload| serde_json::from_str::<serde_json::Value>(payload).expect("event json"))
+            .collect::<Vec<_>>();
+
+        assert!(repairs.is_empty());
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|event| event["kind"].as_str().expect("event kind"))
+                .collect::<Vec<_>>(),
+            [
+                "navigation_result",
+                "workspace_state",
+                "navigation_result",
+                "workspace_state",
+            ]
+        );
+        assert_eq!(delivered[1]["revision"], 1);
+        assert_eq!(delivered[3]["revision"], 2);
+    }
+
+    #[test]
+    fn client_queue_workspace_coalescing_keeps_highest_revision_in_segment() {
+        let queue = ClientQueue::default();
+        queue.enqueue(&prepare_outbound(&workspace_state(10)));
+        queue.enqueue(&prepare_outbound(&workspace_state(9)));
+
+        let (payloads, repairs) = drain_all(&queue);
+        let delivered = payloads
+            .iter()
+            .map(|payload| serde_json::from_str::<serde_json::Value>(payload).expect("event json"))
+            .collect::<Vec<_>>();
+
+        assert!(repairs.is_empty());
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0]["kind"], "workspace_state");
+        assert_eq!(
+            delivered[0]["revision"], 10,
+            "a stale later snapshot must not replace the newer canonical revision"
         );
     }
 

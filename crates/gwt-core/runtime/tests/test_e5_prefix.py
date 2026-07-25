@@ -6,8 +6,11 @@ The runner must transparently inject these prefixes via a custom EmbeddingFuncti
 
 from __future__ import annotations
 
+import math
 import unittest
 from unittest import mock
+
+import numpy as np
 
 import chroma_index_runner as runner
 
@@ -41,6 +44,37 @@ class E5PrefixTests(unittest.TestCase):
         call_args = fake_model.encode.call_args
         passed = call_args[0][0]
         self.assertEqual(passed[0], "query: how do watchers work")
+
+    def test_embed_query_normalizes_numpy_scalars_to_native_finite_floats(self):
+        fake_model = mock.MagicMock()
+        fake_model.encode.return_value = np.asarray(
+            [[0.25, -0.5, 0.75]], dtype=np.float32
+        )
+
+        result = runner.E5EmbeddingFunction(model=fake_model).embed_query(
+            "native float contract"
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(
+            all(type(value) is float for value in result[0]),
+            f"query vector must contain only Python native floats: {result!r}",
+        )
+        self.assertTrue(
+            all(math.isfinite(value) for value in result[0]),
+            f"query vector must contain only finite values: {result!r}",
+        )
+
+    def test_embed_query_rejects_non_finite_scalars(self):
+        fake_model = mock.MagicMock()
+        fake_model.encode.return_value = np.asarray(
+            [[0.25, np.nan, np.inf]], dtype=np.float32
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            runner.E5EmbeddingFunction(model=fake_model).embed_query(
+                "invalid numeric contract"
+            )
 
     def test_passage_prefix_not_double_applied(self):
         fake_model = mock.MagicMock()

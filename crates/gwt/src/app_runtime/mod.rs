@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_SAFE_NAVIGATION_REVISION: u64 = 9_007_199_254_740_991;
+
 #[derive(Clone)]
 pub enum AppEventProxy {
     Real(EventLoopProxy<UserEvent>),
@@ -240,6 +242,39 @@ pub struct OutboundEvent {
     pub(crate) event: BackendEvent,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct PendingNavigationFollowup {
+    persist: bool,
+    workspace_state: bool,
+    active_work_projection: bool,
+    launch_wizard_tombstone_for: Option<String>,
+    improvement_roots: HashSet<PathBuf>,
+    work_events_ingest_roots: HashSet<PathBuf>,
+}
+
+impl PendingNavigationFollowup {
+    fn merge(&mut self, other: Self) {
+        self.persist |= other.persist;
+        self.workspace_state |= other.workspace_state;
+        self.active_work_projection |= other.active_work_projection;
+        if other.launch_wizard_tombstone_for.is_some() {
+            self.launch_wizard_tombstone_for = other.launch_wizard_tombstone_for;
+        }
+        self.improvement_roots.extend(other.improvement_roots);
+        self.work_events_ingest_roots
+            .extend(other.work_events_ingest_roots);
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ActiveTabChange {
+    pub(crate) tab_changed: bool,
+    pub(crate) project_changed: bool,
+    pub(crate) wizard_closed: bool,
+    pub(crate) closed_wizard_id: Option<String>,
+    pub(crate) project_root: Option<PathBuf>,
+}
+
 impl OutboundEvent {
     pub(crate) fn broadcast(event: BackendEvent) -> Self {
         Self {
@@ -258,6 +293,7 @@ impl OutboundEvent {
 
 pub fn build_frontend_sync_events(
     client_id: &str,
+    navigation_revision: u64,
     workspace: gwt::AppStateView,
     terminal_statuses: Vec<(String, WindowProcessStatus, String)>,
     terminal_snapshots: Vec<(String, Vec<u8>)>,
@@ -266,7 +302,10 @@ pub fn build_frontend_sync_events(
 ) -> Vec<OutboundEvent> {
     let mut events = vec![OutboundEvent::reply(
         client_id,
-        BackendEvent::WindowCanvasState { workspace },
+        BackendEvent::WindowCanvasState {
+            revision: navigation_revision,
+            workspace,
+        },
     )];
 
     for (id, status, detail) in terminal_statuses {
@@ -560,6 +599,14 @@ pub struct AppRuntime {
     /// the captured tab/window topology still match.
     pub(crate) frontend_hydration_generations: HashMap<ClientId, u64>,
     pub(crate) frontend_hydration_context_generation: u64,
+    /// SPEC-3170 FR-038: process-lifetime authoritative navigation revision.
+    /// Persisted workspace snapshots intentionally do not store this value.
+    pub(crate) navigation_revision: u64,
+    /// SPEC-3170 FR-039: expensive navigation side effects run in a later
+    /// event-loop turn. Rapid navigation merges into one latest-state
+    /// follow-up without dropping project-scoped refresh/intake work.
+    pub(crate) pending_navigation_followup: PendingNavigationFollowup,
+    pub(crate) navigation_followup_scheduled: bool,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
     /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
@@ -569,6 +616,10 @@ pub struct AppRuntime {
     /// Same root fix for the home works.json (megabytes of Work items +
     /// events): cache hit clones instead of re-parsing per projection event.
     pub(crate) work_items_cache: std::cell::RefCell<gwt_core::workspace_projection::WorkItemsCache>,
+    /// SPEC-3170 T-829: full related Work/session scans are populated by an
+    /// off-thread list load and reused by subsequent row selections. The LRU
+    /// is process-local and bounded in `knowledge`.
+    pub(crate) knowledge_related_snapshots: Arc<Mutex<knowledge::KnowledgeRelatedSnapshotCache>>,
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
@@ -831,12 +882,16 @@ impl AppRuntime {
             repo_activity_scan_generations: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
             frontend_hydration_context_generation: 0,
+            navigation_revision: 0,
+            pending_navigation_followup: PendingNavigationFollowup::default(),
+            navigation_followup_scheduled: false,
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
+            knowledge_related_snapshots: Default::default(),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -1943,7 +1998,10 @@ impl AppRuntime {
             FrontendEvent::ReopenRecentProject { path } => {
                 self.open_project_path_events(PathBuf::from(path))
             }
-            FrontendEvent::SelectProjectTab { tab_id } => self.select_project_tab_events(&tab_id),
+            FrontendEvent::SelectProjectTab {
+                tab_id,
+                interaction_id,
+            } => self.navigate_project_tab_events(&client_id, &tab_id, interaction_id),
             FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
             FrontendEvent::CreateWindow { preset, bounds } => {
                 self.create_window_events(preset, bounds)
@@ -1962,7 +2020,11 @@ impl AppRuntime {
                     },
                 )]
             }
-            FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
+            FrontendEvent::FocusWindow {
+                id,
+                bounds,
+                interaction_id,
+            } => self.navigate_focus_window_events(&client_id, &id, bounds, interaction_id),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(direction, bounds)
             }
@@ -1973,7 +2035,9 @@ impl AppRuntime {
             FrontendEvent::DockWindowTab { id, target_id } => {
                 self.dock_window_tab_events(&id, &target_id)
             }
-            FrontendEvent::ActivateWindowTab { id } => self.activate_window_tab_events(&id),
+            FrontendEvent::ActivateWindowTab { id, interaction_id } => {
+                self.navigate_activate_window_tab_events(&client_id, &id, interaction_id)
+            }
             FrontendEvent::DetachWindowTab { id, geometry } => {
                 self.detach_window_tab_events(&id, geometry)
             }
@@ -2157,6 +2221,7 @@ impl AppRuntime {
                     request_id,
                     selected_number,
                     refresh,
+                    refresh_if_stale: true,
                 },
             ),
             FrontendEvent::SearchKnowledgeBridge {
@@ -2211,6 +2276,7 @@ impl AppRuntime {
                     request_id,
                     selected_number: Some(number),
                     refresh: false,
+                    refresh_if_stale: false,
                 },
             ),
             FrontendEvent::UpdateKnowledgeBridgePhase {
@@ -2725,6 +2791,7 @@ impl AppRuntime {
 
         let events = build_frontend_sync_events(
             client_id,
+            self.navigation_revision,
             self.app_state_view(),
             terminal_statuses,
             Vec::new(),
@@ -2872,8 +2939,107 @@ impl AppRuntime {
 
     pub(crate) fn workspace_state_broadcast(&self) -> OutboundEvent {
         OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
+            revision: self.navigation_revision,
             workspace: self.app_state_view(),
         })
+    }
+
+    pub(crate) fn navigation_result(
+        &self,
+        client_id: &str,
+        interaction_id: Option<String>,
+        scope: gwt::protocol::NavigationScope,
+        outcome: gwt::protocol::NavigationOutcome,
+        canonical: gwt::protocol::NavigationCanonicalDelta,
+    ) -> Vec<OutboundEvent> {
+        interaction_id
+            .map(|interaction_id| {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::NavigationResult {
+                        interaction_id,
+                        revision: self.navigation_revision,
+                        scope,
+                        outcome,
+                        canonical,
+                    },
+                )]
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn advance_navigation_revision(&mut self) -> bool {
+        if self.navigation_revision >= MAX_SAFE_NAVIGATION_REVISION {
+            return false;
+        }
+        let Some(next_revision) = self.navigation_revision.checked_add(1) else {
+            return false;
+        };
+        self.navigation_revision = next_revision;
+        true
+    }
+
+    pub(crate) fn queue_navigation_followup(
+        &mut self,
+        change: ActiveTabChange,
+        work_events_ingest_root: Option<PathBuf>,
+        force_active_work_projection: bool,
+    ) {
+        let mut followup = PendingNavigationFollowup {
+            persist: true,
+            workspace_state: true,
+            active_work_projection: force_active_work_projection || change.tab_changed,
+            launch_wizard_tombstone_for: change.closed_wizard_id,
+            ..PendingNavigationFollowup::default()
+        };
+        if change.project_changed {
+            if let Some(project_root) = change.project_root {
+                followup.improvement_roots.insert(project_root);
+            }
+        }
+        if let Some(project_root) = work_events_ingest_root {
+            followup.work_events_ingest_roots.insert(project_root);
+        }
+        self.pending_navigation_followup.merge(followup);
+        if !self.navigation_followup_scheduled {
+            self.navigation_followup_scheduled = true;
+            self.proxy.send(UserEvent::NavigationFollowup);
+        }
+    }
+
+    pub(crate) fn handle_navigation_followup(&mut self) -> Vec<OutboundEvent> {
+        self.navigation_followup_scheduled = false;
+        let followup = std::mem::take(&mut self.pending_navigation_followup);
+        if followup.persist {
+            let _ = self.persist();
+        }
+        for project_root in followup.improvement_roots {
+            self.schedule_improvement_candidates_refresh(project_root);
+        }
+        for project_root in followup.work_events_ingest_roots {
+            self.spawn_work_events_ingest(project_root, false);
+        }
+
+        let mut events = Vec::new();
+        if followup.workspace_state {
+            events.push(self.workspace_state_broadcast());
+        }
+        if followup.active_work_projection {
+            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                events.push(event);
+            }
+        }
+        if let Some(closed_wizard_id) = followup.launch_wizard_tombstone_for {
+            let still_closed_generation = self
+                .launch_wizard
+                .as_ref()
+                .map(|wizard| wizard.wizard_id == closed_wizard_id)
+                .unwrap_or(true);
+            if still_closed_generation {
+                events.push(self.launch_wizard_state_broadcast(None));
+            }
+        }
+        events
     }
 
     fn improvement_action_error(
@@ -3198,23 +3364,40 @@ impl AppRuntime {
     }
 
     pub(crate) fn set_active_tab(&mut self, tab_id: String) -> bool {
+        let change = self.apply_active_tab(tab_id);
+        if change.project_changed {
+            if let Some(project_root) = change.project_root {
+                self.schedule_improvement_candidates_refresh(project_root);
+            }
+        }
+        change.wizard_closed
+    }
+
+    pub(crate) fn apply_active_tab(&mut self, tab_id: String) -> ActiveTabChange {
+        let previous_tab_id = self.active_tab_id.clone();
         let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         if self.active_tab_id.as_deref() != Some(tab_id.as_str()) {
             self.frontend_hydration_context_generation =
                 self.frontend_hydration_context_generation.saturating_add(1);
         }
-        let wizard_closed = self
+        let closed_wizard_id = self
             .launch_wizard
             .as_ref()
-            .is_some_and(|wizard| wizard.tab_id != tab_id);
+            .filter(|wizard| wizard.tab_id != tab_id)
+            .map(|wizard| wizard.wizard_id.clone());
+        let wizard_closed = closed_wizard_id.is_some();
         self.active_tab_id = Some(tab_id);
         if wizard_closed {
             self.launch_wizard = None;
         }
-        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
-            self.schedule_active_improvement_candidates_refresh();
+        let project_root = self.active_project_root().map(Path::to_path_buf);
+        ActiveTabChange {
+            tab_changed: self.active_tab_id != previous_tab_id,
+            project_changed: project_root != previous_project_root,
+            wizard_closed,
+            closed_wizard_id,
+            project_root,
         }
-        wizard_closed
     }
 
     pub(crate) fn rebuild_window_lookup(&mut self) {

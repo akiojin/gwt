@@ -162,7 +162,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ReopenRecentProject { path } => {
             FrontendUserActionLog::new("reopen_recent_project", "project").target(path)
         }
-        FrontendEvent::SelectProjectTab { tab_id } => {
+        FrontendEvent::SelectProjectTab { tab_id, .. } => {
             FrontendUserActionLog::new("select_project_tab", "project").target(tab_id)
         }
         FrontendEvent::CloseProjectTab { tab_id } => {
@@ -188,7 +188,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .target(target_id)
         }
-        FrontendEvent::ActivateWindowTab { id } => {
+        FrontendEvent::ActivateWindowTab { id, .. } => {
             FrontendUserActionLog::new("activate_window_tab", "window").window(id)
         }
         FrontendEvent::DetachWindowTab { id, .. } => {

@@ -187,6 +187,15 @@ impl WindowCanvasState {
         if !self.persisted.windows[index].placement.is_canvas() {
             return false;
         }
+        if self.persisted.windows[index].tab_group_id.is_some() {
+            let focused = self.activate_window_tab(id);
+            if focused {
+                if let Some(bounds) = bounds {
+                    self.center_window(id, bounds);
+                }
+            }
+            return focused;
+        }
         self.bring_to_front(index);
         if let Some(b) = bounds {
             self.center_window(id, b);
@@ -984,6 +993,26 @@ mod tests {
             .expect("claude window");
         assert_eq!(claude.z_index, 3);
         assert_eq!(workspace.persisted().next_z_index, 4);
+    }
+
+    #[test]
+    fn focusing_hidden_grouped_window_activates_and_raises_the_whole_group() {
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        assert!(
+            !workspace
+                .window("claude-1")
+                .expect("claude")
+                .tab_group_active
+        );
+
+        assert!(workspace.focus_window("claude-1", None));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        assert!(claude.tab_group_active);
+        assert!(!codex.tab_group_active);
+        assert_eq!(claude.z_index, codex.z_index);
     }
 
     #[test]

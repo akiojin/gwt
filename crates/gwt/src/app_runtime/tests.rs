@@ -14,6 +14,7 @@ use tempfile::tempdir;
 
 use base64::Engine;
 use chrono::{TimeZone, Utc};
+use gwt::protocol::{NavigationOutcome, NavigationScope};
 use gwt::{
     empty_workspace_state, load_restored_workspace_state, load_session_state, ArrangeMode,
     BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
@@ -2927,12 +2928,16 @@ fn sample_runtime_with_events(
         repo_activity_scan_generations: HashMap::new(),
         frontend_hydration_generations: HashMap::new(),
         frontend_hydration_context_generation: 0,
+        navigation_revision: 0,
+        pending_navigation_followup: super::PendingNavigationFollowup::default(),
+        navigation_followup_scheduled: false,
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
         work_items_cache: std::cell::RefCell::new(
             gwt_core::workspace_projection::WorkItemsCache::new(),
         ),
+        knowledge_related_snapshots: Default::default(),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
@@ -4634,6 +4639,276 @@ fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() 
 }
 
 #[test]
+fn app_runtime_ordered_project_navigation_replies_before_full_state_followup() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&other).expect("create other");
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-2".to_string(),
+            interaction_id: Some("project-nav-1".to_string()),
+        },
+    );
+
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
+    assert_eq!(runtime.navigation_revision, 1);
+    assert_eq!(
+        events.len(),
+        1,
+        "the synchronous navigation path must return only the ordered result"
+    );
+    assert!(matches!(
+        &events[0],
+        OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event:
+                BackendEvent::NavigationResult {
+                    interaction_id,
+                    revision: 1,
+                    scope: NavigationScope::ProjectTab,
+                    outcome: NavigationOutcome::Accepted,
+                    canonical,
+                },
+        } if client_id == "client-1"
+            && interaction_id == "project-nav-1"
+            && canonical.active_tab_id.as_deref() == Some("tab-2")
+            && canonical.target_id.as_deref() == Some("tab-2")
+            && canonical.window_updates.is_empty()
+    ));
+    assert!(matches!(
+        recorded.lock().expect("event log").as_slice(),
+        [UserEvent::NavigationFollowup]
+    ));
+
+    let followup = runtime.handle_navigation_followup();
+    assert!(matches!(
+        followup.first().map(|event| &event.event),
+        Some(BackendEvent::WindowCanvasState {
+            revision: 1,
+            workspace,
+        }) if workspace.active_tab_id.as_deref() == Some("tab-2")
+    ));
+    assert!(followup
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+}
+
+#[test]
+fn app_runtime_navigation_followup_does_not_tombstone_a_newer_launch_wizard() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&other).expect("create other");
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+    runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-2".to_string(),
+            interaction_id: Some("project-nav-wizard".to_string()),
+        },
+    );
+    assert!(runtime.launch_wizard.is_none());
+
+    let mut replacement = sample_launch_wizard_session("tab-2", &other);
+    replacement.wizard_id = "wizard-2".to_string();
+    runtime.launch_wizard = Some(replacement);
+
+    let followup = runtime.handle_navigation_followup();
+
+    assert!(runtime
+        .launch_wizard
+        .as_ref()
+        .is_some_and(|wizard| wizard.wizard_id == "wizard-2"));
+    assert!(
+        followup.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::LaunchWizardState { wizard: None }
+        )),
+        "a tombstone queued for wizard-1 must not close wizard-2"
+    );
+}
+
+#[test]
+fn app_runtime_rapid_project_navigation_coalesces_followup_to_latest_revision() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&other).expect("create other");
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+
+    let to_other = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-2".to_string(),
+            interaction_id: Some("project-nav-b".to_string()),
+        },
+    );
+    let to_repo = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-1".to_string(),
+            interaction_id: Some("project-nav-a".to_string()),
+        },
+    );
+
+    assert!(matches!(
+        &to_other[0].event,
+        BackendEvent::NavigationResult {
+            interaction_id,
+            revision: 1,
+            outcome: NavigationOutcome::Accepted,
+            ..
+        } if interaction_id == "project-nav-b"
+    ));
+    assert!(matches!(
+        &to_repo[0].event,
+        BackendEvent::NavigationResult {
+            interaction_id,
+            revision: 2,
+            outcome: NavigationOutcome::Accepted,
+            ..
+        } if interaction_id == "project-nav-a"
+    ));
+    assert_eq!(
+        recorded
+            .lock()
+            .expect("event log")
+            .iter()
+            .filter(|event| matches!(event, UserEvent::NavigationFollowup))
+            .count(),
+        1,
+        "rapid navigation must schedule one aggregate follow-up"
+    );
+
+    let followup = runtime.handle_navigation_followup();
+    assert!(matches!(
+        followup.first().map(|event| &event.event),
+        Some(BackendEvent::WindowCanvasState {
+            revision: 2,
+            workspace,
+        }) if workspace.active_tab_id.as_deref() == Some("tab-1")
+    ));
+}
+
+#[test]
+fn app_runtime_project_navigation_reports_noop_missing_and_revision_overflow() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&other).expect("create other");
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+
+    let current = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-1".to_string(),
+            interaction_id: Some("project-current".to_string()),
+        },
+    );
+    let missing = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "missing".to_string(),
+            interaction_id: Some("project-missing".to_string()),
+        },
+    );
+    runtime.navigation_revision = 9_007_199_254_740_991;
+    let overflow = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-2".to_string(),
+            interaction_id: Some("project-overflow".to_string()),
+        },
+    );
+
+    assert!(matches!(
+        current[0].event,
+        BackendEvent::NavigationResult {
+            revision: 0,
+            outcome: NavigationOutcome::AlreadyCurrent,
+            ..
+        }
+    ));
+    assert!(matches!(
+        missing[0].event,
+        BackendEvent::NavigationResult {
+            revision: 0,
+            outcome: NavigationOutcome::NotFound,
+            ..
+        }
+    ));
+    assert!(matches!(
+        overflow[0].event,
+        BackendEvent::NavigationResult {
+            revision: 9_007_199_254_740_991,
+            outcome: NavigationOutcome::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
+    assert!(recorded.lock().expect("event log").is_empty());
+}
+
+#[test]
+fn app_runtime_legacy_project_navigation_mutates_then_queues_full_state() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&other).expect("create other");
+    let tabs = vec![
+        sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "legacy-client".to_string(),
+        FrontendEvent::SelectProjectTab {
+            tab_id: "tab-2".to_string(),
+            interaction_id: None,
+        },
+    );
+
+    assert!(
+        events.is_empty(),
+        "legacy clients do not receive ordered ACKs"
+    );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
+    assert_eq!(runtime.navigation_revision, 1);
+    assert!(matches!(
+        recorded.lock().expect("event log").as_slice(),
+        [UserEvent::NavigationFollowup]
+    ));
+}
+
+#[test]
 fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_tab() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -4843,6 +5118,150 @@ fn app_runtime_cross_project_window_focus_refreshes_the_new_project_snapshot() {
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+}
+
+#[test]
+fn app_runtime_ordered_canvas_focus_replies_without_waiting_for_workspace_state() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Branches, WindowPreset::FileTree],
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let target_id = combined_window_id("tab-1", "branches-1");
+    let address = runtime
+        .window_lookup
+        .get(&target_id)
+        .expect("target address")
+        .clone();
+    let geometry_before = runtime
+        .tab("tab-1")
+        .and_then(|tab| tab.workspace.window(&address.raw_id))
+        .expect("target window")
+        .geometry
+        .clone();
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::FocusWindow {
+            id: target_id.clone(),
+            bounds: Some(WindowGeometry {
+                x: 999.0,
+                y: 777.0,
+                width: 800.0,
+                height: 600.0,
+            }),
+            interaction_id: Some("canvas-focus-1".to_string()),
+        },
+    );
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0].event,
+        BackendEvent::NavigationResult {
+            interaction_id,
+            revision: 1,
+            scope: NavigationScope::Canvas,
+            outcome: NavigationOutcome::Accepted,
+            canonical,
+        } if interaction_id == "canvas-focus-1"
+            && canonical.active_tab_id.as_deref() == Some("tab-1")
+            && canonical.target_id.as_deref() == Some(target_id.as_str())
+            && canonical.window_updates.iter().any(|window| window.id == target_id)
+    ));
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+            .expect("target window")
+            .geometry,
+        geometry_before,
+        "modern camera navigation must not persist viewer-local centering bounds"
+    );
+    assert!(matches!(
+        recorded.lock().expect("event log").as_slice(),
+        [UserEvent::NavigationFollowup]
+    ));
+
+    let already_current = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::FocusWindow {
+            id: target_id,
+            bounds: None,
+            interaction_id: Some("canvas-focus-2".to_string()),
+        },
+    );
+    assert!(matches!(
+        already_current[0].event,
+        BackendEvent::NavigationResult {
+            revision: 1,
+            outcome: NavigationOutcome::AlreadyCurrent,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn app_runtime_ordered_window_tab_activation_returns_complete_group_delta() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Branches, WindowPreset::FileTree],
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let first_id = combined_window_id("tab-1", "branches-1");
+    let second_id = combined_window_id("tab-1", "file-tree-1");
+    assert!(!runtime
+        .dock_window_tab_events(&first_id, &second_id)
+        .is_empty());
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ActivateWindowTab {
+            id: second_id.clone(),
+            interaction_id: Some("window-tab-1".to_string()),
+        },
+    );
+
+    assert_eq!(events.len(), 1);
+    let canonical = match &events[0].event {
+        BackendEvent::NavigationResult {
+            interaction_id,
+            revision: 1,
+            scope: NavigationScope::WindowTab,
+            outcome: NavigationOutcome::Accepted,
+            canonical,
+        } if interaction_id == "window-tab-1" => canonical,
+        event => panic!("unexpected ordered window-tab result: {event:?}"),
+    };
+    assert_eq!(canonical.target_id.as_deref(), Some(second_id.as_str()));
+    assert_eq!(
+        canonical.window_updates.len(),
+        2,
+        "all grouped windows must reconcile from one canonical delta"
+    );
+    assert!(canonical
+        .window_updates
+        .iter()
+        .any(|window| window.id == first_id && window.tab_group_active == Some(false)));
+    assert!(canonical
+        .window_updates
+        .iter()
+        .any(|window| window.id == second_id && window.tab_group_active == Some(true)));
+    assert!(matches!(
+        recorded.lock().expect("event log").as_slice(),
+        [UserEvent::NavigationFollowup]
+    ));
 }
 
 #[test]
@@ -6999,7 +7418,7 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WindowCanvasState { workspace, .. } => Some(workspace),
             _ => None,
         })
         .expect("workspace state after wizard submit");
@@ -14940,6 +15359,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             request_id: None,
             selected_number: Some(42),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -14979,6 +15399,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             request_id: None,
             selected_number: Some(1930),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -15061,6 +15482,7 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
             request_id: Some(7),
             selected_number: Some(42),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
 
@@ -15106,6 +15528,229 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
             )
         })
     });
+}
+
+#[test]
+fn app_runtime_select_knowledge_bridge_entry_does_not_start_stale_remote_refresh() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let marker = temp.path().join("selection-must-not-call-gh");
+    let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &marker);
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Selectable cached issue",
+            &["bug"],
+            "Cached issue body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write stale issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(8),
+            number: 42,
+        },
+    );
+
+    assert!(
+        immediate.is_empty(),
+        "selection cache reads must stay off the GUI event loop"
+    );
+    wait_for_recorded_event("selected knowledge detail", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail {
+                            id,
+                            request_id: Some(8),
+                            detail,
+                            ..
+                        } if id == &window_id && detail.number == Some(42)
+                    ))
+            )
+        })
+    });
+    thread::sleep(Duration::from_secs(2));
+    assert!(
+        !marker.exists(),
+        "row selection must not launch stale-cache GitHub refresh"
+    );
+}
+
+#[test]
+fn app_runtime_select_knowledge_bridge_entry_reuses_related_work_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-42");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Cached issue",
+            &["bug"],
+            "Cached issue body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "issue-1",
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.windows.push(sample_window(
+        "pr-1",
+        WindowPreset::Pr,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo,
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+    let pr_window_id = combined_window_id("tab-1", "pr-1");
+
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-42", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-42".to_string();
+    session.agent_session_id = Some("conversation-issue-42".to_string());
+    session.linked_issue_number = Some(42);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(42),
+            refresh: false,
+            refresh_if_stale: true,
+        },
+    );
+    let initial_events = wait_for_knowledge_view_dispatch(&events, &window_id);
+    assert!(matches!(
+        &initial_events[1].event,
+        BackendEvent::KnowledgeDetail { detail, .. }
+            if detail.number == Some(42) && detail.related_works.len() == 1
+    ));
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshots
+            .lock()
+            .expect("knowledge snapshot cache")
+            .full_scan_count(),
+        1,
+    );
+    events.lock().expect("event log").clear();
+
+    runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &pr_window_id,
+            kind: gwt::KnowledgeKind::Pr,
+            request_id: None,
+            selected_number: None,
+            refresh: false,
+            refresh_if_stale: true,
+        },
+    );
+    wait_for_knowledge_view_dispatch(&events, &pr_window_id);
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshots
+            .lock()
+            .expect("knowledge snapshot cache")
+            .full_scan_count(),
+        1,
+        "a PR view must not scan or replace the Issue related-work snapshot",
+    );
+    events.lock().expect("event log").clear();
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(9),
+            number: 42,
+        },
+    );
+    wait_for_recorded_event("selected cached knowledge detail", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail {
+                            id,
+                            request_id: Some(9),
+                            detail,
+                            ..
+                        } if id == &window_id
+                            && detail.number == Some(42)
+                            && detail.related_works.len() == 1
+                    ))
+            )
+        })
+    });
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshots
+            .lock()
+            .expect("knowledge snapshot cache")
+            .full_scan_count(),
+        1,
+        "row selection must reuse the related-work snapshot populated by the initial load",
+    );
 }
 
 #[test]
@@ -15186,6 +15831,7 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
             request_id: None,
             selected_number: Some(3096),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -15268,6 +15914,7 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
             request_id: None,
             selected_number: Some(3133),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -15386,6 +16033,7 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
             request_id: None,
             selected_number: Some(3133),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -15549,6 +16197,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
             request_id: None,
             selected_number: Some(3133),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -15704,6 +16353,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             request_id: None,
             selected_number: Some(3133),
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -16189,6 +16839,7 @@ fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_suppo
             request_id: None,
             selected_number: None,
             refresh: false,
+            refresh_if_stale: true,
         },
     );
     assert!(immediate.is_empty());
@@ -18480,7 +19131,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WindowCanvasState { workspace, .. } => Some(workspace),
             _ => None,
         })
         .expect("workspace broadcast");
@@ -19353,7 +20004,7 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WindowCanvasState { workspace, .. } => Some(workspace),
             _ => None,
         })
         .expect("initial WindowCanvasState broadcast");
@@ -19866,7 +20517,7 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
         .find(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
         .expect("WindowCanvasState reply for FrontendReady");
     let workspace = match &workspace_event.event {
-        BackendEvent::WindowCanvasState { workspace } => workspace,
+        BackendEvent::WindowCanvasState { workspace, .. } => workspace,
         _ => unreachable!(),
     };
     let projected_window = workspace
