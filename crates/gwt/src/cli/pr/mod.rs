@@ -677,6 +677,7 @@ mod tests {
             &crate::cli::verification_record::VerificationPlanRecord {
                 session_id: "sess-pr".to_string(),
                 owner_number: Some(42),
+                execution_binding: None,
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
@@ -777,6 +778,7 @@ mod tests {
             &crate::cli::verification_record::VerificationPlanRecord {
                 session_id: "sess-pr-settlement".to_string(),
                 owner_number: Some(42),
+                execution_binding: None,
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),

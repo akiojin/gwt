@@ -4563,6 +4563,7 @@ mod tests {
                 &vr::VerificationPlanRecord {
                     session_id: session.to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string()],
                     derived,
                     worktree_fingerprint: String::new(),
@@ -4692,8 +4693,13 @@ mod tests {
                 "recovery extension tamper must fail its independent hash chain"
             );
 
-            // Reopen does not claim completion, but the same fresh evidence
-            // unlocks the normal Ready/complete gates.
+            // Reopen advances the same generation's ledger head. The
+            // recovery evidence remains in the audit, but exact-binding
+            // completion/PR gates require a fresh plan/run for the reopened
+            // head rather than accepting the superseded Blocked binding.
+            assert!(pr_handoff_refusal(dir.path(), true)
+                .is_some_and(|reason| reason.contains("predecessor")));
+            save_covering_evidence(dir.path(), "sess-reopen", true);
             assert_eq!(pr_handoff_refusal(dir.path(), true), None);
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
@@ -4849,6 +4855,7 @@ mod tests {
                 &crate::cli::verification_record::VerificationPlanRecord {
                     session_id: "sess-reopen".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
@@ -4875,6 +4882,7 @@ mod tests {
                 &crate::cli::verification_record::VerificationPlanRecord {
                     session_id: "sess-reopen".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --exec-path".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
@@ -5220,6 +5228,7 @@ mod tests {
                 &vr::VerificationPlanRecord {
                     session_id: "sess-reopen".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec![failing_command.clone()],
                     derived: true,
                     worktree_fingerprint: String::new(),
@@ -5248,6 +5257,7 @@ mod tests {
                 &vr::VerificationPlanRecord {
                     session_id: "sess-reopen".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
@@ -5536,6 +5546,7 @@ mod tests {
                 &vr::VerificationPlanRecord {
                     session_id: "sess-b".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
@@ -5587,6 +5598,7 @@ mod tests {
                 &crate::cli::verification_record::VerificationPlanRecord {
                     session_id: "sess-op".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
@@ -5823,6 +5835,7 @@ mod tests {
                 &crate::cli::verification_record::VerificationPlanRecord {
                     session_id: "sess-op".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
@@ -5945,6 +5958,7 @@ mod tests {
                 &crate::cli::verification_record::VerificationPlanRecord {
                     session_id: "sess-new".to_string(),
                     owner_number: Some(3248),
+                    execution_binding: None,
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),

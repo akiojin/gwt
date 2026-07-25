@@ -28,6 +28,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use gwt_agent::session::ExecutionBindingIdentity;
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,10 @@ pub struct VerificationRunRecord {
     /// time (`None` for unlinked worktrees).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_number: Option<u64>,
+    /// Exact generation/binding/head that produced this evidence. `None`
+    /// remains readable only for pre-generation legacy executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<ExecutionBindingIdentity>,
     /// Worktree fingerprint at run time: HEAD + tracked changes (see
     /// [`worktree_fingerprint`]). Completion recomputes and compares.
     pub worktree_fingerprint: String,
@@ -122,6 +127,11 @@ pub struct VerificationPlanRecord {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_number: Option<u64>,
+    /// Exact generation/binding/head for which this plan is authoritative.
+    /// Legacy plans remain readable with `None`, but cannot authorize a
+    /// generation-aware execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<ExecutionBindingIdentity>,
     pub commands: Vec<String>,
     /// Full T-130: the matrix was derived from changed surfaces instead of
     /// hand-picked (`verify.plan` with `params.derive:true`).
@@ -181,6 +191,8 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
 pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let mut plan = plan.clone();
+        let (_, execution_binding) = current_execution_context(worktree)?;
+        plan.execution_binding = execution_binding;
         if plan.worktree_fingerprint.is_empty() {
             plan.worktree_fingerprint = worktree_fingerprint(worktree);
         }
@@ -222,10 +234,11 @@ fn register_plan_unleased(
     derived: bool,
     worktree_fingerprint: String,
 ) -> io::Result<VerificationPlanRecord> {
-    let owner_number = execution_state::load(worktree)?.map(|record| record.owner_number);
+    let (owner_number, execution_binding) = current_execution_context(worktree)?;
     let mut plan = VerificationPlanRecord {
         session_id: session_id.to_string(),
         owner_number,
+        execution_binding,
         commands,
         derived,
         worktree_fingerprint,
@@ -383,7 +396,8 @@ pub const WORK_EVENT_LOG_RELATIVE: &str = ".gwt/work/events.jsonl";
 
 const WORK_EVENT_SETTLEMENT_RECORD_FILE: &str = "work-event-settlement.json";
 const WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION: u64 = 1;
-const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 2;
+const WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION: u64 = 2;
+const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 3;
 
 /// Independent dirty states reported for the exact tracked Work event path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -445,6 +459,10 @@ impl WorkEventSettlementStatus {
 pub struct WorkEventSettlementRecord {
     pub schema_version: u64,
     pub session_id: String,
+    /// Exact generation that owns this delivery obligation/receipt. Old
+    /// records deserialize as `None` and are audit-only once a ledger exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_binding: Option<ExecutionBindingIdentity>,
     pub obligation_open: bool,
     pub status: WorkEventSettlementStatus,
     pub updated_at: DateTime<Utc>,
@@ -479,7 +497,9 @@ fn decode_work_event_settlement_record(
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     if !matches!(
         record.schema_version,
-        WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION | WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+        WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION
+            | WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION
+            | WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
     ) {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
@@ -554,12 +574,18 @@ pub fn prepare_work_event_settlement_record(
 
     crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
-        let record_session_id = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?
-            .filter(|record| record.obligation_open)
-            .map_or_else(|| session_id.to_string(), |record| record.session_id);
+        let current_binding = current_execution_context(worktree)?.1;
+        let (record_session_id, execution_binding) =
+            match load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?
+                .filter(|record| record.obligation_open)
+            {
+                Some(record) => (record.session_id, record.execution_binding),
+                None => (session_id.to_string(), current_binding),
+            };
         let record = WorkEventSettlementRecord {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: record_session_id,
+            execution_binding,
             obligation_open: true,
             status: WorkEventSettlementStatus::PendingMutation {
                 event_id: event.id.clone(),
@@ -607,15 +633,19 @@ pub fn save_work_event_settlement_record(
             }
         }
         let status = evaluate_work_event_settlement(worktree);
-        let (previous_open, record_session_id) = match previous {
-            Some(record) if record.obligation_open || !open_obligation => {
-                (record.obligation_open, record.session_id)
-            }
-            _ => (false, session_id.to_string()),
+        let current_binding = current_execution_context(worktree)?.1;
+        let (previous_open, record_session_id, execution_binding) = match previous {
+            Some(record) if record.obligation_open || !open_obligation => (
+                record.obligation_open,
+                record.session_id,
+                record.execution_binding,
+            ),
+            _ => (false, session_id.to_string(), current_binding),
         };
         let record = WorkEventSettlementRecord {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: record_session_id,
+            execution_binding,
             obligation_open: !status.is_settled() && (open_obligation || previous_open),
             status: status.clone(),
             updated_at: Utc::now(),
@@ -816,6 +846,14 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             ));
         }
     };
+    let current_binding = match current_execution_context(worktree) {
+        Ok((_, binding)) => binding,
+        Err(error) => {
+            return Some(format!(
+                "Work event settlement refused: current execution generation authority is unreadable ({error}). Repair or relaunch the execution before retrying."
+            ));
+        }
+    };
     let path_exists = match fs::symlink_metadata(worktree.join(WORK_EVENT_LOG_RELATIVE)) {
         Ok(_) => true,
         Err(error) if error.kind() == ErrorKind::NotFound => false,
@@ -836,6 +874,21 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
     };
     if receipt.is_none() && !path_exists && !path_tracked {
         return None;
+    }
+    match receipt.as_ref() {
+        Some(record) if record.execution_binding != current_binding => {
+            return Some(
+                "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation. Settle and push the current generation's own Work event before retrying."
+                    .to_string(),
+            );
+        }
+        None if current_binding.is_some() => {
+            return Some(
+                "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying."
+                    .to_string(),
+            );
+        }
+        _ => {}
     }
 
     let status = if let Some(receipt) = receipt {
@@ -1216,11 +1269,16 @@ pub fn run_verification(
     // Snapshot owner, plan, and worktree together. Commands deliberately run
     // outside the lease; the final commit reacquires it and rejects any
     // interleaving writer by invalidating the evidence snapshot.
-    let (owner_number, plan_snapshot, fingerprint_before) =
+    let (owner_number, execution_binding, plan_snapshot, fingerprint_before) =
         crate::cli::trusted_store::with_write_lease(worktree, || {
-            let owner_number = execution_state::load(worktree)?.map(|record| record.owner_number);
+            let (owner_number, execution_binding) = current_execution_context(worktree)?;
             let plan = load_plan(worktree)?;
-            Ok((owner_number, plan, worktree_fingerprint(worktree)))
+            Ok((
+                owner_number,
+                execution_binding,
+                plan,
+                worktree_fingerprint(worktree),
+            ))
         })
         .map_err(|err| format!("failed to snapshot verification state: {err}"))?;
     let started_at = Utc::now();
@@ -1245,7 +1303,8 @@ pub fn run_verification(
                 if !plan.content_hash.is_empty()
                     && plan_integrity_ok(plan)
                     && plan.session_id == session_id
-                    && plan.owner_number == owner_number =>
+                    && plan.owner_number == owner_number
+                    && plan.execution_binding == execution_binding =>
             {
                 let ran: std::collections::HashSet<&str> =
                     commands.iter().map(String::as_str).collect();
@@ -1268,6 +1327,7 @@ pub fn run_verification(
         record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
         owner_number,
+        execution_binding: execution_binding.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
         commands: results,
         all_passed,
@@ -1281,8 +1341,7 @@ pub fn run_verification(
     };
 
     crate::cli::trusted_store::with_write_lease(worktree, || {
-        let current_owner = execution_state::load(worktree)?
-            .map(|execution| execution.owner_number);
+        let (current_owner, current_binding) = current_execution_context(worktree)?;
         let current_plan = load_plan(worktree)?;
         let fingerprint_after = worktree_fingerprint(worktree);
         if fingerprint_before != fingerprint_after {
@@ -1294,6 +1353,12 @@ pub fn run_verification(
         if current_owner != owner_number {
             transcript.push_str(
                 "warning: the execution owner changed while verification ran — the record is invalidated; rerun `verify.run` for the current owner\n",
+            );
+            record.plan_covered = false;
+        }
+        if current_binding != execution_binding {
+            transcript.push_str(
+                "warning: the execution generation changed while verification ran — the record is invalidated; rerun `verify.run` for the current generation\n",
             );
             record.plan_covered = false;
         }
@@ -1334,6 +1399,8 @@ pub enum EvidenceStatus {
     MissingRecord,
     WrongSession,
     WrongOwner,
+    /// The record belongs to a legacy/predecessor execution generation.
+    WrongGeneration,
     StaleFingerprint,
     Failing,
     Unreadable,
@@ -1362,6 +1429,9 @@ impl EvidenceStatus {
             }
             Self::WrongOwner => {
                 "the verification record was taken for a different owner — rerun `verify.run` after the current launch"
+            }
+            Self::WrongGeneration => {
+                "the verification record belongs to a legacy, predecessor, or superseded execution binding — register the plan and rerun `verify.run` from the current generation"
             }
             Self::StaleFingerprint => {
                 "the worktree changed after the last verification run (stale evidence) — rerun `verify.run`"
@@ -1408,6 +1478,13 @@ pub fn evaluate_evidence_snapshot(
             return EvidenceStatus::WrongOwner;
         }
     }
+    let current_binding = match current_execution_context(worktree) {
+        Ok((_, binding)) => binding,
+        Err(_) => return EvidenceStatus::Unreadable,
+    };
+    if record.execution_binding != current_binding {
+        return EvidenceStatus::WrongGeneration;
+    }
     if record.worktree_fingerprint != worktree_fingerprint(worktree) {
         return EvidenceStatus::StaleFingerprint;
     }
@@ -1422,6 +1499,7 @@ pub fn evaluate_evidence_snapshot(
             || !plan_integrity_ok(plan)
             || plan.session_id != session_id
             || plan.owner_number != record.owner_number
+            || plan.execution_binding != record.execution_binding
             || plan.worktree_fingerprint.is_empty()
             || plan.worktree_fingerprint != record.worktree_fingerprint
             || record.verification_plan_hash != plan.content_hash
@@ -1437,6 +1515,23 @@ pub fn evaluate_evidence_snapshot(
         return EvidenceStatus::PlanChanged;
     }
     EvidenceStatus::Fresh
+}
+
+/// Resolve the current linked owner and its exact generation identity from
+/// the authoritative ECR/ledger pair. A flat legacy ECR intentionally
+/// returns an owner with no binding.
+fn current_execution_context(
+    worktree: &Path,
+) -> io::Result<(Option<u64>, Option<ExecutionBindingIdentity>)> {
+    let Some(execution) = execution_state::load(worktree)? else {
+        return Ok((None, None));
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    let binding = execution_state::current_execution_binding(worktree, owner)?;
+    Ok((Some(execution.owner_number), binding))
 }
 
 /// Evaluate the latest record against the current session, the Execution
@@ -1581,6 +1676,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: session.to_string(),
                 owner_number,
+                execution_binding: None,
                 commands: commands.to_vec(),
                 derived: false,
                 worktree_fingerprint: String::new(),
@@ -1597,6 +1693,7 @@ pub(crate) mod tests {
             record_id: "vr-test".to_string(),
             session_id: session.to_string(),
             owner_number: Some(3248),
+            execution_binding: None,
             worktree_fingerprint: fingerprint.to_string(),
             commands: vec![VerificationCommandResult {
                 command: "git --version".to_string(),
@@ -1639,6 +1736,7 @@ pub(crate) mod tests {
         let plan = VerificationPlanRecord {
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
+            execution_binding: None,
             commands: vec!["cargo test -p gwt --lib".to_string()],
             derived: false,
             worktree_fingerprint: String::new(),
@@ -1713,6 +1811,7 @@ pub(crate) mod tests {
         let mut forged_plan = VerificationPlanRecord {
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
+            execution_binding: None,
             commands: vec!["git --version".to_string()],
             derived: false,
             worktree_fingerprint: String::new(),
@@ -1782,6 +1881,7 @@ pub(crate) mod tests {
             record_id: "vrr-test".to_string(),
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
+            execution_binding: None,
             worktree_fingerprint: "abc".to_string(),
             commands: vec![VerificationCommandResult {
                 command: "git --version".to_string(),
@@ -1856,6 +1956,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: "sess-1".to_string(),
                 owner_number: None,
+                execution_binding: None,
                 commands: vec!["git --version".to_string()],
                 derived: true,
                 worktree_fingerprint: String::new(),
@@ -2022,6 +2123,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: "sess-1".to_string(),
                 owner_number: None,
+                execution_binding: None,
                 commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
@@ -2062,6 +2164,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: "sess-other".to_string(),
                 owner_number: None,
+                execution_binding: None,
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
@@ -2086,6 +2189,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: "sess-1".to_string(),
                 owner_number: None,
+                execution_binding: None,
                 commands: commands.clone(),
                 derived: true,
                 worktree_fingerprint: String::new(),
@@ -2111,6 +2215,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: "sess-1".to_string(),
                 owner_number: None,
+                execution_binding: None,
                 commands: vec!["git --exec-path".to_string()],
                 derived: true,
                 worktree_fingerprint: String::new(),
@@ -2138,6 +2243,7 @@ pub(crate) mod tests {
             &VerificationPlanRecord {
                 session_id: "sess-1".to_string(),
                 owner_number: None,
+                execution_binding: None,
                 commands: commands.clone(),
                 derived: true,
                 worktree_fingerprint: String::new(),
@@ -2379,6 +2485,226 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    fn generation_scoped_owner() -> crate::cli::execution_state::ExecutionOwnerKey {
+        crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 2359,
+        }
+    }
+
+    fn generation_scoped_successor_request(
+        operation_id: &str,
+        session_id: &str,
+    ) -> crate::cli::execution_state::SuccessorRequest {
+        crate::cli::execution_state::SuccessorRequest {
+            operation_id: operation_id.to_string(),
+            principal_id: format!("principal-{operation_id}"),
+            source: "continue-work".to_string(),
+            session_binding_id: format!("binding-{operation_id}"),
+            initial_session_id: session_id.to_string(),
+            entrypoint: "continue-work".to_string(),
+            requested_at: Utc::now(),
+        }
+    }
+
+    fn initialize_generation_scoped_execution(
+        worktree: &Path,
+        session_id: &str,
+    ) -> gwt_agent::session::ExecutionBindingIdentity {
+        let owner = generation_scoped_owner();
+        crate::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize legacy Active execution");
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("import Active execution generation");
+        crate::cli::execution_state::current_execution_binding(worktree, owner)
+            .expect("load current execution binding")
+            .expect("execution generation binding exists")
+    }
+
+    #[test]
+    fn generation_scoped_verification_plan_and_run_bind_exact_execution_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("generation-scoped verification repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let expected = initialize_generation_scoped_execution(dir.path(), "session-generation-a");
+        let commands = vec!["git --version".to_string()];
+        let (run, _) = plan_and_run(dir.path(), "session-generation-a", &commands);
+        let plan = load_plan(dir.path())
+            .expect("load generation-scoped plan")
+            .expect("generation-scoped plan exists");
+
+        assert_eq!(plan.execution_binding.as_ref(), Some(&expected));
+        assert_eq!(run.execution_binding.as_ref(), Some(&expected));
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-generation-a", Some(2359)),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn generation_scoped_successor_rejects_predecessor_verification_evidence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+
+        let predecessor = initialize_generation_scoped_execution(dir.path(), "session-predecessor");
+        let commands = vec!["git --version".to_string()];
+        let (run, _) = plan_and_run(dir.path(), "session-predecessor", &commands);
+        assert_eq!(run.execution_binding.as_ref(), Some(&predecessor));
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                "session-predecessor",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle predecessor generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let request =
+            generation_scoped_successor_request("successor-verification", "session-successor");
+        crate::cli::execution_state::prepare_successor(dir.path(), owner, &request)
+            .expect("prepare successor generation");
+        crate::cli::execution_state::activate_successor(dir.path(), owner, &request)
+            .expect("activate successor generation");
+        let successor = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
+            .expect("load successor binding")
+            .expect("successor binding exists");
+        assert_ne!(successor, predecessor);
+
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-predecessor", Some(2359)),
+            EvidenceStatus::WrongGeneration,
+            "same owner/session/fingerprint predecessor evidence must not satisfy the successor"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_legacy_evidence_becomes_audit_only_after_ledger_import() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("legacy evidence repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_scoped_owner();
+
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "session-legacy-evidence",
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize legacy execution");
+        let commands = vec!["git --version".to_string()];
+        let (legacy_run, _) = plan_and_run(dir.path(), "session-legacy-evidence", &commands);
+        assert!(
+            legacy_run.execution_binding.is_none(),
+            "pre-ledger evidence remains readable as legacy audit history"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-legacy-evidence", Some(2359)),
+            EvidenceStatus::Fresh
+        );
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                "session-legacy-evidence",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle legacy execution"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        crate::cli::execution_state::ensure_generation_ledger(
+            dir.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Unknown,
+        )
+        .expect("import verified legacy terminal generation");
+
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-legacy-evidence", Some(2359)),
+            EvidenceStatus::WrongGeneration,
+            "legacy unbound evidence must not authorize a generation-aware completion gate"
+        );
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_rejects_predecessor_receipt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+
+        initialize_generation_scoped_execution(&fixture.repo, "session-settlement-predecessor");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                "session-settlement-predecessor",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle predecessor before its delivery receipt"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let predecessor =
+            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+                .expect("load terminal predecessor binding")
+                .expect("terminal predecessor binding exists");
+        let receipt = save_work_event_settlement_record(
+            &fixture.repo,
+            "session-settlement-predecessor",
+            true,
+        )
+        .expect("persist predecessor Work settlement");
+        assert!(receipt.status.is_settled());
+        assert_eq!(receipt.execution_binding.as_ref(), Some(&predecessor));
+
+        let request =
+            generation_scoped_successor_request("successor-settlement", "session-settlement-next");
+        crate::cli::execution_state::prepare_successor(&fixture.repo, owner, &request)
+            .expect("prepare settlement successor");
+        crate::cli::execution_state::activate_successor(&fixture.repo, owner, &request)
+            .expect("activate settlement successor");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("predecessor settlement must not authorize successor completion");
+        assert!(
+            refusal.contains("generation") && refusal.contains("predecessor"),
+            "generation mismatch must be actionable without leaking secrets: {refusal}"
+        );
     }
 
     fn assert_path_dirty(fixture: &WorkEventGitFixture, states: Vec<WorkEventPathState>) {
@@ -2887,7 +3213,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn work_event_settlement_reader_accepts_v1_and_refreshes_it_to_v2() {
+    fn work_event_settlement_reader_accepts_v1_v2_and_refreshes_to_v3() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2898,6 +3224,7 @@ pub(crate) mod tests {
         let legacy = WorkEventSettlementRecord {
             schema_version: WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION,
             session_id: "session-legacy".to_string(),
+            execution_binding: None,
             obligation_open: false,
             status: fixture.settled_status(),
             updated_at: Utc::now(),
@@ -2911,8 +3238,18 @@ pub(crate) mod tests {
                 .expect("v1 receipt exists"),
             legacy
         );
+        let mut pre_generation = legacy.clone();
+        pre_generation.schema_version = WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION;
+        persist_work_event_settlement_record(&fixture.repo, &pre_generation)
+            .expect("seed v2 settlement receipt");
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("load v2 receipt")
+                .expect("v2 receipt exists"),
+            pre_generation
+        );
         let refreshed = save_work_event_settlement_record(&fixture.repo, "session-legacy", false)
-            .expect("refresh v1 receipt");
+            .expect("refresh v2 receipt");
         assert_eq!(
             refreshed.schema_version,
             WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
@@ -2955,6 +3292,7 @@ pub(crate) mod tests {
         let record = WorkEventSettlementRecord {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: "session-required-trusted-write".to_string(),
+            execution_binding: None,
             obligation_open: true,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
             updated_at: Utc::now(),
@@ -2985,6 +3323,7 @@ pub(crate) mod tests {
         let initial_record = WorkEventSettlementRecord {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: "session-from-leased-directory".to_string(),
+            execution_binding: None,
             obligation_open: false,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
             updated_at: Utc::now(),
@@ -3054,6 +3393,7 @@ pub(crate) mod tests {
         let initial_record = WorkEventSettlementRecord {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: "session-before-identity-loss".to_string(),
+            execution_binding: None,
             obligation_open: false,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
             updated_at: Utc::now(),
