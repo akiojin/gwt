@@ -862,6 +862,703 @@ fn workspace_state_transaction_does_not_publish_current_when_event_append_fails(
 }
 
 #[test]
+fn workspace_state_transaction_commit_refusal_blocks_until_explicit_rejection() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 0, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-commit-refused".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/commit-refused".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+    let commit_called = std::cell::Cell::new(0_u8);
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-refused",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-commit-refused",
+                "work-commit-refused",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-commit-refused", now);
+            event.agent_session_id = Some("session-commit-refused".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || {
+            commit_called.set(commit_called.get() + 1);
+            assert_eq!(
+                fs::read(&current).expect("read current during commit"),
+                current_before,
+                "the staged Work projection must not be visible before the external CAS"
+            );
+            assert!(!works.exists());
+            assert!(!events.exists());
+            Err(GwtError::Other("generation CAS refused".to_string()))
+        },
+    );
+
+    assert!(result.is_err(), "the external CAS refusal must propagate");
+    assert_eq!(commit_called.get(), 1, "the external CAS runs exactly once");
+    assert_eq!(
+        fs::read(&current).expect("read current after refusal"),
+        current_before
+    );
+    assert!(!works.exists());
+    assert!(!events.exists());
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "an ambiguous external error must retain a discoverable Prepared marker"
+    );
+
+    let blocked = transact_workspace_state_at(&current, &works, &events, &root, |_, _, _| {
+        Ok(((), Vec::new()))
+    });
+    assert!(
+        blocked.is_err(),
+        "ordinary writers must fail closed while external commit state is unresolved"
+    );
+    assert_eq!(
+        fs::read(&current).expect("read current while blocked"),
+        current_before
+    );
+
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-refused",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .expect("discard definitely rejected external transaction"),
+        ExternalWorkspaceCommitResolution::Rejected
+    );
+    assert!(!pending_workspace_state_transaction_path(&current).exists());
+    assert!(!pending_workspace_state_transaction_path_for_work_items(&works).exists());
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-refused",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .expect("matching terminal receipt is idempotent"),
+        ExternalWorkspaceCommitResolution::Rejected
+    );
+    assert!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-refused",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .is_err(),
+        "an opposite decision must conflict with the durable Rejected receipt"
+    );
+}
+
+#[test]
+fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_commit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 15, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-in-flight-commit".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/in-flight-commit".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+
+    let (commit_entered_tx, commit_entered_rx) = std::sync::mpsc::channel();
+    let (release_commit_tx, release_commit_rx) = std::sync::mpsc::channel();
+    let transaction_current = current.clone();
+    let transaction_works = works.clone();
+    let transaction_events = events.clone();
+    let transaction_root = root.clone();
+    let transaction = std::thread::spawn(move || {
+        transact_workspace_state_at_with_commit(
+            &transaction_current,
+            &transaction_works,
+            &transaction_events,
+            &transaction_root,
+            "continue-operation-in-flight",
+            |projection, _, _| {
+                assert!(projection.assign_agent(
+                    "session-in-flight-commit",
+                    "work-in-flight-commit",
+                    None,
+                    None,
+                    now,
+                ));
+                let mut event = WorkEvent::new(WorkEventKind::Resume, "work-in-flight-commit", now);
+                event.agent_session_id = Some("session-in-flight-commit".to_string());
+                event.status_category = Some(WorkspaceStatusCategory::Active);
+                Ok(((), vec![event]))
+            },
+            || {
+                commit_entered_tx
+                    .send(())
+                    .expect("signal external commit entry");
+                release_commit_rx
+                    .recv()
+                    .expect("wait until concurrent resolver is blocked");
+                Ok(())
+            },
+        )
+    });
+    commit_entered_rx
+        .recv()
+        .expect("external commit must start");
+
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-in-flight",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .expect("in-flight resolution must be non-blocking"),
+        ExternalWorkspaceCommitResolution::Busy,
+        "an inverse owner→operation-lock path must release its owner lease and retry"
+    );
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "Busy must not mutate the discoverable Prepared transaction"
+    );
+    release_commit_tx.send(()).expect("release external commit");
+    transaction
+        .join()
+        .expect("join transaction")
+        .expect("external commit and Work publication succeed");
+    assert!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-in-flight",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .is_err(),
+        "the durable Committed receipt must reject an opposite terminal decision"
+    );
+
+    let saved = load_workspace_projection_from_path(&current)
+        .expect("load current")
+        .expect("current exists");
+    assert_eq!(
+        workspace_assignment_for_session(&saved, "session-in-flight-commit"),
+        WorkspaceSessionAssignment::Assigned("work-in-flight-commit".to_string())
+    );
+}
+
+#[test]
+fn workspace_state_transaction_resolver_rejects_a_cross_pair_operation_match() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let current = temp.path().join("state/current.json");
+    let actual_works = temp.path().join("actual/works.json");
+    let wrong_works = temp.path().join("wrong/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let initial = WorkspaceProjection::default_for_project(&root);
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+
+    let (commit_entered_tx, commit_entered_rx) = std::sync::mpsc::channel();
+    let (release_commit_tx, release_commit_rx) = std::sync::mpsc::channel();
+    let transaction_current = current.clone();
+    let transaction_works = actual_works.clone();
+    let transaction_events = events.clone();
+    let transaction_root = root.clone();
+    let transaction = std::thread::spawn(move || {
+        transact_workspace_state_at_with_commit(
+            &transaction_current,
+            &transaction_works,
+            &transaction_events,
+            &transaction_root,
+            "continue-operation-cross-pair",
+            |projection, _, _| {
+                projection.title = "cross-pair transaction".to_string();
+                Ok(((), Vec::new()))
+            },
+            || {
+                commit_entered_tx
+                    .send(())
+                    .expect("signal external commit entry");
+                release_commit_rx
+                    .recv()
+                    .expect("wait for mismatched resolver");
+                Ok(())
+            },
+        )
+    });
+    commit_entered_rx
+        .recv()
+        .expect("external commit must start");
+
+    let mismatched = resolve_workspace_state_external_commit_at(
+        &current,
+        &wrong_works,
+        "continue-operation-cross-pair",
+        ExternalWorkspaceCommitDecision::Reject,
+    );
+    assert!(
+        mismatched.is_err(),
+        "sharing one path and operation id must not authorize another path pair"
+    );
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&actual_works).exists(),
+        "a mismatched resolver must not remove the real transaction"
+    );
+
+    release_commit_tx.send(()).expect("release external commit");
+    transaction
+        .join()
+        .expect("join transaction")
+        .expect("real path pair still commits");
+    assert_eq!(
+        load_workspace_projection_from_path(&current)
+            .expect("load current")
+            .expect("current exists")
+            .title,
+        "cross-pair transaction"
+    );
+}
+
+#[test]
+fn workspace_state_transaction_never_reports_success_after_staged_markers_disappear() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let initial = WorkspaceProjection::default_for_project(&root);
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-lost-stage",
+        |projection, _, _| {
+            projection.title = "must remain staged".to_string();
+            Ok(((), Vec::new()))
+        },
+        || {
+            for marker in [
+                pending_workspace_state_transaction_path(&current),
+                pending_workspace_state_transaction_path_for_work_items(&works),
+            ] {
+                match fs::remove_file(marker) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("remove local staged marker: {error}"),
+                }
+            }
+            let coordinator_dir =
+                crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+            for entry in fs::read_dir(coordinator_dir).expect("read coordinator directory") {
+                let path = entry.expect("coordinator entry").path();
+                if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    fs::remove_file(path).expect("remove global staged marker");
+                }
+            }
+            Ok(())
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "Missing staged evidence must never be promoted to UI success"
+    );
+    assert_eq!(fs::read(&current).expect("read current"), current_before);
+    assert!(!works.exists());
+    assert!(!events.exists());
+}
+
+#[test]
+fn workspace_state_transaction_recovers_publish_failure_after_commit_without_recommitting() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("events-is-a-directory");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&events).expect("create failing events directory");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 30, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-post-commit-recovery".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/post-commit-recovery".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let commit_called = std::cell::Cell::new(0_u8);
+    let event_id = "event-post-commit-recovery";
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-publish-recovery",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-post-commit-recovery",
+                "work-post-commit-recovery",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-post-commit-recovery", now);
+            event.id = event_id.to_string();
+            event.agent_session_id = Some("session-post-commit-recovery".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || {
+            commit_called.set(commit_called.get() + 1);
+            Ok(())
+        },
+    );
+    assert!(
+        result.is_err(),
+        "the first publish must fail after the external commit"
+    );
+    assert_eq!(commit_called.get(), 1);
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "a committed transaction must leave a recovery marker on publish failure"
+    );
+
+    fs::remove_file(external_workspace_commit_receipt_path(
+        &current,
+        &works,
+        "continue-operation-publish-recovery",
+    ))
+    .expect("simulate a legacy committed marker whose receipt was lost");
+    fs::remove_dir(&events).expect("remove failing events directory");
+    let retry_update_called = std::cell::Cell::new(false);
+    let retry_commit_called = std::cell::Cell::new(false);
+    let retry = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-publish-recovery",
+        |_, _, _| {
+            retry_update_called.set(true);
+            Ok(((), Vec::new()))
+        },
+        || {
+            retry_commit_called.set(true);
+            Ok(())
+        },
+    );
+    assert!(
+        retry.is_err(),
+        "recovery-created terminal receipt must stop same-operation re-entry"
+    );
+    assert!(!retry_update_called.get());
+    assert!(!retry_commit_called.get());
+
+    transact_workspace_state_at(&current, &works, &events, &root, |projection, items, _| {
+        assert_eq!(
+            workspace_assignment_for_session(projection, "session-post-commit-recovery",),
+            WorkspaceSessionAssignment::Assigned("work-post-commit-recovery".to_string())
+        );
+        assert!(items
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-post-commit-recovery"));
+        Ok(((), Vec::new()))
+    })
+    .expect("recover committed Work transaction");
+
+    assert_eq!(
+        fs::read_to_string(&events)
+            .expect("read recovered events")
+            .lines()
+            .filter(|line| line.contains(event_id))
+            .count(),
+        1,
+        "recovery must append the Work activation exactly once"
+    );
+    assert_eq!(
+        commit_called.get(),
+        1,
+        "recovery must not rerun the external generation CAS"
+    );
+    assert!(!pending_workspace_state_transaction_path(&current).exists());
+    assert!(!pending_workspace_state_transaction_path_for_work_items(&works).exists());
+}
+
+#[test]
+fn workspace_state_transaction_validates_terminal_receipt_before_recovery_side_effects() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("events-is-a-directory");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&events).expect("create failing events directory");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 45, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-receipt-conflict".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/receipt-conflict".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+
+    let first = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-receipt-conflict",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-receipt-conflict",
+                "work-receipt-conflict",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-receipt-conflict", now);
+            event.agent_session_id = Some("session-receipt-conflict".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || Ok(()),
+    );
+    assert!(
+        first.is_err(),
+        "event append failure must leave recovery state"
+    );
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "first failure was {first:?}"
+    );
+
+    let receipt_path = external_workspace_commit_receipt_path(
+        &current,
+        &works,
+        "continue-operation-receipt-conflict",
+    );
+    let mut receipt: ExternalWorkspaceCommitReceipt =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read committed receipt"))
+            .expect("decode committed receipt");
+    receipt.resolution = ExternalWorkspaceCommitResolution::Rejected;
+    write_atomic(
+        &receipt_path,
+        &serde_json::to_vec_pretty(&receipt).expect("encode conflicting receipt"),
+    )
+    .expect("write conflicting receipt");
+    fs::remove_dir(&events).expect("remove failing events directory");
+
+    let recovery = transact_workspace_state_at(&current, &works, &events, &root, |_, _, _| {
+        Ok(((), Vec::new()))
+    });
+    assert!(
+        recovery.is_err(),
+        "Committed marker plus Rejected receipt must fail closed"
+    );
+    assert_eq!(fs::read(&current).expect("read current"), current_before);
+    assert!(!works.exists());
+    assert!(!events.exists());
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "failed validation must preserve recovery evidence"
+    );
+}
+
+#[test]
+fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_commit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 11, 0, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-post-commit-error".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/post-commit-error".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+    let commit_called = std::cell::Cell::new(0_u8);
+    let external_committed = std::cell::Cell::new(false);
+    let event_id = "event-post-commit-error";
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-response-lost",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-post-commit-error",
+                "work-post-commit-error",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-post-commit-error", now);
+            event.id = event_id.to_string();
+            event.agent_session_id = Some("session-post-commit-error".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || {
+            commit_called.set(commit_called.get() + 1);
+            external_committed.set(true);
+            Err(GwtError::Other(
+                "external commit response was lost".to_string(),
+            ))
+        },
+    );
+    assert!(result.is_err());
+    assert!(external_committed.get());
+    assert_eq!(commit_called.get(), 1);
+    assert_eq!(
+        fs::read(&current).expect("current remains staged"),
+        current_before
+    );
+    assert!(!works.exists());
+    assert!(!events.exists());
+
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-response-lost",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .expect("ledger readback reconciles the committed operation"),
+        ExternalWorkspaceCommitResolution::Committed
+    );
+
+    assert_eq!(commit_called.get(), 1);
+    assert_eq!(
+        fs::read_to_string(&events)
+            .expect("read reconciled events")
+            .lines()
+            .filter(|line| line.contains(event_id))
+            .count(),
+        1
+    );
+    assert_eq!(
+        workspace_assignment_for_session(
+            &load_workspace_projection_from_path(&current)
+                .expect("load current")
+                .expect("current exists"),
+            "session-post-commit-error",
+        ),
+        WorkspaceSessionAssignment::Assigned("work-post-commit-error".to_string())
+    );
+    assert!(!pending_workspace_state_transaction_path(&current).exists());
+    assert!(!pending_workspace_state_transaction_path_for_work_items(&works).exists());
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-response-lost",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .expect("matching Committed receipt is idempotent"),
+        ExternalWorkspaceCommitResolution::Committed
+    );
+}
+
+#[test]
 fn workspace_state_transaction_recovers_partial_commit_exactly_once() {
     let temp = tempfile::tempdir().unwrap();
     let current = temp.path().join("state/current.json");
@@ -909,6 +1606,7 @@ fn workspace_state_transaction_recovers_partial_commit_exactly_once() {
         events: vec![event.clone()],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     write_atomic(
         &pending_workspace_state_transaction_path(&current),
@@ -957,6 +1655,231 @@ fn write_pending_transaction_markers(transaction: &PendingWorkspaceStateTransact
 }
 
 #[test]
+fn workspace_state_transaction_preserves_conflicting_transaction_marker_sets() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("current-state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 11, 15, 0).unwrap();
+    let projection = WorkspaceProjection::default_for_project(&root);
+    let transaction_one = PendingWorkspaceStateTransaction {
+        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        transaction_id: Some("conflicting-transaction-one".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
+        projection: projection.clone(),
+        work_items: Some(WorkItemsProjection::empty(now)),
+        events_path: Some(events.clone()),
+        events: Vec::new(),
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: None,
+    };
+    let mut transaction_two = transaction_one.clone();
+    transaction_two.transaction_id = Some("conflicting-transaction-two".to_string());
+    transaction_two.projection.title = "second transaction".to_string();
+
+    let coordinator =
+        pending_workspace_state_transaction_coordinator_path(&transaction_one).unwrap();
+    let current_marker = pending_workspace_state_transaction_path(&current);
+    let works_marker = pending_workspace_state_transaction_path_for_work_items(&works);
+    let transaction_one_bytes = serde_json::to_vec_pretty(&transaction_one).unwrap();
+    let transaction_two_bytes = serde_json::to_vec_pretty(&transaction_two).unwrap();
+    write_atomic(&coordinator, &transaction_one_bytes).unwrap();
+    write_atomic(&current_marker, &transaction_two_bytes).unwrap();
+    write_atomic(&works_marker, &transaction_two_bytes).unwrap();
+
+    let result = transact_workspace_state_at(&current, &works, &events, &root, |_, _, _| {
+        Ok(((), Vec::new()))
+    });
+    assert!(
+        result.is_err(),
+        "mixed transaction ids targeting one path pair must fail closed"
+    );
+    assert_eq!(fs::read(&coordinator).unwrap(), transaction_one_bytes);
+    assert_eq!(fs::read(&current_marker).unwrap(), transaction_two_bytes);
+    assert_eq!(fs::read(&works_marker).unwrap(), transaction_two_bytes);
+    assert!(!current.exists());
+    assert!(!works.exists());
+    assert!(!events.exists());
+}
+
+#[test]
+fn workspace_state_transaction_recovers_committed_copy_from_mixed_external_phases() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("current-state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 11, 45, 0).unwrap();
+    let operation_id = "mixed-phase-committed-operation";
+    let mut projection = WorkspaceProjection::default_for_project(&root);
+    projection.summary = Some("committed before phase-copy convergence".to_string());
+    let mut event = WorkEvent::new(WorkEventKind::Resume, "work-mixed-phase", now);
+    event.id = "event-mixed-phase".to_string();
+    let mut work_items = WorkItemsProjection::empty(now);
+    work_items.apply_event(event.clone());
+    let prepared = PendingWorkspaceStateTransaction {
+        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        transaction_id: Some("mixed-phase-transaction".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
+        projection,
+        work_items: Some(work_items),
+        events_path: Some(events.clone()),
+        events: vec![event],
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: Some(ExternalWorkspaceCommit {
+            operation_id: operation_id.to_string(),
+            phase: ExternalWorkspaceCommitPhase::Prepared,
+        }),
+    };
+    let mut committed = prepared.clone();
+    committed
+        .external_commit
+        .as_mut()
+        .expect("external commit")
+        .phase = ExternalWorkspaceCommitPhase::Committed;
+    let coordinator =
+        pending_workspace_state_transaction_coordinator_path(&prepared).expect("coordinator");
+    write_atomic(&coordinator, &serde_json::to_vec_pretty(&prepared).unwrap()).unwrap();
+    write_atomic(
+        &pending_workspace_state_transaction_path(&current),
+        &serde_json::to_vec_pretty(&committed).unwrap(),
+    )
+    .unwrap();
+    write_atomic(
+        &pending_workspace_state_transaction_path_for_work_items(&works),
+        &serde_json::to_vec_pretty(&prepared).unwrap(),
+    )
+    .unwrap();
+
+    mutate_workspace_projection_at(&current, &root, |projection| {
+        projection.status_text = "ordinary writer followed recovery".to_string();
+        Ok(())
+    })
+    .expect("a Committed copy is authoritative over matching Prepared copies");
+
+    let saved = load_workspace_projection_from_path(&current)
+        .unwrap()
+        .expect("recovered projection");
+    assert_eq!(
+        saved.summary.as_deref(),
+        Some("committed before phase-copy convergence")
+    );
+    assert_eq!(saved.status_text, "ordinary writer followed recovery");
+    assert!(load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .expect("recovered Work projection")
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-mixed-phase"));
+    assert_eq!(
+        std::fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("event-mixed-phase"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        load_external_workspace_commit_receipt(&current, &works, operation_id)
+            .unwrap()
+            .expect("durable terminal receipt")
+            .resolution,
+        ExternalWorkspaceCommitResolution::Committed
+    );
+    for path in pending_workspace_state_transaction_paths(&prepared) {
+        assert!(
+            !path.exists(),
+            "recovered marker remained: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn workspace_state_transaction_recovers_raw_v1_and_v2_markers() {
+    for version in [1_u32, 2_u32] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join(format!("v{version}/current.json"));
+        let works = current.with_file_name("works.json");
+        let events = temp
+            .path()
+            .join(format!("v{version}/repo/.gwt/work/events.jsonl"));
+        let root = temp.path().join(format!("v{version}/repo"));
+        let now = Utc.with_ymd_and_hms(2026, 7, 25, 12, version, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(&root);
+        projection.summary = Some(format!("recovered raw v{version} marker"));
+        let work_id = format!("work-raw-v{version}");
+        let event_id = format!("event-raw-v{version}");
+        let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, now);
+        event.id = event_id.clone();
+        let mut work_items = WorkItemsProjection::empty(now);
+        work_items.apply_event(event.clone());
+        let mut raw = serde_json::json!({
+            "version": version,
+            "current_path": current,
+            "work_items_path": works,
+            "projection": projection,
+            "work_items": work_items,
+            "events_path": events,
+            "events": [event],
+            "journal_entries": [],
+        });
+        if version == 2 {
+            raw["transaction_id"] =
+                serde_json::Value::String(format!("raw-v{version}-transaction"));
+            raw["current_precondition"] = serde_json::Value::String("missing".to_string());
+            raw["work_items_precondition"] = serde_json::Value::String("missing".to_string());
+        }
+        let marker = pending_workspace_state_transaction_path(&current);
+        write_atomic(&marker, &serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        mutate_workspace_projection_at(&current, &root, |projection| {
+            projection.status_text = format!("ordinary writer after v{version}");
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("raw v{version} recovery failed: {error}"));
+
+        let saved = load_workspace_projection_from_path(&current)
+            .unwrap()
+            .expect("recovered projection");
+        assert_eq!(
+            saved.summary.as_deref(),
+            Some(format!("recovered raw v{version} marker").as_str())
+        );
+        assert!(load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .expect("recovered Work projection")
+            .work_items
+            .iter()
+            .any(|item| item.id == work_id));
+        assert_eq!(
+            std::fs::read_to_string(&events)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(&event_id))
+                .count(),
+            1
+        );
+        assert!(!marker.exists());
+    }
+}
+
+#[test]
 fn ordinary_current_writer_recovers_pending_transaction_before_mutating() {
     let temp = tempfile::tempdir().unwrap();
     let current = temp.path().join("current-state/current.json");
@@ -1000,6 +1923,7 @@ fn ordinary_current_writer_recovers_pending_transaction_before_mutating() {
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     });
 
     mutate_workspace_projection_at(&current, &root, |projection| {
@@ -1056,6 +1980,7 @@ fn ordinary_work_event_writer_recovers_pending_transaction_before_appending() {
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     });
 
     let mut newer_event = WorkEvent::new(
@@ -1128,6 +2053,7 @@ fn one_sided_pending_marker_never_overwrites_a_later_work_event() {
         events: vec![committed_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     write_pending_transaction_markers(&pending);
     std::fs::remove_file(works.with_file_name("pending-state-transaction.json")).unwrap();
@@ -1201,6 +2127,7 @@ fn coordinator_only_pending_transaction_is_discovered_by_work_writer() {
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&pending).unwrap();
     write_atomic(&coordinator, &serde_json::to_vec_pretty(&pending).unwrap()).unwrap();
@@ -1314,6 +2241,7 @@ fn coordinator_created_while_writer_waits_for_lock_is_recovered_before_operation
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&pending).unwrap();
     write_atomic(&coordinator, &serde_json::to_vec_pretty(&pending).unwrap()).unwrap();
@@ -1365,6 +2293,7 @@ fn coordinator_only_incompatible_transaction_is_preserved_and_blocks_writer() {
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction).unwrap();
     let mut value = serde_json::to_value(&transaction).unwrap();
@@ -1412,6 +2341,7 @@ fn incompatible_global_coordinator_does_not_block_an_unrelated_project_writer() 
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction).unwrap();
     let mut value = serde_json::to_value(&transaction).unwrap();
@@ -1477,14 +2407,15 @@ fn split_root_coordinator_uses_writable_gwt_state_and_is_discoverable_by_both_wr
         transaction_id: Some("split-root-writable-coordinator".to_string()),
         current_path: current.clone(),
         work_items_path: works.clone(),
-        current_precondition: None,
-        work_items_precondition: None,
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
         projection: WorkspaceProjection::default_for_project(current.parent().unwrap()),
         work_items: Some(WorkItemsProjection::empty(now)),
         events_path: None,
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction)
         .expect("split roots still require a coordinator");
@@ -1554,6 +2485,7 @@ fn pending_recovery_repairs_partial_jsonl_tails_before_exact_once_append() {
         events: vec![event],
         journal_path: Some(journal.clone()),
         journal_entries: vec![journal_entry],
+        external_commit: None,
     });
     std::fs::create_dir_all(events.parent().unwrap()).unwrap();
     std::fs::write(&events, br#"{"id":"event-partial"#).unwrap();
@@ -1649,6 +2581,7 @@ fn future_pending_transaction_is_preserved_and_blocks_writer() {
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     write_atomic(&marker, &serde_json::to_vec_pretty(&transaction).unwrap()).unwrap();
     let original = std::fs::read(&marker).unwrap();
@@ -1727,6 +2660,7 @@ fn nested_unknown_pending_transaction_payload_is_preserved_and_blocks_writer() {
             agent_title_summary: None,
             updated_at: now,
         }],
+        external_commit: None,
     };
 
     for (label, path) in [
