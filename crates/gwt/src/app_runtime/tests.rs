@@ -2586,9 +2586,7 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     let stale_outcome = runtime.handle_agent_frontend_event_if_current(
         "pane-client".to_string(),
         queued_grant,
-        AgentFrontendRequest::SendInput {
-            text: "stale\r".to_string(),
-        },
+        AgentFrontendRequest::Ready,
     );
     assert!(
         matches!(
@@ -2604,26 +2602,84 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     let current_events = match runtime.handle_agent_frontend_event_if_current(
         "pane-client".to_string(),
         current_grant,
-        AgentFrontendRequest::SendInput {
-            text: "current\r".to_string(),
-        },
+        AgentFrontendRequest::Ready,
     ) {
         super::AgentFrontendDispatchOutcome::Dispatched(events) => events,
         super::AgentFrontendDispatchOutcome::StaleCapability => {
             panic!("current grant must dispatch")
         }
+        super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => {
+            panic!("current inspection grant does not require durable authority")
+        }
     };
-    assert!(matches!(
-        current_events.as_slice(),
-        [OutboundEvent {
-            event: BackendEvent::PaneSendResult {
-                ok: false,
-                window_id: Some(window_id),
-                ..
+    assert!(
+        current_events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+        "the current observation grant must still receive its scoped snapshot"
+    );
+}
+
+#[test]
+fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dispatch() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-project",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-project", Some("session-project".to_string())));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let target = issuer
+        .issue_bound(
+            &project,
+            "session-project",
+            gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: "session-project".to_string(),
+                repo_hash: "repo-stale".to_string(),
+                owner_kind: "issue".to_string(),
+                owner_number: 2359,
+                identity: gwt_agent::ExecutionBindingIdentity {
+                    generation_id: "generation-stale".to_string(),
+                    binding_id: "binding-stale".to_string(),
+                    ledger_head_hash: "head-stale".to_string(),
+                },
+                capability_generation: 1,
             },
-            ..
-        }] if window_id == "tab-project::agent-project"
-    ));
+        )
+        .expect("bound capability");
+    let queued_grant = issuer
+        .grant_for_test(&target.token)
+        .expect("queued bound grant");
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        queued_grant,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-reach-pty\r".to_string(),
+        },
+    );
+
+    assert!(
+        matches!(
+            outcome,
+            super::AgentFrontendDispatchOutcome::StaleCapability
+        ),
+        "a process-local current token with stale durable authority must fail closed"
+    );
 }
 
 #[test]

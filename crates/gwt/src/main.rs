@@ -87,7 +87,7 @@ pub(crate) use docker_launch::{
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
-    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentDurableAuthority, AgentFrontendRequest,
     AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
     AgentSessionPrincipal,
 };
@@ -1315,10 +1315,30 @@ mod tests {
         assert!(
             matches!(
                 queue.try_next(),
-                Some(crate::embedded_server::DrainStep::Closed)
+                Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                    if frame.code == 1008
+                        && frame.reason == "execution binding is no longer current"
             ),
-            "a capability rotated while queued must close the agent socket"
+            "a capability rotated while queued must close the agent socket with a stable policy frame"
         );
+    }
+
+    #[test]
+    fn unavailable_agent_frontend_authority_closes_pane_client_without_raw_error() {
+        let clients = ClientHub::default();
+        let queue = clients.register("unknown-pane-client".to_string());
+
+        apply_agent_frontend_dispatch_outcome(
+            &clients,
+            "unknown-pane-client",
+            AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable,
+        );
+
+        assert!(matches!(
+            queue.try_next(),
+            Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                if frame.code == 1011 && frame.reason == "execution authority is unavailable"
+        ));
     }
 
     #[cfg(unix)]
@@ -7176,7 +7196,15 @@ fn apply_agent_frontend_dispatch_outcome(
 ) {
     match outcome {
         AgentFrontendDispatchOutcome::Dispatched(events) => clients.dispatch(events),
-        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister(client_id),
+        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister_with_close_frame(
+            client_id,
+            Some(crate::embedded_server::AGENT_STALE_BINDING_CLOSE),
+        ),
+        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => clients
+            .unregister_with_close_frame(
+                client_id,
+                Some(crate::embedded_server::AGENT_AUTHORITY_UNAVAILABLE_CLOSE),
+            ),
     }
 }
 

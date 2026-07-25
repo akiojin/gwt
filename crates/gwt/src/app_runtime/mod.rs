@@ -231,6 +231,7 @@ pub struct OutboundEvent {
 pub(crate) enum AgentFrontendDispatchOutcome {
     Dispatched(Vec<OutboundEvent>),
     StaleCapability,
+    ExecutionAuthorityUnavailable,
 }
 
 impl OutboundEvent {
@@ -2664,16 +2665,43 @@ impl AppRuntime {
         grant: AgentCapabilityGrant,
         request: AgentFrontendRequest,
     ) -> AgentFrontendDispatchOutcome {
-        let current = self
-            .agent_capability_issuer
-            .as_ref()
-            .is_some_and(|issuer| issuer.grant_is_current(&grant));
-        if !current {
+        let Some(issuer) = self.agent_capability_issuer.clone() else {
+            return AgentFrontendDispatchOutcome::StaleCapability;
+        };
+        if !issuer.grant_is_current(&grant) {
             tracing::warn!(
                 target: "gwt_security",
                 "queued agent pane request rejected after capability rotation or revoke"
             );
             return AgentFrontendDispatchOutcome::StaleCapability;
+        }
+        if request.requires_producing_authority()
+            && !grant.principal().authorizes_producing_mutation()
+        {
+            tracing::warn!(
+                target: "gwt_security",
+                "observation-only agent pane request rejected before runtime mutation"
+            );
+            return AgentFrontendDispatchOutcome::StaleCapability;
+        }
+        if grant.principal().authorizes_producing_mutation() && request.mutates_host_state() {
+            match issuer.durable_authority(&grant) {
+                AgentDurableAuthority::Current => {}
+                AgentDurableAuthority::Stale | AgentDurableAuthority::ObservationOnly => {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "queued agent pane request rejected by durable execution binding fence"
+                    );
+                    return AgentFrontendDispatchOutcome::StaleCapability;
+                }
+                AgentDurableAuthority::Unavailable => {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "queued agent pane request rejected because execution authority is unavailable"
+                    );
+                    return AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable;
+                }
+            }
         }
         match request {
             AgentFrontendRequest::CloseWindow {
@@ -2696,11 +2724,16 @@ impl AppRuntime {
                 );
                 AgentFrontendDispatchOutcome::Dispatched(Vec::new())
             }
-            request => AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
-                client_id,
-                grant.principal().clone(),
-                request,
-            )),
+            request => {
+                let principal = grant.principal().clone();
+                issuer
+                    .with_current_grant(&grant, || {
+                        self.handle_agent_frontend_event(client_id, principal, request)
+                    })
+                    .map_or(AgentFrontendDispatchOutcome::StaleCapability, |events| {
+                        AgentFrontendDispatchOutcome::Dispatched(events)
+                    })
+            }
         }
     }
 
