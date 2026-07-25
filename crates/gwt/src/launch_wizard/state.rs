@@ -1424,6 +1424,10 @@ impl LaunchWizardState {
         }
     }
 
+    pub(super) fn effective_skip_permissions(&self) -> bool {
+        self.skip_permissions && self.mode == "normal"
+    }
+
     fn reset_default_launch_path(&mut self) {
         self.launch_path = default_launch_path(&self.context, &self.quick_start_entries);
         if !self.quick_start_entries.is_empty() {
@@ -2539,7 +2543,12 @@ mod tests {
         // SPEC-2014 FR-034: saved docker_service が現 context にあれば saved を採用する。
         assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
         assert_eq!(view.selected_docker_lifecycle, "restart");
-        assert!(view.skip_permissions);
+        assert!(
+            state.skip_permissions,
+            "the saved preference remains stored"
+        );
+        assert!(!view.skip_permissions);
+        assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
@@ -3085,7 +3094,12 @@ mod tests {
         assert_eq!(view.selected_reasoning, "medium");
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
-        assert!(view.skip_permissions);
+        assert!(
+            state.skip_permissions,
+            "hydration preserves the saved preference"
+        );
+        assert!(!view.skip_permissions);
+        assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
     }
 
@@ -3558,8 +3572,19 @@ mod tests {
         assert_eq!(codex_view.selected_reasoning, "high");
         assert_eq!(codex_view.selected_version, "0.110.0");
         assert_eq!(codex_view.selected_execution_mode, "continue");
-        assert!(codex_view.skip_permissions);
+        assert!(
+            state.skip_permissions,
+            "the Codex draft retains its preference"
+        );
+        assert!(!codex_view.skip_permissions);
+        assert!(!codex_view.show_skip_permissions);
         assert!(codex_view.codex_fast_mode);
+
+        state.apply(LaunchWizardAction::SetExecutionMode {
+            mode: "normal".to_string(),
+        });
+        let codex_normal_view = state.view();
+        assert!(codex_normal_view.skip_permissions);
     }
 
     #[test]

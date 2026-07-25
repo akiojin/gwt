@@ -93,7 +93,7 @@ impl LaunchWizardState {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
 
-        if self.skip_permissions && self.mode == "normal" {
+        if self.effective_skip_permissions() {
             builder = builder.skip_permissions(true);
         }
 
@@ -930,7 +930,11 @@ mod tests {
         assert_eq!(config.display_name, "Claude Proxy");
         assert!(config.args.contains(&"--serve".to_string()));
         assert!(config.args.contains(&"--resume".to_string()));
-        assert!(config.args.contains(&"--unsafe".to_string()));
+        assert!(!config.skip_permissions);
+        assert!(
+            !config.args.contains(&"--unsafe".to_string()),
+            "inspection Resume must not carry the custom agent permission bypass"
+        );
         assert_eq!(
             config.env_vars.get("API_KEY").map(String::as_str),
             Some("secret")
