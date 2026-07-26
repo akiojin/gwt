@@ -191,7 +191,7 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
 ///
 /// This low-level primitive remains available for internal evidence fixtures.
 /// Caller-facing `verify.plan` dispatch goes through
-/// [`register_plan_for_caller`], which authenticates durable Session authority
+/// `register_plan_for_caller`, which authenticates durable Session authority
 /// before invoking the unleased writer.
 pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
@@ -1279,7 +1279,7 @@ fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), Stri
 ///
 /// This low-level primitive remains available for internal gate fixtures.
 /// Caller-facing `verify.run` dispatch goes through
-/// [`run_verification_for_caller`], which authenticates durable Session
+/// `run_verification_for_caller`, which authenticates durable Session
 /// authority before command dispatch and again before persistence.
 pub fn run_verification(
     worktree: &Path,
