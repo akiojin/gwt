@@ -293,6 +293,10 @@ impl AppRuntime {
             return events;
         };
         if event.source_event.as_deref() == Some("SessionStart") {
+            events.extend(self.finalize_fresh_execution_launch_session_start(
+                &window_id,
+                event.continuation_readiness_nonce.as_deref(),
+            ));
             events.extend(self.finalize_continue_work_session_start(
                 &window_id,
                 event.continuation_readiness_nonce.as_deref(),

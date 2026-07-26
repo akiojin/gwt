@@ -54,6 +54,10 @@ fn launch_wizard_surface_js() -> &'static str {
     root_js_module_source("/launch-wizard-surface.js")
 }
 
+fn workspace_kanban_surface_js() -> &'static str {
+    root_js_module_source("/workspace-kanban-surface.js")
+}
+
 fn styles_components_css() -> &'static str {
     static_asset_text("/styles/components.css")
 }
@@ -2504,6 +2508,47 @@ fn embedded_web_work_surface_renders_lifecycle_state_badge() {
     assert!(
         html.contains("workspace-overview-lifecycle") && html.contains("formatLifecycleStateLabel"),
         "Work surface must render a lifecycle_state badge on each Work card",
+    );
+}
+
+#[test]
+fn embedded_web_work_detail_keeps_task_first_action_and_inspection_contract() {
+    let js = workspace_kanban_surface_js();
+    let css = styles_components_css();
+
+    assert!(
+        js.contains("workspace-detail-work-action-rail")
+            && js.contains("workspace-detail-work-primary-action")
+            && js.contains("Inspect session")
+            && js.contains("No previous session to inspect. Continue work can start a new one."),
+        "embedded Work detail must keep producing continuation on Work and historical sessions as inspection",
+    );
+    assert!(
+        js.contains("createNode(\"button\", \"wizard-button\", \"Launch Agent\")")
+            && !js.contains("createNode(\"button\", \"wizard-button primary\", \"Launch Agent\")"),
+        "Continue work must remain the sole producing primary action",
+    );
+    assert!(
+        css.contains(".workspace-detail-work-action-rail")
+            && css.contains("@container (max-width: 760px)")
+            && css.contains("white-space: nowrap"),
+        "embedded task-first action rail must retain its container-responsive layout contract",
+    );
+}
+
+#[test]
+fn embedded_web_board_entry_ids_are_diagnostics_only() {
+    let js = workspace_kanban_surface_js();
+
+    assert!(
+        js.contains("details.dataset.section = \"board-diagnostics\"")
+            && js.contains("appendBoardDiagnostics(body, boardDiagnosticRefs(workspace))"),
+        "raw Board entry ids must be routed through the collapsed Diagnostics disclosure",
+    );
+    assert!(
+        !js.contains("event?.kind || event?.board_entry_id")
+            && !js.contains("appendMetaText(meta, event.board_entry_id)"),
+        "raw Board entry ids must not leak into lifecycle titles or metadata",
     );
 }
 

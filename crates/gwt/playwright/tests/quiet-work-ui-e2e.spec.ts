@@ -70,7 +70,9 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     // second Work.
     const heading = page.locator(".workspace-detail-work-heading");
     await expect(heading).toHaveCount(1);
-    await expect(heading).toHaveText("Quiet Work UI redesign");
+    await expect(heading).toHaveText(
+      "Quiet Work UI redesign with a deliberately long task purpose that must not crowd actions",
+    );
     await expect(sessions.first()).toContainText("Session");
     // Persistent data renders; never the stale "No assigned agents" placeholder.
     await expect(page.locator(".workspace-overview-detail-pane")).not.toContainText(
@@ -96,6 +98,115 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
       "data-agent-session-id",
       "conv-bbbb2222",
     );
+    await expect(sessionResume).toHaveText("Inspect session");
+  });
+
+  test("Work without Session history keeps Continue work and shows one Work-level guidance", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page, "zero");
+    await page.goto(APP_URL);
+
+    const group = page.locator(
+      '.workspace-detail-work-group[data-work-id="work-quiet-ui"]',
+    );
+    await expect(group.locator("[data-action='continue-work']")).toHaveCount(1);
+    await expect(group.locator(".workspace-detail-session")).toHaveCount(0);
+    await expect(group.getByText("No session yet", { exact: true })).toHaveCount(0);
+    await expect(group.locator(".workspace-detail-session-empty")).toHaveCount(0);
+
+    const guidance = group.locator(".workspace-detail-session-guidance");
+    await expect(guidance).toHaveCount(1);
+    await expect(guidance).toHaveText(
+      "No previous session to inspect. Continue work can start a new one.",
+    );
+  });
+
+  test("Work with mixed Session history renders only real Sessions without empty guidance", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page, "mixed");
+    await page.goto(APP_URL);
+
+    const group = page.locator(
+      '.workspace-detail-work-group[data-work-id="work-quiet-ui"]',
+    );
+    const sessions = group.locator(".workspace-detail-session");
+    await expect(sessions).toHaveCount(1);
+    await expect(sessions.first()).toContainText("conv-bbb");
+    await expect(group.locator(".workspace-detail-session-empty")).toHaveCount(0);
+    await expect(group.locator(".workspace-detail-session-guidance")).toHaveCount(0);
+  });
+
+  test("Task-first Work actions stay readable at large and default window sizes", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(APP_URL);
+
+    const surfaceWindow = page.locator('.workspace-window[data-preset="workspace"]');
+    const group = page.locator(
+      '.workspace-detail-work-group[data-work-id="work-quiet-ui"]',
+    );
+    const diagnostics = page.locator('details[data-section="board-diagnostics"]');
+
+    await expect(group.locator(".workspace-detail-session")).toHaveCount(1);
+    await expect(group.locator(".workspace-detail-session-empty")).toHaveCount(0);
+    await expect(diagnostics).not.toHaveAttribute("open", "");
+    await expect(diagnostics.locator("summary")).toHaveText("Diagnostics (4)");
+    const lifecycle = page.locator(".workspace-detail-section").filter({
+      has: page.locator(".workspace-detail-section-title", { hasText: "Lifecycle" }),
+    });
+    await expect(lifecycle).not.toContainText("board-event-raw-4");
+    await diagnostics.locator("summary").click();
+    await expect(diagnostics).toContainText("board-event-raw-4");
+    await diagnostics.locator("summary").click();
+
+    for (const [width, height] of [[1280, 760], [720, 420]]) {
+      await surfaceWindow.evaluate((node: HTMLElement, size) => {
+        node.style.width = `${size.width}px`;
+        node.style.height = `${size.height}px`;
+      }, { width, height });
+      await group.scrollIntoViewIfNeeded();
+
+      const geometry = await group.evaluate((node: HTMLElement) => {
+        const head = node.querySelector<HTMLElement>(".workspace-detail-work-head");
+        const rail = node.querySelector<HTMLElement>(".workspace-detail-work-action-rail");
+        const buttons = Array.from(
+          rail?.querySelectorAll<HTMLElement>(".wizard-button") || [],
+        );
+        const headRect = head!.getBoundingClientRect();
+        const railRect = rail!.getBoundingClientRect();
+        const buttonRects = buttons.map((button) => button.getBoundingClientRect());
+        const overlaps = buttonRects.some((left, index) =>
+          buttonRects.slice(index + 1).some((right) =>
+            left.left < right.right
+              && left.right > right.left
+              && left.top < right.bottom
+              && left.bottom > right.top,
+          ),
+        );
+        const root = node.closest<HTMLElement>(".workspace-overview-root")!;
+        return {
+          railBelowHead: railRect.top >= headRect.bottom - 1,
+          overlaps,
+          labelsStayOnOneLine: buttons.every(
+            (button) => getComputedStyle(button).whiteSpace === "nowrap",
+          ),
+          noHorizontalOverflow: root.scrollWidth <= root.clientWidth,
+        };
+      });
+
+      expect(geometry, `${width}x${height}`).toEqual({
+        railBelowHead: true,
+        overlaps: false,
+        labelsStayOnOneLine: true,
+        noHorizontalOverflow: true,
+      });
+    }
   });
 
   test("Continue work sends opaque intent, ignores stale outcome, and settles on strong fallback", async ({
@@ -193,8 +304,13 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
   });
 });
 
-async function installBackend(page: any) {
-  await page.addInitScript(() => {
+type SessionHistoryFixture = "default" | "zero" | "mixed";
+
+async function installBackend(
+  page: any,
+  sessionHistory: SessionHistoryFixture = "default",
+) {
+  await page.addInitScript(({ sessionHistory }) => {
     (window as any).__continueWorkMessages = [];
     const workspaceState = {
       kind: "workspace_state",
@@ -257,6 +373,31 @@ async function installBackend(page: any) {
         },
       ],
     };
+    const emptyNewerAgent = {
+      ...activeAgent,
+      session_id: "agent-empty-newer",
+      updated_at: "2026-05-21T05:00:00Z",
+      sessions: [],
+    };
+    const emptyOlderAgent = {
+      ...activeAgent,
+      session_id: "agent-empty-older",
+      updated_at: "2026-05-21T02:00:00Z",
+      sessions: [],
+    };
+    const emptyDistinctAgent = {
+      ...activeAgent,
+      session_id: "agent-empty-distinct",
+      agent_id: "claude-code",
+      display_name: "Claude Code",
+      updated_at: "2026-05-21T05:00:00Z",
+      sessions: [],
+    };
+    const workAgents = sessionHistory === "zero"
+      ? [{ ...activeAgent, sessions: [] }]
+      : sessionHistory === "mixed"
+        ? [activeAgent, emptyDistinctAgent]
+        : [emptyNewerAgent, activeAgent, emptyOlderAgent];
     const projection = {
       kind: "active_work_projection",
       projection: {
@@ -280,21 +421,31 @@ async function installBackend(page: any) {
             worktree_path: "/repo/work/20260521-0234",
             pr_number: 2856,
             pr_state: "open",
-            board_refs: ["board-claim-1"],
+            board_refs: ["board-claim-1", "board-status-2", "board-decision-3"],
             agents: [activeAgent],
             works: [
               {
                 id: "work-quiet-ui",
-                title: "Quiet Work UI redesign",
-                work_summary: "Quiet Work UI redesign",
+                title:
+                  "Quiet Work UI redesign with a deliberately long task purpose that must not crowd actions",
+                work_summary:
+                  "Quiet Work UI redesign with a deliberately long task purpose that must not crowd actions",
                 lifecycle_state: "active",
                 status_category: "idle",
-                agents: [activeAgent],
-                manual_close_allowed: false,
+                agents: workAgents,
+                manual_close_allowed: true,
                 close_blocked_reason: "",
               },
             ],
-            events: [],
+            events: [
+              {
+                kind: "status",
+                title: "board-event-raw-4",
+                summary: "board-event-raw-4",
+                board_entry_id: "board-event-raw-4",
+                updated_at: "2026-05-21T05:30:00Z",
+              },
+            ],
           },
           {
             id: "workspace-done",
@@ -394,5 +545,5 @@ async function installBackend(page: any) {
       configurable: true,
       value: FixtureWebSocket,
     });
-  });
+  }, { sessionHistory });
 }

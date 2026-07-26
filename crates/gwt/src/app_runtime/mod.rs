@@ -221,6 +221,24 @@ pub(crate) enum PendingContinueWorkExecution {
     Takeover(gwt::cli::execution_state::GenerationTakeoverRequest),
 }
 
+/// Explicit linked-owner launch that is waiting for an authenticated
+/// SessionStart before replacing an integrity-valid Blocked generation.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingFreshExecutionLaunch {
+    pub(crate) operation_id: String,
+    pub(crate) project_root: PathBuf,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) request: gwt::cli::execution_state::SuccessorRequest,
+    pub(crate) binding: gwt_agent::SessionExecutionBinding,
+    pub(crate) readiness_nonce: String,
+    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+    pub(crate) base_branch: Option<String>,
+    pub(crate) linked_issue_number: Option<u64>,
+    pub(crate) resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) launch_feedback_context: Option<LaunchFeedbackContext>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CachedContinueWorkOutcome {
     pub(crate) work_id: String,
@@ -581,6 +599,10 @@ pub struct AppRuntime {
     /// The entry remains until an authenticated SessionStart finalizes the
     /// generation + Work transaction and promotes the same bearer.
     pub(crate) pending_continue_work: HashMap<String, PendingContinueWork>,
+    /// Fresh linked-owner launches prepared from legacy Blocked authority.
+    /// Like Continue work, these remain non-producing until SessionStart
+    /// proves the exact candidate binding and the successor CAS commits.
+    pub(crate) pending_fresh_execution_launches: HashMap<String, PendingFreshExecutionLaunch>,
     /// Process-local fast replay for a lost client response. Durable
     /// reconciliation still uses the owner ledger + Work commit receipt.
     pub(crate) continue_work_outcomes: HashMap<String, CachedContinueWorkOutcome>,
@@ -896,6 +918,7 @@ impl AppRuntime {
             inflight_launches: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
+            pending_fresh_execution_launches: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),

@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use super::workspace::{
-    apply_workspace_launch_transition, WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
+    active_agent_summary_from_session, apply_workspace_launch_transition,
+    WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
 };
 use super::{
     launch_config_from_persisted_session, non_empty_workspace_text,
     workspace_resume_owner_issue_number, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
-    OutboundEvent, PendingContinueWork, PendingContinueWorkExecution, WindowGeometry,
-    WindowProcessStatus, WorkspaceResumeContext,
+    OutboundEvent, PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
+    WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
 };
 use regex::Regex;
 
@@ -513,6 +514,21 @@ pub(super) fn pending_execution_activation_status(pending: &PendingContinueWork)
     }
 }
 
+pub(super) fn pending_fresh_execution_activation_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<bool> {
+    gwt::cli::execution_state::continuation_attempt_for_operation(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.operation_id,
+    )
+    .ok()
+    .flatten()
+    .map(|attempt| {
+        attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+    })
+}
+
 fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
     pending_execution_activation_status(pending) == Some(true)
 }
@@ -813,7 +829,11 @@ impl AppRuntime {
         &mut self,
         window_id: &str,
     ) -> bool {
-        if !self.pending_continue_work.contains_key(window_id) {
+        if !self.pending_continue_work.contains_key(window_id)
+            && !self
+                .pending_fresh_execution_launches
+                .contains_key(window_id)
+        {
             return false;
         }
         self.inspection_agent_windows.remove(window_id);
@@ -2519,22 +2539,408 @@ impl AppRuntime {
         events
     }
 
+    fn completed_fresh_execution_launch_events(
+        &mut self,
+        window_id: &str,
+        pending: &PendingFreshExecutionLaunch,
+    ) -> Vec<OutboundEvent> {
+        let Some(active_session) = self.active_agent_sessions.get(window_id).cloned() else {
+            return Vec::new();
+        };
+        if let Some(issue_number) = pending.linked_issue_number {
+            if let Err(error) = super::launch::record_issue_branch_link_with_cache_dir(
+                &pending.worktree_path,
+                &active_session.branch_name,
+                issue_number,
+                &self.issue_link_cache_dir,
+            ) {
+                tracing::warn!(error = %error, "fresh launch issue linkage update was skipped");
+            }
+        }
+        self.pending_fresh_execution_launches.remove(window_id);
+        let _ = self.persist();
+        self.launch_error_terminal_details.remove(window_id);
+        let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(projection);
+        }
+        let composed_status = self
+            .window_status(window_id)
+            .unwrap_or(WindowProcessStatus::Running);
+        events.extend(Self::status_events(
+            window_id.to_string(),
+            composed_status,
+            None,
+        ));
+        if let Some(issue_number) = pending
+            .launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_issue_number)
+        {
+            events.extend(self.issue_monitor_launch_succeeded_events(issue_number, window_id));
+        }
+        events
+    }
+
+    fn reconcile_activated_fresh_execution_launch_events(
+        &mut self,
+        window_id: &str,
+        pending: &PendingFreshExecutionLaunch,
+    ) -> Vec<OutboundEvent> {
+        if gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+            &pending.project_root,
+            &pending.operation_id,
+            gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+        )
+        .ok()
+            != Some(gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed)
+        {
+            return Vec::new();
+        }
+        let exact_current = gwt::cli::execution_state::current_execution_binding(
+            &pending.worktree_path,
+            pending.owner,
+        )
+        .ok()
+        .flatten()
+            == Some(pending.binding.identity.clone());
+        let exact_live = self
+            .active_agent_sessions
+            .get(window_id)
+            .is_some_and(|session| {
+                session.session_id == pending.binding.session_id
+                    && path_matches(&session.worktree_path, &pending.worktree_path)
+            });
+        let exact_capability = self
+            .agent_capability_tokens
+            .get(window_id)
+            .zip(self.agent_capability_issuer.as_ref())
+            .is_some_and(|(token, issuer)| issuer.active_token_is_current(token, &pending.binding));
+        let exact_probe = exact_current
+            && exact_live
+            && exact_capability
+            && gwt::probe_authenticated_execution_binding(
+                &pending.project_root,
+                &pending.binding.session_id,
+                &pending.binding,
+                "fresh-linked-owner-launch-coordinator",
+                gwt::AgentExecutionBindingProbeRequest {
+                    schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+                    operation_id: pending.operation_id.clone(),
+                    nonce: uuid::Uuid::new_v4().to_string(),
+                },
+            )
+            .is_ok_and(|receipt| receipt.execution_binding == pending.binding.identity);
+        if exact_probe {
+            return self.completed_fresh_execution_launch_events(window_id, pending);
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn fresh_execution_launch_failed_events(
+        &mut self,
+        window_id: &str,
+        _detail: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(pending) = self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(is_activated) = pending_fresh_execution_activation_status(&pending) else {
+            // Preserve the exact candidate evidence when durable authority is
+            // unreadable. A later correlated retry can reconcile safely.
+            return Vec::new();
+        };
+        if is_activated {
+            return self.reconcile_activated_fresh_execution_launch_events(window_id, &pending);
+        }
+
+        let abort = gwt::cli::execution_state::abort_successor(
+            &pending.worktree_path,
+            pending.owner,
+            &pending.request,
+            "fresh linked-owner launch failed before SessionStart",
+        );
+        if abort.is_err() {
+            match pending_fresh_execution_activation_status(&pending) {
+                Some(true) => {
+                    return self
+                        .reconcile_activated_fresh_execution_launch_events(window_id, &pending)
+                }
+                Some(false) => {}
+                None => return Vec::new(),
+            }
+        }
+
+        self.stop_window_runtime_without_session_projection(window_id);
+        self.stop_pending_continue_work_session_without_projection(window_id);
+        let events = self.close_window_events(window_id);
+        self.pending_fresh_execution_launches.remove(window_id);
+        if let Err(error) = gwt_agent::remove_session_if_execution_binding_matches(
+            &self.sessions_dir,
+            &pending.binding.session_id,
+            &pending.binding,
+        ) {
+            tracing::warn!(
+                session_id = %pending.binding.session_id,
+                error = %error,
+                "failed to remove an aborted fresh-launch Session safely"
+            );
+        }
+        events
+    }
+
     pub(crate) fn handle_continue_work_ready_timeout(
         &mut self,
         window_id: &str,
         operation_id: &str,
     ) -> Vec<OutboundEvent> {
-        if !self
+        if self
             .pending_continue_work
             .get(window_id)
             .is_some_and(|pending| pending.operation_id == operation_id)
         {
+            return self.continue_work_launch_failed_events(
+                window_id,
+                "authenticated SessionStart readiness timed out",
+            );
+        }
+        let feedback = self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .filter(|pending| pending.operation_id == operation_id)
+            .and_then(|pending| pending.launch_feedback_context.clone());
+        if feedback.is_some()
+            || self
+                .pending_fresh_execution_launches
+                .get(window_id)
+                .is_some_and(|pending| pending.operation_id == operation_id)
+        {
+            return self.launch_error_events_with_continue_work(
+                window_id.to_string(),
+                "authenticated SessionStart readiness timed out".to_string(),
+                feedback,
+            );
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn finalize_fresh_execution_launch_session_start(
+        &mut self,
+        window_id: &str,
+        readiness_nonce: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(pending) = self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let fail = |runtime: &mut Self, detail: &str| {
+            runtime.launch_error_events_with_continue_work(
+                window_id.to_string(),
+                detail.to_string(),
+                pending.launch_feedback_context.clone(),
+            )
+        };
+        if readiness_nonce != Some(pending.readiness_nonce.as_str()) {
+            return fail(
+                self,
+                "the authenticated SessionStart readiness nonce did not match",
+            );
+        }
+        let Some(active_session) = self.active_agent_sessions.get(window_id).cloned() else {
+            return fail(self, "the launched pane has no active Session");
+        };
+        if active_session.session_id != pending.binding.session_id
+            || !path_matches(&active_session.worktree_path, &pending.worktree_path)
+        {
+            return fail(
+                self,
+                "the launched Session does not match its Prepared execution binding",
+            );
+        }
+        let Some(token) = self.agent_capability_tokens.get(window_id).cloned() else {
+            return fail(self, "the Prepared Host capability is missing");
+        };
+        let Some(issuer) = self.agent_capability_issuer.clone() else {
+            return fail(self, "the Host capability issuer is unavailable");
+        };
+        if !issuer.prepared_token_is_current(&token, &pending.binding) {
+            return fail(self, "the Prepared Host capability is no longer current");
+        }
+        let probe = gwt::probe_authenticated_prepared_execution_binding(
+            &pending.project_root,
+            &pending.binding.session_id,
+            &pending.binding,
+            "fresh-linked-owner-launch-coordinator",
+            gwt::AgentExecutionBindingProbeRequest {
+                schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+                operation_id: pending.operation_id.clone(),
+                nonce: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        if probe.as_ref().is_err()
+            || probe
+                .as_ref()
+                .is_ok_and(|receipt| receipt.execution_binding != pending.binding.identity)
+        {
+            return fail(
+                self,
+                "the Host could not prove the exact Prepared execution binding",
+            );
+        }
+        if issuer.promote_prepared(&token, &pending.binding).is_err()
+            || !issuer.active_token_is_current(&token, &pending.binding)
+        {
+            return fail(self, "the Prepared Host capability could not be promoted");
+        }
+
+        let already_activated = pending_fresh_execution_activation_status(&pending) == Some(true);
+        let transaction_result = if already_activated {
+            gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                &pending.project_root,
+                &pending.operation_id,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+            )
+            .and_then(|resolution| {
+                if resolution
+                    == gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed
+                {
+                    Ok(())
+                } else {
+                    Err(gwt_core::error::GwtError::Other(format!(
+                        "unexpected fresh launch Work resolution: {resolution:?}"
+                    )))
+                }
+            })
+        } else {
+            let live_session_ids: HashSet<String> = self
+                .active_agent_sessions
+                .values()
+                .map(|session| session.session_id.clone())
+                .collect();
+            gwt_core::workspace_projection::transact_workspace_state_with_commit(
+                &pending.project_root,
+                &pending.operation_id,
+                |projection, _work_items, _| {
+                    let now = chrono::Utc::now();
+                    let events = if let Some(context) = pending.resume_context.as_ref() {
+                        let event = apply_workspace_launch_transition(
+                            projection,
+                            &active_session,
+                            WorkspaceLaunchTransition {
+                                work_id: gwt_core::workspace_projection::canonical_work_id(
+                                    &pending.project_root,
+                                    Some(active_session.branch_name.as_str()),
+                                    Some(active_session.worktree_path.as_path()),
+                                ),
+                                base_branch: pending.base_branch.as_deref(),
+                                linked_issue_number: pending.linked_issue_number,
+                                resume_context: Some(context),
+                                kind: if pending.base_branch.is_some() {
+                                    WorkspaceLaunchProjectionKind::StartWork
+                                } else {
+                                    WorkspaceLaunchProjectionKind::Resume {
+                                        created_by_start_work: active_session
+                                            .branch_name
+                                            .starts_with("work/"),
+                                    }
+                                },
+                                live_session_ids: &live_session_ids,
+                                now,
+                            },
+                        );
+                        vec![event]
+                    } else {
+                        projection.retain_live_agents_keep_shells(
+                            live_session_ids.iter().map(String::as_str),
+                            now,
+                        );
+                        let mut summary = active_agent_summary_from_session(&active_session, now);
+                        summary.affiliation_status = gwt_core::workspace_projection::
+                            WorkspaceAgentAffiliationStatus::Unassigned;
+                        summary.workspace_id = None;
+                        projection.register_unassigned_agent(summary);
+                        projection.updated_at = now;
+                        Vec::new()
+                    };
+                    Ok(((), events))
+                },
+                || {
+                    gwt::cli::execution_state::activate_successor(
+                        &pending.worktree_path,
+                        pending.owner,
+                        &pending.request,
+                    )
+                    .map(|_| ())
+                    .map_err(gwt_core::error::GwtError::Io)
+                },
+            )
+        };
+        if transaction_result.is_err() {
+            if pending_fresh_execution_activation_status(&pending) != Some(true) {
+                return fail(
+                    self,
+                    "the fresh generation activation transaction was rejected",
+                );
+            }
+            if gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                &pending.project_root,
+                &pending.operation_id,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+            )
+            .ok()
+                != Some(
+                    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+                )
+            {
+                return Vec::new();
+            }
+        }
+
+        if gwt::cli::execution_state::current_execution_binding(
+            &pending.worktree_path,
+            pending.owner,
+        )
+        .ok()
+        .flatten()
+            != Some(pending.binding.identity.clone())
+            || !issuer.active_token_is_current(&token, &pending.binding)
+        {
             return Vec::new();
         }
-        self.continue_work_launch_failed_events(
-            window_id,
-            "authenticated SessionStart readiness timed out",
-        )
+        let active_probe = gwt::probe_authenticated_execution_binding(
+            &pending.project_root,
+            &pending.binding.session_id,
+            &pending.binding,
+            "fresh-linked-owner-launch-coordinator",
+            gwt::AgentExecutionBindingProbeRequest {
+                schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+                operation_id: pending.operation_id.clone(),
+                nonce: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        if active_probe.as_ref().is_err()
+            || active_probe
+                .as_ref()
+                .is_ok_and(|receipt| receipt.execution_binding != pending.binding.identity)
+            || gwt::cli::execution_state::current_execution_binding(
+                &pending.worktree_path,
+                pending.owner,
+            )
+            .ok()
+            .flatten()
+                == Some(pending.predecessor_binding.clone())
+        {
+            return Vec::new();
+        }
+
+        self.completed_fresh_execution_launch_events(window_id, &pending)
     }
 
     pub(crate) fn finalize_continue_work_session_start(

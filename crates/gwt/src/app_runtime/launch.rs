@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use super::continuation::pending_execution_activation_status;
+use super::continuation::{
+    pending_execution_activation_status, pending_fresh_execution_activation_status,
+};
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
@@ -40,8 +42,9 @@ use super::{
     resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
     AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
-    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, PendingContinueWork, UserEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, PendingContinueWork,
+    PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WindowRuntime, WorkspaceResumeContext,
 };
 
 #[derive(Clone)]
@@ -66,6 +69,173 @@ fn private_launch_env_key(key: &str) -> bool {
 fn private_launch_env_assignment(argument: &str) -> Option<&str> {
     let (key, _) = argument.split_once('=')?;
     private_launch_env_key(key).then_some(key)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pending_fresh_execution_launch_from_session(
+    sessions_dir: &Path,
+    session_id: &str,
+    worktree_path: &Path,
+    agent_project_root: &str,
+    linked_issue_number: Option<u64>,
+    base_branch: Option<String>,
+    resume_context: Option<WorkspaceResumeContext>,
+    launch_feedback_context: Option<LaunchFeedbackContext>,
+    readiness_nonce: &str,
+) -> Result<PendingFreshExecutionLaunch, String> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&session_path).map_err(|error| {
+        format!(
+            "fresh linked-owner launch Session could not be read at {}: {error}",
+            session_path.display()
+        )
+    })?;
+    if session.id != session_id || !same_worktree_path(&session.worktree_path, worktree_path) {
+        return Err(
+            "fresh linked-owner launch Session does not match its materialized worktree"
+                .to_string(),
+        );
+    }
+    let binding = session.execution_binding.clone().ok_or_else(|| {
+        "fresh linked-owner launch Session has no Prepared execution binding".to_string()
+    })?;
+    if binding.session_id != session_id
+        || session.linked_issue_number != Some(binding.owner_number)
+        || linked_issue_number != Some(binding.owner_number)
+    {
+        return Err(
+            "fresh linked-owner launch owner does not match its persisted Session binding"
+                .to_string(),
+        );
+    }
+    let owner_kind = match binding.owner_kind.as_str() {
+        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => return Err("fresh linked-owner launch owner kind is not canonical".to_string()),
+    };
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: owner_kind,
+        number: binding.owner_number,
+    };
+    let ledger = gwt::cli::execution_state::load_generation_ledger(worktree_path, owner)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "fresh linked-owner launch owner ledger is missing".to_string())?;
+    if ledger.current_effective_status()
+        != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+    {
+        return Err(
+            "fresh linked-owner launch no longer has a terminal Blocked predecessor".to_string(),
+        );
+    }
+    let attempt = gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
+        worktree_path,
+        owner,
+        session_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| {
+        "fresh linked-owner launch has no unique Prepared successor attempt".to_string()
+    })?;
+    if !gwt::cli::execution_state::prepared_execution_binding_matches(
+        worktree_path,
+        owner,
+        session_id,
+        &binding.identity,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "fresh linked-owner launch Session does not match its Prepared successor".to_string(),
+        );
+    }
+    let predecessor_binding =
+        gwt::cli::execution_state::current_execution_binding(worktree_path, owner)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "fresh linked-owner launch predecessor binding is missing".to_string()
+            })?;
+    if predecessor_binding == binding.identity {
+        return Err(
+            "fresh linked-owner launch candidate is already the current generation".to_string(),
+        );
+    }
+    let project_root = session
+        .project_state_root
+        .clone()
+        .or_else(|| {
+            (!agent_project_root.trim().is_empty()).then(|| PathBuf::from(agent_project_root))
+        })
+        .ok_or_else(|| {
+            "fresh linked-owner launch canonical Project State root is missing".to_string()
+        })?;
+    Ok(PendingFreshExecutionLaunch {
+        operation_id: attempt.request.operation_id.clone(),
+        project_root,
+        worktree_path: worktree_path.to_path_buf(),
+        owner,
+        request: attempt.request,
+        binding,
+        readiness_nonce: readiness_nonce.to_string(),
+        predecessor_binding,
+        base_branch,
+        linked_issue_number,
+        resume_context,
+        launch_feedback_context,
+    })
+}
+
+fn rollback_materialized_fresh_execution_launch(
+    sessions_dir: &Path,
+    session_id: &str,
+    worktree_path: &Path,
+    reason: &str,
+) -> Result<(), String> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&session_path).map_err(|error| error.to_string())?;
+    let binding = session.execution_binding.clone().ok_or_else(|| {
+        "fresh linked-owner rollback cannot prove the candidate Session binding".to_string()
+    })?;
+    if session.id != session_id
+        || binding.session_id != session_id
+        || !same_worktree_path(&session.worktree_path, worktree_path)
+    {
+        return Err("fresh linked-owner rollback candidate identity no longer matches".to_string());
+    }
+    let owner_kind = match binding.owner_kind.as_str() {
+        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => {
+            return Err("fresh linked-owner rollback candidate owner is not canonical".to_string())
+        }
+    };
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: owner_kind,
+        number: binding.owner_number,
+    };
+    let attempt = gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
+        worktree_path,
+        owner,
+        session_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "fresh linked-owner rollback found no unique Prepared candidate".to_string())?;
+    if !gwt::cli::execution_state::prepared_execution_binding_matches(
+        worktree_path,
+        owner,
+        session_id,
+        &binding.identity,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "fresh linked-owner rollback candidate binding is no longer Prepared".to_string(),
+        );
+    }
+    gwt::cli::execution_state::abort_successor(worktree_path, owner, &attempt.request, reason)
+        .map_err(|error| error.to_string())?;
+    gwt_agent::remove_session_if_execution_binding_matches(sessions_dir, session_id, &binding)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 impl std::fmt::Debug for ProcessLaunch {
@@ -332,10 +502,116 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             .map_err(|error| error.to_string())?
             .is_some()
         {
-            return Err(
-                "an execution generation already exists; use Continue work to create a successor"
-                    .to_string(),
+            let ledger = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "the current execution binding has no integrity-valid owner ledger".to_string()
+                })?;
+            if ledger.current_effective_status()
+                != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+            {
+                return Err(
+                    "an execution generation already exists; use Continue work to create a successor"
+                        .to_string(),
+                );
+            }
+
+            let repo_hash = session
+                .repo_hash
+                .clone()
+                .filter(|repo_hash| !repo_hash.trim().is_empty())
+                .ok_or_else(|| {
+                    "producing Session is missing its canonical repository hash".to_string()
+                })?;
+            let request = gwt::cli::execution_state::SuccessorRequest {
+                operation_id: format!("fresh-launch-{}", uuid::Uuid::new_v4()),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+                session_binding_id: uuid::Uuid::new_v4().to_string(),
+                initial_session_id: session.id.clone(),
+                entrypoint: execution_entrypoint.to_string(),
+                requested_at: chrono::Utc::now(),
+            };
+            gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+                worktree, owner, &request,
+            )
+            .map_err(|error| error.to_string())?;
+            let abort_prepared = |reason: &str| {
+                gwt::cli::execution_state::abort_successor(worktree, owner, &request, reason)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            };
+            let identity = match gwt::cli::execution_state::prepared_successor_execution_binding(
+                worktree, owner, &request,
+            ) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let abort = abort_prepared("fresh launch binding derivation failed");
+                    return Err(match abort {
+                        Ok(()) => error.to_string(),
+                        Err(abort_error) => format!(
+                            "{error}; failed to abort fresh launch successor: {abort_error}"
+                        ),
+                    });
+                }
+            };
+            let binding = gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash,
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity,
+                capability_generation: 1,
+            };
+            if let Err(error) = session.set_execution_binding(Some(binding.clone())) {
+                let abort = abort_prepared("fresh launch Session binding failed");
+                return Err(match abort {
+                    Ok(()) => error,
+                    Err(abort_error) => {
+                        format!("{error}; failed to abort fresh launch successor: {abort_error}")
+                    }
+                });
+            }
+            if let Err(error) = session.save(sessions_dir) {
+                let _ = session.set_execution_binding(None);
+                let abort = abort_prepared("fresh launch Session persistence failed");
+                return Err(match abort {
+                    Ok(()) => format!("failed to persist fresh launch Session binding: {error}"),
+                    Err(abort_error) => format!(
+                        "failed to persist fresh launch Session binding: {error}; failed to abort fresh launch successor: {abort_error}"
+                    ),
+                });
+            }
+            if let Err(error) = issue_preflighted_agent_capability_env(
+                env,
+                issuer,
+                project_root,
+                &session.id,
+                AgentCapabilityLaunchAuthority::Prepared(&binding),
+                endpoints,
+            ) {
+                let rollback = session.set_execution_binding(None).and_then(|()| {
+                    session
+                        .save(sessions_dir)
+                        .map_err(|error| error.to_string())
+                });
+                let abort = abort_prepared("fresh launch capability issuance failed");
+                return Err(match (rollback, abort) {
+                    (Ok(()), Ok(())) => error,
+                    (rollback, abort) => format!(
+                        "{error}; fresh launch rollback failed (Session: {}; successor: {})",
+                        rollback.err().unwrap_or_else(|| "ok".to_string()),
+                        abort.err().unwrap_or_else(|| "ok".to_string()),
+                    ),
+                });
+            }
+            env.insert(
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
+                uuid::Uuid::new_v4().to_string(),
             );
+            return Ok(());
         }
 
         gwt::cli::execution_state::materialize_at_launch(
@@ -805,7 +1081,7 @@ fn inflight_launch_key(tab_id: &str, config: &gwt_agent::LaunchConfig) -> Option
     ))
 }
 
-fn record_issue_branch_link_with_cache_dir(
+pub(super) fn record_issue_branch_link_with_cache_dir(
     repo_path: &Path,
     branch_name: &str,
     issue_number: u64,
@@ -1163,6 +1439,77 @@ impl AppRuntime {
                     .env
                     .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                     .cloned();
+                let fresh_readiness_nonce = process_launch
+                    .env
+                    .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+                    .cloned();
+                let pending_fresh_execution = if is_continue_work {
+                    None
+                } else if let Some(readiness_nonce) = fresh_readiness_nonce.as_deref() {
+                    if launch_disposition != AgentLaunchDisposition::WorkProducing {
+                        self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
+                        return self.launch_error_events(
+                            window_id,
+                            "an inspection launch cannot carry fresh execution readiness"
+                                .to_string(),
+                            launch_feedback_context,
+                        );
+                    }
+                    match pending_fresh_execution_launch_from_session(
+                        &self.sessions_dir,
+                        &session_id,
+                        &worktree_path,
+                        &agent_project_root,
+                        linked_issue_number,
+                        base_branch.clone(),
+                        workspace_resume_context.clone(),
+                        launch_feedback_context.clone(),
+                        readiness_nonce,
+                    ) {
+                        Ok(pending) => Some(pending),
+                        Err(error) => {
+                            self.revoke_unbound_agent_capability(
+                                issued_capability_token.as_deref(),
+                            );
+                            let rollback = rollback_materialized_fresh_execution_launch(
+                                &self.sessions_dir,
+                                &session_id,
+                                &worktree_path,
+                                "fresh launch readiness reconstruction failed",
+                            );
+                            let error = match rollback {
+                                Ok(()) => error,
+                                Err(rollback_error) => format!(
+                                    "{error}; candidate rollback requires reconciliation: {rollback_error}"
+                                ),
+                            };
+                            return self.launch_error_events(
+                                window_id,
+                                format!(
+                                    "fresh linked-owner launch readiness could not be recovered: {error}"
+                                ),
+                                launch_feedback_context,
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let is_fresh_execution_launch = pending_fresh_execution.is_some();
+                if let Some(pending) = pending_fresh_execution {
+                    let operation_id = pending.operation_id.clone();
+                    self.pending_fresh_execution_launches
+                        .insert(window_id.clone(), pending);
+                    let timeout_proxy = self.proxy.clone();
+                    let timeout_window_id = window_id.clone();
+                    thread::spawn(move || {
+                        thread::sleep(CONTINUE_WORK_READY_TIMEOUT);
+                        timeout_proxy.send(UserEvent::ContinueWorkReadyTimeout {
+                            window_id: timeout_window_id,
+                            operation_id,
+                        });
+                    });
+                }
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events_with_continue_work(
@@ -1268,7 +1615,9 @@ impl AppRuntime {
                 ) {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
-                        if launch_disposition == AgentLaunchDisposition::WorkProducing {
+                        if launch_disposition == AgentLaunchDisposition::WorkProducing
+                            && !is_fresh_execution_launch
+                        {
                             let linkage_result = match linked_issue_number {
                                 Some(issue_number) => record_issue_branch_link_with_cache_dir(
                                     &worktree_path,
@@ -1301,6 +1650,7 @@ impl AppRuntime {
                         let active_session = &self.active_agent_sessions[&window_id];
                         if launch_disposition == AgentLaunchDisposition::WorkProducing
                             && !is_continue_work
+                            && !is_fresh_execution_launch
                         {
                             if let Some(base_branch) = base_branch.as_deref() {
                                 match save_start_work_workspace_projection(
@@ -1370,18 +1720,19 @@ impl AppRuntime {
                         events.extend(Self::status_events(
                             window_id.clone(),
                             composed_status,
-                            None,
+                            is_fresh_execution_launch
+                                .then(|| "Waiting for authenticated SessionStart...".to_string()),
                         ));
-                        if let Some(issue_number) = launch_feedback_context
-                            .as_ref()
-                            .and_then(|context| context.issue_monitor_issue_number)
-                        {
-                            events.extend(
-                                self.issue_monitor_launch_succeeded_events(
+                        if !is_fresh_execution_launch {
+                            if let Some(issue_number) = launch_feedback_context
+                                .as_ref()
+                                .and_then(|context| context.issue_monitor_issue_number)
+                            {
+                                events.extend(self.issue_monitor_launch_succeeded_events(
                                     issue_number,
                                     &window_id,
-                                ),
-                            );
+                                ));
+                            }
                         }
                         events
                     }
@@ -1423,9 +1774,19 @@ impl AppRuntime {
                 None => return Vec::new(),
             }
         }
+        if let Some(pending) = self.pending_fresh_execution_launches.get(&window_id) {
+            match pending_fresh_execution_activation_status(pending) {
+                Some(true) => {
+                    return self.fresh_execution_launch_failed_events(&window_id, &detail);
+                }
+                Some(false) => {}
+                None => return Vec::new(),
+            }
+        }
         let mut events =
             self.launch_error_events(window_id.clone(), detail.clone(), launch_feedback_context);
         events.extend(self.continue_work_launch_failed_events(&window_id, &detail));
+        events.extend(self.fresh_execution_launch_failed_events(&window_id, &detail));
         events
     }
 
@@ -3189,6 +3550,118 @@ mod agent_endpoint_env_tests {
             )
             .expect("read Prepared authority")
         );
+    }
+
+    #[test]
+    fn explicit_linked_owner_launch_prepares_fresh_lifetime_from_blocked_predecessor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &predecessor.project,
+                &predecessor.session.id,
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "legacy blocker without same-lifetime recovery contract".to_string(),
+                    missing_verification: Some("legacy blocker".to_string()),
+                },
+            )
+            .expect("settle predecessor as Blocked"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let predecessor_binding = gwt::cli::execution_state::current_execution_binding(
+            &predecessor.project,
+            predecessor.owner,
+        )
+        .expect("read blocked predecessor binding")
+        .expect("blocked predecessor generation");
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
+        persist_finalized_launch_session(
+            &predecessor.sessions_dir,
+            &runtime_path,
+            &mut successor,
+            None,
+        )
+        .expect("persist fresh launch Session before authority");
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("explicit fresh launch must prepare a new lifetime from legacy Blocked");
+
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(
+                &predecessor.project,
+                predecessor.owner,
+            )
+            .expect("read current generation"),
+            Some(predecessor_binding),
+            "pre-readiness preparation must preserve the terminal predecessor as current",
+        );
+        let persisted = gwt_agent::Session::load(
+            &predecessor
+                .sessions_dir
+                .join(format!("{}.toml", successor.id)),
+        )
+        .expect("reload fresh prepared Session");
+        let binding = persisted
+            .execution_binding
+            .expect("fresh launch must persist its prepared generation binding");
+        let token = env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("fresh launch Prepared capability token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate fresh Prepared capability");
+        assert_eq!(
+            grant.principal().execution_authority_kind(),
+            crate::embedded_server::AgentExecutionAuthorityKind::Prepared,
+        );
+        assert!(!grant.principal().authorizes_producing_mutation());
+        assert_eq!(grant.principal().execution_binding(), Some(&binding));
     }
 
     #[test]

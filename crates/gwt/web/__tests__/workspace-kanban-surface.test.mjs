@@ -500,6 +500,27 @@ test("Workspace detail Board refs can focus the matching Board entry", () => {
     sendFocus() {},
   });
 
+  const diagnostics = fixture.body.querySelector(
+    'details[data-section="board-diagnostics"]',
+  );
+  assert.ok(diagnostics, "raw Board ids belong in a diagnostics disclosure");
+  assert.equal(diagnostics.hasAttribute("open"), false, "diagnostics start collapsed");
+  assert.equal(diagnostics.querySelector("summary").textContent, "Diagnostics (1)");
+  assert.match(diagnostics.textContent, /board-claim-1/);
+
+  const lifecycle = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-section"),
+  ).find(
+    (section) => section.querySelector(".workspace-detail-section-title")?.textContent
+      === "Lifecycle",
+  );
+  assert.ok(lifecycle, "lifecycle section must remain available");
+  assert.doesNotMatch(
+    lifecycle.textContent,
+    /board-claim-1/,
+    "raw Board IDs stay out of event titles and lifecycle metadata",
+  );
+
   const boardRef = fixture.body.querySelector(
     "[data-action='focus-board-entry'][data-board-entry-id='board-claim-1']",
   );
@@ -753,6 +774,253 @@ test("each Work exposes one Continue work action with opaque Work identity (SPEC
     workId: "work-opaque-1",
     bounds: { x: 0, y: 0, width: 800, height: 600 },
   }]);
+});
+
+test("Work without Session history keeps one Continue work action and renders one fresh-continuation explanation (SPEC-2359 AS-91.7)", () => {
+  const projection = continuationProjection();
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.equal(group.querySelectorAll('[data-action="continue-work"]').length, 1);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 1);
+  assert.equal(
+    group.querySelector(".workspace-detail-session-guidance").textContent,
+    "No previous session to inspect. Continue work can start a new one.",
+  );
+});
+
+test("Work with mixed Agent history renders real Sessions without empty guidance (SPEC-2359 AS-91.8)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "empty-session",
+      agent_id: "claude-code",
+      display_name: "Claude Code",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "usable-session",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "usable-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.equal(group.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 0);
+  assert.equal(
+    group.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "usable-session",
+  );
+});
+
+test("Task-first Work layout separates purpose, producing intent, and lifecycle actions (SPEC-2359 US-91)", () => {
+  const projection = continuationProjection({ sessions: [
+    {
+      agent_session_id: "conv-latest",
+      started_at: "2026-07-26T02:00:00Z",
+      is_active: true,
+      resumable: true,
+    },
+  ] });
+  const work = projection.active_works[0].works[0];
+  projection.active_works[0].branch = "work/issue-2359";
+  work.lifecycle_state = "paused";
+  work.manual_close_allowed = true;
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  const head = group.querySelector(".workspace-detail-work-head");
+  const rail = group.querySelector(".workspace-detail-work-action-rail");
+  assert.ok(head.querySelector(".workspace-detail-work-heading"));
+  assert.ok(head.querySelector(".workspace-overview-lifecycle"));
+  assert.equal(head.querySelector("button"), null, "purpose header is not an action row");
+  assert.ok(rail, "Work actions have a dedicated rail");
+  const continueWork = rail.querySelector('[data-action="continue-work"]');
+  assert.ok(continueWork.classList.contains("primary"));
+  assert.ok(rail.querySelector(".workspace-detail-work-actions"));
+  assert.ok(
+    rail.querySelector('[data-action="close-work-discard"]').classList.contains("destructive"),
+  );
+  assert.equal(
+    group.querySelector('[data-action="resume-session"]').textContent,
+    "Inspect session",
+    "Session history does not compete with the producing Continue work intent",
+  );
+  assert.deepEqual(
+    Array.from(
+      fixture.body.querySelectorAll(".workspace-overview-detail-pane .wizard-button.primary"),
+      (button) => button.dataset.action,
+    ),
+    ["continue-work"],
+    "Continue work is the detail's sole producing primary; Launch Agent stays secondary",
+  );
+});
+
+test("Work detail suppresses empty duplicates when the same Agent has a usable Session (SPEC-2359 AS-91.2)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "empty-newest",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "usable-session",
+      agent_id: "Codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "usable-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "empty-oldest",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "usable-session",
+  );
+});
+
+test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2359 FR-582)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "custom-hyphen-session",
+      agent_id: "my-agent",
+      display_name: "my-agent",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "custom-hyphen-conversation",
+        started_at: "2026-07-26T03:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "custom-compact-session",
+      agent_id: "myagent",
+      display_name: "myagent",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "custom-compact-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.deepEqual(
+    Array.from(
+      group.querySelectorAll('[data-action="resume-session"]'),
+      (button) => button.dataset.sessionId,
+    ),
+    ["custom-hyphen-session", "custom-compact-session"],
+    "unknown custom IDs keep their trimmed command spelling; punctuation is identity-significant",
+  );
+});
+
+test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-581)", () => {
+  const projection = continuationProjection({ sessions: [{
+    agent_session_id: "inspect-conversation",
+    started_at: "2026-07-26T03:00:00Z",
+    is_active: true,
+    resumable: true,
+  }] });
+  const fixture = createFixture();
+  const begins = [];
+  const launchPending = {
+    begin(key, label, operationId) {
+      begins.push({ key, label, operationId });
+      return true;
+    },
+    isPending() {
+      return false;
+    },
+  };
+  const surface = createSurface(fixture, projection, {
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  fixture.body.querySelector('[data-action="resume-session"]').click();
+
+  assert.equal(begins.length, 1);
+  assert.equal(
+    begins[0].label,
+    "Inspect session",
+    "timeout notices must not regress to the old Resume wording",
+  );
 });
 
 test("discarded Work never exposes Continue work even when a legacy lifecycle is stale", () => {

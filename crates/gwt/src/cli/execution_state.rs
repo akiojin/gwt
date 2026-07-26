@@ -351,11 +351,30 @@ pub enum ContinuationAttemptStatus {
     Activated,
 }
 
+/// Terminal state a successor operation is explicitly authorized to leave.
+/// Ordinary Continue work remains Completed-only. The Blocked variant is
+/// reserved for an explicit linked-owner launch that creates a fresh lifetime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuccessorPredecessorStatus {
+    #[default]
+    Completed,
+    Blocked,
+}
+
+pub const FRESH_LINKED_OWNER_LAUNCH_SOURCE: &str = "fresh-linked-owner-launch";
+
+fn is_completed_successor_status(status: &SuccessorPredecessorStatus) -> bool {
+    *status == SuccessorPredecessorStatus::Completed
+}
+
 /// Append-only successor-attempt event. Prepared/Aborted events are audit
 /// records only and can never become the ledger's current generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationAttempt {
     pub request: SuccessorRequest,
+    #[serde(default, skip_serializing_if = "is_completed_successor_status")]
+    pub predecessor_status: SuccessorPredecessorStatus,
     /// Canonical target worktree captured at Prepared time. This is part of
     /// the persisted request envelope and fences every later replay.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -941,11 +960,17 @@ fn validate_generation_ledger(
             &str,
             &ExecutionGenerationIdentity,
             &str,
+            SuccessorPredecessorStatus,
             ContinuationAttemptStatus,
         ),
     > = std::collections::HashMap::new();
     for attempt in &ledger.continuation_attempts {
         if validate_successor_request(&attempt.request).is_err()
+            || (attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
+                && (attempt.request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE
+                    || attempt.request.work_id.is_some()))
+            || (attempt.predecessor_status == SuccessorPredecessorStatus::Completed
+                && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE)
             || attempt.worktree_binding_hash.trim().is_empty()
             || attempt.candidate_generation_id.trim().is_empty()
             || attempt
@@ -978,15 +1003,24 @@ fn validate_generation_ledger(
                         &attempt.worktree_binding_hash,
                         &attempt.predecessor,
                         &attempt.candidate_generation_id,
+                        attempt.predecessor_status,
                         attempt.status,
                     ),
                 );
             }
-            Some((request, worktree_binding_hash, predecessor, candidate, previous_status)) => {
+            Some((
+                request,
+                worktree_binding_hash,
+                predecessor,
+                candidate,
+                predecessor_status,
+                previous_status,
+            )) => {
                 if *request != &attempt.request
                     || *worktree_binding_hash != attempt.worktree_binding_hash
                     || *predecessor != &attempt.predecessor
                     || *candidate != attempt.candidate_generation_id
+                    || *predecessor_status != attempt.predecessor_status
                     || *previous_status != ContinuationAttemptStatus::Prepared
                     || attempt.status == ContinuationAttemptStatus::Prepared
                 {
@@ -1027,6 +1061,7 @@ fn validate_generation_ledger(
                         &attempt.worktree_binding_hash,
                         &attempt.predecessor,
                         &attempt.candidate_generation_id,
+                        attempt.predecessor_status,
                         attempt.status,
                     ),
                 );
@@ -1381,13 +1416,25 @@ fn validate_generation_ledger(
 
     for (index, generation) in ledger.generations.iter().enumerate().skip(1) {
         let predecessor = &ledger.generations[index - 1];
-        if effective_statuses[predecessor.identity.generation_id.as_str()]
-            != ExecutionControlStatus::Completed
+        let authorized_predecessor_status = ledger
+            .continuation_attempts
+            .iter()
+            .find(|attempt| {
+                attempt.status == ContinuationAttemptStatus::Activated
+                    && attempt.predecessor == predecessor.identity
+                    && attempt
+                        .activated_generation
+                        .as_ref()
+                        .is_some_and(|identity| identity == &generation.identity)
+            })
+            .map(|attempt| successor_predecessor_execution_status(attempt.predecessor_status));
+        if authorized_predecessor_status
+            != Some(effective_statuses[predecessor.identity.generation_id.as_str()])
             || generation.identity.predecessor_generation_id.as_deref()
                 != Some(predecessor.identity.generation_id.as_str())
         {
             return Err(invalid_generation_data(
-                "successor generation does not follow a Completed predecessor",
+                "successor generation does not follow its authorized terminal predecessor",
             ));
         }
     }
@@ -2833,10 +2880,11 @@ fn prepared_successor_generation(
     let predecessor_head = effective_generation_head_hash(ledger, predecessor);
     if predecessor.identity != latest.predecessor
         || predecessor_head != latest.predecessor_generation_content_hash
-        || ledger.effective_status_for(predecessor) != ExecutionControlStatus::Completed
+        || ledger.effective_status_for(predecessor)
+            != successor_predecessor_execution_status(latest.predecessor_status)
     {
         return Err(generation_conflict(
-            "prepared successor CAS lost: current generation changed or is not Completed",
+            "prepared successor CAS lost: current generation or authorized terminal status changed",
         ));
     }
     build_successor_generation(
@@ -2910,6 +2958,49 @@ pub fn continuation_attempt_for_operation(
                 .cloned()
         }),
     )
+}
+
+/// Recover the one live Prepared fresh-launch attempt for a candidate
+/// Session. This lets the Host rebuild its process-local readiness receipt
+/// from the integrity-valid owner ledger without persisting a nonce or
+/// trusting child-process input as authority.
+pub fn prepared_fresh_linked_owner_launch_for_session(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    session_id: &str,
+) -> io::Result<Option<ContinuationAttempt>> {
+    if session_id.trim() != session_id
+        || session_id.is_empty()
+        || session_id.len() > 256
+        || session_id.chars().any(char::is_control)
+    {
+        return Err(invalid_generation_data(
+            "fresh launch Session id must be canonical",
+        ));
+    }
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(None);
+    };
+    let mut seen_operations = std::collections::HashSet::new();
+    let mut candidates = ledger
+        .continuation_attempts
+        .iter()
+        .rev()
+        .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
+        .filter(|attempt| {
+            attempt.status == ContinuationAttemptStatus::Prepared
+                && attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
+                && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE
+                && attempt.request.work_id.is_none()
+                && attempt.request.initial_session_id == session_id
+        });
+    let candidate = candidates.next().cloned();
+    if candidates.next().is_some() {
+        return Err(generation_conflict(
+            "more than one Prepared fresh launch is bound to the same Session",
+        ));
+    }
+    Ok(candidate)
 }
 
 /// Append a Prepared same-generation takeover without changing the current
@@ -3238,6 +3329,55 @@ pub fn prepare_successor(
     owner: ExecutionOwnerKey,
     request: &SuccessorRequest,
 ) -> io::Result<ContinuationAttempt> {
+    if request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE {
+        return Err(invalid_generation_data(
+            "fresh linked-owner launch successors require the Blocked-specific prepare operation",
+        ));
+    }
+    prepare_successor_for_status(
+        worktree,
+        owner,
+        request,
+        SuccessorPredecessorStatus::Completed,
+    )
+}
+
+/// Prepare a fresh execution lifetime from an integrity-valid terminal
+/// Blocked generation. This is intentionally separate from Continue work and
+/// cannot be used for Completed predecessors or same-lifetime recovery.
+pub fn prepare_fresh_linked_owner_launch_successor(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+) -> io::Result<ContinuationAttempt> {
+    if request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
+        return Err(invalid_generation_data(
+            "fresh linked-owner launch successor must use the canonical source without a Continue Work identity",
+        ));
+    }
+    prepare_successor_for_status(
+        worktree,
+        owner,
+        request,
+        SuccessorPredecessorStatus::Blocked,
+    )
+}
+
+fn successor_predecessor_execution_status(
+    status: SuccessorPredecessorStatus,
+) -> ExecutionControlStatus {
+    match status {
+        SuccessorPredecessorStatus::Completed => ExecutionControlStatus::Completed,
+        SuccessorPredecessorStatus::Blocked => ExecutionControlStatus::Blocked,
+    }
+}
+
+fn prepare_successor_for_status(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+    predecessor_status: SuccessorPredecessorStatus,
+) -> io::Result<ContinuationAttempt> {
     validate_successor_request(request)?;
     with_generation_owner_lease(worktree, owner, |context| {
         let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
@@ -3266,14 +3406,21 @@ pub fn prepare_successor(
                 invalid_generation_data("execution generation ledger current id is missing")
             })?
             .clone();
-        if ledger.effective_status_for(&predecessor) != ExecutionControlStatus::Completed {
+        let expected_status = successor_predecessor_execution_status(predecessor_status);
+        if ledger.effective_status_for(&predecessor) != expected_status {
             return Err(generation_conflict(
-                "a successor can only be prepared from a Completed generation; Blocked remains execution.reopen-only",
+                match predecessor_status {
+                    SuccessorPredecessorStatus::Completed =>
+                        "a Continue work successor can only be prepared from a Completed generation; Blocked requires an explicit fresh linked-owner launch",
+                    SuccessorPredecessorStatus::Blocked =>
+                        "a fresh linked-owner launch successor can only be prepared from a Blocked generation",
+                },
             ));
         }
         let predecessor_head = effective_generation_head_hash(&ledger, &predecessor);
         let attempt = ContinuationAttempt {
             request: request.clone(),
+            predecessor_status,
             worktree_binding_hash: context.worktree_binding_hash.clone(),
             predecessor: predecessor.identity.clone(),
             predecessor_generation_content_hash: predecessor_head,
@@ -3430,10 +3577,11 @@ pub fn activate_successor(
         let predecessor_head = effective_generation_head_hash(&ledger, &predecessor);
         if predecessor.identity != latest.predecessor
             || predecessor_head != latest.predecessor_generation_content_hash
-            || ledger.effective_status_for(&predecessor) != ExecutionControlStatus::Completed
+            || ledger.effective_status_for(&predecessor)
+                != successor_predecessor_execution_status(latest.predecessor_status)
         {
             return Err(generation_conflict(
-                "successor activation CAS lost: current generation changed or is not Completed",
+                "successor activation CAS lost: current generation or authorized terminal status changed",
             ));
         }
 
@@ -4876,6 +5024,132 @@ mod tests {
                 .continuation_attempts
                 .is_empty(),
             "Blocked remains execution.reopen-only and must not leave a Prepared attempt"
+        );
+    }
+
+    #[test]
+    fn generation_ledger_fresh_launch_abort_preserves_blocked_predecessor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut blocked = active_record("session-blocked");
+        blocked.owner_number = owner.number;
+        blocked.status = ExecutionControlStatus::Blocked;
+        blocked.blocked_reason = Some("legacy terminal blocker".to_string());
+        blocked.settled_at = Some(Utc::now());
+        save(dir.path(), &blocked).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+        let before = load_generation_ledger(dir.path(), owner)
+            .unwrap()
+            .expect("blocked ledger");
+        let predecessor = before.current_generation().unwrap().clone();
+        let predecessor_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .expect("blocked binding");
+        let request = successor_request(
+            "fresh-operation-abort",
+            "gwt-host-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+
+        let prepared =
+            prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request).unwrap();
+        assert_eq!(
+            prepared.predecessor_status,
+            SuccessorPredecessorStatus::Blocked
+        );
+        let _planned = prepared_successor_execution_binding(dir.path(), owner, &request).unwrap();
+        abort_successor(dir.path(), owner, &request, "candidate readiness failed").unwrap();
+
+        let after = load_generation_ledger(dir.path(), owner)
+            .unwrap()
+            .expect("ledger after abort");
+        assert_eq!(after.generations, before.generations);
+        assert_eq!(after.current_generation_id, before.current_generation_id);
+        assert_eq!(
+            after.current_generation().unwrap().execution_control_json,
+            predecessor.execution_control_json,
+            "abort must preserve the exact terminal predecessor projection bytes",
+        );
+        assert_eq!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(predecessor_binding),
+            "abort must leave the Blocked predecessor binding current",
+        );
+        assert_eq!(after.continuation_attempts.len(), 2);
+        assert_eq!(
+            after.continuation_attempts.last().unwrap().status,
+            ContinuationAttemptStatus::Aborted
+        );
+    }
+
+    #[test]
+    fn generation_ledger_fresh_launch_activation_preserves_terminal_history_and_fences_old_binding()
+    {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut blocked = active_record("session-blocked");
+        blocked.owner_number = owner.number;
+        blocked.status = ExecutionControlStatus::Blocked;
+        blocked.blocked_reason = Some("legacy terminal blocker".to_string());
+        blocked.settled_at = Some(Utc::now());
+        save(dir.path(), &blocked).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
+        let before = load_generation_ledger(dir.path(), owner)
+            .unwrap()
+            .expect("blocked ledger");
+        let predecessor = before.current_generation().unwrap().clone();
+        let predecessor_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .expect("blocked binding");
+        let request = successor_request(
+            "fresh-operation-activate",
+            "gwt-host-launch",
+            FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request).unwrap();
+        let planned = prepared_successor_execution_binding(dir.path(), owner, &request).unwrap();
+
+        let activated = activate_successor(dir.path(), owner, &request).unwrap();
+
+        let after = load_generation_ledger(dir.path(), owner)
+            .unwrap()
+            .expect("ledger after activation");
+        assert_eq!(after.generations.len(), before.generations.len() + 1);
+        assert_eq!(after.generations[0], predecessor);
+        assert_eq!(after.current_generation_id, activated.generation_id);
+        assert_eq!(
+            after.current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+        assert_eq!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(planned)
+        );
+        assert_ne!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(predecessor_binding),
+            "the terminal predecessor binding must be stale after fresh activation",
+        );
+        assert_eq!(
+            after.generations[0].execution_control_json,
+            before.generations[0].execution_control_json,
+            "fresh activation must not rewrite the terminal predecessor snapshot",
         );
     }
 
