@@ -2394,3 +2394,269 @@ fn blocks_write_outside_worktree_non_plan_paths_without_owner() {
         .permission_decision_reason()
         .contains("Owner Issue/SPEC"));
 }
+
+// ---- #3265: intake/ownerless read-only compound, transport, and heredoc
+// false positives ----
+
+#[test]
+fn allows_read_only_semicolon_compound_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "command -v gwtd; ls -la .gwt; echo ready" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "semicolon-joined read-only commands must stay allowed"
+    );
+}
+
+#[test]
+fn allows_read_only_newline_compound_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "command -v gwtd\nls -la .gwt\necho ready" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "newline-joined read-only commands must stay allowed"
+    );
+}
+
+#[test]
+fn blocks_newline_chained_mutation_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "echo ready\ngit commit -m 'fix: hidden mutation'" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("newline-chained mutation must be blocked like `&&` chaining");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_jq_to_gwtd_pipeline_without_owner() {
+    // gwt-register-spec builds the envelope with jq and pipes it into gwtd;
+    // the pipe is transport, equivalent to the sanctioned heredoc envelope.
+    let event = event(
+        "Bash",
+        json!({ "command": r#"jq -n --rawfile body .gwt/work/register-spec/body.md '{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: x","body":$body}}' | gwtd"# }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "jq -> gwtd envelope pipeline is transport and must not be owner-gated"
+    );
+}
+
+#[test]
+fn allows_read_only_pipe_into_gwt_bin_variable_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "cat .gwt/work/register-spec/envelope.json | \"$GWT_BIN\"" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "piping a prepared envelope into the resolved gwtd binary is transport"
+    );
+}
+
+#[test]
+fn blocks_mutating_segment_piped_into_gwtd_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "sed -i 's/a/b/' src/lib.rs | gwtd" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("a mutating producer segment must not hide behind gwtd transport");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_redirect_into_worktree_dot_gwt_without_owner() {
+    for command in [
+        r#"jq -n '{"title":"x"}' > .gwt/work/register-spec/envelope.json"#,
+        "echo checkpoint >> .gwt/work/register-spec/progress.log",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "redirects into worktree-local .gwt/ are bookkeeping: {command}"
+        );
+    }
+}
+
+#[test]
+fn allows_redirect_into_absolute_dot_gwt_under_worktree_without_owner() {
+    let command = format!(
+        "jq -n '{{}}' > {}/.gwt/work/register-spec/envelope.json",
+        root().display()
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "absolute .gwt/ paths under the worktree are bookkeeping"
+    );
+}
+
+#[test]
+fn blocks_redirect_escaping_dot_gwt_via_parent_traversal_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "jq -n '{}' > .gwt/../src/generated.rs" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("parent traversal must not smuggle writes out of .gwt/");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_redirect_outside_dot_gwt_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "jq -n '{}' > src/generated.rs" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("redirects outside .gwt/ still mutate the worktree");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_heredoc_envelope_with_shell_symbols_in_body_without_owner() {
+    // Reproduces the #3265 issue.create block: the JSON payload quotes shell
+    // snippets (pipes, semicolons, redirects, heredoc markers). Those are
+    // data, not command structure, and must not trip the lexical scan.
+    let command = json_envelope_command(
+        "issue.create",
+        json!({
+            "title": "bug: repro snippets",
+            "body": "Repro: `jq -n '{}' | gwtd`; then `cat out > .gwt/x.json` and `gwtd <<'JSON' ... JSON`",
+            "labels": ["bug"],
+        }),
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "shell symbols inside the heredoc JSON payload are data, not commands"
+    );
+}
+
+#[test]
+fn blocks_mutation_chained_after_heredoc_envelope_with_shell_symbols() {
+    let command = format!(
+        "{}\n&& git commit -m 'fix: hidden mutation'",
+        json_envelope_command(
+            "issue.create",
+            json!({ "title": "bug", "body": "snippet: a | b > c" }),
+        )
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("masking heredoc bodies must not hide real chained mutations");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_quoted_redirect_text_in_read_only_command_without_owner() {
+    let event = event("Bash", json!({ "command": "grep -n \"a>b\" README.md" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "a quoted `>` is search text, not an output redirection"
+    );
+}
+
+#[test]
+fn blocks_pipeline_into_tee_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git log --oneline | tee log.txt" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("tee writes the worktree and stays owner-gated");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_envelope_with_marker_line_redirect_without_owner() {
+    // The shell-valid spelling puts the redirect on the marker line, so the
+    // heredoc body is terminated and masks to a lone `gwtd` segment. Capturing
+    // an envelope's output into a file is still a worktree write.
+    let command = "gwtd <<'JSON' > output.json\n{\"schema_version\":1,\"operation\":\"issue.create\",\"params\":{\"title\":\"x\"}}\nJSON";
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("an envelope that redirects its output into the worktree needs an owner");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_mutation_chained_after_dot_gwt_redirect_without_owner() {
+    // The redirect gate is command-wide; the per-segment pass must still catch
+    // the mutation that follows an allowed bookkeeping redirect.
+    let event = event(
+        "Bash",
+        json!({ "command": r#"jq -n '{}' > .gwt/work/x.json && git commit -m 'fix: hidden'"# }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("a bookkeeping redirect must not whitelist a chained mutation");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_redirects_that_escape_dot_gwt_through_shell_expansion_without_owner() {
+    for command in [
+        r#"jq -n '{}' > .gwt/'..'/src/generated.rs"#,
+        r#"jq -n '{}' > .gwt/"../"src/generated.rs"#,
+        r#"jq -n '{}' > .gwt/\../src/generated.rs"#,
+        r#"jq -n '{}' > .gwt/$OUT"#,
+        r#"jq -n '{}' > .gwt/skill-state/execution-control.json"#,
+        r#"echo pwn >&2src.txt"#,
+        r#"echo $'a\'b' > src/generated.rs"#,
+    ] {
+        let decision = evaluate(
+            &event("Bash", json!({ "command": command })),
+            workflow_policy::WorkflowContext::unknown(),
+        )
+        .unwrap_or_else(|| panic!("redirect must stay owner-gated: {command}"));
+        assert!(
+            decision
+                .permission_decision_reason()
+                .contains("Owner Issue/SPEC"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn allows_leading_comment_line_before_read_only_pipeline_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "# stage the envelope\njq -n '{}' | gwtd" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "a leading shell comment must not poison classification"
+    );
+}
