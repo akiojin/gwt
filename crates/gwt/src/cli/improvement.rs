@@ -4303,8 +4303,7 @@ mod tests {
     fn independent_machine_stores_converge_after_delayed_duplicate_visibility() {
         use gwt_github::client::{
             fake::FakeIssueClient, IssueNumber, IssueState, OwnerRepositoryClient,
-            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind,
-            UpdatedAt,
+            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, UpdatedAt,
         };
 
         let home_a = tempfile::tempdir().expect("machine A home");
@@ -4426,9 +4425,7 @@ mod tests {
     #[test]
     fn reconciliation_failure_stops_then_retry_reuses_exact_comment() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
-        use gwt_github::client::{
-            IssueNumber, OwnerRepositoryClient, RepositoryIdentity,
-        };
+        use gwt_github::client::{IssueNumber, OwnerRepositoryClient, RepositoryIdentity};
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4600,9 +4597,7 @@ mod tests {
     #[test]
     fn reconciliation_post_submit_unknown_adopts_comment_before_close_retry() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
-        use gwt_github::client::{
-            IssueNumber, OwnerRepositoryClient, RepositoryIdentity,
-        };
+        use gwt_github::client::{IssueNumber, OwnerRepositoryClient, RepositoryIdentity};
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
