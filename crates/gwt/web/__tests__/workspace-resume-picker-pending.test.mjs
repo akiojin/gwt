@@ -38,15 +38,25 @@ function createFixture() {
   return { document, modalEl, dialogEl, createNode };
 }
 
-function createPicker(fixture, { sent = [], launchPending } = {}) {
-  return createWorkspaceResumePickerController({
+function createPicker(fixture, { sent = [], launchPending, createOperationId } = {}) {
+  const defaultOperationId = createOperationId ? "" : "resume-operation-test";
+  const controller = createWorkspaceResumePickerController({
     modalEl: fixture.modalEl,
     dialogEl: fixture.dialogEl,
     createNode: fixture.createNode,
     send: (message) => sent.push(message),
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
+    createOperationId: createOperationId || (() => defaultOperationId),
   });
+  if (!defaultOperationId) return controller;
+  const correlated = (event) => ({ operation_id: defaultOperationId, ...event });
+  return {
+    ...controller,
+    handleAgentsList: (event) => controller.handleAgentsList(correlated(event)),
+    handleStarted: (event) => controller.handleStarted(correlated(event)),
+    handleError: (event) => controller.handleError(correlated(event)),
+  };
 }
 
 const sampleAgent = {
@@ -220,6 +230,35 @@ test("picker ignores a stale agents list from another Workspace", () => {
   );
 });
 
+test("picker ignores an earlier list response after reopening the same Workspace", () => {
+  const fixture = createFixture();
+  const operationIds = ["list-operation-1", "list-operation-2"];
+  const picker = createPicker(fixture, {
+    createOperationId: () => operationIds.shift(),
+  });
+
+  assert.equal(picker.open("workspace-1"), "list-operation-1");
+  assert.equal(picker.open("workspace-1"), "list-operation-2");
+  picker.handleAgentsList({
+    operation_id: "list-operation-1",
+    workspace_id: "workspace-1",
+    agents: [sampleAgent],
+  });
+  assert.equal(
+    fixture.dialogEl.querySelectorAll(".workspace-resume-picker-row").length,
+    0,
+  );
+  picker.handleAgentsList({
+    operation_id: "list-operation-2",
+    workspace_id: "workspace-1",
+    agents: [sampleAgent],
+  });
+  assert.equal(
+    fixture.dialogEl.querySelectorAll(".workspace-resume-picker-row").length,
+    1,
+  );
+});
+
 test("picker settles only the exact pending Session response", () => {
   const fixture = createFixture();
   const picker = createPicker(fixture);
@@ -254,6 +293,70 @@ test("picker settles only the exact pending Session response", () => {
     true,
     "an unsolicited success without a pending request must be ignored",
   );
+});
+
+test("same-Session retry ignores the timed-out operation's late response", () => {
+  const fixture = createFixture();
+  const sent = [];
+  let timeoutCallback = null;
+  const operationIds = [
+    "list-operation-1",
+    "resume-operation-1",
+    "resume-operation-2",
+  ];
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: (callback) => {
+      timeoutCallback = callback;
+      return operationIds.length;
+    },
+    clearTimeoutFn: () => {},
+  });
+  const picker = createPicker(fixture, {
+    sent,
+    launchPending,
+    createOperationId: () => operationIds.shift(),
+  });
+
+  picker.open("workspace-1");
+  picker.handleAgentsList({
+    operation_id: "list-operation-1",
+    workspace_id: "workspace-1",
+    agents: [sampleAgent],
+  });
+  fixture.dialogEl.querySelector(".workspace-resume-picker-row").click();
+  assert.equal(sent[0].operation_id, "resume-operation-1");
+
+  timeoutCallback();
+  picker.render();
+  fixture.dialogEl.querySelector(".workspace-resume-picker-row").click();
+  assert.equal(sent[1].operation_id, "resume-operation-2");
+
+  const staleError = {
+    session_id: "work-1",
+    operation_id: "resume-operation-1",
+    message: "Old request failed",
+  };
+  picker.handleError(staleError);
+  assert.equal(launchPending.settleAck(staleError), false);
+  assert.doesNotMatch(fixture.dialogEl.textContent, /Old request failed/);
+  assert.equal(launchPending.isPending("session:work-1"), true);
+
+  const stale = {
+    session_id: "work-1",
+    operation_id: "resume-operation-1",
+  };
+  picker.handleStarted(stale);
+  assert.equal(launchPending.settleAck(stale), false);
+  assert.equal(fixture.modalEl.classList.contains("open"), true);
+  assert.equal(launchPending.isPending("session:work-1"), true);
+
+  const current = {
+    session_id: "work-1",
+    operation_id: "resume-operation-2",
+  };
+  picker.handleStarted(current);
+  launchPending.settleAck(current);
+  assert.equal(fixture.modalEl.classList.contains("open"), false);
 });
 
 test("shared pending timeout re-enables the picker and ignores its late ack", () => {

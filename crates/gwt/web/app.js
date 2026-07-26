@@ -38,6 +38,7 @@
         createContinueWorkDispatcher,
         createLaunchPendingController,
         isStrongContinueWorkSuccess,
+        launchTimeoutNotice,
       } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
@@ -4032,6 +4033,15 @@
           const notice = launchPending.consumeTimeoutNotice();
           if (notice) {
             console.warn("[launch-pending]", notice);
+            const timeout = launchTimeoutNotice(notice);
+            if (timeout) {
+              alertsToasts.push({
+                id: `launch-timeout-${Date.now()}`,
+                ...timeout,
+                dismissible: true,
+                timeoutMs: 0,
+              });
+            }
           }
         },
       });

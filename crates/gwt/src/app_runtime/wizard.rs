@@ -728,12 +728,14 @@ impl AppRuntime {
     pub(crate) fn list_resumable_agents_events(
         &mut self,
         client_id: &str,
+        operation_id: String,
         workspace_id: Option<String>,
     ) -> Vec<OutboundEvent> {
         let agents = self.collect_resumable_agents(workspace_id.as_deref());
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::WorkspaceResumableAgents {
+                operation_id,
                 agents,
                 workspace_id,
             },
@@ -743,6 +745,7 @@ impl AppRuntime {
     pub(crate) fn resume_workspace_agent_events(
         &mut self,
         client_id: &str,
+        operation_id: String,
         session_id: String,
         agent_session_id: Option<String>,
         bounds: WindowGeometry,
@@ -751,6 +754,7 @@ impl AppRuntime {
             vec![OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentError {
+                    operation_id: operation_id.clone(),
                     session_id: session_id.clone(),
                     message,
                 },
@@ -762,6 +766,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentStarted {
+                    operation_id: operation_id.clone(),
                     session_id: session_id.to_string(),
                     branch,
                 },
@@ -1041,6 +1046,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentStarted {
+                    operation_id: String::new(),
                     session_id,
                     branch: Some(branch),
                 },

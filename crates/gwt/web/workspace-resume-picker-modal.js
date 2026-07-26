@@ -6,6 +6,7 @@
 // Execution generation; Work-level Continue work owns that transition.
 
 import { createFocusTrap } from "./focus-trap.js";
+import { createLaunchOperationId } from "./launch-pending-controller.js";
 
 function isInspectionResumeCandidate(agent) {
   return Boolean(agent?.session_id) && agent.resume_kind !== "metadata_only";
@@ -301,16 +302,19 @@ export function createWorkspaceResumePickerController({
   send,
   getResumeBounds,
   launchPending,
+  createOperationId = () => createLaunchOperationId("resume"),
 }) {
   const state = {
     open: false,
     agents: [],
     workspaceId: null,
+    listOperationId: null,
     error: "",
     // SPEC-2359 W-17 (FR-398): session id of the in-flight resume. The modal
     // stays open in a pending state until the backend acks
     // (`workspace_resume_agent_started`) or errors — no optimistic close.
     pendingSessionId: null,
+    pendingOperationId: null,
   };
 
   function reconcilePendingTimeout() {
@@ -323,6 +327,7 @@ export function createWorkspaceResumePickerController({
       return;
     }
     state.pendingSessionId = null;
+    state.pendingOperationId = null;
     state.error = "Opening this Session timed out; check the connection and retry.";
   }
 
@@ -330,8 +335,10 @@ export function createWorkspaceResumePickerController({
     state.open = false;
     state.agents = [];
     state.workspaceId = null;
+    state.listOperationId = null;
     state.error = "";
     state.pendingSessionId = null;
+    state.pendingOperationId = null;
     render();
   }
 
@@ -345,9 +352,19 @@ export function createWorkspaceResumePickerController({
       render();
       return;
     }
+    const operationId = String(createOperationId?.() || "").trim();
+    if (!operationId) {
+      state.error = "Cannot create a Resume request identifier.";
+      render();
+      return;
+    }
     if (
       launchPending
-      && !launchPending.begin(`session:${agent.session_id}`, "Inspect session")
+      && !launchPending.begin(
+        `session:${agent.session_id}`,
+        "Inspect session",
+        operationId,
+      )
     ) {
       // The same Session is already opening from another surface.
       return;
@@ -355,11 +372,13 @@ export function createWorkspaceResumePickerController({
     if (typeof send === "function") {
       send({
         kind: "resume_workspace_agent",
+        operation_id: operationId,
         session_id: agent.session_id,
         bounds,
       });
     }
     state.pendingSessionId = agent.session_id;
+    state.pendingOperationId = operationId;
     render();
   }
 
@@ -378,11 +397,14 @@ export function createWorkspaceResumePickerController({
   return {
     isOpen: () => state.open,
     open: (workspaceId) => {
+      const operationId = String(createOperationId?.() || "").trim();
       state.open = true;
       state.agents = [];
       state.workspaceId = workspaceId ?? null;
+      state.listOperationId = operationId;
       state.error = "";
       render();
+      return operationId;
     },
     handleAgentsList: (event) => {
       if (!state.open) {
@@ -392,7 +414,10 @@ export function createWorkspaceResumePickerController({
         return;
       }
       const eventWorkspaceId = event?.workspace_id ?? null;
-      if (eventWorkspaceId !== state.workspaceId) {
+      if (
+        eventWorkspaceId !== state.workspaceId
+        || String(event?.operation_id || "") !== state.listOperationId
+      ) {
         return;
       }
       state.agents = Array.isArray(event?.agents) ? event.agents : [];
@@ -404,7 +429,11 @@ export function createWorkspaceResumePickerController({
     handleStarted: (event) => {
       const sessionId = event?.session_id;
       if (!state.open) return;
-      if (!state.pendingSessionId || sessionId !== state.pendingSessionId) {
+      if (
+        !state.pendingSessionId
+        || sessionId !== state.pendingSessionId
+        || String(event?.operation_id || "") !== state.pendingOperationId
+      ) {
         return;
       }
       close();
@@ -415,10 +444,12 @@ export function createWorkspaceResumePickerController({
         !state.open
         || !state.pendingSessionId
         || sessionId !== state.pendingSessionId
+        || String(event?.operation_id || "") !== state.pendingOperationId
       ) {
         return;
       }
       state.pendingSessionId = null;
+      state.pendingOperationId = null;
       state.error = event?.message || "Failed to open the selected session for inspection.";
       render();
     },

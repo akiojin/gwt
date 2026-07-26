@@ -1,3 +1,5 @@
+import { createLaunchOperationId } from "./launch-pending-controller.js";
+
 export function createWorkspaceKanbanSurface({
   activeWorkspace,
   agentStatusLabel,
@@ -1037,17 +1039,33 @@ export function createWorkspaceKanbanSurface({
     button.dataset.action = "continue-work";
     button.dataset.workId = workId;
     if (launchPending?.isPending(`continue:${workId}`)) {
-      button.disabled = true;
+      // Keep the replacement control focusable so keyboard focus survives
+      // this render. Native `disabled` buttons cannot receive focus in a real
+      // browser; aria-disabled plus the click guard below preserves both the
+      // pending semantics and the no-double-send contract.
+      button.setAttribute("aria-disabled", "true");
+      button.setAttribute("aria-busy", "true");
       button.textContent = "Continuing...";
       button.classList.add("is-pending");
     }
     button.addEventListener("click", () => {
+      if (launchPending?.isPending(`continue:${workId}`)) {
+        return;
+      }
       const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
       if (!bounds || typeof continueWork !== "function") {
         return;
       }
       if (continueWork(workId, bounds)) {
+        const focusRoot = button.closest?.(".window") || button.ownerDocument;
         renderWindows(true);
+        const replacement = Array.from(
+          focusRoot?.querySelectorAll?.("[data-action='continue-work']") || [],
+        ).find((candidate) => candidate.dataset.workId === workId);
+        if (replacement && typeof replacement.focus === "function") {
+          try { replacement.focus({ preventScroll: true }); }
+          catch { replacement.focus(); }
+        }
       }
     });
     container.appendChild(button);
@@ -1132,18 +1150,20 @@ export function createWorkspaceKanbanSurface({
     if (!bounds) {
       return;
     }
+    const operationId = createLaunchOperationId("resume");
     // resume_workspace_agent loads the launch config from the gwt session id
     // (the Work) and resumes the specific conversation named by
     // agent_session_id (this Session row).
     if (
       launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Resume")
+      && !launchPending.begin(workPendingKey(sessionId), "Resume", operationId)
     ) {
       return;
     }
     const agentSessionId = session && session.agent_session_id ? session.agent_session_id : null;
     send({
       kind: "resume_workspace_agent",
+      operation_id: operationId,
       session_id: sessionId,
       agent_session_id: agentSessionId,
       bounds,
@@ -1301,11 +1321,13 @@ export function createWorkspaceKanbanSurface({
 
   function resumeWorkspace(workspace) {
     const workspaceId = workspace?.id ?? null;
+    let operationId = "";
     if (typeof openWorkspaceResumePicker === "function") {
-      openWorkspaceResumePicker(workspaceId);
+      operationId = String(openWorkspaceResumePicker(workspaceId) || "");
     }
     send({
       kind: "list_resumable_agents",
+      operation_id: operationId,
       workspace_id: workspaceId ?? undefined,
     });
   }

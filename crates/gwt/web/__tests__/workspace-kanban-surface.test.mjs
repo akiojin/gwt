@@ -809,6 +809,7 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   resumes[0].click();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.match(sent[0].operation_id, /^resume-/);
   assert.equal(sent[0].session_id, "work-launch-1");
   assert.equal(sent[0].agent_session_id, "conv-latest2222");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
@@ -2856,16 +2857,62 @@ test("Continue work click marks the Work pending and a re-click does not re-send
   const pendingButton = fixture.body.querySelector("[data-action='continue-work']");
   assert.equal(
     pendingButton.disabled,
-    true,
-    "the click-driven re-render exposes the correlated pending state",
+    false,
+    "the pending replacement stays natively focusable",
   );
+  assert.equal(pendingButton.getAttribute("aria-disabled"), "true");
+  assert.equal(pendingButton.getAttribute("aria-busy"), "true");
   assert.match(pendingButton.textContent, /Continuing/);
 
   pendingButton.click();
   assert.equal(sent.length, 1, "re-click while pending must not re-send");
 });
 
-test("a pending Work renders its Continue work button disabled with progress label", () => {
+test("Continue work keeps keyboard focus on the pending replacement action", () => {
+  const projection = continuationProjection();
+  const fixture = createFixture();
+  let activeElement = null;
+  Object.defineProperty(fixture.document, "activeElement", {
+    configurable: true,
+    get: () => activeElement,
+  });
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  const dispatcher = createContinueWorkDispatcher({
+    launchPending,
+    send() {},
+    createOperationId: () => "continue-operation-focus",
+  });
+  const surface = createSurface(fixture, projection, {
+    continueWork: dispatcher.dispatch,
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+    createNode: (tag, className, text) => {
+      const node = createNode(fixture.document, tag, className, text);
+      node.focus = () => {
+        activeElement = node;
+      };
+      return node;
+    },
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  const button = fixture.body.querySelector("[data-action='continue-work']");
+  button.focus();
+  button.click();
+
+  assert.equal(activeElement?.dataset?.action, "continue-work");
+  assert.equal(activeElement?.dataset?.workId, "work-opaque-1");
+  assert.equal(activeElement?.disabled, false);
+  assert.equal(activeElement?.getAttribute("aria-disabled"), "true");
+});
+
+test("a pending Work renders focusable disabled semantics with progress label", () => {
   const projection = continuationProjection();
   const fixture = createFixture();
   const launchPending = createLaunchPendingController({
@@ -2890,6 +2937,8 @@ test("a pending Work renders its Continue work button disabled with progress lab
 
   const continueButton = fixture.body.querySelector("[data-action='continue-work']");
   assert.ok(continueButton, "Continue work control still renders while pending");
-  assert.equal(continueButton.disabled, true, "pending Work disables Continue work");
+  assert.equal(continueButton.disabled, false, "pending Work remains focusable");
+  assert.equal(continueButton.getAttribute("aria-disabled"), "true");
+  assert.equal(continueButton.getAttribute("aria-busy"), "true");
   assert.match(continueButton.textContent, /Continuing/);
 });

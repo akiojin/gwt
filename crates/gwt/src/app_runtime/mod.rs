@@ -2419,16 +2419,22 @@ impl AppRuntime {
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(&client_id, source, journal_id)
             }
-            FrontendEvent::ListResumableAgents { workspace_id } => {
-                self.list_resumable_agents_events(&client_id, workspace_id)
-            }
+            FrontendEvent::ListResumableAgents {
+                operation_id,
+                workspace_id,
+            } => self.list_resumable_agents_events(&client_id, operation_id, workspace_id),
             FrontendEvent::ResumeWorkspaceAgent {
+                operation_id,
                 session_id,
                 agent_session_id,
                 bounds,
-            } => {
-                self.resume_workspace_agent_events(&client_id, session_id, agent_session_id, bounds)
-            }
+            } => self.resume_workspace_agent_events(
+                &client_id,
+                operation_id,
+                session_id,
+                agent_session_id,
+                bounds,
+            ),
             FrontendEvent::ContinueWork {
                 operation_id,
                 work_id,

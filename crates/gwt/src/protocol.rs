@@ -601,6 +601,9 @@ pub enum FrontendEvent {
     /// which previous agent to restart without going through the Launch
     /// Wizard.
     ListResumableAgents {
+        /// Retry correlation only; this value grants no authority.
+        #[serde(default)]
+        operation_id: String,
         #[serde(default)]
         workspace_id: Option<String>,
     },
@@ -615,6 +618,9 @@ pub enum FrontendEvent {
     /// current viewport so the spawned agent window appears at a sensible
     /// position inside the visible canvas.
     ResumeWorkspaceAgent {
+        /// Retry correlation only; this value grants no authority.
+        #[serde(default)]
+        operation_id: String,
         session_id: String,
         #[serde(default)]
         agent_session_id: Option<String>,
@@ -1842,6 +1848,8 @@ pub enum BackendEvent {
     /// so the picker modal can render an explicit "Nothing to resume"
     /// notice instead of silently leaving the user without feedback.
     WorkspaceResumableAgents {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         agents: Vec<crate::launch_wizard::ResumableAgentView>,
         #[serde(skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
@@ -1850,6 +1858,8 @@ pub enum BackendEvent {
     /// Client-scoped reply so the picker modal can keep itself open and
     /// re-enable the selected entry with the user-facing reason.
     WorkspaceResumeAgentError {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         session_id: String,
         message: String,
     },
@@ -1858,6 +1868,8 @@ pub enum BackendEvent {
     /// focused. Lets the frontend settle its pending Resume UI
     /// deterministically instead of guessing from broadcasts.
     WorkspaceResumeAgentStarted {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         session_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
@@ -3175,6 +3187,50 @@ mod tests {
             policy.backpressure,
             BackendEventBackpressurePolicy::FailOpenError
         );
+    }
+
+    #[test]
+    fn workspace_resume_agent_wire_contract_echoes_operation_correlation() {
+        let list_request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "list_resumable_agents",
+            "operation_id": "list-operation-1",
+            "workspace_id": "workspace-1"
+        }))
+        .expect("deserialize correlated list request");
+        assert!(matches!(
+            list_request,
+            FrontendEvent::ListResumableAgents { operation_id, .. }
+                if operation_id == "list-operation-1"
+        ));
+
+        let list = serde_json::to_value(BackendEvent::WorkspaceResumableAgents {
+            operation_id: "list-operation-1".to_string(),
+            agents: Vec::new(),
+            workspace_id: Some("workspace-1".to_string()),
+        })
+        .expect("serialize correlated list response");
+        assert_eq!(list["operation_id"], "list-operation-1");
+
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "resume_workspace_agent",
+            "operation_id": "resume-operation-1",
+            "session_id": "session-1",
+            "bounds": { "x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0 }
+        }))
+        .expect("deserialize correlated Resume request");
+        assert!(matches!(
+            request,
+            FrontendEvent::ResumeWorkspaceAgent { operation_id, .. }
+                if operation_id == "resume-operation-1"
+        ));
+
+        let started = serde_json::to_value(BackendEvent::WorkspaceResumeAgentStarted {
+            operation_id: "resume-operation-1".to_string(),
+            session_id: "session-1".to_string(),
+            branch: None,
+        })
+        .expect("serialize correlated Resume ack");
+        assert_eq!(started["operation_id"], "resume-operation-1");
     }
 
     #[test]

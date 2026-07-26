@@ -12,8 +12,13 @@ import {
   createContinueWorkDispatcher,
   createLaunchPendingController,
   isStrongContinueWorkSuccess,
+  launchTimeoutNotice,
   LAUNCH_PENDING_TIMEOUT_MS,
 } from "../launch-pending-controller.js";
+
+const APP_SOURCE = await import("node:fs").then(({ readFileSync }) =>
+  readFileSync(new URL("../app.js", import.meta.url), "utf8")
+);
 
 function createFakeTimers() {
   const timers = new Map();
@@ -70,6 +75,23 @@ test("settleAck clears pending by session id and by branch", () => {
   assert.equal(timers.size(), 0, "settling clears the timeout timers");
 });
 
+test("settleAck ignores an earlier operation for the same Session retry", () => {
+  const timers = createFakeTimers();
+  const controller = createLaunchPendingController(timers);
+
+  controller.begin("session:work-1", "Resume", "resume-operation-2");
+
+  assert.equal(controller.settleAck({
+    session_id: "work-1",
+    operation_id: "resume-operation-1",
+  }), false);
+  assert.equal(controller.isPending("session:work-1"), true);
+  assert.equal(controller.settleAck({
+    session_id: "work-1",
+    operation_id: "resume-operation-2",
+  }), true);
+});
+
 test("settleWhere clears every key with the given prefix", () => {
   const timers = createFakeTimers();
   const controller = createLaunchPendingController(timers);
@@ -108,6 +130,20 @@ test("timeout clears the pending entry and surfaces a one-shot notice", () => {
     controller.consumeTimeoutNotice(),
     "",
     "notice is one-shot — consuming clears it",
+  );
+});
+
+test("launch timeout maps to a sticky visible error toast in the app shell", () => {
+  assert.deepEqual(launchTimeoutNotice("Continue work request timed out"), {
+    level: "error",
+    title: "Launch timed out",
+    message: "Continue work request timed out",
+  });
+  assert.match(APP_SOURCE, /launchTimeoutNotice\(notice\)/);
+  assert.match(
+    APP_SOURCE,
+    /id:\s*`launch-timeout-/,
+    "the timeout notice must reach the shared visible toast stack",
   );
 });
 

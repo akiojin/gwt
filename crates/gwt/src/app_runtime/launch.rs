@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use super::continuation::pending_execution_activation_status;
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
@@ -1402,12 +1403,26 @@ impl AppRuntime {
         }
     }
 
-    fn launch_error_events_with_continue_work(
+    pub(super) fn launch_error_events_with_continue_work(
         &mut self,
         window_id: String,
         detail: String,
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
+        // Activation is the irreversible continuation commit. Reconcile its
+        // exact durable/live state before the generic launch-error path can
+        // tear down the pane, Session, or capability needed for readback and
+        // waiter fan-out. An uncertain readback intentionally leaves the
+        // pending receipt intact for the correlated retry path.
+        if let Some(pending) = self.pending_continue_work.get(&window_id) {
+            match pending_execution_activation_status(pending) {
+                Some(true) => {
+                    return self.continue_work_launch_failed_events(&window_id, &detail);
+                }
+                Some(false) => {}
+                None => return Vec::new(),
+            }
+        }
         let mut events =
             self.launch_error_events(window_id.clone(), detail.clone(), launch_feedback_context);
         events.extend(self.continue_work_launch_failed_events(&window_id, &detail));

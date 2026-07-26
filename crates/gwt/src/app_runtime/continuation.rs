@@ -480,7 +480,7 @@ fn session_matches_project_state(session: &gwt_agent::Session, project_root: &Pa
     path_matches(&project_anchor, &session_anchor)
 }
 
-fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
+pub(super) fn pending_execution_activation_status(pending: &PendingContinueWork) -> Option<bool> {
     match &pending.execution {
         PendingContinueWorkExecution::Successor(_) => {
             gwt::cli::execution_state::continuation_attempt_for_operation(
@@ -489,9 +489,11 @@ fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
                 &pending.operation_id,
             )
             .ok()
-            .flatten()
-            .is_some_and(|attempt| {
-                attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+                })
             })
         }
         PendingContinueWorkExecution::Takeover(_) => {
@@ -501,13 +503,18 @@ fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
                 &pending.operation_id,
             )
             .ok()
-            .flatten()
-            .is_some_and(|attempt| {
-                attempt.status
-                    == gwt::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == gwt::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
+                })
             })
         }
     }
+}
+
+fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
+    pending_execution_activation_status(pending) == Some(true)
 }
 
 pub(super) fn abort_prepared_execution(
@@ -554,6 +561,104 @@ impl AppRuntime {
                 )
             })
             .collect()
+    }
+
+    fn reconcile_activated_pending_continue_work(
+        &mut self,
+        window_id: &str,
+        pending: &PendingContinueWork,
+    ) -> Option<Vec<OutboundEvent>> {
+        if !self.window_lookup.contains_key(window_id)
+            || matches!(
+                self.window_status(window_id),
+                None | Some(WindowProcessStatus::Stopped | WindowProcessStatus::Error)
+            )
+        {
+            return None;
+        }
+        let active = self.active_agent_sessions.get(window_id)?;
+        if active.session_id != pending.binding.session_id
+            || !path_matches(&active.worktree_path, &pending.worktree_path)
+        {
+            return None;
+        }
+        let token = self.agent_capability_tokens.get(window_id)?;
+        let issuer = self.agent_capability_issuer.as_ref()?;
+        if !issuer.active_token_is_current(token, &pending.binding) {
+            return None;
+        }
+        if gwt::cli::execution_state::current_execution_binding(
+            &pending.worktree_path,
+            pending.owner,
+        )
+        .ok()
+        .flatten()
+            != Some(pending.binding.identity.clone())
+        {
+            return None;
+        }
+        let probe = gwt::probe_authenticated_execution_binding(
+            &pending.project_root,
+            &pending.binding.session_id,
+            &pending.binding,
+            "continue-work-coordinator",
+            gwt::AgentExecutionBindingProbeRequest {
+                schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+                operation_id: pending.operation_id.clone(),
+                nonce: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .ok()?;
+        if probe.execution_binding != pending.binding.identity
+            || gwt::cli::execution_state::current_active_execution_binding_matches(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.predecessor_session_id,
+                &pending.predecessor_binding,
+            )
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        let work_is_active =
+            gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
+                .ok()
+                .flatten()
+                .is_some_and(|projection| {
+                    projection.work_items.iter().any(|item| {
+                        item.id == pending.work_id
+                            && item.status_category
+                                == gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+                            && item
+                                .agents
+                                .iter()
+                                .any(|agent| agent.session_id == pending.binding.session_id)
+                    })
+                });
+        if !work_is_active {
+            return None;
+        }
+
+        self.pending_continue_work.remove(window_id);
+        let outcome = CachedContinueWorkOutcome {
+            work_id: pending.work_id.clone(),
+            outcome: pending.outcome,
+            message: None,
+            error_code: None,
+            retryable: false,
+        };
+        self.continue_work_outcomes
+            .insert(pending.operation_id.clone(), outcome.clone());
+        let mut events = self.continue_work_correlated_outcome_events(
+            &pending.client_id,
+            pending.operation_id.clone(),
+            outcome,
+        );
+        events.push(self.workspace_state_broadcast());
+        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(projection);
+        }
+        Some(events)
     }
 
     fn ensure_local_active_execution_authority(
@@ -2259,10 +2364,15 @@ impl AppRuntime {
         // error or lost success delivery must be reconciled by operation
         // readback; it must never tear down or report failure for a committed
         // generation.
-        if pending_execution_is_activated(&pending) {
-            self.pending_continue_work.remove(window_id);
-            self.continue_work_waiters.remove(&pending.operation_id);
+        let Some(is_activated) = pending_execution_activation_status(&pending) else {
+            // Fail closed on an unreadable durable attempt. Teardown or abort
+            // could destroy the exact live evidence needed by a retry.
             return Vec::new();
+        };
+        if is_activated {
+            return self
+                .reconcile_activated_pending_continue_work(window_id, &pending)
+                .unwrap_or_default();
         }
         let abort_result = match &pending.execution {
             PendingContinueWorkExecution::Successor(request) => {
@@ -2314,8 +2424,9 @@ impl AppRuntime {
                     attempt.status() == DurableContinueWorkAttemptStatus::Activated
                 })
             }) {
-                self.pending_continue_work.remove(window_id);
-                return Vec::new();
+                return self
+                    .reconcile_activated_pending_continue_work(window_id, &pending)
+                    .unwrap_or_default();
             }
             if !durable.as_ref().is_ok_and(|attempt| {
                 attempt.as_ref().is_some_and(|attempt| {

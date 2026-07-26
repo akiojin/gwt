@@ -443,7 +443,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ResumeWorkspace { source, .. } => {
             FrontendUserActionLog::new("resume_workspace", "workspace").mode(format!("{source:?}"))
         }
-        FrontendEvent::ListResumableAgents { workspace_id } => {
+        FrontendEvent::ListResumableAgents { workspace_id, .. } => {
             FrontendUserActionLog::new("list_resumable_agents", "workspace")
                 .target(workspace_id.as_deref().unwrap_or_default())
         }

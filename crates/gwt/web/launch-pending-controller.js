@@ -15,11 +15,15 @@
 export const LAUNCH_PENDING_TIMEOUT_MS = 20000;
 
 function defaultContinueWorkOperationId() {
+  return createLaunchOperationId("continue");
+}
+
+export function createLaunchOperationId(prefix = "launch") {
   const random =
     typeof globalThis.crypto?.randomUUID === "function"
       ? globalThis.crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `continue-${random}`;
+  return `${prefix}-${random}`;
 }
 
 export function createLaunchPendingController({
@@ -40,14 +44,18 @@ export function createLaunchPendingController({
     }
   }
 
-  function begin(key, label) {
+  function begin(key, label, operationId = "") {
     if (!key || pending.has(key) || correlations.has(key)) return false;
     const timer = setTimeoutFn(() => {
       if (!pending.delete(key)) return;
       timeoutNotice = `${label || "Launch"} request timed out; check the connection and retry.`;
       notify();
     }, LAUNCH_PENDING_TIMEOUT_MS);
-    pending.set(key, { label: label || "", timer });
+    pending.set(key, {
+      label: label || "",
+      operationId: String(operationId || ""),
+      timer,
+    });
     notify();
     return true;
   }
@@ -107,11 +115,22 @@ export function createLaunchPendingController({
   /// `branch` — clears both key namespaces in one call.
   function settleAck(event) {
     let settled = false;
+    const settleExact = (key) => {
+      const entry = pending.get(key);
+      if (!entry) return false;
+      if (
+        entry.operationId
+        && entry.operationId !== String(event?.operation_id || "")
+      ) {
+        return false;
+      }
+      return settle(key);
+    };
     if (event && event.session_id) {
-      settled = settle(`session:${event.session_id}`) || settled;
+      settled = settleExact(`session:${event.session_id}`) || settled;
     }
     if (event && event.branch) {
-      settled = settle(`branch:${event.branch}`) || settled;
+      settled = settleExact(`branch:${event.branch}`) || settled;
     }
     return settled;
   }
@@ -180,6 +199,16 @@ export function createLaunchPendingController({
     correlatedOperation,
     retryCorrelated,
     consumeTimeoutNotice,
+  };
+}
+
+export function launchTimeoutNotice(message) {
+  const value = typeof message === "string" ? message.trim() : "";
+  if (!value) return null;
+  return {
+    level: "error",
+    title: "Launch timed out",
+    message: value,
   };
 }
 

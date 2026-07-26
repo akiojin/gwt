@@ -8378,19 +8378,30 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     runtime.continue_work_outcomes.remove(operation_id);
     runtime
         .pending_continue_work
-        .insert(window_id.clone(), committed_pending);
+        .insert(window_id.clone(), committed_pending.clone());
     runtime.continue_work_waiters.insert(
         operation_id.to_string(),
         HashSet::from(["client-after-response-loss".to_string()]),
     );
+    let late_error_events = runtime.launch_error_events_with_continue_work(
+        window_id.clone(),
+        "late PTY error after committed response loss".to_string(),
+        None,
+    );
     assert!(
-        runtime
-            .continue_work_launch_failed_events(
-                &window_id,
-                "late PTY error after committed response loss",
-            )
-            .is_empty(),
-        "a late launch error cannot roll back or report failure after Activated"
+        late_error_events.iter().any(|event| matches!(
+            (&event.target, &event.event),
+            (
+                DispatchTarget::Client(client_id),
+                BackendEvent::ContinueWorkOutcome {
+                    operation_id: emitted_operation_id,
+                    outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                    retryable: false,
+                    ..
+                }
+            ) if client_id == "client-after-response-loss" && emitted_operation_id == operation_id
+        )),
+        "an Activated late error must reconcile and fan out durable success: {late_error_events:?}"
     );
     assert!(
         !runtime.pending_continue_work.contains_key(&window_id),
@@ -8398,9 +8409,16 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     );
     assert!(
         !runtime.continue_work_waiters.contains_key(operation_id),
-        "discarding an Activated process-local receipt must not orphan reconnect waiters",
+        "the reconciled outcome must consume reconnect waiters exactly once",
     );
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(
+        !matches!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Error | WindowProcessStatus::Stopped)
+        ),
+        "durably committed response-loss recovery must not tear down the exact live pane"
+    );
     let same_host_retry = runtime.continue_work_events(
         "client-response-loss",
         operation_id.to_string(),
@@ -8415,10 +8433,31 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
             ..
         }
     )));
+    assert!(!runtime.continue_work_waiters.contains_key(operation_id));
     assert!(
         !runtime.pending_continue_work.contains_key(&window_id),
         "durable response-loss reconciliation must consume the stale pending receipt"
     );
+
+    runtime.continue_work_outcomes.remove(operation_id);
+    runtime
+        .pending_continue_work
+        .insert(window_id.clone(), committed_pending);
+    runtime.continue_work_waiters.insert(
+        operation_id.to_string(),
+        HashSet::from(["client-error-pane".to_string()]),
+    );
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Error);
+    assert!(
+        runtime
+            .continue_work_launch_failed_events(&window_id, "already-dead pane")
+            .is_empty(),
+        "a non-live pane must never be reconstructed as strong continuation success"
+    );
+    assert!(runtime.pending_continue_work.contains_key(&window_id));
+    assert!(runtime.continue_work_waiters.contains_key(operation_id));
 
     let retry_tab = sample_project_tab_with_window_at(
         "tab-retry",
@@ -13015,7 +13054,10 @@ fn app_runtime_list_resumable_agents_returns_assigned_with_session_toml() {
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::ListResumableAgents { workspace_id: None },
+        FrontendEvent::ListResumableAgents {
+            operation_id: "list-operation".to_string(),
+            workspace_id: None,
+        },
     );
 
     let event = events
@@ -13026,7 +13068,12 @@ fn app_runtime_list_resumable_agents_returns_assigned_with_session_toml() {
         DispatchTarget::Client(client_id) if client_id == "client-1"
     ));
     match &event.event {
-        BackendEvent::WorkspaceResumableAgents { agents, .. } => {
+        BackendEvent::WorkspaceResumableAgents {
+            operation_id,
+            agents,
+            ..
+        } => {
+            assert_eq!(operation_id, "list-operation");
             assert_eq!(agents.len(), 1, "single assigned agent must surface");
             assert_eq!(agents[0].session_id, session_id);
             assert!(matches!(
@@ -13075,7 +13122,10 @@ fn app_runtime_list_resumable_agents_includes_unassigned_agents_with_session_tom
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::ListResumableAgents { workspace_id: None },
+        FrontendEvent::ListResumableAgents {
+            operation_id: "list-operation".to_string(),
+            workspace_id: None,
+        },
     );
 
     match events.first().map(|outbound| &outbound.event) {
@@ -13125,7 +13175,10 @@ fn app_runtime_list_resumable_agents_includes_live_session_as_running() {
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::ListResumableAgents { workspace_id: None },
+        FrontendEvent::ListResumableAgents {
+            operation_id: "list-operation".to_string(),
+            workspace_id: None,
+        },
     );
 
     match events.first().map(|outbound| &outbound.event) {
@@ -13177,7 +13230,10 @@ fn app_runtime_list_resumable_agents_marks_idless_codex_as_native_picker() {
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::ListResumableAgents { workspace_id: None },
+        FrontendEvent::ListResumableAgents {
+            operation_id: "list-operation".to_string(),
+            workspace_id: None,
+        },
     );
 
     match events.first().map(|outbound| &outbound.event) {
@@ -13274,6 +13330,7 @@ fn app_runtime_list_resumable_agents_uses_workspace_branch_ledger_candidates() {
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ListResumableAgents {
+            operation_id: "list-operation".to_string(),
             workspace_id: Some(work_id),
         },
     );
@@ -13312,6 +13369,7 @@ fn app_runtime_resume_workspace_agent_replies_error_when_session_toml_missing() 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ResumeWorkspaceAgent {
+            operation_id: "resume-operation".to_string(),
             session_id: "missing-session".to_string(),
             agent_session_id: None,
             bounds: canvas_bounds(),
@@ -13327,8 +13385,13 @@ fn app_runtime_resume_workspace_agent_replies_error_when_session_toml_missing() 
     ));
     assert!(matches!(
         &event.event,
-        BackendEvent::WorkspaceResumeAgentError { session_id, message }
-            if session_id == "missing-session" && !message.is_empty()
+        BackendEvent::WorkspaceResumeAgentError {
+            operation_id,
+            session_id,
+            message,
+        } if operation_id == "resume-operation"
+            && session_id == "missing-session"
+            && !message.is_empty()
     ));
 }
 
@@ -13359,6 +13422,7 @@ fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ResumeWorkspaceAgent {
+            operation_id: "resume-operation".to_string(),
             session_id: "stopped-session".to_string(),
             agent_session_id: None,
             bounds: canvas_bounds(),
@@ -13370,7 +13434,7 @@ fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
         .expect("ResumeWorkspaceAgent should proceed past stopped window");
     assert!(matches!(
         &event.event,
-        BackendEvent::WorkspaceResumeAgentError { session_id, message }
+        BackendEvent::WorkspaceResumeAgentError { session_id, message, .. }
             if session_id == "stopped-session" && !message.is_empty()
     ));
 }
@@ -13396,6 +13460,7 @@ fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_w
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ResumeWorkspaceAgent {
+            operation_id: "resume-operation".to_string(),
             session_id: session.id.clone(),
             agent_session_id: None,
             bounds: canvas_bounds(),
@@ -13407,6 +13472,7 @@ fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_w
         BackendEvent::WorkspaceResumeAgentError {
             session_id,
             message,
+            ..
         } if session_id == "session-metadata-only"
             && message.contains("saved conversation")
     )));
@@ -13443,6 +13509,7 @@ fn app_runtime_resume_workspace_agent_materializes_missing_worktree_when_branch_
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ResumeWorkspaceAgent {
+            operation_id: "resume-operation".to_string(),
             session_id: "session-ghost".to_string(),
             agent_session_id: None,
             bounds: canvas_bounds(),
@@ -13452,7 +13519,11 @@ fn app_runtime_resume_workspace_agent_materializes_missing_worktree_when_branch_
     assert!(
         events.iter().any(|event| matches!(
             &event.event,
-            BackendEvent::WorkspaceResumeAgentStarted { session_id, branch: Some(started_branch) }
+            BackendEvent::WorkspaceResumeAgentStarted {
+                session_id,
+                branch: Some(started_branch),
+                ..
+            }
                 if session_id == "session-ghost" && started_branch == branch
         )),
         "branch-materializable missing worktree should enter launch materialization and ack"
@@ -13496,7 +13567,10 @@ fn app_runtime_list_resumable_agents_filters_session_when_worktree_and_branch_mi
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::ListResumableAgents { workspace_id: None },
+        FrontendEvent::ListResumableAgents {
+            operation_id: "list-operation".to_string(),
+            workspace_id: None,
+        },
     );
 
     match events.first().map(|outbound| &outbound.event) {
@@ -13547,6 +13621,7 @@ fn app_runtime_resume_workspace_agent_errors_when_live_window_runs_other_convers
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ResumeWorkspaceAgent {
+            operation_id: "resume-operation".to_string(),
             session_id: "work-live".to_string(),
             agent_session_id: Some("conv-old".to_string()),
             bounds: canvas_bounds(),
@@ -13558,7 +13633,7 @@ fn app_runtime_resume_workspace_agent_errors_when_live_window_runs_other_convers
         .expect("resume must reply on conversation conflict");
     assert!(matches!(
         &event.event,
-        BackendEvent::WorkspaceResumeAgentError { session_id, message }
+        BackendEvent::WorkspaceResumeAgentError { session_id, message, .. }
             if session_id == "work-live" && message.contains("different conversation")
     ));
 }
@@ -26576,6 +26651,7 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
 
     let events = runtime.resume_workspace_agent_events(
         "client-7",
+        "resume-operation-7".to_string(),
         session.id.clone(),
         None,
         canvas_bounds(),
@@ -26596,7 +26672,12 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
         "ack is scoped to the requesting client"
     );
     match &ack.event {
-        BackendEvent::WorkspaceResumeAgentStarted { branch, .. } => {
+        BackendEvent::WorkspaceResumeAgentStarted {
+            operation_id,
+            branch,
+            ..
+        } => {
+            assert_eq!(operation_id, "resume-operation-7");
             assert_eq!(branch.as_deref(), Some("feature/resume-ack"));
         }
         other => panic!("expected started ack, got {other:?}"),
