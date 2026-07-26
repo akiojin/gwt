@@ -10126,6 +10126,59 @@ fn app_runtime_resume_workspace_agent_replies_error_when_session_toml_missing() 
 }
 
 #[test]
+fn app_runtime_inspect_workspace_session_rejects_unresumable_conversation_without_launching() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "feature/inspect", gwt_agent::AgentId::Codex);
+    session.id = "session-inspect".to_string();
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ResumeWorkspaceAgent {
+            session_id: session.id.clone(),
+            // Codex initially reports this structural placeholder before it
+            // captures a provider conversation UUID. It is not resumable.
+            agent_session_id: Some("agent-session".to_string()),
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WorkspaceResumeAgentError { session_id, message }
+            if session_id == &session.id && message.contains("not resumable")
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::WorkspaceResumeAgentStarted { .. }
+    )));
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        0,
+        "Inspection must not turn an unresumable placeholder into a producing launch"
+    );
+}
+
+#[test]
 fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
     let _env_lock = env_test_lock()
         .lock()
