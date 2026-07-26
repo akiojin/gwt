@@ -1015,6 +1015,7 @@ impl AppRuntime {
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
                             if let Some(tab) = self.tab(&tab_id) {
+                                self.request_repo_activity_refresh_if_needed(&tab.project_root);
                                 if let Some(projection) =
                                     self.active_work_projection_for_tab(&tab_id, tab)
                                 {
@@ -2070,7 +2071,10 @@ impl AppRuntime {
             return Some(true);
         }
         let project_root = self.tab(&session.tab_id).map(|tab| &tab.project_root)?;
-        let snapshot = self.repo_activity_snapshots.get(project_root)?;
+        let snapshot = self
+            .repo_activity_snapshots
+            .get(project_root)
+            .filter(|snapshot| snapshot.is_usable(std::time::Instant::now()))?;
         dunce::canonicalize(&session.worktree_path)
             .ok()
             .map(|path| snapshot.detached_worktree_paths.contains(&path))

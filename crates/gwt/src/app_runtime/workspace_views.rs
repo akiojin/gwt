@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+use crate::UserEvent;
+
 use super::{
     active_agent_summary_from_session, current_git_branch, local_branch_exists,
     merge_active_sessions_into_projection, normalize_branch_name, origin_remote_ref,
@@ -1021,7 +1023,7 @@ pub(super) fn work_session_index(
 pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkItem,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
-    project_root: &Path,
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
         id: item.id.clone(),
@@ -1050,7 +1052,9 @@ pub(crate) fn workspace_work_item_view_from_item(
         agents: item
             .agents
             .iter()
-            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index, project_root))
+            .map(|agent| {
+                workspace_work_agent_view_from_ref(agent, session_index, session_resume_snapshot)
+            })
             .collect(),
         execution_containers: item
             .execution_containers
@@ -1070,7 +1074,7 @@ pub(crate) fn workspace_work_item_view_from_item(
 pub(super) fn workspace_work_agent_view_from_ref(
     agent: &gwt_core::workspace_projection::WorkAgentRef,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
-    project_root: &Path,
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
 ) -> gwt::WorkspaceHistoryAgentView {
     // A Work's `session_id` is the gwt session id (the launch). It keys into the
     // persisted Session whose forward-only `session_history` is the Session list
@@ -1080,7 +1084,8 @@ pub(super) fn workspace_work_agent_view_from_ref(
         .get(agent.session_id.as_str())
         .map(|session| {
             let latest = session.agent_session_id.as_deref();
-            let exact_resume_available = session_exact_resume_materializable(project_root, session);
+            let exact_resume_available =
+                session_exact_resume_materializable_from_snapshot(session_resume_snapshot, session);
             // Render Sessions in stable chronological order (oldest first) so
             // clock skew or delayed persistence cannot scramble the timeline;
             // the append order alone is not guaranteed monotonic.
@@ -1412,6 +1417,23 @@ pub(super) fn session_exact_resume_materializable(
     workspace_resume_branch_exists(project_root, &session.branch)
 }
 
+pub(super) fn session_exact_resume_materializable_from_snapshot(
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
+    session: &gwt_agent::Session,
+) -> bool {
+    let Some(session_resume_snapshot) = session_resume_snapshot else {
+        return false;
+    };
+    session_resume_snapshot
+        .snapshot
+        .materialized_worktree_paths
+        .contains(&session.worktree_path)
+        || session_resume_snapshot
+            .snapshot
+            .materializable_branches
+            .contains(&normalize_branch_name(session.branch.trim()))
+}
+
 fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
     match agent.status_category.as_str() {
         "blocked" => 0,
@@ -1697,7 +1719,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
     agent_sessions: &[gwt_agent::Session],
     project_repo_hash: Option<gwt_core::repo_hash::RepoHash>,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
-    project_root: &Path,
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
 ) {
     let registry = crate::workspace_session_registry::branch_session_registry(
         agent_sessions,
@@ -1736,8 +1758,11 @@ pub(super) fn attach_registry_sessions_to_active_works(
                 updated_at: session.last_activity_at,
                 attached_by: None,
             };
-            let history_view =
-                workspace_work_agent_view_from_ref(&agent_ref, session_index, project_root);
+            let history_view = workspace_work_agent_view_from_ref(
+                &agent_ref,
+                session_index,
+                session_resume_snapshot,
+            );
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
         }
@@ -1982,6 +2007,9 @@ pub(crate) enum WorktreeActivity {
 #[derive(Debug, Clone)]
 pub(crate) struct RepoActivitySnapshot {
     pub(crate) captured_at: std::time::Instant,
+    pub(crate) complete: bool,
+    pub(crate) materialized_worktree_paths: HashSet<PathBuf>,
+    pub(crate) materializable_branches: HashSet<String>,
     pub(crate) worktree_activity: HashMap<PathBuf, WorktreeActivity>,
     pub(crate) known_clean_branches: HashSet<String>,
     pub(crate) live_process_worktree_paths: HashSet<PathBuf>,
@@ -1992,9 +2020,26 @@ pub(crate) struct RepoActivitySnapshot {
     pub(crate) tip_subjects: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionResumeSnapshot<'a> {
+    snapshot: &'a RepoActivitySnapshot,
+}
+
 impl RepoActivitySnapshot {
     pub(crate) fn is_fresh(&self, now: std::time::Instant) -> bool {
         now.saturating_duration_since(self.captured_at) < std::time::Duration::from_secs(10)
+    }
+
+    pub(crate) fn is_usable(&self, now: std::time::Instant) -> bool {
+        self.complete && self.is_fresh(now)
+    }
+
+    pub(crate) fn session_resume_snapshot(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<SessionResumeSnapshot<'_>> {
+        self.is_usable(now)
+            .then_some(SessionResumeSnapshot { snapshot: self })
     }
 }
 
@@ -2420,6 +2465,7 @@ impl AppRuntime {
     pub(super) fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
+        self.request_repo_activity_refresh_if_needed(&tab.project_root);
         let projection = self.active_work_projection_for_tab(tab_id, tab)?;
         Some(OutboundEvent::reply(
             client_id,
@@ -2432,6 +2478,7 @@ impl AppRuntime {
     pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
+        self.request_repo_activity_refresh_if_needed(&tab.project_root);
         let projection = self.active_work_projection_for_tab(tab_id, tab)?;
         Some(OutboundEvent::broadcast(
             BackendEvent::ActiveWorkProjection {
@@ -2447,6 +2494,7 @@ impl AppRuntime {
     pub(super) fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
+        self.request_repo_activity_refresh_if_needed(&tab.project_root);
         let projection = self
             .active_work_projection_for_tab(tab_id, tab)
             .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab));
@@ -2455,6 +2503,19 @@ impl AppRuntime {
                 projection: Box::new(projection),
             },
         ))
+    }
+
+    pub(super) fn request_repo_activity_refresh_if_needed(&self, project_root: &Path) {
+        let now = std::time::Instant::now();
+        let needs_refresh = self
+            .repo_activity_snapshots
+            .get(project_root)
+            .is_none_or(|snapshot| !snapshot.is_fresh(now));
+        if needs_refresh {
+            self.proxy.send(UserEvent::RepoActivityRefreshRequested {
+                project_root: project_root.to_path_buf(),
+            });
+        }
     }
 
     pub(super) fn active_work_projection_for_tab(
@@ -2530,6 +2591,13 @@ impl AppRuntime {
                 .borrow_mut()
                 .load(&self.sessions_dir);
             let session_index = work_session_index(&agent_sessions);
+            let now = std::time::Instant::now();
+            let repo_activity = self
+                .repo_activity_snapshots
+                .get(&tab.project_root)
+                .filter(|snapshot| snapshot.is_usable(now));
+            let session_resume_snapshot =
+                repo_activity.and_then(|snapshot| snapshot.session_resume_snapshot(now));
             let workspaces = self
                 .work_items_cache
                 .borrow_mut()
@@ -2541,7 +2609,11 @@ impl AppRuntime {
                 .work_items
                 .iter()
                 .map(|item| {
-                    workspace_work_item_view_from_item(item, &session_index, &tab.project_root)
+                    workspace_work_item_view_from_item(
+                        item,
+                        &session_index,
+                        session_resume_snapshot,
+                    )
                 })
                 .collect::<Vec<_>>();
             let mut view = active_work_projection_from_saved_with_journal(
@@ -2567,12 +2639,11 @@ impl AppRuntime {
                 &agent_sessions,
                 gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
                 &session_index,
-                &tab.project_root,
+                session_resume_snapshot,
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background repository-activity snapshot plus the recorded PR
             // state. Projection must never spawn Git or scan OS processes.
-            let repo_activity = self.repo_activity_snapshots.get(&tab.project_root);
             mark_merged_active_works(
                 &mut view.active_works,
                 repo_activity.map(|snapshot| &snapshot.merged_branches),

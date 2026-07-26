@@ -29,7 +29,8 @@ use gwt::KnowledgeKind;
 use super::{
     knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
     workspace_resume_owner_issue_number, workspace_work_item_view_from_item, AppRuntime,
-    BackendEvent, IssueBranchLinkStore, OutboundEvent, UserEvent, WindowPreset,
+    BackendEvent, IssueBranchLinkStore, OutboundEvent, RepoActivitySnapshot, SessionResumeSnapshot,
+    UserEvent, WindowPreset,
 };
 
 pub struct KnowledgeSearchRequest<'a> {
@@ -201,6 +202,11 @@ impl KnowledgeRelatedSnapshotCache {
         }
     }
 
+    fn invalidate_project(&mut self, project_root: &Path) {
+        self.entries
+            .retain(|entry| entry.project_root != project_root);
+    }
+
     #[cfg(test)]
     pub(crate) fn full_scan_count(&self) -> usize {
         self.full_scan_count
@@ -325,11 +331,17 @@ fn knowledge_view_events(
     ]
 }
 
+#[derive(Clone, Copy)]
+struct KnowledgeRelatedSources<'a> {
+    project_root: &'a Path,
+    sessions_dir: &'a Path,
+    issue_link_cache_dir: &'a Path,
+    repo_activity: Option<&'a RepoActivitySnapshot>,
+}
+
 fn augment_knowledge_bridge_related_works_with_snapshot(
     snapshots: &Arc<Mutex<KnowledgeRelatedSnapshotCache>>,
-    project_root: &Path,
-    sessions_dir: &Path,
-    issue_link_cache_dir: &Path,
+    sources: KnowledgeRelatedSources<'_>,
     view: &mut gwt::KnowledgeBridgeView,
     reuse_existing: bool,
     snapshot_generation: Option<u64>,
@@ -342,13 +354,16 @@ fn augment_knowledge_bridge_related_works_with_snapshot(
         snapshots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project_root, kind)
+            .get(sources.project_root, kind)
     });
     let related_by_number = existing.flatten().unwrap_or_else(|| {
         let related_by_number = Arc::new(load_knowledge_bridge_related_works_from_paths(
-            project_root,
-            sessions_dir,
-            issue_link_cache_dir,
+            sources.project_root,
+            sources.sessions_dir,
+            sources.issue_link_cache_dir,
+            sources
+                .repo_activity
+                .and_then(|snapshot| snapshot.session_resume_snapshot(std::time::Instant::now())),
             view,
         ));
         let mut snapshots = snapshots
@@ -357,7 +372,7 @@ fn augment_knowledge_bridge_related_works_with_snapshot(
         snapshots.full_scan_count += 1;
         if let Some(generation) = snapshot_generation {
             snapshots.replace_if_current(
-                project_root,
+                sources.project_root,
                 kind,
                 generation,
                 Arc::clone(&related_by_number),
@@ -384,6 +399,7 @@ fn load_knowledge_bridge_related_works_from_paths(
     project_root: &Path,
     sessions_dir: &Path,
     issue_link_cache_dir: &Path,
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
     view: &gwt::KnowledgeBridgeView,
 ) -> KnowledgeRelatedWorksByNumber {
     let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(sessions_dir);
@@ -394,20 +410,20 @@ fn load_knowledge_bridge_related_works_from_paths(
         .unwrap_or_default();
     let issue_by_branch = load_issue_branch_links(project_root, issue_link_cache_dir);
     load_knowledge_bridge_related_works(
-        project_root,
         view,
         &work_items,
         &sessions,
         &issue_by_branch,
+        session_resume_snapshot,
     )
 }
 
 fn load_knowledge_bridge_related_works(
-    project_root: &Path,
     view: &gwt::KnowledgeBridgeView,
     work_items: &[gwt_core::workspace_projection::WorkItem],
     sessions: &[gwt_agent::Session],
     issue_by_branch: &HashMap<String, u64>,
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
 ) -> KnowledgeRelatedWorksByNumber {
     if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
         return HashMap::new();
@@ -434,7 +450,8 @@ fn load_knowledge_bridge_related_works(
         if !relevant_numbers.contains(&issue_number) {
             continue;
         }
-        let work_view = workspace_work_item_view_from_item(item, &session_index, project_root);
+        let work_view =
+            workspace_work_item_view_from_item(item, &session_index, session_resume_snapshot);
         represented_sessions_by_number
             .entry(issue_number)
             .or_default()
@@ -479,6 +496,113 @@ fn load_knowledge_bridge_related_works(
     }
 
     related_by_number
+}
+
+#[cfg(test)]
+mod related_work_resume_tests {
+    use super::*;
+
+    #[test]
+    fn related_work_uses_fresh_repo_activity_snapshot_for_session_resume() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let branch = "work/issue-42";
+        let conversation = "conversation-42";
+        let now = chrono::Utc::now();
+        let mut session = gwt_agent::Session::new(
+            project_root.join("deleted-worktree"),
+            branch,
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-42".to_string();
+        session.agent_session_id = Some(conversation.to_string());
+        session.session_history = vec![gwt_agent::AgentSessionHistoryEntry {
+            agent_session_id: conversation.to_string(),
+            started_at: now,
+        }];
+        let work_item = gwt_core::workspace_projection::WorkItem {
+            id: "work-42".to_string(),
+            title: "Issue 42".to_string(),
+            intent: None,
+            summary: None,
+            progress_summary: None,
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+            owner: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            agents: vec![gwt_core::workspace_projection::WorkAgentRef {
+                session_id: session.id.clone(),
+                agent_id: Some("codex".to_string()),
+                display_name: Some("Codex".to_string()),
+                updated_at: now,
+                attached_by: None,
+            }],
+            execution_containers: vec![
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(branch.to_string()),
+                    worktree_path: None,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            ],
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+            legacy_metadata_snapshot: None,
+            legacy_metadata_authoritative: false,
+            legacy_metadata_snapshot_at: None,
+            duplicate_event_containers: Default::default(),
+            discarded: false,
+            discarded_at: None,
+        };
+        let view = gwt::KnowledgeBridgeView {
+            kind: KnowledgeKind::Issue,
+            entries: Vec::new(),
+            selected_number: Some(42),
+            empty_message: None,
+            refresh_enabled: true,
+            detail: gwt::KnowledgeDetailView {
+                number: Some(42),
+                title: "Issue 42".to_string(),
+                subtitle: String::new(),
+                state: "OPEN".to_string(),
+                labels: Vec::new(),
+                sections: Vec::new(),
+                launch_issue_number: Some(42),
+                related_works: Vec::new(),
+            },
+        };
+        let issue_by_branch = HashMap::from([(branch.to_string(), 42)]);
+        let mut repo_activity = crate::app_runtime::RepoActivitySnapshot {
+            captured_at: std::time::Instant::now(),
+            complete: true,
+            materialized_worktree_paths: HashSet::new(),
+            materializable_branches: HashSet::new(),
+            worktree_activity: HashMap::new(),
+            known_clean_branches: HashSet::new(),
+            live_process_worktree_paths: HashSet::new(),
+            local_worktree_branches: HashSet::new(),
+            detached_worktree_paths: HashSet::new(),
+            merged_branches: HashMap::new(),
+            cleanup_ready_branches: HashMap::new(),
+            tip_subjects: HashMap::new(),
+        };
+        repo_activity
+            .materializable_branches
+            .insert(branch.to_string());
+
+        let related = load_knowledge_bridge_related_works(
+            &view,
+            &[work_item],
+            &[session],
+            &issue_by_branch,
+            repo_activity.session_resume_snapshot(std::time::Instant::now()),
+        );
+
+        assert!(related[&42][0].agents[0].sessions[0].resumable);
+    }
 }
 
 fn apply_knowledge_bridge_related_works(
@@ -895,6 +1019,13 @@ fn parse_related_time_millis(value: &str) -> i64 {
 }
 
 impl AppRuntime {
+    pub(super) fn invalidate_knowledge_related_snapshot(&self, project_root: &Path) {
+        self.knowledge_related_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .invalidate_project(project_root);
+    }
+
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -963,6 +1094,7 @@ impl AppRuntime {
         let refresh_if_stale = request.refresh_if_stale;
         let sessions_dir = self.sessions_dir.clone();
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
         let reuse_related_snapshot = !refresh_if_stale;
         let related_snapshot_generation = reserve_related_snapshot_generation(
@@ -977,9 +1109,12 @@ impl AppRuntime {
                 Ok(mut view) => {
                     augment_knowledge_bridge_related_works_with_snapshot(
                         &related_snapshots,
-                        &project_root,
-                        &sessions_dir,
-                        &issue_link_cache_dir,
+                        KnowledgeRelatedSources {
+                            project_root: &project_root,
+                            sessions_dir: &sessions_dir,
+                            issue_link_cache_dir: &issue_link_cache_dir,
+                            repo_activity: repo_activity.as_ref(),
+                        },
                         &mut view,
                         reuse_related_snapshot,
                         related_snapshot_generation,
@@ -1016,9 +1151,12 @@ impl AppRuntime {
             {
                 augment_knowledge_bridge_related_works_with_snapshot(
                     &related_snapshots,
-                    &project_root,
-                    &sessions_dir,
-                    &issue_link_cache_dir,
+                    KnowledgeRelatedSources {
+                        project_root: &project_root,
+                        sessions_dir: &sessions_dir,
+                        issue_link_cache_dir: &issue_link_cache_dir,
+                        repo_activity: repo_activity.as_ref(),
+                    },
                     &mut view,
                     false,
                     related_snapshot_generation,
@@ -1044,6 +1182,7 @@ impl AppRuntime {
             issue_link_cache_dir,
         } = task;
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
+        let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
         let related_snapshot_generation =
             reserve_related_snapshot_generation(&related_snapshots, &project_root, kind, false);
         let proxy = self.proxy.clone();
@@ -1068,9 +1207,12 @@ impl AppRuntime {
                     Ok(mut view) => {
                         augment_knowledge_bridge_related_works_with_snapshot(
                             &related_snapshots,
-                            &project_root,
-                            &sessions_dir,
-                            &issue_link_cache_dir,
+                            KnowledgeRelatedSources {
+                                project_root: &project_root,
+                                sessions_dir: &sessions_dir,
+                                issue_link_cache_dir: &issue_link_cache_dir,
+                                repo_activity: repo_activity.as_ref(),
+                            },
                             &mut view,
                             false,
                             related_snapshot_generation,
@@ -1169,6 +1311,7 @@ impl AppRuntime {
             issue_link_cache_dir,
         } = task;
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
+        let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let event =
@@ -1176,9 +1319,12 @@ impl AppRuntime {
                     Ok(mut view) => {
                         augment_knowledge_bridge_related_works_with_snapshot(
                             &related_snapshots,
-                            &project_root,
-                            &sessions_dir,
-                            &issue_link_cache_dir,
+                            KnowledgeRelatedSources {
+                                project_root: &project_root,
+                                sessions_dir: &sessions_dir,
+                                issue_link_cache_dir: &issue_link_cache_dir,
+                                repo_activity: repo_activity.as_ref(),
+                            },
                             &mut view,
                             true,
                             None,

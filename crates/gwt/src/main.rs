@@ -1028,6 +1028,19 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
+    /// SPEC-3170 FR-066: a projection observed a missing or expired repository
+    /// activity snapshot. The event loop starts the existing background scan;
+    /// the projection itself remains process-free and fail-closed.
+    RepoActivityRefreshRequested {
+        project_root: PathBuf,
+    },
+    /// SPEC-3170 FR-066: delayed continuation for an incomplete repository
+    /// activity scan. Generation validation prevents stale retries from
+    /// replacing newer or complete state.
+    RepoActivityRetryRequested {
+        project_root: PathBuf,
+        generation: u64,
+    },
     /// SPEC-3170 FR-044: one complete, generation-tagged repository activity
     /// scan. All process-backed inputs are collected off the event loop and
     /// atomically replace the projection cache.
@@ -1060,6 +1073,12 @@ enum UserEvent {
         changed: bool,
     },
     WorkspaceProjectionChanged {
+        project_root: PathBuf,
+    },
+    /// A successful cleanup persisted a projection mutation off-thread. The
+    /// event-loop continuation invalidates repository-derived caches and
+    /// rebuilds the projection from one fresh background snapshot.
+    WorkspaceCleanupProjectionChanged {
         project_root: PathBuf,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
@@ -2471,6 +2490,7 @@ mod tests {
             repo_activity_snapshots: HashMap::new(),
             repo_activity_scans_inflight: std::collections::HashSet::new(),
             repo_activity_scan_generations: HashMap::new(),
+            repo_activity_retry_attempts: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
             frontend_hydration_context_generation: 0,
             navigation_revision: 0,
@@ -7590,6 +7610,15 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_board_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::RepoActivityRefreshRequested { project_root }) => {
+                app.spawn_repo_activity_snapshot_scan(project_root, false);
+            }
+            Event::UserEvent(UserEvent::RepoActivityRetryRequested {
+                project_root,
+                generation,
+            }) => {
+                app.handle_repo_activity_retry(project_root, generation);
+            }
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
@@ -7621,6 +7650,10 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
                 let events = app.handle_workspace_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkspaceCleanupProjectionChanged { project_root }) => {
+                let events = app.handle_workspace_cleanup_projection_changed(project_root);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {

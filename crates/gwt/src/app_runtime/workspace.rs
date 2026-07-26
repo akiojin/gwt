@@ -19,21 +19,17 @@
 //!   [`clear_workspace_cleanup_git_details_event`])
 //!
 //! Behavior-preserving move: shared view helpers
-//! (`active_work_projection_from_saved_with_journal`,
-//! `non_empty_workspace_text`, ...) stay in `mod.rs` and are imported via
+//! (`non_empty_workspace_text`, ...) stay in `mod.rs` and are imported via
 //! `super`.
 
 use std::path::{Path, PathBuf};
 use std::thread;
 
 use super::{
-    active_work_cleanup_candidate_view_from_candidate,
-    active_work_projection_from_saved_with_journal, cleanup_selected_branches_with_progress,
-    list_branch_entries_with_active_sessions, non_empty_workspace_text, work_session_index,
-    workspace_journal_entry_view_from_entry, workspace_work_item_view_from_item,
-    ActiveAgentSession, AppEventProxy, AppRuntime, BackendEvent, BranchCleanupOptions,
-    BranchEntriesPhase, ClientId, OutboundEvent, UserEvent, WindowPreset, WorkspaceResumeContext,
-    WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    active_work_cleanup_candidate_view_from_candidate, cleanup_selected_branches_with_progress,
+    list_branch_entries_with_active_sessions, non_empty_workspace_text, ActiveAgentSession,
+    AppEventProxy, AppRuntime, BackendEvent, BranchCleanupOptions, BranchEntriesPhase, ClientId,
+    OutboundEvent, UserEvent, WindowPreset, WorkspaceResumeContext, WORKSPACE_CLEANUP_EVENT_ID,
 };
 
 pub(super) fn active_agent_summary_from_session(
@@ -303,7 +299,7 @@ pub(super) fn spawn_workspace_cleanup_async(
     options: BranchCleanupOptions,
 ) {
     thread::spawn(move || {
-        let events =
+        let (events, projection_changed) =
             match list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
             {
                 Ok(entries) => {
@@ -329,14 +325,14 @@ pub(super) fn spawn_workspace_cleanup_async(
                             )]));
                         },
                     );
-                    let mut events = vec![OutboundEvent::reply(
+                    let events = vec![OutboundEvent::reply(
                         client_id.clone(),
                         BackendEvent::BranchCleanupResult {
                             id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
                             results: results.clone(),
                         },
                     )];
-                    if results.iter().any(|result| {
+                    let projection_changed = if results.iter().any(|result| {
                         result.branch == branch
                             && matches!(
                                 result.status,
@@ -352,79 +348,51 @@ pub(super) fn spawn_workspace_cleanup_async(
                                 &branch,
                                 chrono::Utc::now(),
                             );
-                        if let Some(event) =
-                            clear_workspace_cleanup_git_details_event(&project_root)
-                        {
-                            events.push(event);
-                        }
-                    }
-                    events
+                        clear_workspace_cleanup_git_details_event(&project_root)
+                    } else {
+                        None
+                    };
+                    (events, projection_changed)
                 }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id.clone(),
-                    BackendEvent::BranchError {
-                        id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
-                        message: error.to_string(),
-                    },
-                )],
+                Err(error) => (
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::BranchError {
+                            id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
+                            message: error.to_string(),
+                        },
+                    )],
+                    None,
+                ),
             };
         proxy.send(UserEvent::Dispatch(events));
+        if let Some(event) = projection_changed {
+            proxy.send(event);
+        }
     });
 }
 
-fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<OutboundEvent> {
-    let projection =
-        match gwt_core::workspace_projection::mutate_existing_workspace_projection_for_cleanup(
-            project_root,
-            |projection| {
-                projection.clear_git_details_to_idle(chrono::Utc::now());
-                Ok(projection.clone())
-            },
-        ) {
-            Ok(Some(projection)) => projection,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    error = %error,
-                    "workspace projection cleanup state update skipped"
-                );
-                return None;
-            }
-        };
-    let journal_entries = gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<UserEvent> {
+    match gwt_core::workspace_projection::mutate_existing_workspace_projection_for_cleanup(
         project_root,
-        WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
-    )
-    .unwrap_or_default()
-    .iter()
-    .map(workspace_journal_entry_view_from_entry)
-    .collect::<Vec<_>>();
-    // Rare post-cleanup path with no runtime handle: a one-shot cache load
-    // matches the previous eager loader's cost and semantics.
-    let agent_sessions = crate::session_ledger_cache::SessionLedgerCache::new()
-        .load(&gwt_core::paths::gwt_sessions_dir());
-    let session_index = work_session_index(&agent_sessions);
-    let workspaces =
-        gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
-            .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
-                updated_at: projection.updated_at,
-                work_items: Vec::new(),
-            })
-            .work_items
-            .iter()
-            .map(|item| workspace_work_item_view_from_item(item, &session_index, project_root))
-            .collect::<Vec<_>>();
-    Some(OutboundEvent::broadcast(
-        BackendEvent::ActiveWorkProjection {
-            projection: Box::new(active_work_projection_from_saved_with_journal(
-                projection,
-                journal_entries,
-                workspaces,
-                None,
-            )),
+        |projection| {
+            projection.clear_git_details_to_idle(chrono::Utc::now());
+            Ok(())
         },
-    ))
+    ) {
+        Ok(Some(())) => Some(UserEvent::WorkspaceCleanupProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                error = %error,
+                "workspace projection cleanup state update skipped"
+            );
+            None
+        }
+    }
 }
 
 fn spawn_branch_cleanup_async(
@@ -617,6 +585,51 @@ mod tests {
     use super::*;
     use fs2::FileExt;
     use gwt_core::test_support::{env_lock, ScopedEnvVar};
+
+    #[test]
+    fn cleanup_completion_reenters_runtime_through_projection_changed_event() {
+        let _env_guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/cleanup-event".to_string()),
+            worktree_path: Some(project_root.join("work/cleanup-event")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save current projection");
+
+        let event = clear_workspace_cleanup_git_details_event(&project_root)
+            .expect("cleanup projection change event");
+
+        assert!(matches!(
+            event,
+            UserEvent::WorkspaceCleanupProjectionChanged {
+                project_root: changed_root
+            } if changed_root == project_root
+        ));
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&project_root)
+            .expect("load projection")
+            .expect("projection remains");
+        assert!(
+            projection.git_details.is_none(),
+            "the worker persists cleanup before the event loop invalidates runtime caches"
+        );
+    }
 
     #[test]
     fn cleanup_completion_does_not_recreate_projection_deleted_while_waiting_for_lock() {

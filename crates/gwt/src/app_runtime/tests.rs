@@ -1253,7 +1253,13 @@ fn save_merged_work_items(project_root: &Path, count: usize) {
                 created_at: updated_at,
                 updated_at,
                 completed_at: None,
-                agents: Vec::new(),
+                agents: vec![gwt_core::workspace_projection::WorkAgentRef {
+                    session_id: format!("session-perf-{index:03}"),
+                    agent_id: Some("codex".to_string()),
+                    display_name: Some("Codex".to_string()),
+                    updated_at,
+                    attached_by: None,
+                }],
                 execution_containers: vec![
                     gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                         branch: Some(branch),
@@ -1289,9 +1295,35 @@ fn save_merged_work_items(project_root: &Path, count: usize) {
     .expect("save performance fixture work items");
 }
 
+fn save_resumable_work_session_ledgers(project_root: &Path, sessions_dir: &Path, count: usize) {
+    fs::create_dir_all(sessions_dir).expect("create performance fixture sessions dir");
+    for index in 0..count {
+        let conversation = format!("conversation-perf-{index:03}");
+        let mut session = gwt_agent::Session::new(
+            project_root
+                .join("deleted-worktrees")
+                .join(format!("perf-{index:03}")),
+            format!("work/perf-{index:03}"),
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = format!("session-perf-{index:03}");
+        session.agent_session_id = Some(conversation.clone());
+        session.session_history = vec![gwt_agent::AgentSessionHistoryEntry {
+            agent_session_id: conversation,
+            started_at: chrono::Utc::now(),
+        }];
+        session
+            .save(sessions_dir)
+            .expect("save performance fixture session");
+    }
+}
+
 fn empty_repo_activity_snapshot() -> super::RepoActivitySnapshot {
     super::RepoActivitySnapshot {
         captured_at: std::time::Instant::now(),
+        complete: true,
+        materialized_worktree_paths: HashSet::new(),
+        materializable_branches: HashSet::new(),
         worktree_activity: HashMap::new(),
         known_clean_branches: HashSet::new(),
         live_process_worktree_paths: HashSet::new(),
@@ -1478,7 +1510,7 @@ fn workspace_work_agent_view_attaches_session_history() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, None);
 
     let ids: Vec<&str> = view
         .sessions
@@ -1491,8 +1523,7 @@ fn workspace_work_agent_view_attaches_session_history() {
 
     // A Work with no persisted Session yields an empty Session list, not a panic.
     let empty_index = super::work_session_index(&[]);
-    let empty_view =
-        super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index, Path::new("/"));
+    let empty_view = super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index, None);
     assert!(empty_view.sessions.is_empty());
 }
 
@@ -2926,6 +2957,7 @@ fn sample_runtime_with_events(
         repo_activity_snapshots: HashMap::new(),
         repo_activity_scans_inflight: HashSet::new(),
         repo_activity_scan_generations: HashMap::new(),
+        repo_activity_retry_attempts: HashMap::new(),
         frontend_hydration_generations: HashMap::new(),
         frontend_hydration_context_generation: 0,
         navigation_revision: 0,
@@ -9606,7 +9638,7 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        &repo,
+        None,
     );
 
     assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
@@ -9701,7 +9733,7 @@ fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        &repo,
+        None,
     );
 
     assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
@@ -13148,6 +13180,7 @@ fn app_runtime_active_work_projection_is_process_free_for_many_worktrees() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     save_merged_work_items(&repo, 64);
+    save_resumable_work_session_ledgers(&repo, &temp.path().join("sessions"), 64);
 
     let fake_bin = temp.path().join("fake-bin");
     fs::create_dir_all(&fake_bin).expect("create fake bin");
@@ -13168,6 +13201,15 @@ fn app_runtime_active_work_projection_is_process_free_for_many_worktrees() {
         64,
         "fixture must render every Work"
     );
+    assert_eq!(
+        view.works
+            .iter()
+            .flat_map(|work| &work.agents)
+            .flat_map(|agent| &agent.sessions)
+            .count(),
+        64,
+        "fixture must traverse every persisted Session ledger entry"
+    );
     assert!(
         view.active_works.iter().all(|work| !work.merged_into_base
             && !work.done_equivalent
@@ -13179,6 +13221,56 @@ fn app_runtime_active_work_projection_is_process_free_for_many_worktrees() {
         invocations.trim().is_empty(),
         "Active Work projection render must consume only cached repository activity; \
          synchronous Git invocations:\n{invocations}"
+    );
+}
+
+#[test]
+fn app_runtime_frontend_ready_hydration_is_process_free_for_many_sessions() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    save_merged_work_items(&repo, 64);
+    save_resumable_work_session_ledgers(&repo, &temp.path().join("sessions"), 64);
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let git_log = temp.path().join("git-invocations.log");
+    let _path = prepend_tool_parent_to_path(&fake_git);
+    let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+    let _bootstrap =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+    let hydration = finish_frontend_hydration(&runtime, &recorded, "client-1");
+    let projection = hydration
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        })
+        .expect("FrontendReady hydration Active Work projection");
+
+    assert_eq!(
+        projection
+            .works
+            .iter()
+            .flat_map(|work| &work.agents)
+            .flat_map(|agent| &agent.sessions)
+            .count(),
+        64,
+        "FrontendReady completion must traverse all persisted Session rows"
+    );
+    let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        invocations.trim().is_empty(),
+        "FrontendReady bootstrap and hydration completion must not run repository processes; \
+         invocations:\n{invocations}"
     );
 }
 
@@ -13249,6 +13341,7 @@ fn app_runtime_ordered_project_tab_ack_is_process_free_for_many_worktrees() {
     fs::create_dir_all(&first_repo).expect("create first repo");
     fs::create_dir_all(&target_repo).expect("create target repo");
     save_merged_work_items(&target_repo, 64);
+    save_resumable_work_session_ledgers(&target_repo, &temp.path().join("sessions"), 64);
 
     let fake_bin = temp.path().join("fake-bin");
     fs::create_dir_all(&fake_bin).expect("create fake bin");
@@ -13291,10 +13384,28 @@ fn app_runtime_ordered_project_tab_ack_is_process_free_for_many_worktrees() {
         recorded.lock().expect("event log").as_slice(),
         [UserEvent::NavigationFollowup]
     ));
+    let followup = runtime.handle_navigation_followup();
+    let projection = followup
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        })
+        .expect("NavigationFollowup Active Work projection");
+    assert_eq!(
+        projection
+            .works
+            .iter()
+            .flat_map(|work| &work.agents)
+            .flat_map(|agent| &agent.sessions)
+            .count(),
+        64,
+        "NavigationFollowup must traverse all persisted Session rows"
+    );
     let invocations = fs::read_to_string(&git_log).unwrap_or_default();
     assert!(
         invocations.trim().is_empty(),
-        "ordered project-tab ACK path must not run repository processes; \
+        "ordered project-tab ACK and NavigationFollowup must not run repository processes; \
          invocations:\n{invocations}"
     );
 }
@@ -23303,7 +23414,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert_eq!(works[0].session_agent_total, 12, "uncapped count reported");
@@ -23424,7 +23535,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     let agents = &works[0].agents;
@@ -23562,7 +23673,7 @@ fn attach_registry_sessions_preserves_same_identity_agent_per_child_work() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert_eq!(
@@ -23617,7 +23728,7 @@ fn attach_registry_sessions_preserves_distinct_conversations_within_one_child_wo
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert_eq!(
@@ -23665,7 +23776,7 @@ fn attach_registry_sessions_collapses_same_conversation_across_child_works() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert!(
@@ -23704,7 +23815,7 @@ fn attach_registry_sessions_caps_agents_across_all_child_works() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert_eq!(
@@ -23747,7 +23858,7 @@ fn attach_registry_sessions_assigns_shared_session_to_one_canonical_child_work()
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert_eq!(
@@ -23791,7 +23902,7 @@ fn attach_registry_sessions_assigns_shared_session_to_latest_legacy_child_work()
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     assert!(works[0].works[0].agents.is_empty());
@@ -23885,7 +23996,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     let ids: Vec<&str> = works[0]
@@ -23969,7 +24080,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     let agents = &works[0].agents;
@@ -24005,7 +24116,7 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, None);
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
     assert!(view.agent_id.is_some(), "agent_id borrowed from the ledger");
 }
@@ -24102,7 +24213,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     let agents = &works[0].agents;
@@ -24163,8 +24274,8 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
 
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("unity-cli");
-    let issue_worktree = temp.path().join("unity-cli/work/issue-206");
-    let other_worktree = temp.path().join("unity-cli/work/20260616-1102");
+    let issue_worktree = repo.join("work/issue-206");
+    let other_worktree = repo.join("work/20260616-1102");
     fs::create_dir_all(&issue_worktree).expect("issue worktree");
     fs::create_dir_all(&other_worktree).expect("other worktree");
 
@@ -24231,7 +24342,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         updated_at: "2026-06-19T13:49:00Z".to_string(),
     }];
 
-    super::attach_registry_sessions_to_active_works(&mut works, &[], None, &session_index, &repo);
+    super::attach_registry_sessions_to_active_works(&mut works, &[], None, &session_index, None);
 
     let agents = &works[0].agents;
     assert_eq!(agents.len(), 1, "only sessions owned by this row stay");
@@ -24274,8 +24385,16 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity
+        .materialized_worktree_paths
+        .insert(worktree.clone());
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
+    let view = super::workspace_work_agent_view_from_ref(
+        &agent_ref,
+        &index,
+        repo_activity.session_resume_snapshot(std::time::Instant::now()),
+    );
 
     assert_eq!(
         view.sessions.len(),
@@ -24289,12 +24408,7 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
 
 #[test]
 fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    init_git_clone_with_origin(&repo);
     let mut session = gwt_agent::Session::new(
         temp.path().join("deleted-worktree"),
         "feature/deleted-session-row",
@@ -24313,7 +24427,7 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
         attached_by: None,
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, None);
 
     assert_eq!(view.sessions.len(), 1);
     assert!(
@@ -24324,14 +24438,8 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
 
 #[test]
 fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    init_git_clone_with_origin(&repo);
     let branch = "feature/session-row-resume";
-    run_git(&repo, &["branch", branch]);
     let mut session = gwt_agent::Session::new(
         temp.path().join("deleted-worktree"),
         branch,
@@ -24349,13 +24457,452 @@ fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
         updated_at: chrono::Utc::now(),
         attached_by: None,
     };
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity
+        .materializable_branches
+        .insert(branch.to_string());
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+    let view = super::workspace_work_agent_view_from_ref(
+        &agent_ref,
+        &index,
+        repo_activity.session_resume_snapshot(std::time::Instant::now()),
+    );
 
     assert_eq!(view.sessions.len(), 1);
     assert!(
         view.sessions[0].resumable,
         "available branch lets exact Session Resume re-materialize the worktree"
+    );
+}
+
+#[test]
+fn session_resume_cache_normalizes_remote_branch_identity() {
+    let temp = tempdir().expect("tempdir");
+    let session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        "origin/feature/remote-session-row",
+        gwt_agent::AgentId::Codex,
+    );
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity
+        .materializable_branches
+        .insert("feature/remote-session-row".to_string());
+
+    assert!(super::session_exact_resume_materializable_from_snapshot(
+        repo_activity.session_resume_snapshot(std::time::Instant::now()),
+        &session
+    ));
+}
+
+#[test]
+fn session_resume_cache_rejects_stale_snapshot() {
+    let temp = tempdir().expect("tempdir");
+    let session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        "feature/stale-session-row",
+        gwt_agent::AgentId::Codex,
+    );
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity.captured_at = std::time::Instant::now() - std::time::Duration::from_secs(11);
+    repo_activity
+        .materializable_branches
+        .insert("feature/stale-session-row".to_string());
+
+    let resume_snapshot = repo_activity.session_resume_snapshot(std::time::Instant::now());
+
+    assert!(!super::session_exact_resume_materializable_from_snapshot(
+        resume_snapshot,
+        &session
+    ));
+}
+
+#[test]
+fn session_resume_cache_rejects_incomplete_snapshot() {
+    let temp = tempdir().expect("tempdir");
+    let session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        "feature/incomplete-session-row",
+        gwt_agent::AgentId::Codex,
+    );
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity.complete = false;
+    repo_activity
+        .materializable_branches
+        .insert("feature/incomplete-session-row".to_string());
+
+    let resume_snapshot = repo_activity.session_resume_snapshot(std::time::Instant::now());
+
+    assert!(!super::session_exact_resume_materializable_from_snapshot(
+        resume_snapshot,
+        &session
+    ));
+}
+
+#[test]
+fn ephemeral_intake_projection_rejects_incomplete_or_stale_repo_activity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let intake = repo.join(".intake-review");
+    fs::create_dir_all(&intake).expect("create intake worktree");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "window-1");
+    session.worktree_path = intake.clone();
+    let mut snapshot = empty_repo_activity_snapshot();
+    snapshot
+        .detached_worktree_paths
+        .insert(dunce::canonicalize(&intake).expect("canonical intake path"));
+    snapshot.complete = false;
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), snapshot);
+
+    assert_eq!(runtime.ephemeral_intake_session_cached(&session), None);
+
+    let snapshot = runtime
+        .repo_activity_snapshots
+        .get_mut(&repo)
+        .expect("repository snapshot");
+    snapshot.complete = true;
+    snapshot.captured_at = std::time::Instant::now() - Duration::from_secs(11);
+    assert_eq!(runtime.ephemeral_intake_session_cached(&session), None);
+
+    runtime
+        .repo_activity_snapshots
+        .get_mut(&repo)
+        .expect("repository snapshot")
+        .captured_at = std::time::Instant::now();
+    assert_eq!(
+        runtime.ephemeral_intake_session_cached(&session),
+        Some(true)
+    );
+}
+
+#[test]
+fn incomplete_repo_activity_snapshot_schedules_retry_and_remains_fail_closed() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    save_merged_work_items(&repo, 1);
+    save_resumable_work_session_ledgers(&repo, &temp.path().join("sessions"), 1);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 1);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+    let mut snapshot = empty_repo_activity_snapshot();
+    snapshot.complete = false;
+    snapshot
+        .materializable_branches
+        .insert("work/perf-000".to_string());
+    snapshot
+        .known_clean_branches
+        .insert("work/perf-000".to_string());
+    snapshot
+        .merged_branches
+        .insert("work/perf-000".to_string(), chrono::Utc::now());
+    snapshot.cleanup_ready_branches.insert(
+        "work/perf-000".to_string(),
+        gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
+            .as_str()
+            .to_string(),
+    );
+
+    let events = runtime.apply_repo_activity_snapshot(&repo, 1, snapshot);
+    let projection = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        })
+        .expect("incomplete snapshot projection");
+    assert!(
+        !projection.works[0].agents[0].sessions[0].resumable,
+        "incomplete repository identity must remain fail-closed while retry is pending"
+    );
+    assert!(
+        !projection.active_works[0].merged_into_base
+            && projection.active_works[0].cleanup_candidate.is_none(),
+        "an incomplete repository snapshot must fail closed for every projection verdict"
+    );
+    wait_for_recorded_event(
+        "incomplete repository activity retry",
+        &recorded,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::RepoActivityRetryRequested {
+                        project_root,
+                        generation: 1,
+                    } if project_root == &repo
+                )
+            })
+        },
+    );
+    assert_eq!(runtime.repo_activity_retry_attempts.get(&repo), Some(&1));
+
+    runtime.handle_repo_activity_retry(repo.clone(), 1);
+
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo),
+        Some(&2),
+        "the retry must reuse the existing generation-gated single-flight scanner"
+    );
+    assert!(runtime.repo_activity_scans_inflight.contains(&repo));
+}
+
+#[test]
+fn completed_repo_activity_snapshot_cancels_stale_scheduled_retry() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 1);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+    let mut incomplete = empty_repo_activity_snapshot();
+    incomplete.complete = false;
+    runtime.apply_repo_activity_snapshot(&repo, 1, incomplete);
+    wait_for_recorded_event("stale repository activity retry", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::RepoActivityRetryRequested {
+                    project_root,
+                    generation: 1,
+                } if project_root == &repo
+            )
+        })
+    });
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 2);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+    runtime.apply_repo_activity_snapshot(&repo, 2, empty_repo_activity_snapshot());
+
+    runtime.handle_repo_activity_retry(repo.clone(), 1);
+
+    assert_eq!(runtime.repo_activity_scan_generations.get(&repo), Some(&2));
+    assert!(!runtime.repo_activity_scans_inflight.contains(&repo));
+    assert!(!runtime.repo_activity_retry_attempts.contains_key(&repo));
+}
+
+#[test]
+fn incomplete_repo_activity_automatic_retry_budget_is_bounded() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    for generation in 1..=u64::from(super::REPO_ACTIVITY_MAX_AUTO_RETRIES) + 1 {
+        runtime
+            .repo_activity_scan_generations
+            .insert(repo.clone(), generation);
+        runtime.repo_activity_scans_inflight.insert(repo.clone());
+        let mut incomplete = empty_repo_activity_snapshot();
+        incomplete.complete = false;
+        runtime.apply_repo_activity_snapshot(&repo, generation, incomplete);
+    }
+    wait_for_recorded_event("bounded repository activity retries", &recorded, |events| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    UserEvent::RepoActivityRetryRequested { project_root, .. }
+                        if project_root == &repo
+                )
+            })
+            .count()
+            == usize::from(super::REPO_ACTIVITY_MAX_AUTO_RETRIES)
+    });
+    let final_delay =
+        super::repo_activity_retry_delay(usize::from(super::REPO_ACTIVITY_MAX_AUTO_RETRIES) - 1)
+            .expect("final bounded retry delay");
+    thread::sleep(final_delay + Duration::from_millis(25));
+    let retries = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                UserEvent::RepoActivityRetryRequested { project_root, .. }
+                    if project_root == &repo
+            )
+        })
+        .count();
+
+    assert_eq!(
+        retries,
+        usize::from(super::REPO_ACTIVITY_MAX_AUTO_RETRIES),
+        "persistent scan failure must not create an unbounded retry loop"
+    );
+    assert_eq!(
+        runtime.repo_activity_retry_attempts.get(&repo),
+        Some(&super::REPO_ACTIVITY_MAX_AUTO_RETRIES)
+    );
+}
+
+#[test]
+fn stale_active_work_projection_requests_repo_activity_refresh() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    save_merged_work_items(&repo, 1);
+    save_resumable_work_session_ledgers(&repo, &temp.path().join("sessions"), 1);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity.captured_at = std::time::Instant::now() - std::time::Duration::from_secs(11);
+    repo_activity
+        .materializable_branches
+        .insert("work/perf-000".to_string());
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), repo_activity);
+
+    let event = runtime
+        .active_work_projection_broadcast_for_active_tab()
+        .expect("active work projection");
+    let projection = match event.event {
+        BackendEvent::ActiveWorkProjection { projection } => projection,
+        other => panic!("expected ActiveWorkProjection, got {other:?}"),
+    };
+
+    assert!(
+        !projection.works[0].agents[0].sessions[0].resumable,
+        "stale repository identity must fail closed"
+    );
+    assert!(matches!(
+        recorded.lock().expect("event log").as_slice(),
+        [UserEvent::RepoActivityRefreshRequested { project_root }] if project_root == &repo
+    ));
+}
+
+#[test]
+fn applying_complete_repo_activity_snapshot_rebroadcasts_resumable_session() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    save_merged_work_items(&repo, 1);
+    save_resumable_work_session_ledgers(&repo, &temp.path().join("sessions"), 1);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 1);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+    let mut repo_activity = empty_repo_activity_snapshot();
+    repo_activity
+        .materializable_branches
+        .insert("work/perf-000".to_string());
+
+    let events = runtime.apply_repo_activity_snapshot(&repo, 1, repo_activity);
+    let projection = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        })
+        .expect("snapshot completion projection");
+
+    assert!(
+        projection.works[0].agents[0].sessions[0].resumable,
+        "complete snapshot completion must converge Session Resume without reload"
+    );
+}
+
+#[test]
+fn workspace_cleanup_invalidates_resume_snapshot_and_rescans_before_convergence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "work/perf-000"]);
+    save_merged_work_items(&repo, 1);
+    save_resumable_work_session_ledgers(&repo, &temp.path().join("sessions"), 1);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut initial_snapshot = empty_repo_activity_snapshot();
+    initial_snapshot
+        .materializable_branches
+        .insert("work/perf-000".to_string());
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), initial_snapshot);
+
+    let invalidated = runtime.handle_workspace_cleanup_projection_changed(repo.clone());
+    let invalidated_projection = invalidated
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        })
+        .expect("cleanup invalidation projection");
+    assert!(
+        !invalidated_projection.works[0].agents[0].sessions[0].resumable,
+        "cleanup mutation must invalidate the pre-cleanup identity snapshot"
+    );
+    assert!(!runtime.repo_activity_snapshots.contains_key(&repo));
+
+    wait_for_recorded_event("cleanup repository activity rescan", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::RepoActivityReady { project_root, .. } if project_root == &repo
+            )
+        })
+    });
+    let (generation, snapshot) = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::RepoActivityReady {
+                project_root,
+                generation,
+                snapshot,
+            } if project_root == &repo => Some((*generation, snapshot.clone())),
+            _ => None,
+        })
+        .expect("cleanup rescan result");
+    let converged = runtime.apply_repo_activity_snapshot(&repo, generation, snapshot);
+    let converged_projection = converged
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        })
+        .expect("cleanup converged projection");
+
+    assert!(converged_projection.works[0].agents[0].sessions[0].resumable);
+}
+
+#[test]
+fn workspace_cleanup_does_not_rebroadcast_an_unrelated_active_project() {
+    let temp = tempdir().expect("tempdir");
+    let active_repo = temp.path().join("active-repo");
+    let cleaned_repo = temp.path().join("cleaned-repo");
+    fs::create_dir_all(&active_repo).expect("create active repo");
+    fs::create_dir_all(&cleaned_repo).expect("create cleaned repo");
+    save_merged_work_items(&active_repo, 1);
+    let tab = sample_project_tab("tab-1", "Active", active_repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_workspace_cleanup_projection_changed(cleaned_repo);
+
+    assert!(
+        events.is_empty(),
+        "cleanup convergence for a background project must not rebroadcast the active project"
     );
 }
 
@@ -24426,7 +24973,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         &[],
         None,
         &std::collections::HashMap::new(),
-        Path::new("/"),
+        None,
     );
 
     let order: Vec<&str> = works.iter().map(|work| work.id.as_str()).collect();
@@ -24764,6 +25311,82 @@ fn spawn_work_merge_status_scan_clears_stale_cache_when_no_targets_remain() {
             )
         })
     });
+}
+
+#[test]
+fn repo_activity_snapshot_collects_session_resume_identities() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let local_branch = "feature/local-session-resume";
+    let remote_branch = "feature/remote-session-resume";
+    run_git(&repo, &["branch", local_branch]);
+    run_git(&repo, &["branch", remote_branch]);
+    run_git(&repo, &["push", "-u", "origin", remote_branch]);
+    run_git(&repo, &["branch", "-D", remote_branch]);
+
+    let snapshot = super::scan_repo_activity_snapshot(&repo);
+    let canonical_repo = dunce::canonicalize(&repo).expect("canonical repo path");
+
+    assert!(snapshot
+        .materialized_worktree_paths
+        .contains(&canonical_repo));
+    assert!(snapshot.materializable_branches.contains(local_branch));
+    assert!(
+        snapshot.materializable_branches.contains(remote_branch),
+        "origin-only refs must be normalized for Session resume lookup"
+    );
+}
+
+#[test]
+fn repo_activity_snapshot_marks_failed_git_scan_incomplete() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = write_fake_git_recorder(&fake_bin);
+    let _path = prepend_tool_parent_to_path(&fake_git);
+
+    let snapshot = super::scan_repo_activity_snapshot(&repo);
+
+    assert!(
+        !snapshot.complete,
+        "a Git repository scan with failed inventory/refs must be fail-closed"
+    );
+}
+
+#[test]
+fn repo_activity_snapshot_supports_non_git_project_worktree_identity() {
+    let temp = tempdir().expect("tempdir");
+    let project_root = temp.path().join("plain-project");
+    fs::create_dir_all(&project_root).expect("create project root");
+    let session = gwt_agent::Session::new(
+        project_root.clone(),
+        "plain-project",
+        gwt_agent::AgentId::Codex,
+    );
+
+    let snapshot = super::scan_repo_activity_snapshot(&project_root);
+    let resume_snapshot = snapshot.session_resume_snapshot(std::time::Instant::now());
+
+    assert!(
+        snapshot.complete,
+        "non-Git inventory is complete by definition"
+    );
+    assert!(super::session_exact_resume_materializable_from_snapshot(
+        resume_snapshot,
+        &session
+    ));
 }
 
 #[test]
