@@ -96,14 +96,14 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready_for_runtime,
-    install_launch_gwt_bin_env, prune_orphan_intake_worktrees, resolve_launch_worktree,
-    resolve_shell_launch_worktree,
+    install_launch_gwt_bin_env, prune_orphan_intake_worktrees,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+    resolve_ephemeral_launch_worktree, resolve_launch_worktree, resolve_launch_worktree_request,
+    resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -988,6 +988,33 @@ enum ImprovementActionOutcome {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KnowledgeProjectionRetry {
+    Load {
+        client_id: ClientId,
+        id: String,
+        kind: KnowledgeKind,
+        request_id: Option<u64>,
+        selected_number: Option<u64>,
+    },
+    Search {
+        client_id: ClientId,
+        id: String,
+        kind: KnowledgeKind,
+        query: String,
+        request_id: u64,
+        selected_number: Option<u64>,
+    },
+}
+
+impl KnowledgeProjectionRetry {
+    fn client_id(&self) -> &str {
+        match self {
+            Self::Load { client_id, .. } | Self::Search { client_id, .. } => client_id,
+        }
+    }
+}
+
 #[cfg_attr(
     windows,
     allow(
@@ -1117,10 +1144,11 @@ enum UserEvent {
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
-    /// A successful cleanup persisted a projection mutation off-thread. The
-    /// event-loop continuation invalidates repository-derived caches and
-    /// rebuilds the projection from one fresh background snapshot.
-    WorkspaceCleanupProjectionChanged {
+    /// A cleanup changed branch/worktree topology off-thread. Projection
+    /// persistence may be absent or fail independently; the event-loop
+    /// continuation still invalidates repository-derived caches and rebuilds
+    /// the projection from one fresh background snapshot.
+    WorkspaceCleanupCompleted {
         project_root: PathBuf,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
@@ -1193,6 +1221,7 @@ enum UserEvent {
         project_root: PathBuf,
         generation: u64,
         events: Vec<OutboundEvent>,
+        retry: Option<KnowledgeProjectionRetry>,
     },
     Dispatch(Vec<OutboundEvent>),
     ImprovementActionComplete {
@@ -2606,6 +2635,7 @@ mod tests {
             repo_activity_scan_generations: HashMap::new(),
             repo_activity_force_pending: std::collections::HashSet::new(),
             repo_activity_projection_generations: HashMap::new(),
+            pending_knowledge_projection_retries: HashMap::new(),
             repo_activity_retry_attempts: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
             frontend_hydration_tasks: Default::default(),
@@ -7876,8 +7906,8 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_workspace_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::WorkspaceCleanupProjectionChanged { project_root }) => {
-                let events = app.handle_workspace_cleanup_projection_changed(project_root);
+            Event::UserEvent(UserEvent::WorkspaceCleanupCompleted { project_root }) => {
+                let events = app.handle_workspace_cleanup_completed(project_root);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
@@ -7986,11 +8016,13 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 generation,
                 events,
+                retry,
             }) => {
                 clients.dispatch(app.handle_repo_generation_dispatch(
                     &project_root,
                     generation,
                     events,
+                    retry,
                 ));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {

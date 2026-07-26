@@ -29,8 +29,8 @@ use gwt::KnowledgeKind;
 use super::{
     knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
     workspace_resume_owner_issue_number, workspace_work_item_view_from_item, AppRuntime,
-    BackendEvent, IssueBranchLinkStore, OutboundEvent, RepoActivitySnapshot, SessionResumeSnapshot,
-    UserEvent, WindowPreset,
+    BackendEvent, IssueBranchLinkStore, KnowledgeProjectionRetry, OutboundEvent,
+    RepoActivitySnapshot, SessionResumeSnapshot, UserEvent, WindowPreset,
 };
 
 pub struct KnowledgeSearchRequest<'a> {
@@ -101,6 +101,7 @@ const KNOWLEDGE_RELATED_SNAPSHOT_CAPACITY: usize = 8;
 struct KnowledgeRelatedSnapshotEntry {
     project_root: PathBuf,
     kind: KnowledgeKind,
+    repo_generation: u64,
     generation: u64,
     snapshot: Option<Arc<KnowledgeRelatedWorksByNumber>>,
 }
@@ -123,15 +124,24 @@ impl KnowledgeRelatedSnapshotCache {
         &mut self,
         project_root: &Path,
         kind: KnowledgeKind,
+        repo_generation: u64,
     ) -> Option<Arc<KnowledgeRelatedWorksByNumber>> {
         let index = self.entry_index(project_root, kind)?;
+        if self.entries[index].repo_generation != repo_generation {
+            return None;
+        }
         let entry = self.entries.remove(index)?;
         let snapshot = entry.snapshot.as_ref().map(Arc::clone);
         self.entries.push_back(entry);
         snapshot
     }
 
-    fn reserve_generation(&mut self, project_root: &Path, kind: KnowledgeKind) -> u64 {
+    fn reserve_generation(
+        &mut self,
+        project_root: &Path,
+        kind: KnowledgeKind,
+        repo_generation: u64,
+    ) -> u64 {
         if self.next_generation == u64::MAX {
             self.entries.clear();
             self.next_generation = 0;
@@ -140,13 +150,16 @@ impl KnowledgeRelatedSnapshotCache {
         let generation = self.next_generation;
         if let Some(index) = self.entry_index(project_root, kind) {
             if let Some(mut entry) = self.entries.remove(index) {
+                entry.repo_generation = repo_generation;
                 entry.generation = generation;
+                entry.snapshot = None;
                 self.entries.push_back(entry);
             }
         } else {
             self.entries.push_back(KnowledgeRelatedSnapshotEntry {
                 project_root: project_root.to_path_buf(),
                 kind,
+                repo_generation,
                 generation,
                 snapshot: None,
             });
@@ -160,6 +173,7 @@ impl KnowledgeRelatedSnapshotCache {
         project_root: &Path,
         kind: KnowledgeKind,
         reuse_existing: bool,
+        repo_generation: u64,
     ) -> Option<u64> {
         if !matches!(kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
             return None;
@@ -168,11 +182,13 @@ impl KnowledgeRelatedSnapshotCache {
             && self
                 .entry_index(project_root, kind)
                 .and_then(|index| self.entries.get(index))
-                .is_some_and(|entry| entry.snapshot.is_some())
+                .is_some_and(|entry| {
+                    entry.repo_generation == repo_generation && entry.snapshot.is_some()
+                })
         {
             return None;
         }
-        Some(self.reserve_generation(project_root, kind))
+        Some(self.reserve_generation(project_root, kind, repo_generation))
     }
 
     fn replace_if_current(
@@ -216,12 +232,13 @@ impl KnowledgeRelatedSnapshotCache {
 #[cfg(test)]
 mod related_snapshot_cache_tests {
     use super::*;
+    use gwt_core::test_support::{env_lock, ScopedEnvVar};
 
     #[test]
     fn stale_refresh_second_commit_cannot_replace_a_newer_related_work_snapshot() {
         let root = Path::new("/repo");
         let mut cache = KnowledgeRelatedSnapshotCache::default();
-        let older = cache.reserve_generation(root, KnowledgeKind::Issue);
+        let older = cache.reserve_generation(root, KnowledgeKind::Issue, 1);
         let mut older_initial_snapshot = KnowledgeRelatedWorksByNumber::new();
         older_initial_snapshot.insert(21, Vec::new());
         assert!(cache.replace_if_current(
@@ -231,7 +248,7 @@ mod related_snapshot_cache_tests {
             Arc::new(older_initial_snapshot),
         ));
 
-        let newer = cache.reserve_generation(root, KnowledgeKind::Issue);
+        let newer = cache.reserve_generation(root, KnowledgeKind::Issue, 1);
         let mut newer_snapshot = KnowledgeRelatedWorksByNumber::new();
         newer_snapshot.insert(84, Vec::new());
         assert!(cache.replace_if_current(
@@ -251,7 +268,7 @@ mod related_snapshot_cache_tests {
         ));
         assert!(
             cache
-                .get(root, KnowledgeKind::Issue)
+                .get(root, KnowledgeKind::Issue, 1)
                 .is_some_and(|snapshot| snapshot.contains_key(&84)),
             "the later request's snapshot must survive an older late completion",
         );
@@ -261,7 +278,7 @@ mod related_snapshot_cache_tests {
     fn invalidated_project_rejects_an_inflight_related_work_snapshot() {
         let root = Path::new("/repo");
         let mut cache = KnowledgeRelatedSnapshotCache::default();
-        let stale_generation = cache.reserve_generation(root, KnowledgeKind::Issue);
+        let stale_generation = cache.reserve_generation(root, KnowledgeKind::Issue, 1);
 
         cache.invalidate_project(root);
 
@@ -276,7 +293,131 @@ mod related_snapshot_cache_tests {
             ),
             "cleanup invalidation must prevent an in-flight task from refilling the cache",
         );
-        assert!(cache.get(root, KnowledgeKind::Issue).is_none());
+        assert!(cache.get(root, KnowledgeKind::Issue, 1).is_none());
+    }
+
+    #[test]
+    fn new_repo_generation_reservation_hides_the_previous_positive_snapshot() {
+        let root = Path::new("/repo");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+        let old_generation = cache.reserve_generation(root, KnowledgeKind::Issue, 1);
+        assert!(cache.replace_if_current(
+            root,
+            KnowledgeKind::Issue,
+            old_generation,
+            Arc::new(HashMap::from([(42, Vec::new())])),
+        ));
+
+        assert!(cache
+            .reserve_generation_if_needed(root, KnowledgeKind::Issue, false, 2)
+            .is_some());
+
+        assert!(
+            cache.get(root, KnowledgeKind::Issue, 2).is_none(),
+            "a newer repository generation must remain fail-closed until its rebuild commits"
+        );
+    }
+
+    #[test]
+    fn stale_repo_activity_does_not_reuse_positive_related_work_snapshot() {
+        let _env_guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+        let sessions_dir = home.join(".gwt/sessions");
+        let issue_link_cache_dir = home.join(".gwt/cache/issues");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+        let generation = cache.reserve_generation(&project_root, KnowledgeKind::Issue, 7);
+        let cached_work = gwt::KnowledgeRelatedWorkView {
+            id: "cached-work".to_string(),
+            title: "Cached Work".to_string(),
+            status_category: "idle".to_string(),
+            branch: Some("work/issue-42".to_string()),
+            worktree_path: Some(project_root.join("deleted").display().to_string()),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            agents: vec![gwt::KnowledgeRelatedAgentView {
+                session_id: "session-42".to_string(),
+                agent_id: Some("codex".to_string()),
+                display_name: Some("Codex".to_string()),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                sessions: vec![gwt::KnowledgeRelatedSessionView {
+                    agent_session_id: "conversation-42".to_string(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    is_active: false,
+                    resumable: true,
+                }],
+            }],
+        };
+        assert!(cache.replace_if_current(
+            &project_root,
+            KnowledgeKind::Issue,
+            generation,
+            Arc::new(HashMap::from([(42, vec![cached_work])])),
+        ));
+        let snapshots = Arc::new(Mutex::new(cache));
+        let stale_repo_activity = RepoActivitySnapshot {
+            captured_at: std::time::Instant::now() - std::time::Duration::from_secs(11),
+            complete: true,
+            materialized_worktree_paths: HashSet::new(),
+            materializable_branches: HashSet::from(["work/issue-42".to_string()]),
+            worktree_activity: HashMap::new(),
+            known_clean_branches: HashSet::new(),
+            live_process_worktree_paths: HashSet::new(),
+            local_worktree_branches: HashSet::new(),
+            detached_worktree_paths: HashSet::new(),
+            merged_branches: HashMap::new(),
+            cleanup_ready_branches: HashMap::new(),
+            tip_subjects: HashMap::new(),
+        };
+        let mut view = gwt::KnowledgeBridgeView {
+            kind: KnowledgeKind::Issue,
+            entries: Vec::new(),
+            selected_number: Some(42),
+            empty_message: None,
+            refresh_enabled: true,
+            detail: gwt::KnowledgeDetailView {
+                number: Some(42),
+                title: "Issue 42".to_string(),
+                subtitle: String::new(),
+                state: "OPEN".to_string(),
+                labels: Vec::new(),
+                sections: Vec::new(),
+                launch_issue_number: Some(42),
+                related_works: Vec::new(),
+            },
+        };
+
+        augment_knowledge_bridge_related_works_with_snapshot(
+            &snapshots,
+            KnowledgeRelatedSources {
+                project_root: &project_root,
+                sessions_dir: &sessions_dir,
+                issue_link_cache_dir: &issue_link_cache_dir,
+                repo_activity: Some(&stale_repo_activity),
+                repo_generation: 7,
+            },
+            &mut view,
+            true,
+            None,
+        );
+
+        assert!(
+            view.detail.related_works.is_empty(),
+            "an expired repository snapshot must not preserve a cached Resume positive"
+        );
+        assert_eq!(
+            snapshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .full_scan_count(),
+            1,
+            "expired repository evidence must rebuild the related view fail-closed"
+        );
     }
 }
 
@@ -359,6 +500,7 @@ struct KnowledgeRelatedSources<'a> {
     sessions_dir: &'a Path,
     issue_link_cache_dir: &'a Path,
     repo_activity: Option<&'a RepoActivitySnapshot>,
+    repo_generation: u64,
 }
 
 fn augment_knowledge_bridge_related_works_with_snapshot(
@@ -372,11 +514,14 @@ fn augment_knowledge_bridge_related_works_with_snapshot(
     if !matches!(kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
         return;
     }
-    let existing = reuse_existing.then(|| {
+    let repo_activity_is_usable = sources
+        .repo_activity
+        .is_some_and(|snapshot| snapshot.is_usable(std::time::Instant::now()));
+    let existing = (reuse_existing && repo_activity_is_usable).then(|| {
         snapshots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(sources.project_root, kind)
+            .get(sources.project_root, kind, sources.repo_generation)
     });
     let related_by_number = existing.flatten().unwrap_or_else(|| {
         let related_by_number = Arc::new(load_knowledge_bridge_related_works_from_paths(
@@ -410,11 +555,12 @@ fn reserve_related_snapshot_generation(
     project_root: &Path,
     kind: KnowledgeKind,
     reuse_existing: bool,
+    repo_generation: u64,
 ) -> Option<u64> {
     snapshots
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .reserve_generation_if_needed(project_root, kind, reuse_existing)
+        .reserve_generation_if_needed(project_root, kind, reuse_existing, repo_generation)
 }
 
 fn load_knowledge_bridge_related_works_from_paths(
@@ -506,10 +652,9 @@ fn load_knowledge_bridge_related_works(
             .entry(issue_number)
             .or_default()
             .insert(session.id.clone());
-        related_by_number
-            .entry(issue_number)
-            .or_default()
-            .push(knowledge_related_work_from_session(session));
+        related_by_number.entry(issue_number).or_default().push(
+            knowledge_related_work_from_session(session, session_resume_snapshot),
+        );
     }
 
     for works in related_by_number.values_mut() {
@@ -624,6 +769,93 @@ mod related_work_resume_tests {
         );
 
         assert!(related[&42][0].agents[0].sessions[0].resumable);
+    }
+
+    #[test]
+    fn session_only_related_work_fails_closed_without_repo_activity_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let branch = "work/issue-42";
+        let conversation = "conversation-42";
+        let now = chrono::Utc::now();
+        let mut session = gwt_agent::Session::new(
+            project_root.join("deleted-worktree"),
+            branch,
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-42".to_string();
+        session.agent_session_id = Some(conversation.to_string());
+        session.session_history = vec![gwt_agent::AgentSessionHistoryEntry {
+            agent_session_id: conversation.to_string(),
+            started_at: now,
+        }];
+        let view = gwt::KnowledgeBridgeView {
+            kind: KnowledgeKind::Issue,
+            entries: Vec::new(),
+            selected_number: Some(42),
+            empty_message: None,
+            refresh_enabled: true,
+            detail: gwt::KnowledgeDetailView {
+                number: Some(42),
+                title: "Issue 42".to_string(),
+                subtitle: String::new(),
+                state: "OPEN".to_string(),
+                labels: Vec::new(),
+                sections: Vec::new(),
+                launch_issue_number: Some(42),
+                related_works: Vec::new(),
+            },
+        };
+        let issue_by_branch = HashMap::from([(branch.to_string(), 42)]);
+
+        let related = load_knowledge_bridge_related_works(
+            &view,
+            &[],
+            std::slice::from_ref(&session),
+            &issue_by_branch,
+            None,
+        );
+
+        assert!(
+            !related[&42][0].agents[0].sessions[0].resumable,
+            "session-only Knowledge rows must require fresh repository membership"
+        );
+
+        let mut repo_activity = RepoActivitySnapshot {
+            captured_at: std::time::Instant::now(),
+            complete: true,
+            materialized_worktree_paths: HashSet::new(),
+            materializable_branches: HashSet::from([branch.to_string()]),
+            worktree_activity: HashMap::new(),
+            known_clean_branches: HashSet::new(),
+            live_process_worktree_paths: HashSet::new(),
+            local_worktree_branches: HashSet::new(),
+            detached_worktree_paths: HashSet::new(),
+            merged_branches: HashMap::new(),
+            cleanup_ready_branches: HashMap::new(),
+            tip_subjects: HashMap::new(),
+        };
+        let related = load_knowledge_bridge_related_works(
+            &view,
+            &[],
+            std::slice::from_ref(&session),
+            &issue_by_branch,
+            repo_activity.session_resume_snapshot(std::time::Instant::now()),
+        );
+        assert!(related[&42][0].agents[0].sessions[0].resumable);
+
+        repo_activity.captured_at = std::time::Instant::now() - std::time::Duration::from_secs(11);
+        let related = load_knowledge_bridge_related_works(
+            &view,
+            &[],
+            std::slice::from_ref(&session),
+            &issue_by_branch,
+            repo_activity.session_resume_snapshot(std::time::Instant::now()),
+        );
+        assert!(
+            !related[&42][0].agents[0].sessions[0].resumable,
+            "session-only Knowledge rows must reject expired repository membership"
+        );
     }
 }
 
@@ -771,6 +1003,7 @@ fn knowledge_related_agent_from_workspace_history(
 
 fn knowledge_related_work_from_session(
     session: &gwt_agent::Session,
+    session_resume_snapshot: Option<SessionResumeSnapshot<'_>>,
 ) -> gwt::KnowledgeRelatedWorkView {
     let updated_at = session
         .updated_at
@@ -784,7 +1017,11 @@ fn knowledge_related_work_from_session(
                 agent_session_id: agent_session_id.clone(),
                 started_at: updated_at.clone(),
                 is_active,
-                resumable: session.is_resumable_conversation(agent_session_id),
+                resumable: session.is_resumable_conversation(agent_session_id)
+                    && super::session_exact_resume_materializable_from_snapshot(
+                        session_resume_snapshot,
+                        session,
+                    ),
             }]
         })
         .unwrap_or_default();
@@ -1116,16 +1353,28 @@ impl AppRuntime {
         let refresh_if_stale = request.refresh_if_stale;
         let sessions_dir = self.sessions_dir.clone();
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        self.request_repo_activity_refresh_if_needed(&project_root);
         let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
         let repo_generation = self.repo_activity_projection_generation(&project_root);
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
-        let reuse_related_snapshot = !refresh_if_stale;
+        let reuse_related_snapshot = !refresh_if_stale
+            && repo_activity
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.is_usable(std::time::Instant::now()));
         let related_snapshot_generation = reserve_related_snapshot_generation(
             &related_snapshots,
             &project_root,
             kind,
             reuse_related_snapshot,
+            repo_generation,
         );
+        let retry = KnowledgeProjectionRetry::Load {
+            client_id: client_id.clone(),
+            id: id.clone(),
+            kind,
+            request_id,
+            selected_number,
+        };
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
@@ -1137,6 +1386,7 @@ impl AppRuntime {
                             sessions_dir: &sessions_dir,
                             issue_link_cache_dir: &issue_link_cache_dir,
                             repo_activity: repo_activity.as_ref(),
+                            repo_generation,
                         },
                         &mut view,
                         reuse_related_snapshot,
@@ -1163,6 +1413,7 @@ impl AppRuntime {
                     request_id,
                     view,
                 ),
+                retry: Some(retry.clone()),
             });
             if !refresh_after {
                 return;
@@ -1183,6 +1434,7 @@ impl AppRuntime {
                         sessions_dir: &sessions_dir,
                         issue_link_cache_dir: &issue_link_cache_dir,
                         repo_activity: repo_activity.as_ref(),
+                        repo_generation,
                     },
                     &mut view,
                     false,
@@ -1192,6 +1444,7 @@ impl AppRuntime {
                     project_root,
                     generation: repo_generation,
                     events: knowledge_view_events(client_id, id, kind, request_id, view),
+                    retry: Some(retry),
                 });
             }
         });
@@ -1211,10 +1464,23 @@ impl AppRuntime {
             issue_link_cache_dir,
         } = task;
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
+        self.request_repo_activity_refresh_if_needed(&project_root);
         let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
         let repo_generation = self.repo_activity_projection_generation(&project_root);
-        let related_snapshot_generation =
-            reserve_related_snapshot_generation(&related_snapshots, &project_root, kind, false);
+        let related_snapshot_generation = reserve_related_snapshot_generation(
+            &related_snapshots,
+            &project_root,
+            kind,
+            false,
+            repo_generation,
+        );
+        let retry = KnowledgeProjectionRetry::Load {
+            client_id: client_id.clone(),
+            id: id.clone(),
+            kind,
+            request_id,
+            selected_number,
+        };
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let refreshed = match gwt::refresh_knowledge_bridge_cache(&project_root, force) {
@@ -1242,6 +1508,7 @@ impl AppRuntime {
                                 sessions_dir: &sessions_dir,
                                 issue_link_cache_dir: &issue_link_cache_dir,
                                 repo_activity: repo_activity.as_ref(),
+                                repo_generation,
                             },
                             &mut view,
                             false,
@@ -1258,6 +1525,7 @@ impl AppRuntime {
                 project_root,
                 generation: repo_generation,
                 events: event,
+                retry: Some(retry),
             });
         });
     }
@@ -1345,8 +1613,17 @@ impl AppRuntime {
             issue_link_cache_dir,
         } = task;
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
+        self.request_repo_activity_refresh_if_needed(&project_root);
         let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
         let repo_generation = self.repo_activity_projection_generation(&project_root);
+        let retry = KnowledgeProjectionRetry::Search {
+            client_id: client_id.clone(),
+            id: id.clone(),
+            kind,
+            query: query.clone(),
+            request_id,
+            selected_number,
+        };
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let event =
@@ -1359,6 +1636,7 @@ impl AppRuntime {
                                 sessions_dir: &sessions_dir,
                                 issue_link_cache_dir: &issue_link_cache_dir,
                                 repo_activity: repo_activity.as_ref(),
+                                repo_generation,
                             },
                             &mut view,
                             true,
@@ -1383,6 +1661,7 @@ impl AppRuntime {
                 project_root,
                 generation: repo_generation,
                 events: vec![OutboundEvent::reply(client_id, event)],
+                retry: Some(retry),
             });
         });
     }

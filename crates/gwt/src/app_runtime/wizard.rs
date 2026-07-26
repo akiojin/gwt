@@ -26,6 +26,7 @@ use gwt::{
 };
 use uuid::Uuid;
 
+use crate::launch_runtime::resolve_shell_launch_worktree_attempt;
 use crate::{ShellLaunchConfig, UserEvent};
 
 /// `Pr => None` because Launch Agent is not exposed for PR bridges
@@ -100,15 +101,14 @@ use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
-    resolve_shell_launch_worktree, save_shell_work_projection, session_exact_resume_materializable,
-    synthetic_branch_entry, workspace_projection_for_current_resume,
-    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
-    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
-    workspace_resume_context_from_projection, workspace_resume_owner_issue_number,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DispatchTarget,
-    IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext, LaunchFeedbackContext,
-    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus,
-    WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    save_shell_work_projection, session_exact_resume_materializable, synthetic_branch_entry,
+    workspace_projection_for_current_resume, workspace_resume_branch_exists,
+    workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
+    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
+    workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
+    BackendEvent, DispatchTarget, IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -2709,13 +2709,14 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
-            let did_materialize =
-                resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
-            if did_materialize {
+            let worktree_resolution =
+                resolve_shell_launch_worktree_attempt(Path::new(&project_root), &mut config);
+            if worktree_resolution.should_invalidate_topology {
                 proxy.send(UserEvent::RepoTopologyMaterialized {
                     project_root: PathBuf::from(&project_root),
                 });
             }
+            worktree_resolution.result?;
             let worktree_path = config
                 .working_dir
                 .clone()
@@ -2762,6 +2763,148 @@ impl AppRuntime {
             // Cache refresh preserves picker candidates set at first hydration.
             open_branch_candidates: Vec::new(),
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shell_topology_invalidation_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn init_git_clone_with_origin(root: &Path) -> PathBuf {
+        let seed = root.join("seed");
+        let repo = root.join("repo");
+        fs::create_dir_all(&seed).expect("create seed");
+        run_git(&seed, &["init", "-q", "-b", "develop"]);
+        run_git(&seed, &["config", "user.name", "Codex"]);
+        run_git(&seed, &["config", "user.email", "codex@example.com"]);
+        fs::write(seed.join("README.md"), "repo\n").expect("seed readme");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-qm", "init"]);
+        run_git(root, &["clone", "--bare", "seed", "origin.git"]);
+        run_git(root, &["clone", "origin.git", "repo"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        repo
+    }
+
+    fn shell_config(branch: &str) -> ShellLaunchConfig {
+        ShellLaunchConfig {
+            working_dir: None,
+            branch: Some(branch.to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Shell".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+            env_vars: std::collections::HashMap::new(),
+            remove_env: Vec::new(),
+            command_override: None,
+            command_args_override: None,
+        }
+    }
+
+    #[test]
+    fn remote_branch_creation_is_reported_before_shell_worktree_failure() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_git_clone_with_origin(temp.path());
+        let hook = repo.join(".git/hooks/post-checkout");
+        fs::write(&hook, "#!/bin/sh\nexit 23\n").expect("write failing post-checkout hook");
+        let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+        let branch = "feature/shell-partial-materialization";
+        let (proxy, events) = AppEventProxy::stub();
+
+        AppRuntime::spawn_wizard_shell_window_async(
+            proxy,
+            repo.display().to_string(),
+            "tab-1::shell-1".to_string(),
+            shell_config(branch),
+            temp.path().join("profile.toml"),
+        );
+
+        run_git(
+            &repo,
+            &[
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let recorded = events.lock().expect("events");
+        let invalidated_index = recorded
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::RepoTopologyMaterialized { project_root }
+                        if project_root == &repo
+                )
+            })
+            .expect("successful remote branch creation must invalidate repo topology");
+        let failed_index = recorded
+            .iter()
+            .position(|event| {
+                matches!(event, UserEvent::ShellLaunchComplete { result: Err(_), .. })
+            })
+            .expect("failing post-checkout hook must fail Shell launch materialization");
+        assert!(
+            invalidated_index < failed_index,
+            "topology invalidation must precede the failed Shell launch completion"
+        );
+    }
+
+    #[test]
+    fn existing_worktree_reuse_does_not_report_topology_materialization() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_git_clone_with_origin(temp.path());
+        let invalid_profile = temp.path().join("invalid-profile.toml");
+        fs::write(&invalid_profile, "active_profile = [not-valid").expect("write invalid profile");
+        let (proxy, events) = AppEventProxy::stub();
+
+        AppRuntime::spawn_wizard_shell_window_async(
+            proxy,
+            repo.display().to_string(),
+            "tab-1::shell-1".to_string(),
+            shell_config("develop"),
+            invalid_profile,
+        );
+
+        let recorded = events.lock().expect("events");
+        assert!(
+            !recorded.iter().any(|event| matches!(
+                event,
+                UserEvent::RepoTopologyMaterialized { project_root } if project_root == &repo
+            )),
+            "reusing an existing worktree must not invalidate repo topology"
+        );
+        assert!(
+            recorded.iter().any(|event| matches!(
+                event,
+                UserEvent::ShellLaunchComplete { result: Err(_), .. }
+            )),
+            "invalid profile must finish the reused-worktree launch with an error"
+        );
     }
 }
 

@@ -16,7 +16,7 @@
 //!   [`workspace_work_event_from_launch_projection`])
 //! - runs the Workspace cleanup flow keyed by
 //!   `WORKSPACE_CLEANUP_EVENT_ID` ([`spawn_workspace_cleanup_async`],
-//!   [`clear_workspace_cleanup_git_details_event`])
+//!   [`complete_workspace_cleanup`])
 //!
 //! Behavior-preserving move: shared view helpers
 //! (`non_empty_workspace_text`, ...) stay in `mod.rs` and are imported via
@@ -299,7 +299,7 @@ pub(super) fn spawn_workspace_cleanup_async(
     options: BranchCleanupOptions,
 ) {
     thread::spawn(move || {
-        let (events, projection_changed) =
+        let (events, topology_changed_event) =
             match list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
             {
                 Ok(entries) => {
@@ -332,27 +332,9 @@ pub(super) fn spawn_workspace_cleanup_async(
                             results: results.clone(),
                         },
                     )];
-                    let projection_changed = if results.iter().any(|result| {
-                        result.branch == branch
-                            && matches!(
-                                result.status,
-                                gwt::BranchCleanupResultStatus::Success
-                                    | gwt::BranchCleanupResultStatus::Partial
-                            )
-                    }) {
-                        // SPEC-2359 US-37 / FR-118: emit Done only after the
-                        // matching workspace cleanup actually succeeded.
-                        let _ =
-                            gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
-                                &project_root,
-                                &branch,
-                                chrono::Utc::now(),
-                            );
-                        clear_workspace_cleanup_git_details_event(&project_root)
-                    } else {
-                        None
-                    };
-                    (events, projection_changed)
+                    let topology_changed_event =
+                        complete_workspace_cleanup(&project_root, &branch, &results);
+                    (events, topology_changed_event)
                 }
                 Err(error) => (
                     vec![OutboundEvent::reply(
@@ -366,13 +348,42 @@ pub(super) fn spawn_workspace_cleanup_async(
                 ),
             };
         proxy.send(UserEvent::Dispatch(events));
-        if let Some(event) = projection_changed {
+        if let Some(event) = topology_changed_event {
             proxy.send(event);
         }
     });
 }
 
-fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<UserEvent> {
+fn complete_workspace_cleanup(
+    project_root: &Path,
+    branch: &str,
+    results: &[gwt::BranchCleanupResultEntry],
+) -> Option<UserEvent> {
+    let topology_changed = results.iter().any(|result| {
+        result.branch == branch
+            && matches!(
+                result.status,
+                gwt::BranchCleanupResultStatus::Success | gwt::BranchCleanupResultStatus::Partial
+            )
+    });
+    if !topology_changed {
+        return None;
+    }
+
+    // SPEC-2359 US-37 / FR-118: emit Done only after the matching workspace
+    // cleanup actually changed repository topology.
+    let _ = gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
+        project_root,
+        branch,
+        chrono::Utc::now(),
+    );
+    clear_workspace_cleanup_git_details(project_root);
+    Some(UserEvent::WorkspaceCleanupCompleted {
+        project_root: project_root.to_path_buf(),
+    })
+}
+
+fn clear_workspace_cleanup_git_details(project_root: &Path) {
     match gwt_core::workspace_projection::mutate_existing_workspace_projection_for_cleanup(
         project_root,
         |projection| {
@@ -380,19 +391,32 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<User
             Ok(())
         },
     ) {
-        Ok(Some(())) => Some(UserEvent::WorkspaceCleanupProjectionChanged {
-            project_root: project_root.to_path_buf(),
-        }),
-        Ok(None) => None,
+        Ok(Some(())) | Ok(None) => {}
         Err(error) => {
             tracing::warn!(
                 project_root = %project_root.display(),
                 error = %error,
                 "workspace projection cleanup state update skipped"
             );
-            None
         }
     }
+}
+
+fn cleanup_topology_changed_event(
+    project_root: &Path,
+    results: &[gwt::BranchCleanupResultEntry],
+) -> Option<UserEvent> {
+    results
+        .iter()
+        .any(|result| {
+            matches!(
+                result.status,
+                gwt::BranchCleanupResultStatus::Success | gwt::BranchCleanupResultStatus::Partial
+            )
+        })
+        .then(|| UserEvent::WorkspaceCleanupCompleted {
+            project_root: project_root.to_path_buf(),
+        })
 }
 
 fn spawn_branch_cleanup_async(
@@ -405,7 +429,7 @@ fn spawn_branch_cleanup_async(
     options: BranchCleanupOptions,
 ) {
     thread::spawn(move || {
-        let events =
+        let (events, topology_changed_event) =
             match list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
             {
                 Ok(entries) => {
@@ -432,6 +456,8 @@ fn spawn_branch_cleanup_async(
                             )]));
                         },
                     );
+                    let topology_changed_event =
+                        cleanup_topology_changed_event(&project_root, &results);
                     let mut events = vec![OutboundEvent::reply(
                         client_id.clone(),
                         BackendEvent::BranchCleanupResult {
@@ -463,17 +489,23 @@ fn spawn_branch_cleanup_async(
                             },
                         )),
                     }
-                    events
+                    (events, topology_changed_event)
                 }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BranchError {
-                        id: window_id,
-                        message: error.to_string(),
-                    },
-                )],
+                Err(error) => (
+                    vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::BranchError {
+                            id: window_id,
+                            message: error.to_string(),
+                        },
+                    )],
+                    None,
+                ),
             };
         proxy.send(UserEvent::Dispatch(events));
+        if let Some(event) = topology_changed_event {
+            proxy.send(event);
+        }
     });
 }
 
@@ -587,7 +619,37 @@ mod tests {
     use gwt_core::test_support::{env_lock, ScopedEnvVar};
 
     #[test]
-    fn cleanup_completion_reenters_runtime_through_projection_changed_event() {
+    fn cleanup_results_report_topology_changes_for_success_and_partial() {
+        let project_root = Path::new("/repo");
+        for status in [
+            gwt::BranchCleanupResultStatus::Success,
+            gwt::BranchCleanupResultStatus::Partial,
+        ] {
+            let results = vec![gwt::BranchCleanupResultEntry {
+                branch: "work/issue-42".to_string(),
+                execution_branch: Some("work/issue-42".to_string()),
+                status,
+                message: "changed".to_string(),
+            }];
+            assert!(matches!(
+                cleanup_topology_changed_event(project_root, &results),
+                Some(UserEvent::WorkspaceCleanupCompleted {
+                    project_root: changed_root
+                }) if changed_root == project_root
+            ));
+        }
+
+        let failed = vec![gwt::BranchCleanupResultEntry {
+            branch: "work/issue-42".to_string(),
+            execution_branch: Some("work/issue-42".to_string()),
+            status: gwt::BranchCleanupResultStatus::Failed,
+            message: "unchanged".to_string(),
+        }];
+        assert!(cleanup_topology_changed_event(project_root, &failed).is_none());
+    }
+
+    #[test]
+    fn cleanup_completion_reenters_runtime_through_completed_event() {
         let _env_guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -613,12 +675,18 @@ mod tests {
         gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
             .expect("save current projection");
 
-        let event = clear_workspace_cleanup_git_details_event(&project_root)
+        let results = vec![gwt::BranchCleanupResultEntry {
+            branch: "work/cleanup-event".to_string(),
+            execution_branch: Some("work/cleanup-event".to_string()),
+            status: gwt::BranchCleanupResultStatus::Success,
+            message: "changed".to_string(),
+        }];
+        let event = complete_workspace_cleanup(&project_root, "work/cleanup-event", &results)
             .expect("cleanup projection change event");
 
         assert!(matches!(
             event,
-            UserEvent::WorkspaceCleanupProjectionChanged {
+            UserEvent::WorkspaceCleanupCompleted {
                 project_root: changed_root
             } if changed_root == project_root
         ));
@@ -632,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_completion_does_not_recreate_projection_deleted_while_waiting_for_lock() {
+    fn cleanup_completion_invalidates_topology_without_recreating_deleted_projection() {
         let _env_guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -666,8 +734,14 @@ mod tests {
         lock.lock_exclusive().expect("lock project state");
 
         let root_for_cleanup = project_root.clone();
+        let results = vec![gwt::BranchCleanupResultEntry {
+            branch: "work/cleanup-event".to_string(),
+            execution_branch: Some("work/cleanup-event".to_string()),
+            status: gwt::BranchCleanupResultStatus::Success,
+            message: "changed".to_string(),
+        }];
         let handle = std::thread::spawn(move || {
-            clear_workspace_cleanup_git_details_event(&root_for_cleanup)
+            complete_workspace_cleanup(&root_for_cleanup, "work/cleanup-event", &results)
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(
@@ -679,10 +753,15 @@ mod tests {
         FileExt::unlock(&lock).expect("unlock project state");
         let event = handle.join().expect("join cleanup completion");
 
-        assert_eq!(
-            (event.is_none(), current_path.exists()),
-            (true, false),
-            "a deleted current projection must not be broadcast or recreated by cleanup completion"
+        assert!(matches!(
+            event,
+            Some(UserEvent::WorkspaceCleanupCompleted {
+                project_root: changed_root
+            }) if changed_root == project_root
+        ));
+        assert!(
+            !current_path.exists(),
+            "a deleted current projection must not be recreated by cleanup completion"
         );
         assert!(
             !legacy_path.exists(),

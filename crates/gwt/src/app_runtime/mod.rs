@@ -191,7 +191,8 @@ use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,
     agent_launch_purpose_title, linked_issue_workspace_context, non_empty_workspace_text,
     save_resumed_workspace_projection, save_start_work_workspace_projection,
-    session_exact_resume_materializable, work_session_index, workspace_resume_branch_exists,
+    session_exact_resume_materializable, session_exact_resume_materializable_from_snapshot,
+    work_session_index, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
     workspace_resume_owner_issue_number, workspace_work_item_view_from_item,
@@ -203,8 +204,7 @@ use workspace_views::{
     apply_work_summary_external_sources, assign_and_merge_workspace_groups,
     attach_registry_sessions_to_active_works, derive_work_summary, is_identifier_like_title,
     mark_merged_active_works, mark_remote_only_active_works, mark_workspace_cleanup_candidates,
-    session_exact_resume_materializable_from_snapshot, workspace_work_agent_view_from_ref,
-    workspace_work_event_kind_wire,
+    workspace_work_agent_view_from_ref, workspace_work_event_kind_wire,
 };
 pub(crate) use workspace_views::{RepoActivitySnapshot, SessionResumeSnapshot, WorktreeActivity};
 
@@ -632,6 +632,12 @@ pub struct AppRuntime {
     /// scan generations this advances at invalidation time, so an already
     /// running Knowledge task cannot publish after cleanup/topology mutation.
     pub(crate) repo_activity_projection_generations: HashMap<PathBuf, u64>,
+    /// Knowledge reads whose result lost a repository generation race. Keep
+    /// the typed request until the replacement repository snapshot is
+    /// published, then rebuild the view from that snapshot instead of leaving
+    /// the frontend on an old positive Resume result or in loading state.
+    pub(crate) pending_knowledge_projection_retries:
+        HashMap<PathBuf, Vec<KnowledgeProjectionRetry>>,
     /// Incomplete scans retry with a small bounded backoff. A complete scan or
     /// an explicit refresh clears the budget for that project.
     pub(crate) repo_activity_retry_attempts: HashMap<PathBuf, u8>,
@@ -936,6 +942,7 @@ impl AppRuntime {
             repo_activity_scan_generations: HashMap::new(),
             repo_activity_force_pending: HashSet::new(),
             repo_activity_projection_generations: HashMap::new(),
+            pending_knowledge_projection_retries: HashMap::new(),
             repo_activity_retry_attempts: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
             frontend_hydration_tasks: Default::default(),
@@ -1029,16 +1036,92 @@ impl AppRuntime {
     /// Accept a Knowledge/background projection only while the repository
     /// identity it captured is still current.
     pub(crate) fn handle_repo_generation_dispatch(
-        &self,
+        &mut self,
         project_root: &Path,
         generation: u64,
         events: Vec<OutboundEvent>,
+        retry: Option<KnowledgeProjectionRetry>,
     ) -> Vec<OutboundEvent> {
         if self.repo_activity_projection_generation(project_root) == generation {
             events
+        } else if let Some(retry) = retry {
+            if !self
+                .frontend_hydration_generations
+                .contains_key(retry.client_id())
+            {
+                return Vec::new();
+            }
+            if self
+                .repo_activity_snapshots
+                .get(project_root)
+                .is_some_and(|snapshot| snapshot.is_usable(std::time::Instant::now()))
+            {
+                self.retry_knowledge_projection(retry)
+            } else {
+                let pending = self
+                    .pending_knowledge_projection_retries
+                    .entry(project_root.to_path_buf())
+                    .or_default();
+                if !pending.contains(&retry) {
+                    pending.push(retry);
+                }
+                self.spawn_repo_activity_snapshot_scan(project_root.to_path_buf(), false);
+                Vec::new()
+            }
         } else {
             Vec::new()
         }
+    }
+
+    fn retry_knowledge_projection(&self, retry: KnowledgeProjectionRetry) -> Vec<OutboundEvent> {
+        match retry {
+            KnowledgeProjectionRetry::Load {
+                client_id,
+                id,
+                kind,
+                request_id,
+                selected_number,
+            } => self.load_knowledge_bridge_events(
+                &client_id,
+                KnowledgeLoadRequest {
+                    id: &id,
+                    kind,
+                    request_id,
+                    selected_number,
+                    refresh: false,
+                    refresh_if_stale: false,
+                },
+            ),
+            KnowledgeProjectionRetry::Search {
+                client_id,
+                id,
+                kind,
+                query,
+                request_id,
+                selected_number,
+            } => self.search_knowledge_bridge_events(
+                &client_id,
+                KnowledgeSearchRequest {
+                    id: &id,
+                    kind,
+                    query: &query,
+                    request_id,
+                    selected_number,
+                },
+            ),
+        }
+    }
+
+    fn drain_pending_knowledge_projection_retries(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        self.pending_knowledge_projection_retries
+            .remove(project_root)
+            .into_iter()
+            .flatten()
+            .flat_map(|retry| self.retry_knowledge_projection(retry))
+            .collect()
     }
 
     /// SPEC-2359 W-15 (FR-386): store the background merged-branch scan
@@ -1079,7 +1162,9 @@ impl AppRuntime {
         );
         self.advance_repo_activity_projection_generation(project_root);
         self.invalidate_knowledge_related_snapshot(project_root);
-        self.repo_activity_projection_broadcast_for_project(project_root)
+        let mut events = self.repo_activity_projection_broadcast_for_project(project_root);
+        events.extend(self.drain_pending_knowledge_projection_retries(project_root));
+        events
     }
 
     /// SPEC-3170 FR-044/066: accept only the newest repository activity scan
@@ -1126,7 +1211,9 @@ impl AppRuntime {
             self.schedule_repo_activity_retry(project_root, generation);
         }
         self.invalidate_knowledge_related_snapshot(project_root);
-        self.repo_activity_projection_broadcast_for_project(project_root)
+        let mut events = self.repo_activity_projection_broadcast_for_project(project_root);
+        events.extend(self.drain_pending_knowledge_projection_retries(project_root));
+        events
     }
 
     fn schedule_repo_activity_retry(&mut self, project_root: &Path, generation: u64) {
@@ -1169,7 +1256,7 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn handle_workspace_cleanup_projection_changed(
+    pub(crate) fn handle_workspace_cleanup_completed(
         &mut self,
         project_root: PathBuf,
     ) -> Vec<OutboundEvent> {
@@ -3433,6 +3520,11 @@ impl AppRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(client_id);
+        self.pending_knowledge_projection_retries
+            .retain(|_, retries| {
+                retries.retain(|retry| retry.client_id() != client_id);
+                !retries.is_empty()
+            });
     }
 }
 
@@ -4223,6 +4315,7 @@ fn work_branch_scan_targets(
 }
 
 fn scan_repo_activity_snapshot(project_root: &Path) -> RepoActivitySnapshot {
+    let project_root_is_directory = project_root.is_dir();
     let is_git_repository = gwt_git::Repository::discover(project_root).is_ok();
     let main_root = gwt_git::worktree::main_worktree_root(project_root)
         .unwrap_or_else(|_| project_root.to_path_buf());
@@ -4232,7 +4325,7 @@ fn scan_repo_activity_snapshot(project_root: &Path) -> RepoActivitySnapshot {
             Err(_) => (Vec::new(), false),
         }
     } else {
-        (Vec::new(), true)
+        (Vec::new(), project_root_is_directory)
     };
     let canonical_main =
         dunce::canonicalize(&main_root).unwrap_or_else(|_| main_root.to_path_buf());
@@ -4279,7 +4372,7 @@ fn scan_repo_activity_snapshot(project_root: &Path) -> RepoActivitySnapshot {
     let mut materialized_worktree_paths = HashSet::new();
     let mut worktree_paths_by_branch: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut worktree_paths = Vec::new();
-    if !is_git_repository {
+    if !is_git_repository && project_root_is_directory {
         materialized_worktree_paths.insert(project_root.to_path_buf());
         let path = dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
         materialized_worktree_paths.insert(path.clone());

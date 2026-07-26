@@ -44,12 +44,32 @@ fn set_worktree_launch_path(
 ///
 /// Returns `true` only when this call successfully materialized a new
 /// worktree; selecting an already-materialized worktree returns `false`.
+#[cfg(test)]
 pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
     base_branch: &mut Option<String>,
     working_dir: &mut Option<PathBuf>,
     env_vars: &mut HashMap<String, String>,
+) -> Result<bool, String> {
+    let mut should_invalidate_topology = false;
+    resolve_launch_worktree_request_with_topology_tracking(
+        repo_path,
+        branch_name,
+        base_branch,
+        working_dir,
+        env_vars,
+        &mut should_invalidate_topology,
+    )
+}
+
+fn resolve_launch_worktree_request_with_topology_tracking(
+    repo_path: &Path,
+    branch_name: Option<&str>,
+    base_branch: &mut Option<String>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+    should_invalidate_topology: &mut bool,
 ) -> Result<bool, String> {
     let Some(branch_name) = branch_name.map(str::to_string) else {
         return Ok(false);
@@ -82,6 +102,7 @@ pub fn resolve_launch_worktree_request(
         manager
             .prune()
             .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
+        *should_invalidate_topology = true;
         worktrees = manager.list().map_err(|err| err.to_string())?;
         if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
             set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
@@ -98,6 +119,11 @@ pub fn resolve_launch_worktree_request(
 
     if !has_local_branch {
         if is_start_work_branch_name(&branch_name) {
+            // Preparing origin/develop can push the branch successfully and
+            // still fail while fetching its tracking ref. Mark the attempt
+            // before entering the non-transactional helper so callers always
+            // invalidate any partially changed remote topology.
+            *should_invalidate_topology = true;
             manager
                 .prepare_start_work_remote_develop()
                 .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
@@ -105,6 +131,10 @@ pub fn resolve_launch_worktree_request(
             remote_base_ref = origin_remote_ref(&effective_base_branch);
             *base_branch = Some(effective_base_branch.clone());
         } else {
+            // `fetch --prune` itself updates and removes remote-tracking refs.
+            // A later base/branch check may fail, but the snapshot still has
+            // to be invalidated for the fetch mutation already attempted.
+            *should_invalidate_topology = true;
             manager
                 .fetch_origin()
                 .map_err(|err| format!("failed to fetch origin: {err}"))?;
@@ -142,6 +172,10 @@ pub fn resolve_launch_worktree_request(
             .remote_branch_exists(&remote_branch_ref)
             .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
         {
+            // A successful push followed by a failed tracking-ref fetch still
+            // changes remote topology. Conservatively invalidate from the
+            // start of the mutation attempt, not only after full success.
+            *should_invalidate_topology = true;
             manager
                 .create_remote_branch_from_base(&remote_base_ref, &branch_name)
                 .map_err(|err| {
@@ -161,6 +195,10 @@ pub fn resolve_launch_worktree_request(
         .ok_or_else(|| {
             format!("failed to resolve available worktree path for branch {branch_name}")
         })?;
+    // `git worktree add` is not transactional: a hook can fail after Git has
+    // already registered the worktree. Invalidate on any attempted add so the
+    // next repo-activity scan observes the actual topology.
+    *should_invalidate_topology = true;
     if has_local_branch {
         manager
             .create(&branch_name, &worktree_path)
@@ -182,11 +220,29 @@ pub fn resolve_launch_worktree_request(
 /// when the session ends. `working_dir` already set is a no-op (idempotent /
 /// reuse). Collisions with existing worktrees are avoided by suffixing.
 /// Returns `true` when a detached intake worktree was newly materialized.
+#[cfg(test)]
 pub fn resolve_ephemeral_launch_worktree(
     repo_path: &Path,
     base_ref: Option<&str>,
     working_dir: &mut Option<PathBuf>,
     env_vars: &mut HashMap<String, String>,
+) -> Result<bool, String> {
+    let mut should_invalidate_topology = false;
+    resolve_ephemeral_launch_worktree_with_topology_tracking(
+        repo_path,
+        base_ref,
+        working_dir,
+        env_vars,
+        &mut should_invalidate_topology,
+    )
+}
+
+fn resolve_ephemeral_launch_worktree_with_topology_tracking(
+    repo_path: &Path,
+    base_ref: Option<&str>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+    should_invalidate_topology: &mut bool,
 ) -> Result<bool, String> {
     if working_dir.is_some() {
         return Ok(false);
@@ -206,6 +262,9 @@ pub fn resolve_ephemeral_launch_worktree(
     // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
     // base ref such as `origin/develop` when they need a specific base.
     let base_ref = base_ref.unwrap_or("HEAD");
+    // Like branch worktree creation, detached `git worktree add` may register
+    // topology before a checkout hook reports failure.
+    *should_invalidate_topology = true;
     manager
         .create_detached(base_ref, &worktree_path)
         .map_err(|err| err.to_string())?;
@@ -275,52 +334,93 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
     removed
 }
 
-/// Resolve an Agent launch and report whether it materialized a new worktree.
-pub fn resolve_launch_worktree(
+pub(crate) struct LaunchWorktreeResolutionAttempt {
+    pub(crate) result: Result<bool, String>,
+    pub(crate) should_invalidate_topology: bool,
+}
+
+pub(crate) fn resolve_launch_worktree_attempt(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
-) -> Result<bool, String> {
-    // SPEC-3214: an ephemeral intake launch resolves a detached throwaway
-    // worktree instead of creating/reusing a branch worktree.
+) -> LaunchWorktreeResolutionAttempt {
     if config.is_ephemeral {
-        let did_materialize = resolve_ephemeral_launch_worktree(
+        let mut should_invalidate_topology = false;
+        let result = resolve_ephemeral_launch_worktree_with_topology_tracking(
             repo_path,
             config.ephemeral_base_ref.as_deref(),
             &mut config.working_dir,
             &mut config.env_vars,
-        )?;
-        normalize_launch_config_working_dir(config);
-        return Ok(did_materialize);
+            &mut should_invalidate_topology,
+        );
+        if result.is_ok() {
+            normalize_launch_config_working_dir(config);
+        }
+        return LaunchWorktreeResolutionAttempt {
+            result,
+            should_invalidate_topology,
+        };
     }
+
     let mut base_branch = config.base_branch.clone();
-    let did_materialize = resolve_launch_worktree_request(
+    let mut should_invalidate_topology = false;
+    let result = resolve_launch_worktree_request_with_topology_tracking(
         repo_path,
         config.branch.as_deref(),
         &mut base_branch,
         &mut config.working_dir,
         &mut config.env_vars,
-    )?;
-    config.base_branch = base_branch;
-    normalize_launch_config_working_dir(config);
-    Ok(did_materialize)
+        &mut should_invalidate_topology,
+    );
+    if result.is_ok() {
+        config.base_branch = base_branch;
+        normalize_launch_config_working_dir(config);
+    }
+    LaunchWorktreeResolutionAttempt {
+        result,
+        should_invalidate_topology,
+    }
+}
+
+/// Resolve an Agent launch and report whether it materialized a new worktree.
+#[cfg(test)]
+pub fn resolve_launch_worktree(
+    repo_path: &Path,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<bool, String> {
+    resolve_launch_worktree_attempt(repo_path, config).result
 }
 
 /// Resolve a Shell launch and report whether it materialized a new worktree.
+pub(crate) fn resolve_shell_launch_worktree_attempt(
+    repo_path: &Path,
+    config: &mut ShellLaunchConfig,
+) -> LaunchWorktreeResolutionAttempt {
+    let mut base_branch = config.base_branch.clone();
+    let mut should_invalidate_topology = false;
+    let result = resolve_launch_worktree_request_with_topology_tracking(
+        repo_path,
+        config.branch.as_deref(),
+        &mut base_branch,
+        &mut config.working_dir,
+        &mut config.env_vars,
+        &mut should_invalidate_topology,
+    );
+    if result.is_ok() {
+        config.base_branch = base_branch;
+        normalize_shell_launch_config_working_dir(config);
+    }
+    LaunchWorktreeResolutionAttempt {
+        result,
+        should_invalidate_topology,
+    }
+}
+
+#[cfg(test)]
 pub fn resolve_shell_launch_worktree(
     repo_path: &Path,
     config: &mut ShellLaunchConfig,
 ) -> Result<bool, String> {
-    let mut base_branch = config.base_branch.clone();
-    let did_materialize = resolve_launch_worktree_request(
-        repo_path,
-        config.branch.as_deref(),
-        &mut base_branch,
-        &mut config.working_dir,
-        &mut config.env_vars,
-    )?;
-    config.base_branch = base_branch;
-    normalize_shell_launch_config_working_dir(config);
-    Ok(did_materialize)
+    resolve_shell_launch_worktree_attempt(repo_path, config).result
 }
 
 pub fn build_shell_process_launch(
@@ -1708,6 +1808,121 @@ mod tests {
             .status()
             .expect("git status")
             .success()
+    }
+
+    fn init_clone_with_origin(root: &Path, default_branch: &str) -> PathBuf {
+        let seed = root.join(format!("seed-{default_branch}"));
+        let origin = root.join(format!("origin-{default_branch}.git"));
+        let repo = root.join(format!("repo-{default_branch}"));
+        fs::create_dir_all(&seed).expect("create seed");
+        run_git(&seed, &["init", "-q", "-b", default_branch]);
+        run_git(&seed, &["config", "user.email", "gwt@example.invalid"]);
+        run_git(&seed, &["config", "user.name", "gwt"]);
+        fs::write(seed.join("README.md"), format!("{default_branch}\n")).expect("write readme");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-qm", "seed repository"]);
+        run_git(
+            root,
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        run_git(
+            root,
+            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "gwt"]);
+        repo
+    }
+
+    fn set_missing_push_remote(repo: &Path, root: &Path) {
+        let missing = root.join("missing-push-origin.git");
+        run_git(
+            repo,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                missing.to_str().unwrap(),
+            ],
+        );
+    }
+
+    #[test]
+    fn remote_branch_mutation_attempt_invalidates_when_push_fails() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_clone_with_origin(temp.path(), "develop");
+        set_missing_push_remote(&repo, temp.path());
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("feature/push-failure")
+            .base_branch("develop")
+            .build();
+
+        let attempt = resolve_launch_worktree_attempt(&repo, &mut config);
+
+        assert!(attempt.result.is_err(), "the invalid push URL must fail");
+        assert!(
+            attempt.should_invalidate_topology,
+            "a remote branch mutation can partially succeed before reporting an error"
+        );
+    }
+
+    #[test]
+    fn start_work_base_preparation_attempt_invalidates_when_push_fails() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_clone_with_origin(temp.path(), "main");
+        set_missing_push_remote(&repo, temp.path());
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/20260727-1200")
+            .base_branch("origin/develop")
+            .build();
+
+        let attempt = resolve_launch_worktree_attempt(&repo, &mut config);
+
+        assert!(attempt.result.is_err(), "the invalid push URL must fail");
+        assert!(
+            attempt.should_invalidate_topology,
+            "Start Work base preparation may mutate origin/develop before its final fetch fails"
+        );
+    }
+
+    #[test]
+    fn non_start_work_fetch_mutation_invalidates_before_base_resolution_failure() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_clone_with_origin(temp.path(), "develop");
+        run_git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/stale-review-ref", "HEAD"],
+        );
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("feature/fetch-before-base-failure")
+            .base_branch("missing-base")
+            .build();
+
+        let attempt = resolve_launch_worktree_attempt(&repo, &mut config);
+
+        assert!(attempt.result.is_err(), "the missing base must fail");
+        assert!(
+            !git_status(
+                &repo,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/stale-review-ref",
+                ],
+            ),
+            "fetch --prune must mutate the cached remote-tracking topology"
+        );
+        assert!(
+            attempt.should_invalidate_topology,
+            "a fetch mutation must remain visible even when later base resolution fails"
+        );
     }
 
     #[test]

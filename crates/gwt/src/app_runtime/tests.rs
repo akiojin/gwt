@@ -52,8 +52,8 @@ use super::{
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
-    AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
-    UploadedAttachment,
+    AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore,
+    KnowledgeProjectionRetry, PtyWriterRegistry, UploadedAttachment,
 };
 
 #[test]
@@ -2960,6 +2960,7 @@ fn sample_runtime_with_events(
         repo_activity_scan_generations: HashMap::new(),
         repo_activity_force_pending: HashSet::new(),
         repo_activity_projection_generations: HashMap::new(),
+        pending_knowledge_projection_retries: HashMap::new(),
         repo_activity_retry_attempts: HashMap::new(),
         frontend_hydration_generations: HashMap::new(),
         frontend_hydration_tasks: Default::default(),
@@ -14505,8 +14506,50 @@ fn frontend_disconnect_cancels_client_hydration_and_rejects_late_completion() {
         .lock()
         .expect("hydration tasks")
         .insert("client-1".to_string(), 1);
+    let project_root = runtime
+        .active_project_root()
+        .expect("active project root")
+        .to_path_buf();
+    runtime.pending_knowledge_projection_retries.insert(
+        project_root.clone(),
+        vec![
+            KnowledgeProjectionRetry::Load {
+                client_id: "client-1".to_string(),
+                id: "tab-1::issue-1".to_string(),
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(1),
+                selected_number: Some(42),
+            },
+            KnowledgeProjectionRetry::Search {
+                client_id: "client-2".to_string(),
+                id: "tab-1::issue-1".to_string(),
+                kind: gwt::KnowledgeKind::Issue,
+                query: "keep connected client".to_string(),
+                request_id: 2,
+                selected_number: None,
+            },
+        ],
+    );
 
     runtime.handle_frontend_client_disconnected("client-1");
+    runtime
+        .repo_activity_projection_generations
+        .insert(project_root.clone(), 1);
+    runtime
+        .repo_activity_scans_inflight
+        .insert(project_root.clone());
+    let late_events = runtime.handle_repo_generation_dispatch(
+        &project_root,
+        0,
+        Vec::new(),
+        Some(KnowledgeProjectionRetry::Load {
+            client_id: "client-1".to_string(),
+            id: "tab-1::issue-1".to_string(),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(3),
+            selected_number: Some(42),
+        }),
+    );
     let events = runtime.handle_frontend_hydration_ready(
         "client-1",
         FrontendHydrationCompletion {
@@ -14520,6 +14563,7 @@ fn frontend_disconnect_cancels_client_hydration_and_rejects_late_completion() {
     );
 
     assert!(events.is_empty());
+    assert!(late_events.is_empty());
     assert!(!runtime
         .frontend_hydration_generations
         .contains_key("client-1"));
@@ -14528,6 +14572,15 @@ fn frontend_disconnect_cancels_client_hydration_and_rejects_late_completion() {
         .lock()
         .expect("hydration tasks")
         .contains_key("client-1"));
+    let pending = runtime
+        .pending_knowledge_projection_retries
+        .get(&project_root)
+        .expect("connected client retry remains");
+    assert_eq!(pending.len(), 1);
+    assert!(matches!(
+        &pending[0],
+        KnowledgeProjectionRetry::Search { client_id, .. } if client_id == "client-2"
+    ));
 }
 
 #[test]
@@ -16665,6 +16718,7 @@ fn app_runtime_select_knowledge_bridge_entry_reuses_related_work_snapshot() {
             "2026-04-20T10:00:00Z",
         ))
         .expect("write issue snapshot");
+    let repo_activity = super::scan_repo_activity_snapshot(&repo);
 
     let mut persisted = empty_workspace_state();
     persisted.windows.push(sample_window(
@@ -16681,13 +16735,14 @@ fn app_runtime_select_knowledge_bridge_entry_reuses_related_work_snapshot() {
     let tab = ProjectTabRuntime {
         id: "tab-1".to_string(),
         title: "Repo".to_string(),
-        project_root: repo,
+        project_root: repo.clone(),
         kind: ProjectKind::Git,
         workspace: WindowCanvasState::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.repo_activity_snapshots.insert(repo, repo_activity);
     let window_id = combined_window_id("tab-1", "issue-1");
     let pr_window_id = combined_window_id("tab-1", "pr-1");
 
@@ -17832,8 +17887,12 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
     });
     wait_for_path("stale knowledge refresh gh invocation", &marker);
     assert!(
-        events.lock().expect("event log").is_empty(),
-        "background refresh errors should not overwrite the current cache view"
+        events
+            .lock()
+            .expect("event log")
+            .iter()
+            .all(|event| matches!(event, UserEvent::RepoActivityRefreshRequested { .. })),
+        "background refresh errors must not dispatch a knowledge result; a repository freshness request remains allowed"
     );
 
     fs::remove_file(&marker).expect("remove marker");
@@ -17853,8 +17912,12 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
     });
     thread::sleep(Duration::from_millis(250));
     assert!(
-        events.lock().expect("event log").is_empty(),
-        "noop background refresh should return silently without dispatch"
+        events
+            .lock()
+            .expect("event log")
+            .iter()
+            .all(|event| matches!(event, UserEvent::RepoActivityRefreshRequested { .. })),
+        "noop background refresh must not dispatch a knowledge result; a repository freshness request remains allowed"
     );
 }
 
@@ -25761,7 +25824,7 @@ fn workspace_cleanup_invalidates_resume_snapshot_and_rescans_before_convergence(
         .repo_activity_snapshots
         .insert(repo.clone(), initial_snapshot);
 
-    let invalidated = runtime.handle_workspace_cleanup_projection_changed(repo.clone());
+    let invalidated = runtime.handle_workspace_cleanup_completed(repo.clone());
     let invalidated_projection = invalidated
         .iter()
         .find_map(|event| match &event.event {
@@ -25819,7 +25882,7 @@ fn workspace_cleanup_does_not_rebroadcast_an_unrelated_active_project() {
     let tab = sample_project_tab("tab-1", "Active", active_repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_workspace_cleanup_projection_changed(cleaned_repo);
+    let events = runtime.handle_workspace_cleanup_completed(cleaned_repo);
 
     assert!(
         events.is_empty(),
@@ -25839,7 +25902,7 @@ fn knowledge_projection_completion_is_fenced_after_repo_cleanup_invalidation() {
         .insert(repo.clone(), empty_repo_activity_snapshot());
     let stale_generation = runtime.repo_activity_projection_generation(&repo);
 
-    let _ = runtime.handle_workspace_cleanup_projection_changed(repo.clone());
+    let _ = runtime.handle_workspace_cleanup_completed(repo.clone());
     let events = runtime.handle_repo_generation_dispatch(
         &repo,
         stale_generation,
@@ -25847,11 +25910,199 @@ fn knowledge_projection_completion_is_fenced_after_repo_cleanup_invalidation() {
             "client-1",
             BackendEvent::LaunchWizardState { wizard: None },
         )],
+        None,
     );
 
     assert!(
         events.is_empty(),
         "a background Knowledge projection captured before cleanup must not escape"
+    );
+}
+
+#[test]
+fn stale_knowledge_projection_retries_after_repository_snapshot_replacement() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Generation-fenced issue",
+            &["bug"],
+            "Cached issue body",
+            "2026-07-27T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+    let stale_generation = runtime.repo_activity_projection_generation(&repo);
+    runtime.invalidate_repo_activity_projection(&repo);
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 1);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 1);
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.handle_repo_generation_dispatch(
+        &repo,
+        stale_generation,
+        vec![OutboundEvent::reply(
+            "client-1",
+            BackendEvent::KnowledgeEntries {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(17),
+                entries: Vec::new(),
+                selected_number: Some(42),
+                empty_message: None,
+                refresh_enabled: true,
+            },
+        )],
+        Some(KnowledgeProjectionRetry::Load {
+            client_id: "client-1".to_string(),
+            id: window_id.clone(),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(17),
+            selected_number: Some(42),
+        }),
+    );
+
+    assert!(immediate.is_empty());
+    assert_eq!(
+        runtime
+            .pending_knowledge_projection_retries
+            .get(&repo)
+            .map(Vec::len),
+        Some(1),
+        "a stale completion must retain its current-view refresh intent"
+    );
+
+    runtime.apply_repo_activity_snapshot(&repo, 1, empty_repo_activity_snapshot());
+    let current_generation = runtime.repo_activity_projection_generation(&repo);
+    wait_for_recorded_event("current-generation knowledge retry", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::RepoGenerationDispatch {
+                    generation,
+                    events: dispatched,
+                    ..
+                } if *generation == current_generation
+                    && dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeEntries {
+                            id,
+                            request_id: Some(17),
+                            entries,
+                            ..
+                        } if id == &window_id
+                            && entries.iter().any(|entry| entry.number == 42)
+                    ))
+            )
+        })
+    });
+    assert!(
+        !runtime
+            .pending_knowledge_projection_retries
+            .contains_key(&repo),
+        "the accepted replacement snapshot must drain the retry"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_knowledge_search_retries_with_original_request_context() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    write_fake_project_index_runtime(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Generation-fenced search result",
+            &["bug"],
+            "Cached issue body",
+            "2026-07-27T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let stale_generation = runtime.repo_activity_projection_generation(&repo);
+    runtime.invalidate_repo_activity_projection(&repo);
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 1);
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.handle_repo_generation_dispatch(
+        &repo,
+        stale_generation,
+        Vec::new(),
+        Some(KnowledgeProjectionRetry::Search {
+            client_id: "client-1".to_string(),
+            id: window_id.clone(),
+            kind: gwt::KnowledgeKind::Issue,
+            query: "semantic query".to_string(),
+            request_id: 29,
+            selected_number: Some(42),
+        }),
+    );
+
+    assert!(immediate.is_empty());
+    let current_generation = runtime.repo_activity_projection_generation(&repo);
+    wait_for_recorded_event(
+        "current-generation knowledge search retry",
+        &recorded,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::RepoGenerationDispatch {
+                        generation,
+                        events: dispatched,
+                        ..
+                    } if *generation == current_generation
+                        && dispatched.iter().any(|outbound| matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeSearchResults {
+                                id,
+                                query,
+                                request_id: 29,
+                                selected_number: Some(42),
+                                ..
+                            } if id == &window_id && query == "semantic query"
+                        ))
+                )
+            })
+        },
     );
 }
 
@@ -26362,6 +26613,31 @@ fn repo_activity_snapshot_supports_non_git_project_worktree_identity() {
         resume_snapshot,
         &session
     ));
+}
+
+#[test]
+fn repo_activity_snapshot_rejects_missing_non_git_project_root() {
+    let temp = tempdir().expect("tempdir");
+    let project_root = temp.path().join("missing-project");
+    let session = gwt_agent::Session::new(
+        project_root.clone(),
+        "missing-project",
+        gwt_agent::AgentId::Codex,
+    );
+
+    let snapshot = super::scan_repo_activity_snapshot(&project_root);
+
+    assert!(
+        !snapshot.complete,
+        "a missing project root cannot provide a complete materialization inventory"
+    );
+    assert!(
+        !super::session_exact_resume_materializable_from_snapshot(
+            snapshot.session_resume_snapshot(std::time::Instant::now()),
+            &session,
+        ),
+        "a deleted non-Git root must not keep Session Resume available"
+    );
 }
 
 #[test]

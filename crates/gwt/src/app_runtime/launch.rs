@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::launch_runtime::resolve_launch_worktree_attempt;
+
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
@@ -36,11 +38,11 @@ use super::{
     install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
     launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
-    save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
-    AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
-    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    resolve_launch_spec_with_fallback, same_worktree_path, save_resumed_workspace_projection,
+    save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, LaunchFeedbackContext,
+    LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 #[derive(Clone)]
@@ -1613,12 +1615,14 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
-            let did_materialize = resolve_launch_worktree(Path::new(&project_root), &mut config)?;
-            if did_materialize {
+            let worktree_resolution =
+                resolve_launch_worktree_attempt(Path::new(&project_root), &mut config);
+            if worktree_resolution.should_invalidate_topology {
                 proxy.send(UserEvent::RepoTopologyMaterialized {
                     project_root: PathBuf::from(&project_root),
                 });
             }
+            worktree_resolution.result?;
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -2607,5 +2611,150 @@ mod fr001_capability_cache_tests {
         );
         assert!(!off.claude_ultracode_supported());
         assert!(!off.claude_workflows_enabled());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod topology_invalidation_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn init_git_clone_with_origin(root: &Path) -> PathBuf {
+        let seed = root.join("seed");
+        let repo = root.join("repo");
+        fs::create_dir_all(&seed).expect("create seed");
+        run_git(&seed, &["init", "-q", "-b", "develop"]);
+        run_git(&seed, &["config", "user.name", "Codex"]);
+        run_git(&seed, &["config", "user.email", "codex@example.com"]);
+        fs::write(seed.join("README.md"), "repo\n").expect("seed readme");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-qm", "init"]);
+        run_git(root, &["clone", "--bare", "seed", "origin.git"]);
+        run_git(root, &["clone", "origin.git", "repo"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        repo
+    }
+
+    #[test]
+    fn remote_branch_creation_is_reported_when_worktree_creation_fails() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_git_clone_with_origin(temp.path());
+        let hook = repo.join(".git/hooks/post-checkout");
+        fs::write(&hook, "#!/bin/sh\nexit 23\n").expect("write failing post-checkout hook");
+        let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let branch = "feature/partial-materialization";
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch(branch)
+            .base_branch("develop")
+            .build();
+        let (proxy, events) = AppEventProxy::stub();
+
+        AppRuntime::spawn_agent_window_async(
+            proxy,
+            sessions_dir,
+            repo.display().to_string(),
+            "tab-1::agent-1".to_string(),
+            config,
+            temp.path().join("profile.toml"),
+            None,
+        );
+
+        run_git(
+            &repo,
+            &[
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        let recorded = events.lock().expect("events");
+        let invalidated_index = recorded
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::RepoTopologyMaterialized { project_root }
+                        if project_root == &repo
+                )
+            })
+            .expect("successful remote branch creation must invalidate repo topology");
+        let failed_index = recorded
+            .iter()
+            .position(|event| matches!(event, UserEvent::LaunchComplete { result: Err(_), .. }))
+            .expect("failing post-checkout hook must fail launch materialization");
+        assert!(
+            invalidated_index < failed_index,
+            "topology invalidation must precede the failed launch completion"
+        );
+    }
+
+    #[test]
+    fn ephemeral_worktree_attempt_is_reported_when_checkout_hook_fails() {
+        let temp = tempdir().expect("tempdir");
+        let repo = init_git_clone_with_origin(temp.path());
+        let hook = repo.join(".git/hooks/post-checkout");
+        fs::write(&hook, "#!/bin/sh\nexit 23\n").expect("write failing post-checkout hook");
+        let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .ephemeral(Some("develop".to_string()))
+            .build();
+        let (proxy, events) = AppEventProxy::stub();
+
+        AppRuntime::spawn_agent_window_async(
+            proxy,
+            sessions_dir,
+            repo.display().to_string(),
+            "tab-1::agent-1".to_string(),
+            config,
+            temp.path().join("profile.toml"),
+            None,
+        );
+
+        let recorded = events.lock().expect("events");
+        let invalidated_index = recorded
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::RepoTopologyMaterialized { project_root }
+                        if project_root == &repo
+                )
+            })
+            .expect("an attempted detached worktree must invalidate repo topology");
+        let failed_index = recorded
+            .iter()
+            .position(|event| matches!(event, UserEvent::LaunchComplete { result: Err(_), .. }))
+            .expect("failing post-checkout hook must fail ephemeral materialization");
+        assert!(
+            invalidated_index < failed_index,
+            "topology invalidation must precede the failed ephemeral launch completion"
+        );
     }
 }
