@@ -147,11 +147,7 @@ fn discuss_park_marks_proposal_parked() {
 #[test]
 fn discuss_park_marks_all_duplicate_active_proposals_parked() {
     let fixture = fixture();
-    let duplicate = format!(
-        "{}\n{}",
-        ACTIVE_DISCUSSION,
-        ACTIVE_DISCUSSION.replace("Proposal A", "Proposal A")
-    );
+    let duplicate = format!("{}\n{}", ACTIVE_DISCUSSION, ACTIVE_DISCUSSION);
     fs::write(repo_local_discussions_path(&fixture), duplicate).expect("write duplicate fixture");
 
     let response = run_discuss(
