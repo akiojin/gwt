@@ -202,7 +202,20 @@ impl AppRuntime {
             )];
         };
 
-        let write_result = match self.runtimes.get(&window_id) {
+        self.pane_send_input_to_window_events(client_id, &window_id, text)
+    }
+
+    /// Inject input into one already-authorized pane identity. Capability
+    /// callers resolve this exact combined window id inside their authenticated
+    /// project before reaching the PTY; this helper never performs a
+    /// process-global Session lookup.
+    pub(crate) fn pane_send_input_to_window_events(
+        &mut self,
+        client_id: ClientId,
+        window_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
             Some(runtime) => runtime
                 .pane
@@ -219,7 +232,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: true,
-                    window_id: Some(window_id),
+                    window_id: Some(window_id.to_string()),
                     error: None,
                 },
             )],
@@ -227,7 +240,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: false,
-                    window_id: Some(window_id),
+                    window_id: Some(window_id.to_string()),
                     error: Some(error),
                 },
             )],
