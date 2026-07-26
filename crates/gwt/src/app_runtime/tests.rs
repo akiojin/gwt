@@ -569,6 +569,12 @@ impl ScopedEnvVar {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnvVar {
@@ -5305,7 +5311,8 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     assert_eq!(view.selected_reasoning, "high");
     assert_eq!(view.selected_version, "latest");
     assert_eq!(view.selected_execution_mode, "continue");
-    assert!(view.skip_permissions);
+    assert!(!view.skip_permissions);
+    assert!(!view.show_skip_permissions);
     assert!(view.codex_fast_mode);
 }
 
@@ -20973,6 +20980,12 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
 
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
@@ -20998,6 +21011,12 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.agent_capability_issuer =
+        Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:43123/internal/hook-live",
+            "ws://127.0.0.1:43124/ws",
+            "ws://127.0.0.1:43123/internal/pane-ws",
+        ));
     let profiles = runtime.issue_monitor_previous_profiles(&runtime.tabs[0].project_root);
     let repo_profile = profiles.repo_local().expect("repo-local last settings");
     assert_eq!(
