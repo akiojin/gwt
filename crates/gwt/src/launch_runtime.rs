@@ -40,18 +40,22 @@ fn set_worktree_launch_path(
     env_vars.insert("GWT_PROJECT_ROOT".to_string(), path.display().to_string());
 }
 
+/// Resolve the requested branch to a worktree.
+///
+/// Returns `true` only when this call successfully materialized a new
+/// worktree; selecting an already-materialized worktree returns `false`.
 pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
     base_branch: &mut Option<String>,
     working_dir: &mut Option<PathBuf>,
     env_vars: &mut HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let Some(branch_name) = branch_name.map(str::to_string) else {
-        return Ok(());
+        return Ok(false);
     };
     if working_dir.is_some() {
-        return Ok(());
+        return Ok(false);
     }
 
     let main_repo_path = match gwt_git::worktree::main_worktree_root(repo_path) {
@@ -63,7 +67,7 @@ pub fn resolve_launch_worktree_request(
                     gwt_git::RepoType::NonRepo
                 )
             {
-                return Ok(());
+                return Ok(false);
             }
             return Err(error.to_string());
         }
@@ -72,7 +76,7 @@ pub fn resolve_launch_worktree_request(
     let mut worktrees = manager.list().map_err(|err| err.to_string())?;
     if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
         set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
-        return Ok(());
+        return Ok(false);
     }
     if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
         manager
@@ -81,7 +85,7 @@ pub fn resolve_launch_worktree_request(
         worktrees = manager.list().map_err(|err| err.to_string())?;
         if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
             set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -168,7 +172,7 @@ pub fn resolve_launch_worktree_request(
     }
 
     set_worktree_launch_path(working_dir, env_vars, &worktree_path);
-    Ok(())
+    Ok(true)
 }
 
 /// Resolve a working directory for an ephemeral intake launch (SPEC-3214
@@ -177,14 +181,15 @@ pub fn resolve_launch_worktree_request(
 /// a branch — the intake worktree hosts a short-lived session and is removed
 /// when the session ends. `working_dir` already set is a no-op (idempotent /
 /// reuse). Collisions with existing worktrees are avoided by suffixing.
+/// Returns `true` when a detached intake worktree was newly materialized.
 pub fn resolve_ephemeral_launch_worktree(
     repo_path: &Path,
     base_ref: Option<&str>,
     working_dir: &mut Option<PathBuf>,
     env_vars: &mut HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if working_dir.is_some() {
-        return Ok(());
+        return Ok(false);
     }
 
     let main_repo_path =
@@ -206,7 +211,7 @@ pub fn resolve_ephemeral_launch_worktree(
         .map_err(|err| err.to_string())?;
 
     set_worktree_launch_path(working_dir, env_vars, &worktree_path);
-    Ok(())
+    Ok(true)
 }
 
 fn is_start_work_branch_name(branch_name: &str) -> bool {
@@ -270,24 +275,25 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
     removed
 }
 
+/// Resolve an Agent launch and report whether it materialized a new worktree.
 pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // SPEC-3214: an ephemeral intake launch resolves a detached throwaway
     // worktree instead of creating/reusing a branch worktree.
     if config.is_ephemeral {
-        resolve_ephemeral_launch_worktree(
+        let did_materialize = resolve_ephemeral_launch_worktree(
             repo_path,
             config.ephemeral_base_ref.as_deref(),
             &mut config.working_dir,
             &mut config.env_vars,
         )?;
         normalize_launch_config_working_dir(config);
-        return Ok(());
+        return Ok(did_materialize);
     }
     let mut base_branch = config.base_branch.clone();
-    resolve_launch_worktree_request(
+    let did_materialize = resolve_launch_worktree_request(
         repo_path,
         config.branch.as_deref(),
         &mut base_branch,
@@ -296,15 +302,16 @@ pub fn resolve_launch_worktree(
     )?;
     config.base_branch = base_branch;
     normalize_launch_config_working_dir(config);
-    Ok(())
+    Ok(did_materialize)
 }
 
+/// Resolve a Shell launch and report whether it materialized a new worktree.
 pub fn resolve_shell_launch_worktree(
     repo_path: &Path,
     config: &mut ShellLaunchConfig,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let mut base_branch = config.base_branch.clone();
-    resolve_launch_worktree_request(
+    let did_materialize = resolve_launch_worktree_request(
         repo_path,
         config.branch.as_deref(),
         &mut base_branch,
@@ -313,7 +320,7 @@ pub fn resolve_shell_launch_worktree(
     )?;
     config.base_branch = base_branch;
     normalize_shell_launch_config_working_dir(config);
-    Ok(())
+    Ok(did_materialize)
 }
 
 pub fn build_shell_process_launch(

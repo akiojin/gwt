@@ -1181,6 +1181,11 @@ enum UserEvent {
         window_id: String,
         result: Result<ProcessLaunch, String>,
     },
+    /// A launch resolver materialized a new worktree and changed repository
+    /// topology before any later profile, process, or window handoff work.
+    RepoTopologyMaterialized {
+        project_root: PathBuf,
+    },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     /// Repository-derived Knowledge projection tagged with the identity epoch
     /// captured by its background worker.
@@ -6322,7 +6327,7 @@ mod tests {
         let mut created_dir = None;
         let mut created_env = HashMap::new();
         let mut base_branch = Some("develop".to_string());
-        super::resolve_launch_worktree_request(
+        let did_materialize = super::resolve_launch_worktree_request(
             &repo,
             Some("feature/created"),
             &mut base_branch,
@@ -6330,6 +6335,10 @@ mod tests {
             &mut created_env,
         )
         .expect("remote-backed worktree");
+        assert!(
+            did_materialize,
+            "creating a new branch worktree must report a topology mutation"
+        );
         let created_dir = created_dir.expect("created worktree dir");
         assert!(created_dir.exists());
         assert!(created_env
@@ -6394,7 +6403,12 @@ mod tests {
             .build();
         launch_config.working_dir = None;
         launch_config.env_vars = HashMap::new();
-        super::resolve_launch_worktree(&repo, &mut launch_config).expect("agent launch wrapper");
+        let did_materialize = super::resolve_launch_worktree(&repo, &mut launch_config)
+            .expect("agent launch wrapper");
+        assert!(
+            !did_materialize,
+            "reusing an existing Agent worktree must not report materialization"
+        );
         assert!(launch_config
             .working_dir
             .as_deref()
@@ -6414,12 +6428,40 @@ mod tests {
             command_override: None,
             command_args_override: None,
         };
-        super::resolve_shell_launch_worktree(&repo, &mut shell_config)
+        let did_materialize = super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");
+        assert!(
+            !did_materialize,
+            "reusing an existing Shell worktree must not report materialization"
+        );
         assert!(shell_config
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+
+        let mut new_agent_config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .branch("feature/new-agent-wrapper")
+            .base_branch("develop")
+            .build();
+        let did_materialize = super::resolve_launch_worktree(&repo, &mut new_agent_config)
+            .expect("new Agent launch wrapper");
+        assert!(
+            did_materialize,
+            "a newly created Agent worktree must report materialization"
+        );
+
+        let mut new_shell_config = ShellLaunchConfig {
+            branch: Some("feature/new-shell-wrapper".to_string()),
+            ..shell_config.clone()
+        };
+        new_shell_config.working_dir = None;
+        new_shell_config.env_vars.clear();
+        let did_materialize = super::resolve_shell_launch_worktree(&repo, &mut new_shell_config)
+            .expect("new Shell launch wrapper");
+        assert!(
+            did_materialize,
+            "a newly created Shell worktree must report materialization"
+        );
     }
 
     #[test]
@@ -7932,6 +7974,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
                 let events = app.handle_shell_launch_complete(window_id, result);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RepoTopologyMaterialized { project_root }) => {
+                app.handle_repo_topology_materialized(project_root);
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
                 let events = app.handle_issue_launch_wizard_prepared(prepared);

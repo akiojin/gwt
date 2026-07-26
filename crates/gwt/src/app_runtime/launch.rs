@@ -1033,11 +1033,6 @@ impl AppRuntime {
                                 }
                             }
                         }
-                        // Worktree/branch materialization may have changed even
-                        // when the pre-launch snapshot is still inside its 10s
-                        // freshness window. Invalidate it before rebuilding any
-                        // Session Resume / Knowledge projection.
-                        self.spawn_repo_activity_snapshot_scan(project_root.clone(), true);
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
@@ -1087,6 +1082,10 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn handle_repo_topology_materialized(&mut self, project_root: PathBuf) {
+        self.spawn_repo_activity_snapshot_scan(project_root, true);
+    }
+
     pub(crate) fn handle_shell_launch_complete(
         &mut self,
         window_id: String,
@@ -1116,8 +1115,6 @@ impl AppRuntime {
                     );
                 };
                 let geometry = window.geometry.clone();
-                let project_root = tab.project_root.clone();
-
                 // SPEC-2809 (revised) — second Launch Wizard exit path
                 // emits the same launch banner sequence as the primary
                 // handler so the Console window's `agent` tab is
@@ -1142,7 +1139,6 @@ impl AppRuntime {
                 ) {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
-                        self.spawn_repo_activity_snapshot_scan(project_root, true);
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
                         let composed_status = self
@@ -1617,7 +1613,12 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
-            resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+            let did_materialize = resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+            if did_materialize {
+                proxy.send(UserEvent::RepoTopologyMaterialized {
+                    project_root: PathBuf::from(&project_root),
+                });
+            }
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),

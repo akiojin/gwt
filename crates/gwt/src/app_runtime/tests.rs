@@ -19,8 +19,8 @@ use gwt::{
     empty_workspace_state, load_restored_workspace_state, load_session_state, ArrangeMode,
     BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
     FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState,
-    WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
+    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, ShellLaunchConfig, UiTracePayload,
+    WindowCanvasState, WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -3836,6 +3836,200 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
                 && status.state == gwt::ProjectIndexStatusState::Ready
         ),
         "ProjectIndexStatus must follow LaunchComplete and carry project root"
+    );
+}
+
+#[test]
+fn agent_materialization_is_reported_before_later_launch_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let invalid_profile = temp.path().join("invalid-profile.toml");
+    fs::write(&invalid_profile, "active_profile = [not-valid").expect("invalid profile");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("feature/agent-materialization-boundary")
+        .base_branch("develop")
+        .build();
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir,
+        repo.display().to_string(),
+        "tab-1::agent-1".to_string(),
+        config,
+        invalid_profile,
+        None,
+    );
+
+    let recorded = events.lock().expect("events");
+    let materialized_index = recorded
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                UserEvent::RepoTopologyMaterialized { project_root }
+                    if project_root == &repo
+            )
+        })
+        .expect("new Agent worktree must report its topology mutation");
+    let failed_index = recorded
+        .iter()
+        .position(|event| matches!(event, UserEvent::LaunchComplete { result: Err(_), .. }))
+        .expect("invalid profile must fail after worktree materialization");
+    assert!(
+        materialized_index < failed_index,
+        "topology invalidation must not depend on later launch success or a live window"
+    );
+}
+
+#[test]
+fn shell_materialization_is_reported_before_later_launch_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let invalid_profile = temp.path().join("invalid-profile.toml");
+    fs::write(&invalid_profile, "active_profile = [not-valid").expect("invalid profile");
+    let config = ShellLaunchConfig {
+        working_dir: None,
+        branch: Some("feature/shell-materialization-boundary".to_string()),
+        base_branch: Some("develop".to_string()),
+        display_name: "Shell".to_string(),
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+        env_vars: HashMap::new(),
+        remove_env: Vec::new(),
+        command_override: None,
+        command_args_override: None,
+    };
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_wizard_shell_window_async(
+        proxy,
+        repo.display().to_string(),
+        "tab-1::shell-1".to_string(),
+        config,
+        invalid_profile,
+    );
+
+    let recorded = events.lock().expect("events");
+    let materialized_index = recorded
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                UserEvent::RepoTopologyMaterialized { project_root }
+                    if project_root == &repo
+            )
+        })
+        .expect("new Shell worktree must report its topology mutation");
+    let failed_index = recorded
+        .iter()
+        .position(|event| matches!(event, UserEvent::ShellLaunchComplete { result: Err(_), .. }))
+        .expect("invalid profile must fail after worktree materialization");
+    assert!(
+        materialized_index < failed_index,
+        "Shell topology invalidation must precede later setup or PTY outcomes"
+    );
+}
+
+#[test]
+fn materialization_invalidation_does_not_require_a_live_launch_window() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+
+    runtime.handle_repo_topology_materialized(repo.clone());
+
+    assert!(
+        !runtime.repo_activity_snapshots.contains_key(&repo),
+        "the project-scoped materialization event must invalidate after its launch window closes"
+    );
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo).copied(),
+        Some(1),
+        "the materialization event must force one replacement generation"
+    );
+}
+
+#[test]
+fn later_pty_spawn_failure_does_not_undo_materialization_invalidation() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+    runtime.handle_repo_topology_materialized(repo.clone());
+
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command: temp
+                    .path()
+                    .join("missing-agent-binary")
+                    .display()
+                    .to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(repo.clone()),
+            },
+            "session-1".to_string(),
+            "feature/materialized".to_string(),
+            "Codex".to_string(),
+            repo.clone(),
+            gwt_agent::AgentId::Codex,
+            None,
+            Some("develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            repo.display().to_string(),
+        )),
+    );
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, status, .. }
+                if id == &window_id && *status == WindowProcessStatus::Error
+        )
+    }));
+    assert!(
+        !runtime.repo_activity_snapshots.contains_key(&repo),
+        "a later PTY failure must not restore the invalidated topology snapshot"
+    );
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo).copied(),
+        Some(1)
     );
 }
 
@@ -26295,7 +26489,7 @@ fn forced_repo_activity_refresh_queued_during_inflight_scan_converges() {
 }
 
 #[test]
-fn successful_shell_launch_forces_repo_activity_refresh_despite_fresh_cache() {
+fn existing_worktree_shell_launch_preserves_fresh_repo_activity_snapshot() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -26339,13 +26533,13 @@ fn successful_shell_launch_forces_repo_activity_refresh_despite_fresh_cache() {
     );
 
     assert!(
-        !runtime.repo_activity_snapshots.contains_key(&repo),
-        "successful materialization must invalidate the pre-launch topology snapshot"
+        runtime.repo_activity_snapshots.contains_key(&repo),
+        "an existing-worktree Shell handoff must not invalidate fresh topology"
     );
     assert_eq!(
         runtime.repo_activity_scan_generations.get(&repo).copied(),
-        Some(1),
-        "successful materialization must force a replacement scan"
+        None,
+        "an existing-worktree Shell handoff must not start a replacement scan"
     );
     runtime.stop_all_runtimes();
 }

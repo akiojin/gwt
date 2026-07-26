@@ -2709,7 +2709,13 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
-            resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
+            let did_materialize =
+                resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
+            if did_materialize {
+                proxy.send(UserEvent::RepoTopologyMaterialized {
+                    project_root: PathBuf::from(&project_root),
+                });
+            }
             let worktree_path = config
                 .working_dir
                 .clone()
