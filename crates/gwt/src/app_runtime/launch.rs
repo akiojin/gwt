@@ -1033,6 +1033,11 @@ impl AppRuntime {
                                 }
                             }
                         }
+                        // Worktree/branch materialization may have changed even
+                        // when the pre-launch snapshot is still inside its 10s
+                        // freshness window. Invalidate it before rebuilding any
+                        // Session Resume / Knowledge projection.
+                        self.spawn_repo_activity_snapshot_scan(project_root.clone(), true);
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
@@ -1040,7 +1045,6 @@ impl AppRuntime {
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
                             if let Some(tab) = self.tab(&tab_id) {
-                                self.request_repo_activity_refresh_if_needed(&tab.project_root);
                                 if let Some(projection) =
                                     self.active_work_projection_for_tab(&tab_id, tab)
                                 {
@@ -1112,6 +1116,7 @@ impl AppRuntime {
                     );
                 };
                 let geometry = window.geometry.clone();
+                let project_root = tab.project_root.clone();
 
                 // SPEC-2809 (revised) — second Launch Wizard exit path
                 // emits the same launch banner sequence as the primary
@@ -1137,6 +1142,7 @@ impl AppRuntime {
                 ) {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
+                        self.spawn_repo_activity_snapshot_scan(project_root, true);
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
                         let composed_status = self

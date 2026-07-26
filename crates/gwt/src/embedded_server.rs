@@ -2389,6 +2389,11 @@ async fn client_session_with_scope(
         }
     }
 
+    if matches!(scope, ClientSessionScope::Browser) {
+        state.proxy.send(UserEvent::FrontendClientDisconnected {
+            client_id: client_id.clone(),
+        });
+    }
     state.clients.unregister(&client_id);
 }
 
@@ -4227,6 +4232,56 @@ mod tests {
             [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady }]
                 if client_id == "client-1"
         ));
+    }
+
+    #[test]
+    fn browser_websocket_disconnect_notifies_runtime_for_hydration_cancellation() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let browser_websocket_url = server
+            .agent_capability_issuer()
+            .pane_websocket_url()
+            .to_string();
+
+        runtime.block_on(async {
+            let (mut socket, _) = connect_async(&browser_websocket_url)
+                .await
+                .expect("browser WebSocket");
+            socket.close(None).await.expect("close browser WebSocket");
+        });
+
+        let mut observed = false;
+        for _ in 0..100 {
+            observed = events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|event| {
+                    matches!(
+                        event,
+                        UserEvent::FrontendClientDisconnected { client_id }
+                            if !client_id.is_empty()
+                    )
+                });
+            if observed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        server.shutdown();
+
+        assert!(
+            observed,
+            "browser WebSocket teardown must notify the runtime so per-client hydration work is cancelled"
+        );
     }
 
     #[test]

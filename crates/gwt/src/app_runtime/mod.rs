@@ -624,6 +624,14 @@ pub struct AppRuntime {
     /// generation also rejects a late result after an explicit refresh.
     pub(crate) repo_activity_scans_inflight: HashSet<PathBuf>,
     pub(crate) repo_activity_scan_generations: HashMap<PathBuf, u64>,
+    /// A force request received while the per-project single-flight slot is
+    /// occupied. The current completion is discarded and immediately hands
+    /// the slot to one replacement generation.
+    pub(crate) repo_activity_force_pending: HashSet<PathBuf>,
+    /// Monotonic identity of the repository-derived projection state. Unlike
+    /// scan generations this advances at invalidation time, so an already
+    /// running Knowledge task cannot publish after cleanup/topology mutation.
+    pub(crate) repo_activity_projection_generations: HashMap<PathBuf, u64>,
     /// Incomplete scans retry with a small bounded backoff. A complete scan or
     /// an explicit refresh clears the budget for that project.
     pub(crate) repo_activity_retry_attempts: HashMap<PathBuf, u8>,
@@ -631,6 +639,10 @@ pub struct AppRuntime {
     /// Background pane snapshots are accepted only when this generation and
     /// the captured tab/window topology still match.
     pub(crate) frontend_hydration_generations: HashMap<ClientId, u64>,
+    /// Shared logical cancellation registry for background pane hydration.
+    /// Disconnect and superseding generations remove/replace entries before a
+    /// worker is allowed to send its completion back to the event loop.
+    pub(crate) frontend_hydration_tasks: Arc<Mutex<HashMap<ClientId, u64>>>,
     pub(crate) frontend_hydration_context_generation: u64,
     /// SPEC-3170 FR-038: process-lifetime authoritative navigation revision.
     /// Persisted workspace snapshots intentionally do not store this value.
@@ -922,8 +934,11 @@ impl AppRuntime {
             repo_activity_snapshots: HashMap::new(),
             repo_activity_scans_inflight: HashSet::new(),
             repo_activity_scan_generations: HashMap::new(),
+            repo_activity_force_pending: HashSet::new(),
+            repo_activity_projection_generations: HashMap::new(),
             repo_activity_retry_attempts: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
+            frontend_hydration_tasks: Default::default(),
             frontend_hydration_context_generation: 0,
             navigation_revision: 0,
             pending_navigation_followup: PendingNavigationFollowup::default(),
@@ -963,6 +978,69 @@ impl AppRuntime {
         Ok(app)
     }
 
+    /// Repository identity captured by background Knowledge projections.
+    /// Invalidation and accepted replacement both advance this value.
+    pub(crate) fn repo_activity_projection_generation(&self, project_root: &Path) -> u64 {
+        self.repo_activity_projection_generations
+            .get(project_root)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn advance_repo_activity_projection_generation(&mut self, project_root: &Path) -> u64 {
+        let generation = self
+            .repo_activity_projection_generations
+            .entry(project_root.to_path_buf())
+            .or_default();
+        *generation = generation.checked_add(1).unwrap_or(1);
+        *generation
+    }
+
+    fn active_project_matches(&self, project_root: &Path) -> bool {
+        self.active_project_root()
+            .is_some_and(|active_root| same_worktree_path(active_root, project_root))
+    }
+
+    fn repo_activity_projection_broadcast_for_project(
+        &self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        if self.active_project_matches(project_root) {
+            self.active_work_projection_broadcast_for_active_tab()
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn invalidate_repo_activity_projection(&mut self, project_root: &Path) {
+        self.advance_repo_activity_projection_generation(project_root);
+        self.repo_activity_snapshots.remove(project_root);
+        self.work_merged_branches.remove(project_root);
+        self.work_cleanup_ready_branches.remove(project_root);
+        self.work_tip_subjects.remove(project_root);
+        self.local_worktree_branches
+            .borrow_mut()
+            .remove(project_root);
+        self.invalidate_knowledge_related_snapshot(project_root);
+    }
+
+    /// Accept a Knowledge/background projection only while the repository
+    /// identity it captured is still current.
+    pub(crate) fn handle_repo_generation_dispatch(
+        &self,
+        project_root: &Path,
+        generation: u64,
+        events: Vec<OutboundEvent>,
+    ) -> Vec<OutboundEvent> {
+        if self.repo_activity_projection_generation(project_root) == generation {
+            events
+        } else {
+            Vec::new()
+        }
+    }
+
     /// SPEC-2359 W-15 (FR-386): store the background merged-branch scan
     /// result and rebroadcast the Workspace projection so the "safe to
     /// delete" badge appears. Display-only; never records a close (US-61).
@@ -999,9 +1077,9 @@ impl AppRuntime {
                 tip_subjects: HashMap::new(),
             },
         );
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
+        self.advance_repo_activity_projection_generation(project_root);
+        self.invalidate_knowledge_related_snapshot(project_root);
+        self.repo_activity_projection_broadcast_for_project(project_root)
     }
 
     /// SPEC-3170 FR-044/066: accept only the newest repository activity scan
@@ -1020,6 +1098,11 @@ impl AppRuntime {
         if expected != Some(generation) {
             return Vec::new();
         }
+        if self.repo_activity_force_pending.remove(project_root) {
+            self.repo_activity_scans_inflight.remove(project_root);
+            self.start_repo_activity_snapshot_scan(project_root.to_path_buf());
+            return Vec::new();
+        }
         self.repo_activity_scans_inflight.remove(project_root);
         self.work_merged_branches
             .insert(project_root.to_path_buf(), snapshot.merged_branches.clone());
@@ -1036,15 +1119,14 @@ impl AppRuntime {
         let complete = snapshot.complete;
         self.repo_activity_snapshots
             .insert(project_root.to_path_buf(), snapshot);
+        self.advance_repo_activity_projection_generation(project_root);
         if complete {
             self.repo_activity_retry_attempts.remove(project_root);
         } else {
             self.schedule_repo_activity_retry(project_root, generation);
         }
         self.invalidate_knowledge_related_snapshot(project_root);
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
+        self.repo_activity_projection_broadcast_for_project(project_root)
     }
 
     fn schedule_repo_activity_retry(&mut self, project_root: &Path, generation: u64) {
@@ -1091,23 +1173,7 @@ impl AppRuntime {
         &mut self,
         project_root: PathBuf,
     ) -> Vec<OutboundEvent> {
-        let active_project_matches = self
-            .active_tab_id
-            .as_deref()
-            .and_then(|tab_id| self.tab(tab_id))
-            .is_some_and(|tab| same_worktree_path(&tab.project_root, &project_root));
-        self.repo_activity_snapshots.remove(&project_root);
-        self.repo_activity_retry_attempts.remove(&project_root);
-        self.work_merged_branches.remove(&project_root);
-        self.work_cleanup_ready_branches.remove(&project_root);
-        self.work_tip_subjects.remove(&project_root);
-        self.local_worktree_branches
-            .borrow_mut()
-            .remove(&project_root);
-        // Supersede a pre-cleanup scan. Its generation will be rejected if it
-        // finishes after the replacement scan starts.
-        self.repo_activity_scans_inflight.remove(&project_root);
-        self.invalidate_knowledge_related_snapshot(&project_root);
+        let active_project_matches = self.active_project_matches(&project_root);
         self.spawn_repo_activity_snapshot_scan(project_root, true);
         if active_project_matches {
             self.active_work_projection_broadcast_for_active_tab()
@@ -1194,15 +1260,14 @@ impl AppRuntime {
         changed: bool,
     ) -> Vec<OutboundEvent> {
         self.spawn_repo_activity_snapshot_scan(project_root.clone(), true);
-        self.spawn_work_pr_titles_scan(project_root.clone());
-        self.spawn_work_ai_summaries_scan(project_root);
-        if changed {
-            self.active_work_projection_broadcast_for_active_tab()
-                .into_iter()
-                .collect()
+        let events = if changed {
+            self.repo_activity_projection_broadcast_for_project(&project_root)
         } else {
             Vec::new()
-        }
+        };
+        self.spawn_work_pr_titles_scan(project_root.clone());
+        self.spawn_work_ai_summaries_scan(project_root);
+        events
     }
 
     #[cfg(test)]
@@ -1212,22 +1277,29 @@ impl AppRuntime {
 
     pub(crate) fn spawn_repo_activity_snapshot_scan(&mut self, project_root: PathBuf, force: bool) {
         let now = std::time::Instant::now();
-        if !force
-            && self
-                .repo_activity_snapshots
-                .get(&project_root)
-                .is_some_and(|snapshot| snapshot.complete && snapshot.is_fresh(now))
+        if force {
+            self.invalidate_repo_activity_projection(&project_root);
+            self.repo_activity_retry_attempts.remove(&project_root);
+            if self.repo_activity_scans_inflight.contains(&project_root) {
+                self.repo_activity_force_pending.insert(project_root);
+                return;
+            }
+        } else if self
+            .repo_activity_snapshots
+            .get(&project_root)
+            .is_some_and(|snapshot| snapshot.complete && snapshot.is_fresh(now))
         {
             return;
         }
+        self.start_repo_activity_snapshot_scan(project_root);
+    }
+
+    fn start_repo_activity_snapshot_scan(&mut self, project_root: PathBuf) {
         if !self
             .repo_activity_scans_inflight
             .insert(project_root.clone())
         {
             return;
-        }
-        if force {
-            self.repo_activity_retry_attempts.remove(&project_root);
         }
         let generation = self
             .repo_activity_scan_generations
@@ -3197,6 +3269,24 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
+        self.spawn_frontend_hydration(client_id);
+
+        let events = build_frontend_sync_events(
+            client_id,
+            self.navigation_revision,
+            self.app_state_view(),
+            terminal_statuses,
+            Vec::new(),
+            self.launch_wizard
+                .as_ref()
+                .map(|wizard| wizard.wizard.view()),
+            self.pending_update.clone(),
+        );
+        self.schedule_active_improvement_candidates_refresh();
+        events
+    }
+
+    fn spawn_frontend_hydration(&mut self, client_id: &str) {
         let pane_sources = self
             .runtimes
             .iter()
@@ -3221,6 +3311,10 @@ impl AppRuntime {
             .and_modify(|generation| *generation = generation.saturating_add(1))
             .or_insert(1);
         let generation = *generation;
+        self.frontend_hydration_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(client_id.to_string(), generation);
         let context_generation = self.frontend_hydration_context_generation;
         let active_tab_id = self.active_tab_id.clone();
         let active_project_root = self.active_project_root().map(Path::to_path_buf);
@@ -3231,21 +3325,38 @@ impl AppRuntime {
         window_instances.sort_by(|left, right| left.0.cmp(&right.0));
         let proxy = self.proxy.clone();
         let hydration_client_id = client_id.to_string();
+        let hydration_tasks = Arc::clone(&self.frontend_hydration_tasks);
         self.blocking_tasks.spawn(move || {
-            let mut terminal_snapshots = pane_sources
-                .into_iter()
-                .filter_map(|(id, pane)| {
-                    // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: preserve the
-                    // formatted screen and scrollback, but never lock a pane
-                    // on the event-loop bootstrap path.
-                    let snapshot = pane
-                        .lock()
-                        .map(|pane| pane.snapshot_bytes())
-                        .unwrap_or_default();
-                    (!snapshot.is_empty()).then_some((id, snapshot))
-                })
-                .collect::<Vec<_>>();
+            let task_is_current = || {
+                hydration_tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&hydration_client_id)
+                    .is_some_and(|current| *current == generation)
+            };
+            if !task_is_current() {
+                return;
+            }
+            let mut terminal_snapshots = Vec::new();
+            for (id, pane) in pane_sources {
+                if !task_is_current() {
+                    return;
+                }
+                // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: preserve the
+                // formatted screen and scrollback, but never lock a pane on
+                // the event-loop bootstrap path.
+                let snapshot = pane
+                    .lock()
+                    .map(|pane| pane.snapshot_bytes())
+                    .unwrap_or_default();
+                if !snapshot.is_empty() {
+                    terminal_snapshots.push((id, snapshot));
+                }
+            }
             terminal_snapshots.extend(launch_error_snapshots);
+            if !task_is_current() {
+                return;
+            }
             proxy.send(UserEvent::FrontendHydrationReady {
                 client_id: hydration_client_id,
                 hydration: FrontendHydrationCompletion {
@@ -3258,32 +3369,22 @@ impl AppRuntime {
                 },
             });
         });
-
-        let events = build_frontend_sync_events(
-            client_id,
-            self.navigation_revision,
-            self.app_state_view(),
-            terminal_statuses,
-            Vec::new(),
-            self.launch_wizard
-                .as_ref()
-                .map(|wizard| wizard.wizard.view()),
-            self.pending_update.clone(),
-        );
-        self.schedule_active_improvement_candidates_refresh();
-        events
     }
 
     pub(crate) fn handle_frontend_hydration_ready(
-        &self,
+        &mut self,
         client_id: &str,
         hydration: FrontendHydrationCompletion,
     ) -> Vec<OutboundEvent> {
         if self.frontend_hydration_generations.get(client_id).copied() != Some(hydration.generation)
-            || self.frontend_hydration_context_generation != hydration.context_generation
+        {
+            return Vec::new();
+        }
+        if self.frontend_hydration_context_generation != hydration.context_generation
             || self.active_tab_id != hydration.active_tab_id
             || self.active_project_root() != hydration.active_project_root.as_deref()
         {
+            self.spawn_frontend_hydration(client_id);
             return Vec::new();
         }
         let mut current_instances = self
@@ -3293,8 +3394,13 @@ impl AppRuntime {
             .collect::<Vec<_>>();
         current_instances.sort_by(|left, right| left.0.cmp(&right.0));
         if current_instances != hydration.window_instances {
+            self.spawn_frontend_hydration(client_id);
             return Vec::new();
         }
+        self.frontend_hydration_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(client_id);
 
         let mut events = Vec::new();
         if let Some(event) = self.active_work_projection_reply(client_id) {
@@ -3319,6 +3425,14 @@ impl AppRuntime {
                 }),
         );
         events
+    }
+
+    pub(crate) fn handle_frontend_client_disconnected(&mut self, client_id: &str) {
+        self.frontend_hydration_generations.remove(client_id);
+        self.frontend_hydration_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(client_id);
     }
 }
 

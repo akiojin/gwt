@@ -256,6 +256,28 @@ mod related_snapshot_cache_tests {
             "the later request's snapshot must survive an older late completion",
         );
     }
+
+    #[test]
+    fn invalidated_project_rejects_an_inflight_related_work_snapshot() {
+        let root = Path::new("/repo");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+        let stale_generation = cache.reserve_generation(root, KnowledgeKind::Issue);
+
+        cache.invalidate_project(root);
+
+        let mut stale_snapshot = KnowledgeRelatedWorksByNumber::new();
+        stale_snapshot.insert(42, Vec::new());
+        assert!(
+            !cache.replace_if_current(
+                root,
+                KnowledgeKind::Issue,
+                stale_generation,
+                Arc::new(stale_snapshot),
+            ),
+            "cleanup invalidation must prevent an in-flight task from refilling the cache",
+        );
+        assert!(cache.get(root, KnowledgeKind::Issue).is_none());
+    }
 }
 
 /// SPEC-2359 US-80: a debounced Start Work duplicate-work advisory query.
@@ -1095,6 +1117,7 @@ impl AppRuntime {
         let sessions_dir = self.sessions_dir.clone();
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
         let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
+        let repo_generation = self.repo_activity_projection_generation(&project_root);
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
         let reuse_related_snapshot = !refresh_if_stale;
         let related_snapshot_generation = reserve_related_snapshot_generation(
@@ -1130,13 +1153,17 @@ impl AppRuntime {
                 }
             };
             let refresh_after = refresh_if_stale && request_id.is_some() && view.refresh_enabled;
-            proxy.send(UserEvent::Dispatch(knowledge_view_events(
-                client_id.clone(),
-                id.clone(),
-                kind,
-                request_id,
-                view,
-            )));
+            proxy.send(UserEvent::RepoGenerationDispatch {
+                project_root: project_root.clone(),
+                generation: repo_generation,
+                events: knowledge_view_events(
+                    client_id.clone(),
+                    id.clone(),
+                    kind,
+                    request_id,
+                    view,
+                ),
+            });
             if !refresh_after {
                 return;
             }
@@ -1161,9 +1188,11 @@ impl AppRuntime {
                     false,
                     related_snapshot_generation,
                 );
-                proxy.send(UserEvent::Dispatch(knowledge_view_events(
-                    client_id, id, kind, request_id, view,
-                )));
+                proxy.send(UserEvent::RepoGenerationDispatch {
+                    project_root,
+                    generation: repo_generation,
+                    events: knowledge_view_events(client_id, id, kind, request_id, view),
+                });
             }
         });
         Vec::new()
@@ -1183,6 +1212,7 @@ impl AppRuntime {
         } = task;
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
         let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
+        let repo_generation = self.repo_activity_projection_generation(&project_root);
         let related_snapshot_generation =
             reserve_related_snapshot_generation(&related_snapshots, &project_root, kind, false);
         let proxy = self.proxy.clone();
@@ -1224,7 +1254,11 @@ impl AppRuntime {
                         knowledge_error_event(id, kind, error, request_id, None),
                     )],
                 };
-            proxy.send(UserEvent::Dispatch(event));
+            proxy.send(UserEvent::RepoGenerationDispatch {
+                project_root,
+                generation: repo_generation,
+                events: event,
+            });
         });
     }
 
@@ -1312,6 +1346,7 @@ impl AppRuntime {
         } = task;
         let related_snapshots = Arc::clone(&self.knowledge_related_snapshots);
         let repo_activity = self.repo_activity_snapshots.get(&project_root).cloned();
+        let repo_generation = self.repo_activity_projection_generation(&project_root);
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let event =
@@ -1344,9 +1379,11 @@ impl AppRuntime {
                         knowledge_error_event(id, kind, error, Some(request_id), Some(query))
                     }
                 };
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id, event,
-            )]));
+            proxy.send(UserEvent::RepoGenerationDispatch {
+                project_root,
+                generation: repo_generation,
+                events: vec![OutboundEvent::reply(client_id, event)],
+            });
         });
     }
 

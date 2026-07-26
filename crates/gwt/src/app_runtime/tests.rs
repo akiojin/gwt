@@ -2958,8 +2958,11 @@ fn sample_runtime_with_events(
         repo_activity_snapshots: HashMap::new(),
         repo_activity_scans_inflight: HashSet::new(),
         repo_activity_scan_generations: HashMap::new(),
+        repo_activity_force_pending: HashSet::new(),
+        repo_activity_projection_generations: HashMap::new(),
         repo_activity_retry_attempts: HashMap::new(),
         frontend_hydration_generations: HashMap::new(),
+        frontend_hydration_tasks: Default::default(),
         frontend_hydration_context_generation: 0,
         navigation_revision: 0,
         pending_navigation_followup: super::PendingNavigationFollowup::default(),
@@ -3566,7 +3569,7 @@ fn wait_for_recorded_event(
 }
 
 fn finish_frontend_hydration(
-    runtime: &AppRuntime,
+    runtime: &mut AppRuntime,
     recorded: &Arc<Mutex<Vec<UserEvent>>>,
     client_id: &str,
 ) -> Vec<OutboundEvent> {
@@ -3609,7 +3612,11 @@ fn wait_for_knowledge_view_dispatch(
         {
             let recorded = events.lock().expect("event log");
             for event in recorded.iter() {
-                if let UserEvent::Dispatch(dispatched) = event {
+                if let UserEvent::Dispatch(dispatched)
+                | UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                } = event
+                {
                     if dispatched.iter().any(|outbound| {
                         matches!(
                             &outbound.event,
@@ -4400,7 +4407,11 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
 
     let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
-    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
+    events.extend(finish_frontend_hydration(
+        &mut runtime,
+        &recorded,
+        "client-1",
+    ));
 
     assert!(events.iter().all(|event| matches!(
         &event.target,
@@ -4467,7 +4478,11 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
 
     let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
-    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
+    events.extend(finish_frontend_hydration(
+        &mut runtime,
+        &recorded,
+        "client-1",
+    ));
 
     let snapshot = events.iter().find_map(|event| match &event.event {
         BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(data_base64),
@@ -4549,7 +4564,11 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
 
     let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
-    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
+    events.extend(finish_frontend_hydration(
+        &mut runtime,
+        &recorded,
+        "client-1",
+    ));
 
     let snapshot = events.iter().find_map(|event| match &event.event {
         BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => Some(data_base64),
@@ -5145,7 +5164,11 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
 
     let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
-    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
+    events.extend(finish_frontend_hydration(
+        &mut runtime,
+        &recorded,
+        "client-1",
+    ));
 
     assert!(matches!(
         events.first().map(|event| &event.event),
@@ -7975,7 +7998,11 @@ fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_r
 
     let mut events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
-    events.extend(finish_frontend_hydration(&runtime, &recorded, "client-1"));
+    events.extend(finish_frontend_hydration(
+        &mut runtime,
+        &recorded,
+        "client-1",
+    ));
 
     let snapshot = events
         .iter()
@@ -13837,7 +13864,7 @@ fn app_runtime_frontend_ready_hydration_is_process_free_for_many_sessions() {
 
     let _bootstrap =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
-    let hydration = finish_frontend_hydration(&runtime, &recorded, "client-1");
+    let hydration = finish_frontend_hydration(&mut runtime, &recorded, "client-1");
     let projection = hydration
         .iter()
         .find_map(|event| match &event.event {
@@ -14214,6 +14241,99 @@ fn frontend_hydration_drops_closed_and_reopened_window_instance() {
         events.is_empty(),
         "a reopened window with the same id must reject the old pane snapshot"
     );
+}
+
+#[test]
+fn frontend_hydration_reschedules_after_pane_topology_drift() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().join("repo"),
+        ProjectKind::Git,
+        &[],
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 1);
+
+    let events = runtime.handle_frontend_hydration_ready(
+        "client-1",
+        FrontendHydrationCompletion {
+            generation: 1,
+            context_generation: runtime.frontend_hydration_context_generation,
+            active_tab_id: Some("tab-1".to_string()),
+            active_project_root: runtime.active_project_root().map(Path::to_path_buf),
+            window_instances: vec![("removed-pane".to_string(), 1)],
+            terminal_snapshots: vec![("removed-pane".to_string(), b"stale".to_vec())],
+        },
+    );
+
+    assert!(events.is_empty(), "the drifted snapshot must stay rejected");
+    assert_eq!(
+        runtime
+            .frontend_hydration_generations
+            .get("client-1")
+            .copied(),
+        Some(2),
+        "rejecting the current generation for pane drift must schedule convergence"
+    );
+    wait_for_recorded_event("replacement frontend hydration", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::FrontendHydrationReady {
+                    client_id,
+                    hydration: FrontendHydrationCompletion { generation: 2, .. },
+                } if client_id == "client-1"
+            )
+        })
+    });
+}
+
+#[test]
+fn frontend_disconnect_cancels_client_hydration_and_rejects_late_completion() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().join("repo"),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .frontend_hydration_generations
+        .insert("client-1".to_string(), 1);
+    runtime
+        .frontend_hydration_tasks
+        .lock()
+        .expect("hydration tasks")
+        .insert("client-1".to_string(), 1);
+
+    runtime.handle_frontend_client_disconnected("client-1");
+    let events = runtime.handle_frontend_hydration_ready(
+        "client-1",
+        FrontendHydrationCompletion {
+            generation: 1,
+            context_generation: runtime.frontend_hydration_context_generation,
+            active_tab_id: Some("tab-1".to_string()),
+            active_project_root: runtime.active_project_root().map(Path::to_path_buf),
+            window_instances: Vec::new(),
+            terminal_snapshots: Vec::new(),
+        },
+    );
+
+    assert!(events.is_empty());
+    assert!(!runtime
+        .frontend_hydration_generations
+        .contains_key("client-1"));
+    assert!(!runtime
+        .frontend_hydration_tasks
+        .lock()
+        .expect("hydration tasks")
+        .contains_key("client-1"));
 }
 
 #[test]
@@ -16207,7 +16327,9 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
         events.iter().any(|event| {
             matches!(
                 event,
-                UserEvent::Dispatch(dispatched)
+                UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                }
                     if dispatched.iter().any(|outbound| {
                         matches!(
                             &outbound.target,
@@ -16233,7 +16355,9 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
         events.iter().any(|event| {
             matches!(
                 event,
-                UserEvent::Dispatch(dispatched)
+                UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                }
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
                         BackendEvent::KnowledgeDetail { id, .. } if id == &window_id
@@ -16303,6 +16427,9 @@ fn app_runtime_select_knowledge_bridge_entry_does_not_start_stale_remote_refresh
             matches!(
                 event,
                 UserEvent::Dispatch(dispatched)
+                | UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                }
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
                         BackendEvent::KnowledgeDetail {
@@ -16441,6 +16568,9 @@ fn app_runtime_select_knowledge_bridge_entry_reuses_related_work_snapshot() {
             matches!(
                 event,
                 UserEvent::Dispatch(dispatched)
+                | UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                }
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
                         BackendEvent::KnowledgeDetail {
@@ -17196,7 +17326,9 @@ fn app_runtime_knowledge_search_replies_through_async_dispatch() {
         events.iter().any(|event| {
             matches!(
                 event,
-                UserEvent::Dispatch(dispatched)
+                UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                }
                     if dispatched.iter().any(|outbound| {
                         matches!(
                             &outbound.target,
@@ -17271,7 +17403,9 @@ fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
         events.iter().any(|event| {
             matches!(
                 event,
-                UserEvent::Dispatch(dispatched)
+                UserEvent::RepoGenerationDispatch {
+                    events: dispatched, ..
+                }
                     if dispatched.iter().any(|outbound| {
                         matches!(
                             &outbound.target,
@@ -17364,6 +17498,9 @@ fn app_runtime_manual_knowledge_refresh_uses_child_bare_repo_for_workspace_home(
                 matches!(
                     event,
                     UserEvent::Dispatch(dispatched)
+                    | UserEvent::RepoGenerationDispatch {
+                        events: dispatched, ..
+                    }
                         if dispatched.iter().any(|outbound| {
                             matches!(
                                 &outbound.event,
@@ -25496,6 +25633,60 @@ fn workspace_cleanup_does_not_rebroadcast_an_unrelated_active_project() {
     );
 }
 
+#[test]
+fn knowledge_projection_completion_is_fenced_after_repo_cleanup_invalidation() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+    let stale_generation = runtime.repo_activity_projection_generation(&repo);
+
+    let _ = runtime.handle_workspace_cleanup_projection_changed(repo.clone());
+    let events = runtime.handle_repo_generation_dispatch(
+        &repo,
+        stale_generation,
+        vec![OutboundEvent::reply(
+            "client-1",
+            BackendEvent::LaunchWizardState { wizard: None },
+        )],
+    );
+
+    assert!(
+        events.is_empty(),
+        "a background Knowledge projection captured before cleanup must not escape"
+    );
+}
+
+#[test]
+fn repo_activity_completion_does_not_rebroadcast_an_unrelated_active_project() {
+    let temp = tempdir().expect("tempdir");
+    let active_repo = temp.path().join("active-repo");
+    let scanned_repo = temp.path().join("scanned-repo");
+    fs::create_dir_all(&active_repo).expect("create active repo");
+    fs::create_dir_all(&scanned_repo).expect("create scanned repo");
+    save_merged_work_items(&active_repo, 1);
+    let tab = sample_project_tab("tab-1", "Active", active_repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_scan_generations
+        .insert(scanned_repo.clone(), 1);
+    runtime
+        .repo_activity_scans_inflight
+        .insert(scanned_repo.clone());
+
+    let events =
+        runtime.apply_repo_activity_snapshot(&scanned_repo, 1, empty_repo_activity_snapshot());
+
+    assert!(
+        events.is_empty(),
+        "a background repository completion must not rebroadcast the unrelated active tab"
+    );
+}
+
 /// SPEC-2359 Phase W-16 (FR-403): the Workspace list is ordered by last
 /// update, newest first — rows with fresher records or fresher ledger
 /// sessions float to the top, stale backfill rows sink.
@@ -26035,6 +26226,128 @@ fn repo_activity_refresh_is_single_flight_and_fresh_for_ten_seconds() {
         "a fresh snapshot must suppress another process-backed scan"
     );
     assert!(!runtime.repo_activity_scans_inflight.contains(&repo));
+}
+
+#[test]
+fn forced_repo_activity_refresh_queued_during_inflight_scan_converges() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+    runtime
+        .repo_activity_scan_generations
+        .insert(repo.clone(), 1);
+    runtime.repo_activity_scans_inflight.insert(repo.clone());
+
+    runtime.spawn_repo_activity_snapshot_scan(repo.clone(), true);
+
+    assert!(
+        !runtime.repo_activity_snapshots.contains_key(&repo),
+        "force refresh must invalidate even while an older scan owns the single-flight slot"
+    );
+    let events = runtime.apply_repo_activity_snapshot(&repo, 1, empty_repo_activity_snapshot());
+    assert!(
+        events.is_empty(),
+        "the superseded completion must not publish"
+    );
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo).copied(),
+        Some(2),
+        "the queued force refresh must advance to a replacement generation"
+    );
+    assert!(
+        runtime.repo_activity_scans_inflight.contains(&repo),
+        "the replacement generation must own the single-flight slot"
+    );
+
+    wait_for_recorded_event("queued force replacement", &recorded, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::RepoActivityReady {
+                    project_root,
+                    generation: 2,
+                    ..
+                } if project_root == &repo
+            )
+        })
+    });
+    let replacement = recorded
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::RepoActivityReady {
+                project_root,
+                generation: 2,
+                snapshot,
+            } if project_root == &repo => Some(snapshot.clone()),
+            _ => None,
+        })
+        .expect("replacement snapshot");
+    let _ = runtime.apply_repo_activity_snapshot(&repo, 2, replacement);
+    assert!(runtime.repo_activity_snapshots.contains_key(&repo));
+    assert!(!runtime.repo_activity_scans_inflight.contains(&repo));
+}
+
+#[test]
+fn successful_shell_launch_forces_repo_activity_refresh_despite_fresh_cache() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo.clone(),
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .repo_activity_snapshots
+        .insert(repo.clone(), empty_repo_activity_snapshot());
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 30 127.0.0.1 > nul".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+
+    let _ = runtime.handle_shell_launch_complete(
+        combined_window_id("tab-1", "shell-1"),
+        Ok(ProcessLaunch {
+            command,
+            args,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: Some(repo.clone()),
+        }),
+    );
+
+    assert!(
+        !runtime.repo_activity_snapshots.contains_key(&repo),
+        "successful materialization must invalidate the pre-launch topology snapshot"
+    );
+    assert_eq!(
+        runtime.repo_activity_scan_generations.get(&repo).copied(),
+        Some(1),
+        "successful materialization must force a replacement scan"
+    );
+    runtime.stop_all_runtimes();
 }
 
 #[test]

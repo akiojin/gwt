@@ -1007,6 +1007,11 @@ enum UserEvent {
         client_id: ClientId,
         hydration: FrontendHydrationCompletion,
     },
+    /// Browser socket teardown cancels any pane hydration owned by that
+    /// client. Agent-pane sockets never create browser hydration state.
+    FrontendClientDisconnected {
+        client_id: ClientId,
+    },
     /// SPEC-3170 FR-039: ordered navigation replies are dispatched before
     /// persistence and whole-workspace reconciliation in a later loop turn.
     NavigationFollowup,
@@ -1177,6 +1182,13 @@ enum UserEvent {
         result: Result<ProcessLaunch, String>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
+    /// Repository-derived Knowledge projection tagged with the identity epoch
+    /// captured by its background worker.
+    RepoGenerationDispatch {
+        project_root: PathBuf,
+        generation: u64,
+        events: Vec<OutboundEvent>,
+    },
     Dispatch(Vec<OutboundEvent>),
     ImprovementActionComplete {
         project_root: PathBuf,
@@ -2587,8 +2599,11 @@ mod tests {
             repo_activity_snapshots: HashMap::new(),
             repo_activity_scans_inflight: std::collections::HashSet::new(),
             repo_activity_scan_generations: HashMap::new(),
+            repo_activity_force_pending: std::collections::HashSet::new(),
+            repo_activity_projection_generations: HashMap::new(),
             repo_activity_retry_attempts: HashMap::new(),
             frontend_hydration_generations: HashMap::new(),
+            frontend_hydration_tasks: Default::default(),
             frontend_hydration_context_generation: 0,
             navigation_revision: 0,
             pending_navigation_followup: crate::app_runtime::PendingNavigationFollowup::default(),
@@ -4331,6 +4346,9 @@ mod tests {
                 matches!(
                     event,
                     UserEvent::Dispatch(dispatched)
+                    | UserEvent::RepoGenerationDispatch {
+                        events: dispatched, ..
+                    }
                         if dispatched.iter().any(|outbound| matches!(
                             outbound.event,
                             BackendEvent::KnowledgeEntries { .. }
@@ -4356,6 +4374,9 @@ mod tests {
                     matches!(
                         event,
                         UserEvent::Dispatch(dispatched)
+                        | UserEvent::RepoGenerationDispatch {
+                            events: dispatched, ..
+                        }
                             if dispatched.iter().any(|outbound| matches!(
                                 outbound.event,
                                 BackendEvent::KnowledgeEntries { .. }
@@ -7716,6 +7737,9 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_frontend_hydration_ready(&client_id, hydration);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::FrontendClientDisconnected { client_id }) => {
+                app.handle_frontend_client_disconnected(&client_id);
+            }
             Event::UserEvent(UserEvent::NavigationFollowup) => {
                 clients.dispatch(app.handle_navigation_followup());
             }
@@ -7912,6 +7936,17 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
                 let events = app.handle_issue_launch_wizard_prepared(prepared);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RepoGenerationDispatch {
+                project_root,
+                generation,
+                events,
+            }) => {
+                clients.dispatch(app.handle_repo_generation_dispatch(
+                    &project_root,
+                    generation,
+                    events,
+                ));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
