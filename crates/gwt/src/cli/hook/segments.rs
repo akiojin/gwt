@@ -726,16 +726,17 @@ mod tests {
         );
     }
 
-    // Hooks run on every Bash tool call: masking must stay linear. Before the
-    // single-pass rewrite this input took seconds.
+    // Hooks run on every Bash tool call: masking must stay linear. The
+    // quadratic predecessor took ~57s on this input, so the generous budget
+    // still catches a regression without depending on machine speed.
     #[test]
     fn masking_stays_linear_on_large_heredoc_marker_spam() {
-        let command = "x <<a\n".repeat(20_000);
+        let command = "x <<a\n".repeat(66_000);
         let start = std::time::Instant::now();
         let masked = mask_heredoc_bodies(&command);
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "masking 120KB took {:?}",
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "masking 400KB took {:?}",
             start.elapsed()
         );
         assert!(!masked.is_empty());
