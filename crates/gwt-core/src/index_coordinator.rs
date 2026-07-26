@@ -779,16 +779,31 @@ mod tests {
         key: &TargetKey,
         priority: JobPriority,
     ) -> TargetJobGuard {
-        match coordinator
-            .request_job(key, priority, Duration::from_secs(5))
-            .expect("request job")
-        {
-            JobAdmission::Owner(guard) => guard,
-            JobAdmission::Joined(_) => panic!(
-                "expected ownership of {} (state: {:?})",
-                key.file_stem(),
-                std::fs::read_to_string(coordinator.target_state_path(key)).ok(),
-            ),
+        // A target lock released by a just-finished owner can still read as
+        // contended for a scheduler tick under load, so `request_job` joins as
+        // a waiter instead of taking ownership. Production self-heals (the
+        // waiter's probe resolves it), but this helper asserts "I can own now,"
+        // so it polls until the lock is genuinely free rather than failing on a
+        // single spurious join (issue #3339). A stray join is dropped so its
+        // waiter registration is removed before the next attempt.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match coordinator
+                .request_job(key, priority, Duration::from_secs(5))
+                .expect("request job")
+            {
+                JobAdmission::Owner(guard) => return guard,
+                JobAdmission::Joined(waiter) => {
+                    drop(waiter);
+                    assert!(
+                        Instant::now() < deadline,
+                        "expected ownership of {} (state: {:?})",
+                        key.file_stem(),
+                        std::fs::read_to_string(coordinator.target_state_path(key)).ok(),
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 

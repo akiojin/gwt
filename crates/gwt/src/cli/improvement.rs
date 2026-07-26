@@ -2599,6 +2599,20 @@ mod tests {
         (home, gwt_home)
     }
 
+    /// A resolution deadline for fake-client fixtures that do not exercise
+    /// timeout behavior. `ResolutionDeadline` is an absolute wall-clock expiry,
+    /// and these tests reuse one deadline across several store-writing,
+    /// lock-taking operations, so a short budget expires spuriously under load
+    /// (issue #3339). Timeout paths are covered separately by injecting
+    /// `ApiError::Timeout` through `fail_next_owner_operation`, so the budget
+    /// here only needs to outlast any realistic test run.
+    fn generous_owner_deadline() -> gwt_github::client::ResolutionDeadline {
+        gwt_github::client::ResolutionDeadline::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(3600),
+        )
+    }
+
     fn board_entries_json(env: &mut TestEnv) -> Value {
         let (_, board_out) = run_collect(
             env,
@@ -4212,9 +4226,8 @@ mod tests {
     fn resolver_reconciles_exact_plain_issue_duplicates_to_lowest_owner() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4257,7 +4270,7 @@ mod tests {
 
         assert_eq!(resolved.state, CandidateState::Linked);
         assert_eq!(resolved.owner.as_ref().unwrap().number, 78);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let duplicate = env
             .owner_client
             .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -4290,10 +4303,9 @@ mod tests {
     fn independent_machine_stores_converge_after_delayed_duplicate_visibility() {
         use gwt_github::client::{
             fake::FakeIssueClient, IssueNumber, IssueState, OwnerRepositoryClient,
-            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline,
+            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind,
             UpdatedAt,
         };
-        use std::time::Duration;
 
         let home_a = tempfile::tempdir().expect("machine A home");
         let home_b = tempfile::tempdir().expect("machine B home");
@@ -4377,7 +4389,7 @@ mod tests {
 
         assert_eq!(resolved_b.state, CandidateState::Linked);
         assert_eq!(resolved_b.owner.as_ref().unwrap().number, 78);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             shared_owner
                 .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -4415,9 +4427,8 @@ mod tests {
     fn reconciliation_failure_stops_then_retry_reuses_exact_comment() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
         use gwt_github::client::{
-            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+            IssueNumber, OwnerRepositoryClient, RepositoryIdentity,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4496,7 +4507,7 @@ mod tests {
         })
         .expect("simulate crash after reconciliation attempt acquisition");
 
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let canonical = env
             .owner_client
             .fetch_issue(
@@ -4590,9 +4601,8 @@ mod tests {
     fn reconciliation_post_submit_unknown_adopts_comment_before_close_retry() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
         use gwt_github::client::{
-            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+            IssueNumber, OwnerRepositoryClient, RepositoryIdentity,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4630,7 +4640,7 @@ mod tests {
         assert_eq!(linked.state, CandidateState::Linked);
         assert_eq!(linked.owner.as_ref().unwrap().number, 78);
         assert_eq!(env.owner_client.owner_mutation_count(), 3);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let comments = env
             .owner_client
             .list_comments(
@@ -4701,9 +4711,8 @@ mod tests {
     fn occurrence_comment_unknown_rebinds_to_lower_canonical_owner_after_readback() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
         use gwt_github::client::{
-            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4729,7 +4738,7 @@ mod tests {
         assert_eq!(env.owner_client.owner_mutation_count(), 1);
 
         let repository = RepositoryIdentity::gwt_upstream();
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let submitted_comments = env
             .owner_client
             .list_comments(&repository, IssueNumber(79), &deadline)
@@ -5710,10 +5719,7 @@ mod tests {
         .expect("initial owner creation");
         assert_eq!(created.state, CandidateState::Created);
         assert_eq!(created.owner.as_ref().unwrap().number, 78);
-        let deadline = gwt_github::client::ResolutionDeadline::new(
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(5),
-        );
+        let deadline = generous_owner_deadline();
         let unrelated = env
             .owner_client
             .fetch_issue(
@@ -5870,14 +5876,7 @@ mod tests {
         );
         assert!(env
             .owner_client
-            .fetch_issue(
-                &repository,
-                IssueNumber(79),
-                &gwt_github::client::ResolutionDeadline::new(
-                    std::time::Duration::from_secs(1),
-                    std::time::Duration::from_secs(5),
-                ),
-            )
+            .fetch_issue(&repository, IssueNumber(79), &generous_owner_deadline())
             .is_err());
     }
 
@@ -5885,9 +5884,8 @@ mod tests {
     fn created_owner_number_survives_one_shot_source_save_failure() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -5952,7 +5950,7 @@ mod tests {
                 }
             )
         ));
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             env.owner_client
                 .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -5990,9 +5988,8 @@ mod tests {
     fn post_create_hidden_owner_preserves_the_complete_reconciliation_set() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -6050,7 +6047,7 @@ mod tests {
         assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
         assert!(unknown.reconciliation_required);
         assert_eq!(unknown.reconciliation_owner_numbers, vec![78, 79]);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             env.owner_client
                 .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -6103,9 +6100,8 @@ mod tests {
     fn post_create_duplicate_view_unions_the_hidden_created_owner() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -6181,7 +6177,7 @@ mod tests {
         ));
         assert!(unsettled.reconciliation_required);
         assert_eq!(unsettled.reconciliation_owner_numbers, vec![78, 79, 80]);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             env.owner_client
                 .fetch_issue(&repository, IssueNumber(80), &deadline)
@@ -6209,9 +6205,8 @@ mod tests {
     #[test]
     fn visible_owner_conflicting_with_durable_owner_is_reconciled_before_rebind() {
         use gwt_github::client::{
-            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -6237,7 +6232,7 @@ mod tests {
 
         seed_exact_plain_owners(&mut env, &[78]);
         let repository = RepositoryIdentity::gwt_upstream();
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let lower_owner = env
             .owner_client
             .fetch_issue(&repository, IssueNumber(78), &deadline)
