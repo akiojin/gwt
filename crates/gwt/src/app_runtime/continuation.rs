@@ -534,6 +534,70 @@ fn pending_fresh_execution_attempt_status(
     .map(|attempt| attempt.status)
 }
 
+#[derive(Debug)]
+struct DurableFreshExecutionCandidate {
+    project_root: PathBuf,
+    worktree_path: PathBuf,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    attempt: gwt::cli::execution_state::ContinuationAttempt,
+    binding: gwt_agent::SessionExecutionBinding,
+}
+
+fn durable_fresh_execution_candidate(
+    session: &gwt_agent::Session,
+) -> Result<Option<DurableFreshExecutionCandidate>, String> {
+    let Some(binding) = session.execution_binding.clone() else {
+        return Ok(None);
+    };
+    if binding.schema_version != gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+        || binding.session_id != session.id
+        || session.linked_issue_number != Some(binding.owner_number)
+        || session.repo_hash.as_deref() != Some(binding.repo_hash.as_str())
+    {
+        return Err("persisted fresh-launch Session binding is not canonical".to_string());
+    }
+    let owner_kind = match binding.owner_kind.as_str() {
+        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => return Err("persisted fresh-launch owner kind is not canonical".to_string()),
+    };
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: owner_kind,
+        number: binding.owner_number,
+    };
+    let Some(attempt) = gwt::cli::execution_state::fresh_linked_owner_launch_for_session(
+        &session.worktree_path,
+        owner,
+        &session.id,
+    )
+    .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if binding.identity.generation_id != attempt.candidate_generation_id
+        || binding.identity.binding_id != attempt.request.session_binding_id
+    {
+        return Err(
+            "persisted fresh-launch Session does not match its durable candidate generation"
+                .to_string(),
+        );
+    }
+    let project_root = session
+        .project_state_root
+        .clone()
+        .filter(|root| !root.as_os_str().is_empty())
+        .ok_or_else(|| {
+            "persisted fresh-launch Session has no canonical Project State root".to_string()
+        })?;
+    Ok(Some(DurableFreshExecutionCandidate {
+        project_root,
+        worktree_path: session.worktree_path.clone(),
+        owner,
+        attempt,
+        binding,
+    }))
+}
+
 fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
     pending_execution_activation_status(pending) == Some(true)
 }
@@ -556,6 +620,192 @@ pub(super) fn abort_prepared_execution(
 }
 
 impl AppRuntime {
+    pub(super) fn reconcile_durable_fresh_execution_launches(&mut self) {
+        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                continue;
+            }
+            let session = match gwt_agent::Session::load(&path) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to inspect a Session during fresh-launch recovery"
+                    );
+                    continue;
+                }
+            };
+            let candidate = match durable_fresh_execution_candidate(&session) {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        error = %error,
+                        "retained ambiguous fresh-launch recovery evidence"
+                    );
+                    continue;
+                }
+            };
+
+            match candidate.attempt.status {
+                gwt::cli::execution_state::ContinuationAttemptStatus::Activated => {
+                    let activated_matches = candidate
+                        .attempt
+                        .activated_generation
+                        .as_ref()
+                        .is_some_and(|identity| {
+                            identity.generation_id == candidate.binding.identity.generation_id
+                                && identity.session_binding_id
+                                    == candidate.binding.identity.binding_id
+                        });
+                    if !activated_matches {
+                        tracing::warn!(
+                            session_id = %candidate.binding.session_id,
+                            "retained Activated fresh-launch evidence with a mismatched Session binding"
+                        );
+                        continue;
+                    }
+                    if let Err(error) = gwt::cli::execution_state::activate_successor(
+                        &candidate.worktree_path,
+                        candidate.owner,
+                        &candidate.attempt.request,
+                    ) {
+                        tracing::warn!(
+                            session_id = %candidate.binding.session_id,
+                            error = %error,
+                            "Activated fresh-launch projection repair remains pending"
+                        );
+                        continue;
+                    }
+                    let exact_current = gwt::cli::execution_state::current_execution_binding(
+                        &candidate.worktree_path,
+                        candidate.owner,
+                    )
+                    .is_ok_and(|current| current == Some(candidate.binding.identity.clone()));
+                    if !exact_current {
+                        tracing::warn!(
+                            session_id = %candidate.binding.session_id,
+                            "Activated fresh-launch repair did not recover the exact Session binding"
+                        );
+                        continue;
+                    }
+                    match gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                        &candidate.project_root,
+                        &candidate.attempt.request.operation_id,
+                        gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+                    ) {
+                        Ok(
+                            gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+                        ) => {
+                            tracing::info!(
+                                session_id = %candidate.binding.session_id,
+                                operation_id = %candidate.attempt.request.operation_id,
+                                "recovered an Activated fresh launch after Host restart"
+                            );
+                        }
+                        Ok(resolution) => {
+                            tracing::warn!(
+                                session_id = %candidate.binding.session_id,
+                                ?resolution,
+                                "Activated fresh-launch Workspace commit remains pending"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = %candidate.binding.session_id,
+                                error = %error,
+                                "Activated fresh-launch Workspace commit could not be recovered"
+                            );
+                        }
+                    }
+                }
+                gwt::cli::execution_state::ContinuationAttemptStatus::Prepared => {
+                    let prepared_matches =
+                        gwt::cli::execution_state::prepared_execution_binding_matches(
+                            &candidate.worktree_path,
+                            candidate.owner,
+                            &candidate.binding.session_id,
+                            &candidate.binding.identity,
+                        )
+                        .unwrap_or(false);
+                    if !prepared_matches {
+                        tracing::warn!(
+                            session_id = %candidate.binding.session_id,
+                            "retained a Prepared fresh launch whose exact binding is unreadable"
+                        );
+                        continue;
+                    }
+                    if let Err(error) = gwt::cli::execution_state::abort_successor(
+                        &candidate.worktree_path,
+                        candidate.owner,
+                        &candidate.attempt.request,
+                        "Host restarted before fresh launch activation",
+                    ) {
+                        tracing::warn!(
+                            session_id = %candidate.binding.session_id,
+                            error = %error,
+                            "Prepared fresh-launch abort remains pending"
+                        );
+                        continue;
+                    }
+                    self.finish_durable_aborted_fresh_execution_cleanup(&candidate);
+                }
+                gwt::cli::execution_state::ContinuationAttemptStatus::Aborted => {
+                    self.finish_durable_aborted_fresh_execution_cleanup(&candidate);
+                }
+            }
+        }
+    }
+
+    fn finish_durable_aborted_fresh_execution_cleanup(
+        &mut self,
+        candidate: &DurableFreshExecutionCandidate,
+    ) {
+        let workspace_rejected = matches!(
+            gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                &candidate.project_root,
+                &candidate.attempt.request.operation_id,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
+            ),
+            Ok(
+                gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
+                    | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing
+            )
+        );
+        if !workspace_rejected {
+            tracing::warn!(
+                session_id = %candidate.binding.session_id,
+                "Aborted fresh-launch cleanup retained its Session until Workspace rejection succeeds"
+            );
+            return;
+        }
+        match gwt_agent::remove_session_if_execution_binding_matches(
+            &self.sessions_dir,
+            &candidate.binding.session_id,
+            &candidate.binding,
+        ) {
+            Ok(true) => tracing::info!(
+                session_id = %candidate.binding.session_id,
+                "completed durable Aborted fresh-launch Session cleanup"
+            ),
+            Ok(false) => tracing::warn!(
+                session_id = %candidate.binding.session_id,
+                "retained Aborted fresh-launch cleanup evidence after binding mismatch"
+            ),
+            Err(error) => tracing::warn!(
+                session_id = %candidate.binding.session_id,
+                error = %error,
+                "Aborted fresh-launch Session cleanup remains retryable"
+            ),
+        }
+    }
+
     fn continue_work_correlated_outcome_events(
         &mut self,
         client_id: &str,
@@ -2715,20 +2965,32 @@ impl AppRuntime {
 
         self.stop_window_runtime_without_session_projection(window_id);
         self.stop_pending_continue_work_session_without_projection(window_id);
-        let events = self.close_window_events(window_id);
-        self.pending_fresh_execution_launches.remove(window_id);
-        if let Err(error) = gwt_agent::remove_session_if_execution_binding_matches(
+        match gwt_agent::remove_session_if_execution_binding_matches(
             &self.sessions_dir,
             &pending.binding.session_id,
             &pending.binding,
         ) {
-            tracing::warn!(
+            Ok(true) => {
+                let events = self.close_window_events(window_id);
+                self.pending_fresh_execution_launches.remove(window_id);
+                events
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    session_id = %pending.binding.session_id,
+                    "retained aborted fresh-launch pending state after binding mismatch"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::warn!(
                 session_id = %pending.binding.session_id,
                 error = %error,
-                "failed to remove an aborted fresh-launch Session safely"
-            );
+                    "retained aborted fresh-launch pending state after cleanup failure"
+                );
+                Vec::new()
+            }
         }
-        events
     }
 
     pub(crate) fn handle_continue_work_ready_timeout(

@@ -8923,6 +8923,60 @@ fn assert_pending_fresh_execution_was_rolled_back(fixture: &PendingFreshExecutio
     );
 }
 
+fn leave_fresh_execution_activated_before_projection_commit(
+    fixture: &mut PendingFreshExecutionFixture,
+) {
+    fixture
+        .issuer
+        .promote_prepared(&fixture.token, &fixture.binding)
+        .expect("promote Prepared capability before simulated commit response loss");
+    let transaction = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+        &fixture.repo,
+        &fixture.operation_id,
+        |_projection, _work_items, _| Ok(((), Vec::new())),
+        || {
+            gwt::cli::execution_state::activate_successor(
+                &fixture.repo,
+                fixture.owner,
+                &fixture
+                    .runtime
+                    .pending_fresh_execution_launches
+                    .get(&fixture.window_id)
+                    .expect("pending fresh launch")
+                    .request,
+            )
+            .map_err(gwt_core::error::GwtError::Io)?;
+            Err(gwt_core::error::GwtError::Other(
+                "simulated response loss after ledger activation".to_string(),
+            ))
+        },
+    );
+    assert!(
+        transaction.is_err(),
+        "response loss must leave reconciliation work"
+    );
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+        .expect("trusted worktree directory");
+    for path in [
+        trusted_dir.join("execution-control.json"),
+        trusted_dir.join("execution-generation-pointer.json"),
+        fixture
+            .repo
+            .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
+        fixture
+            .repo
+            .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+    ] {
+        if path.exists() {
+            fs::remove_file(&path).expect("remove partial activation projection artifact");
+        }
+    }
+    assert!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).is_err(),
+        "the fixture must expose an Activated ledger with an incomplete projection/pointer"
+    );
+}
+
 #[test]
 fn fresh_execution_ready_timeout_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
@@ -8980,6 +9034,90 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
 
     assert!(!events.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[test]
+fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-precommit-failure");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        "blocked-precommit-session",
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "blocked-precommit-session",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "precommit regression fixture".to_string(),
+                missing_verification: Some("fresh launch pending".to_string()),
+            },
+        )
+        .expect("settle Blocked predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import Blocked predecessor");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .branch("work/issue-2359")
+        .linked_issue_number(owner.number)
+        .extra_arg("$gwt-execute #2359")
+        .build();
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::agent-precommit".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        None,
+    );
+
+    let launch_error = events
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete {
+                result: Err(error), ..
+            } => Some(error.clone()),
+            _ => None,
+        })
+        .expect("failed LaunchComplete event");
+    assert!(launch_error.contains("Host capability issuer"));
+    let persisted_candidates = fs::read_dir(&sessions_dir)
+        .expect("read sessions dir")
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .collect::<Vec<_>>();
+    assert!(
+        persisted_candidates.is_empty(),
+        "a launch that never returned its Session id must not leave an undiscoverable candidate: {persisted_candidates:?}"
+    );
 }
 
 #[test]
@@ -9048,55 +9186,7 @@ fn fresh_execution_activated_response_loss_repairs_projection_pointer_and_worksp
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-activated-repair");
-    fixture
-        .issuer
-        .promote_prepared(&fixture.token, &fixture.binding)
-        .expect("promote Prepared capability before simulated commit response loss");
-    let transaction = gwt_core::workspace_projection::transact_workspace_state_with_commit(
-        &fixture.repo,
-        &fixture.operation_id,
-        |_projection, _work_items, _| Ok(((), Vec::new())),
-        || {
-            gwt::cli::execution_state::activate_successor(
-                &fixture.repo,
-                fixture.owner,
-                &fixture
-                    .runtime
-                    .pending_fresh_execution_launches
-                    .get(&fixture.window_id)
-                    .expect("pending fresh launch")
-                    .request,
-            )
-            .map_err(gwt_core::error::GwtError::Io)?;
-            Err(gwt_core::error::GwtError::Other(
-                "simulated response loss after ledger activation".to_string(),
-            ))
-        },
-    );
-    assert!(
-        transaction.is_err(),
-        "response loss must leave reconciliation work"
-    );
-    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
-        .expect("trusted worktree directory");
-    for path in [
-        trusted_dir.join("execution-control.json"),
-        trusted_dir.join("execution-generation-pointer.json"),
-        fixture
-            .repo
-            .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
-        fixture
-            .repo
-            .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
-    ] {
-        if path.exists() {
-            fs::remove_file(&path).expect("remove partial activation projection artifact");
-        }
-    }
-    assert!(
-        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).is_err(),
-        "the fixture must expose an Activated ledger with an incomplete projection/pointer"
-    );
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
 
     let events = fixture
         .runtime
@@ -9123,6 +9213,174 @@ fn fresh_execution_activated_response_loss_repairs_projection_pointer_and_worksp
         )
         .expect("read committed Workspace transaction"),
         gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+    );
+}
+
+#[test]
+fn startup_repairs_activated_fresh_execution_without_process_local_pending_state() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture =
+        pending_fresh_execution_fixture(temp.path(), "fresh-activated-restart-repair");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    gwt_agent::update_session(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+        |session| {
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.restore_window_on_startup = false;
+            Ok(())
+        },
+    )
+    .expect("stop candidate before simulated Host restart");
+    let runtime_root = temp.path().join(".gwt");
+    drop(fixture.runtime);
+    let tab = sample_project_tab(
+        "tab-restarted",
+        "Repo",
+        fixture.repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+    assert!(restarted.pending_fresh_execution_launches.is_empty());
+    assert!(restarted.active_agent_sessions.is_empty());
+    assert!(restarted.agent_capability_tokens.is_empty());
+
+    restarted.bootstrap();
+
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read restart-repaired current binding"),
+        Some(fixture.binding.identity.clone()),
+    );
+    assert_eq!(
+        gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+            &fixture.repo,
+            &fixture.operation_id,
+            gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+        )
+        .expect("read restart-committed Workspace transaction"),
+        gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&fixture.repo, fixture.owner)
+            .expect("read restart-repaired ledger")
+            .expect("restart-repaired ledger")
+            .generations
+            .len(),
+        2,
+        "restart repair must not append a duplicate generation",
+    );
+}
+
+#[test]
+fn aborted_fresh_execution_cleanup_retains_pending_when_exact_session_was_replaced() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-cleanup-mismatch");
+    gwt::cli::execution_state::abort_successor(
+        &fixture.repo,
+        fixture.owner,
+        &fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .get(&fixture.window_id)
+            .expect("pending fresh launch")
+            .request,
+        "simulated launch failure",
+    )
+    .expect("abort fresh candidate");
+    gwt_agent::update_session(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+        |session| {
+            let mut replacement = session
+                .execution_binding
+                .clone()
+                .expect("candidate execution binding");
+            replacement.identity.binding_id = "replacement-binding".to_string();
+            replacement.capability_generation += 1;
+            session
+                .set_execution_binding(Some(replacement))
+                .map_err(std::io::Error::other)
+        },
+    )
+    .expect("replace candidate Session binding");
+
+    let _events = fixture
+        .runtime
+        .fresh_execution_launch_failed_events(&fixture.window_id, "simulated launch failure");
+
+    assert!(
+        fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id),
+        "binding-mismatch cleanup must retain process-local retry evidence",
+    );
+    assert!(
+        fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id))
+            .exists(),
+        "strict cleanup must not delete the replacement Session",
+    );
+}
+
+#[test]
+fn startup_retries_aborted_fresh_execution_candidate_cleanup() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "fresh-aborted-restart-cleanup");
+    gwt::cli::execution_state::abort_successor(
+        &fixture.repo,
+        fixture.owner,
+        &fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .get(&fixture.window_id)
+            .expect("pending fresh launch")
+            .request,
+        "simulated crash after durable abort",
+    )
+    .expect("abort fresh candidate");
+    let runtime_root = temp.path().join(".gwt");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    assert!(candidate_path.exists());
+    drop(fixture.runtime);
+    let tab = sample_project_tab(
+        "tab-restarted",
+        "Repo",
+        fixture.repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+
+    restarted.bootstrap();
+
+    assert!(
+        !candidate_path.exists(),
+        "startup must finish exact cleanup recorded by the Aborted fresh attempt",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read preserved predecessor"),
+        Some(fixture.predecessor_binding),
     );
 }
 

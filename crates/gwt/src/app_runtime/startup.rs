@@ -96,6 +96,12 @@ pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id:
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
+        // Fresh linked-owner launch authority is durable in the Session and
+        // owner ledger, while readiness capabilities are intentionally
+        // process-local. Reconcile that durable pair before startup migrations
+        // or auto-resume can observe a partial Activated/Aborted transaction.
+        self.reconcile_durable_fresh_execution_launches();
+
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
         // Workspace Overview Completed column reflects past completions on the

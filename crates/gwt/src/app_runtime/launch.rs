@@ -233,9 +233,15 @@ fn rollback_materialized_fresh_execution_launch(
     }
     gwt::cli::execution_state::abort_successor(worktree_path, owner, &attempt.request, reason)
         .map_err(|error| error.to_string())?;
-    gwt_agent::remove_session_if_execution_binding_matches(sessions_dir, session_id, &binding)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    match gwt_agent::remove_session_if_execution_binding_matches(sessions_dir, session_id, &binding)
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(
+            "fresh linked-owner rollback retained a Session whose binding no longer matches"
+                .to_string(),
+        ),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 impl std::fmt::Debug for ProcessLaunch {
@@ -460,6 +466,11 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                         .to_string(),
                 );
             }
+            session.save(sessions_dir).map_err(|error| {
+                format!(
+                    "failed to persist the Prepared continuation Session binding before capability issuance: {error}"
+                )
+            })?;
             let endpoints = preflight_agent_capability_endpoints(
                 issuer,
                 project_root,
@@ -615,17 +626,28 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 AgentCapabilityLaunchAuthority::Prepared(&binding),
                 endpoints,
             ) {
-                let rollback = session.set_execution_binding(None).and_then(|()| {
-                    session
-                        .save(sessions_dir)
-                        .map_err(|error| error.to_string())
-                });
                 let abort = abort_prepared("fresh launch capability issuance failed");
-                return Err(match (rollback, abort) {
+                let cleanup = match abort.as_ref() {
+                    Ok(()) => gwt_agent::remove_session_if_execution_binding_matches(
+                        sessions_dir,
+                        &session.id,
+                        &binding,
+                    )
+                    .map_err(|cleanup_error| cleanup_error.to_string())
+                    .and_then(|removed| {
+                        removed.then_some(()).ok_or_else(|| {
+                            "candidate Session binding changed before cleanup".to_string()
+                        })
+                    }),
+                    Err(_) => Err(
+                        "candidate retained because the durable abort did not commit".to_string(),
+                    ),
+                };
+                return Err(match (cleanup, abort) {
                     (Ok(()), Ok(())) => error,
-                    (rollback, abort) => format!(
-                        "{error}; fresh launch rollback failed (Session: {}; successor: {})",
-                        rollback.err().unwrap_or_else(|| "ok".to_string()),
+                    (cleanup, abort) => format!(
+                        "{error}; fresh launch rollback retained exact evidence (Session: {}; successor: {})",
+                        cleanup.err().unwrap_or_else(|| "ok".to_string()),
                         abort.err().unwrap_or_else(|| "ok".to_string()),
                     ),
                 });
@@ -2603,13 +2625,18 @@ impl AppRuntime {
                     .unwrap_or_else(|| worktree_path.display().to_string())
             });
 
-            persist_finalized_launch_session(
-                &sessions_dir,
-                &runtime_path,
-                &mut session,
-                (runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
-                    .then_some(agent_project_root.as_str()),
-            )?;
+            if runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                let project_state_root = session
+                    .project_state_root
+                    .as_deref()
+                    .filter(|root| !root.as_os_str().is_empty())
+                    .ok_or_else(|| {
+                        "Docker launch is missing the host Project State root before Session persistence"
+                            .to_string()
+                    })?
+                    .to_path_buf();
+                session.bind_docker_runtime(&agent_project_root, &project_state_root)?;
+            }
 
             // A plain Resume is inspection-only. Producing authority is
             // created only for a linked non-ephemeral launch that owns its
@@ -2633,7 +2660,7 @@ impl AppRuntime {
                     })
                 })
                 .flatten();
-            FinalizedAgentCapabilityLaunch {
+            let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,
                 session: &mut session,
@@ -2645,11 +2672,35 @@ impl AppRuntime {
                 runtime_target,
                 container_runtime: container_runtime.as_ref(),
             }
-            .install(&mut config.env_vars)?;
+            .install(&mut config.env_vars);
             issued_capability_token = config
                 .env_vars
                 .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                 .cloned();
+            capability_install?;
+            let is_fresh_execution_install = producing_owner.is_some()
+                && prepared_continuation.is_none()
+                && config
+                    .env_vars
+                    .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+            if let Err(error) =
+                persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)
+            {
+                let rollback = is_fresh_execution_install.then(|| {
+                    rollback_materialized_fresh_execution_launch(
+                        &sessions_dir,
+                        &session_id,
+                        &worktree_path,
+                        "fresh launch final Session persistence failed",
+                    )
+                });
+                return Err(match rollback {
+                    None | Some(Ok(())) => error,
+                    Some(Err(rollback_error)) => format!(
+                        "{error}; candidate rollback requires reconciliation: {rollback_error}"
+                    ),
+                });
+            }
 
             let process_launch = ProcessLaunch {
                 command: config.command.clone(),

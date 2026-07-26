@@ -3003,6 +3003,52 @@ pub fn prepared_fresh_linked_owner_launch_for_session(
     Ok(candidate)
 }
 
+/// Recover the one latest fresh linked-owner launch attempt for a candidate
+/// Session, including terminal Aborted and Activated attempts.
+///
+/// Unlike [`prepared_fresh_linked_owner_launch_for_session`], this is the
+/// process-restart reconciliation seam. The persisted Session id is only a
+/// correlation key; the integrity-valid owner ledger and exact request remain
+/// the authority. Reusing one Session id for multiple fresh operations is
+/// refused as ambiguous instead of guessing which operation owns cleanup.
+pub fn fresh_linked_owner_launch_for_session(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    session_id: &str,
+) -> io::Result<Option<ContinuationAttempt>> {
+    if session_id.trim() != session_id
+        || session_id.is_empty()
+        || session_id.len() > 256
+        || session_id.chars().any(char::is_control)
+    {
+        return Err(invalid_generation_data(
+            "fresh launch Session id must be canonical",
+        ));
+    }
+    let Some(ledger) = load_owner_generation_ledger(worktree, owner)? else {
+        return Ok(None);
+    };
+    let mut seen_operations = std::collections::HashSet::new();
+    let mut candidates = ledger
+        .continuation_attempts
+        .iter()
+        .rev()
+        .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
+        .filter(|attempt| {
+            attempt.predecessor_status == SuccessorPredecessorStatus::Blocked
+                && attempt.request.source == FRESH_LINKED_OWNER_LAUNCH_SOURCE
+                && attempt.request.work_id.is_none()
+                && attempt.request.initial_session_id == session_id
+        });
+    let candidate = candidates.next().cloned();
+    if candidates.next().is_some() {
+        return Err(generation_conflict(
+            "more than one fresh launch operation is bound to the same Session",
+        ));
+    }
+    Ok(candidate)
+}
+
 /// Append a Prepared same-generation takeover without changing the current
 /// owner projection.
 pub fn prepare_generation_takeover(
