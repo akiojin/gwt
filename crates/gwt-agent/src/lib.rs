@@ -62,12 +62,12 @@ pub use session::{
     remove_session_if_execution_binding_matches, reset_runtime_state_dir,
     reset_runtime_state_dir_for_pid, rotate_session_execution_capability,
     runtime_state_dir_for_pid, runtime_state_path, runtime_state_path_for_pid,
-    sessions_dir_from_runtime_path, update_session, validate_docker_runtime_worktree_path,
-    validate_session_id_path_component, with_session_lease, with_session_lease_wait,
-    AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionBindingIdentity,
-    PendingDiscussionResume, Session, SessionExecutionBinding, SessionRuntimeState,
-    GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
-    GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+    sessions_dir_from_runtime_path, update_session, update_session_if_changed,
+    validate_docker_runtime_worktree_path, validate_session_id_path_component, with_session_lease,
+    with_session_lease_wait, AgentSessionHistoryEntry, DockerRuntimeBinding,
+    ExecutionBindingIdentity, PendingDiscussionResume, Session, SessionExecutionBinding,
+    SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{

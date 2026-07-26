@@ -16155,6 +16155,149 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
 }
 
 #[test]
+fn app_runtime_startup_recovery_preserves_unchanged_session_file_identity() {
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(&worktree, "work/no-op", gwt_agent::AgentId::Codex);
+    session.id = "session-no-op-startup".to_string();
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save no-op session");
+
+    let session_path = runtime.sessions_dir.join("session-no-op-startup.toml");
+    let mut session_file = OpenOptions::new()
+        .append(true)
+        .open(&session_path)
+        .expect("open no-op session");
+    session_file
+        .write_all(b"\n# preserve-no-op-session\n")
+        .expect("append no-op sentinel");
+    drop(session_file);
+    let before = fs::read(&session_path).expect("read no-op session before startup recovery");
+    let identity_probe = runtime.sessions_dir.join("session-no-op-startup.identity");
+    fs::hard_link(&session_path, &identity_probe).expect("link no-op session identity probe");
+
+    let loaded = runtime.load_recovery_sessions();
+
+    let after = fs::read(&session_path).expect("read no-op session after startup recovery");
+    let mut probe_file = OpenOptions::new()
+        .append(true)
+        .open(&identity_probe)
+        .expect("open identity probe");
+    probe_file
+        .write_all(b"# same-file-identity\n")
+        .expect("append identity probe");
+    drop(probe_file);
+    let original_after_probe =
+        fs::read(&session_path).expect("read original after identity probe append");
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, session.id);
+    assert_eq!(
+        after, before,
+        "current no-op Session must remain byte-identical"
+    );
+    assert!(
+        original_after_probe.ends_with(b"# same-file-identity\n"),
+        "startup recovery must not replace the no-op Session inode"
+    );
+}
+
+#[test]
+fn app_runtime_startup_recovery_preserves_already_interrupted_session_file_identity() {
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/interrupted", gwt_agent::AgentId::Codex);
+    session.id = "session-already-interrupted".to_string();
+    session.record_hook_event("UserPromptSubmit");
+    session.update_status(gwt_agent::AgentStatus::Interrupted);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save interrupted session");
+
+    let session_path = runtime
+        .sessions_dir
+        .join("session-already-interrupted.toml");
+    let before = fs::read(&session_path).expect("read interrupted session before recovery");
+    let identity_probe = runtime
+        .sessions_dir
+        .join("session-already-interrupted.identity");
+    fs::hard_link(&session_path, &identity_probe).expect("link interrupted identity probe");
+
+    let loaded = runtime.load_recovery_sessions();
+
+    let after = fs::read(&session_path).expect("read interrupted session after recovery");
+    let mut probe_file = OpenOptions::new()
+        .append(true)
+        .open(&identity_probe)
+        .expect("open interrupted identity probe");
+    probe_file
+        .write_all(b"# same-interrupted-file-identity\n")
+        .expect("append interrupted identity probe");
+    drop(probe_file);
+    let original_after_probe =
+        fs::read(&session_path).expect("read interrupted original after probe append");
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, session.id);
+    assert_eq!(
+        after, before,
+        "already Interrupted Session must remain byte-identical"
+    );
+    assert!(
+        original_after_probe.ends_with(b"# same-interrupted-file-identity\n"),
+        "startup recovery must not replace an already Interrupted Session inode"
+    );
+}
+
+#[test]
+fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() {
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(&worktree, "work/legacy", gwt_agent::AgentId::Codex);
+    session.id = "session-legacy-startup".to_string();
+    session.schema_version = 2;
+    session.status = gwt_agent::AgentStatus::Running;
+    session.last_hook_event = None;
+    session.last_hook_event_at = None;
+    session.last_completed_stop_at = None;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save legacy session");
+    fs::write(
+        runtime.sessions_dir.join("malformed-session.toml"),
+        "not = [valid toml",
+    )
+    .expect("write malformed session");
+
+    let loaded = runtime.load_recovery_sessions();
+
+    assert_eq!(loaded.len(), 1, "malformed Session must remain isolated");
+    assert_eq!(
+        loaded[0].schema_version,
+        gwt_agent::Session::CURRENT_SCHEMA_VERSION
+    );
+    assert_eq!(loaded[0].status, gwt_agent::AgentStatus::Interrupted);
+    let persisted =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-legacy-startup.toml"))
+            .expect("load migrated Session without applying another migration");
+    assert_eq!(
+        persisted.schema_version,
+        gwt_agent::Session::CURRENT_SCHEMA_VERSION
+    );
+    assert_eq!(persisted.status, gwt_agent::AgentStatus::Interrupted);
+}
+
+#[test]
 fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
     let _env_lock = env_test_lock()
         .lock()

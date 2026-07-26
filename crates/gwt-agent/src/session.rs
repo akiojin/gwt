@@ -875,6 +875,36 @@ where
     })
 }
 
+/// Load and mutate one session under a per-session file lock, persisting it
+/// only when migration or mutation changes its normalized value.
+///
+/// Comparing canonical values before and after mutation keeps comments,
+/// formatting, and file identity intact for semantic no-ops while preserving
+/// required schema migrations.
+pub fn update_session_if_changed<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    mutate: F,
+) -> io::Result<Session>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load(&path)?;
+        let before = serialize_session_toml(&session)?;
+        session.migrate_legacy_launch_args();
+        mutate(&mut session)?;
+        let after = serialize_session_toml(&session)?;
+        if after != before {
+            write_session_toml_atomic(&path, &after)?;
+        }
+        Ok(session)
+    })
+}
+
 /// Remove one uncommitted Session only when its durable execution binding
 /// still matches the exact Prepared candidate selected by the caller.
 ///
