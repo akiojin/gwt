@@ -15,11 +15,12 @@ use tempfile::tempdir;
 use base64::Engine;
 use chrono::{TimeZone, Utc};
 use gwt::{
-    empty_workspace_state, load_restored_workspace_state, load_session_state, ArrangeMode,
-    BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
-    FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState,
-    WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
+    empty_workspace_state, load_restored_workspace_state, load_session_state, load_workspace_state,
+    workspace_state_path, ArrangeMode, BackendEvent, BranchCleanupInfo, BranchListEntry,
+    BranchScope, ContentLimits, FocusCycleDirection, FrontendEvent, LaunchWizardAction,
+    LaunchWizardContext, LaunchWizardState, LinkedIssueKind, ProfileEnvEntryView, ProjectKind,
+    UiTracePayload, WindowCanvasState, WindowGeometry, WindowPlacement, WindowPreset,
+    WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -986,6 +987,251 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
         .persisted()
         .windows
         .is_empty());
+}
+
+#[test]
+fn app_runtime_work_singleton_reuses_create_before_hydration() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let first_events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let first = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .first()
+        .expect("first Work window")
+        .clone();
+
+    let repeated_events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let windows = &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows;
+
+    assert_eq!(
+        windows.len(),
+        1,
+        "repeated Work create must reuse the window"
+    );
+    assert_eq!(windows[0].id, first.id);
+    assert_eq!(windows[0].preset, WindowPreset::Work);
+    assert!(
+        windows[0].z_index > first.z_index,
+        "reuse must raise the existing Work window"
+    );
+    assert_eq!(runtime.window_lookup.len(), 1);
+    assert!(
+        runtime.runtimes.is_empty(),
+        "Work reuse must not start a PTY"
+    );
+    assert!(first_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(repeated_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(
+        !repeated_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })),
+        "reuse must not re-enter the runtime start/status path"
+    );
+
+    assert!(runtime
+        .persist_dispatcher
+        .wait_idle(std::time::Duration::from_secs(5)));
+    let persisted =
+        load_workspace_state(&workspace_state_path(&repo)).expect("persisted Work singleton state");
+    assert_eq!(persisted.windows.len(), 1);
+    assert_eq!(persisted.windows[0].id, first.id);
+}
+
+#[test]
+fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.create_window_events(WindowPreset::Branches, canvas_bounds());
+    let legacy = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows[0]
+        .clone();
+    let events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let windows = &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows;
+
+    assert_eq!(windows.len(), 1, "Branches and Work must share identity");
+    assert_eq!(windows[0].id, legacy.id);
+    assert_eq!(windows[0].preset, WindowPreset::Branches);
+    assert!(windows[0].z_index > legacy.z_index);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+}
+
+#[test]
+fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::Work, WindowPreset::FileTree],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let work_id = combined_window_id("tab-1", "work-1");
+    let file_tree_id = combined_window_id("tab-1", "file-tree-1");
+
+    runtime.dock_window_tab_events(&file_tree_id, &work_id);
+    let before = runtime.tab("tab-1").expect("tab").workspace.persisted();
+    assert!(
+        before
+            .windows
+            .iter()
+            .find(|window| window.id == "file-tree-1")
+            .expect("File Tree tab")
+            .tab_group_active
+    );
+    assert!(
+        !before
+            .windows
+            .iter()
+            .find(|window| window.id == "work-1")
+            .expect("inactive Work tab")
+            .tab_group_active
+    );
+
+    let events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let after = runtime.tab("tab-1").expect("tab").workspace.persisted();
+    let work = after
+        .windows
+        .iter()
+        .find(|window| window.id == "work-1")
+        .expect("reused Work tab");
+    let file_tree = after
+        .windows
+        .iter()
+        .find(|window| window.id == "file-tree-1")
+        .expect("grouped File Tree tab");
+
+    assert_eq!(after.windows.len(), 2);
+    assert!(
+        work.tab_group_active,
+        "reuse must reveal the Work group tab"
+    );
+    assert!(!file_tree.tab_group_active);
+    assert!(work.z_index >= file_tree.z_index);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+}
+
+#[test]
+fn app_runtime_work_singleton_preserves_historical_duplicates() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Work, WindowPreset::Branches],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let windows = &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows;
+
+    assert_eq!(
+        windows.len(),
+        2,
+        "reuse must not purge historical duplicates"
+    );
+    assert!(windows.iter().any(|window| window.id == "work-1"));
+    assert!(windows.iter().any(|window| window.id == "branches-1"));
+    assert_eq!(
+        windows
+            .iter()
+            .max_by_key(|window| window.z_index)
+            .expect("focused singleton")
+            .id,
+        "branches-1"
+    );
+
+    assert!(runtime
+        .persist_dispatcher
+        .wait_idle(std::time::Duration::from_secs(5)));
+    let persisted = load_workspace_state(&workspace_state_path(&repo))
+        .expect("persisted historical Work windows");
+    assert_eq!(persisted.windows.len(), 2);
+}
+
+#[test]
+fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.create_window_events(WindowPreset::Shell, canvas_bounds());
+    runtime.create_window_events(WindowPreset::Shell, canvas_bounds());
+    let shell_ids = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Shell)
+        .map(|window| combined_window_id("tab-1", &window.id))
+        .collect::<Vec<_>>();
+
+    assert_eq!(shell_ids.len(), 2);
+    assert_eq!(runtime.runtimes.len(), 2);
+    for shell_id in shell_ids {
+        runtime.close_window_events(&shell_id);
+    }
 }
 
 // SPEC-2359 Workspace → Work → Session: a Work row (keyed by the gwt session

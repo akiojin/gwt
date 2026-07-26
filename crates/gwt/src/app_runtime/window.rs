@@ -26,6 +26,10 @@ use super::{
     WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
+fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
+    matches!(preset, WindowPreset::Work | WindowPreset::Branches)
+}
+
 impl AppRuntime {
     pub(crate) fn create_window_events(
         &mut self,
@@ -38,6 +42,31 @@ impl AppRuntime {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
+        if shares_work_surface_singleton(preset) {
+            let existing_id = {
+                let Some(tab) = self.tab_mut(&tab_id) else {
+                    return Vec::new();
+                };
+                let existing_id = tab
+                    .workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| shares_work_surface_singleton(window.preset))
+                    .max_by_key(|window| window.z_index)
+                    .map(|window| window.id.clone());
+                if let Some(existing_id) = existing_id.as_deref() {
+                    let _ = tab.workspace.activate_window_tab(existing_id);
+                    let _ = tab
+                        .workspace
+                        .focus_window(existing_id, Some(bounds.clone()));
+                }
+                existing_id
+            };
+            if existing_id.is_some() {
+                return self.activate_tab_for_window_events(tab_id);
+            }
+        }
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
@@ -538,5 +567,20 @@ impl AppRuntime {
             .flat_map(|tab| self.workspace_view_for_tab(tab).windows)
             .collect();
         BackendEvent::WindowList { windows }
+    }
+}
+
+#[cfg(test)]
+mod singleton_tests {
+    use super::*;
+
+    #[test]
+    fn work_surface_singleton_excludes_multi_instance_terminal_presets() {
+        assert!(shares_work_surface_singleton(WindowPreset::Work));
+        assert!(shares_work_surface_singleton(WindowPreset::Branches));
+        assert!(!shares_work_surface_singleton(WindowPreset::Agent));
+        assert!(!shares_work_surface_singleton(WindowPreset::Shell));
+        assert!(!shares_work_surface_singleton(WindowPreset::Claude));
+        assert!(!shares_work_surface_singleton(WindowPreset::Codex));
     }
 }

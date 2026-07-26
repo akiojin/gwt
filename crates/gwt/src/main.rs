@@ -3323,7 +3323,6 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Work,
             WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
@@ -3348,6 +3347,37 @@ mod tests {
             assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
+
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_raw_id = runtime
+            .window_lookup
+            .get(&branches_id)
+            .expect("Branches lookup")
+            .raw_id
+            .clone();
+        let before_z = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("Branches window")
+            .z_index;
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Work, bounds.clone())
+                .len(),
+            1,
+            "Work must focus the existing legacy Branches singleton",
+        );
+        let reused_work = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("reused Work surface");
+        assert_eq!(reused_work.geometry.width, 720.0);
+        assert_eq!(reused_work.geometry.height, 420.0);
+        assert!(reused_work.z_index > before_z);
     }
 
     #[test]
