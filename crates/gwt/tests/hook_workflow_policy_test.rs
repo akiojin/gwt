@@ -56,6 +56,15 @@ const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
 const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
 const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
 
+/// How long the loopback fixture server waits for the client to connect. The
+/// client only connects after building its `DefaultCliEnv` and entering the
+/// direct-stop evaluation, and that setup runs on the main thread while this
+/// accept loop is already counting down. A tight budget (formerly 2s) expires
+/// spuriously when the machine is loaded (issue #3339); this only bounds a
+/// genuine hang, so it can be generous without weakening any assertion — the
+/// direct-stop budget itself is measured separately after setup completes.
+const LOOPBACK_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn evaluate_direct_stop_with_test_budget(env: &mut DefaultCliEnv) -> HookOutput {
     let deadline = ResolutionDeadline::new(
         DIRECT_STOP_TEST_CONNECT_TIMEOUT,
@@ -216,7 +225,9 @@ fn fail_next_owner_corpus_with_timeout(env: &TestEnv) {
 
 fn read_http_request(stream: &mut TcpStream) {
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        // Generous so a loaded scheduler cannot stall the post-accept read into
+        // a spurious failure (issue #3339); the request is already in flight.
+        .set_read_timeout(Some(LOOPBACK_ACCEPT_TIMEOUT))
         .expect("request read timeout");
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -490,7 +501,7 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
         let server = std::thread::spawn(move || {
-            let mut first = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+            let mut first = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             server_requests.fetch_add(1, Ordering::SeqCst);
             read_http_request(&mut first);
             let body = r#"{"data":{"repository":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}}"#;
@@ -504,7 +515,7 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
             first.flush().expect("flush first page");
             drop(first);
 
-            let mut stalled = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+            let mut stalled = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             server_requests.fetch_add(1, Ordering::SeqCst);
             read_http_request(&mut stalled);
             stalled
@@ -581,7 +592,7 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let address = listener.local_addr().expect("loopback address");
         let server = std::thread::spawn(move || {
-            let mut request = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+            let mut request = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             read_http_request(&mut request);
             let candidate_lock = std::fs::OpenOptions::new()
                 .create(true)

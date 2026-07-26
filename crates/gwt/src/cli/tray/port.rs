@@ -251,6 +251,25 @@ mod tests {
         TcpListener::bind((Ipv4Addr::LOCALHOST, port))
     }
 
+    /// Run an ephemeral-port scenario that can lose its exact port number to an
+    /// unrelated process on a loaded machine. The closure returns `Ok` once its
+    /// invariants hold, or `Err(reason)` when the OS-assigned port was stolen in
+    /// the drop→rebind window; only that environmental race is retried with a
+    /// fresh port. A genuine regression fails the closure's own assertions and
+    /// panics immediately, and an exhausted retry budget still fails the test
+    /// (issue #3339).
+    fn retry_ephemeral_port_scenario(mut attempt: impl FnMut() -> Result<(), String>) {
+        const ATTEMPTS: usize = 8;
+        let mut last = String::new();
+        for _ in 0..ATTEMPTS {
+            match attempt() {
+                Ok(()) => return,
+                Err(reason) => last = reason,
+            }
+        }
+        panic!("ephemeral-port scenario lost its port on all {ATTEMPTS} attempts: {last}");
+    }
+
     fn listener_port(listener: &TcpListener) -> u16 {
         listener.local_addr().expect("listener address").port()
     }
@@ -437,26 +456,36 @@ mod tests {
 
     #[test]
     fn persistence_failure_releases_new_listener_before_returning_error() {
-        let selected_port = Cell::new(None);
+        retry_ephemeral_port_scenario(|| {
+            let selected_port = Cell::new(None);
 
-        let error = bind_stable_port_with_store(
-            request(None, false),
-            || Ok(Settings::default()),
-            |settings| {
-                selected_port.set(settings.server.embedded_port);
-                Err(ConfigError::WriteError {
-                    reason: "injected atomic writer failure".to_string(),
-                })
-            },
-            bind_loopback,
-        )
-        .expect_err("persistence failure is fatal");
+            let error = bind_stable_port_with_store(
+                request(None, false),
+                || Ok(Settings::default()),
+                |settings| {
+                    selected_port.set(settings.server.embedded_port);
+                    Err(ConfigError::WriteError {
+                        reason: "injected atomic writer failure".to_string(),
+                    })
+                },
+                bind_loopback,
+            )
+            .expect_err("persistence failure is fatal");
 
-        assert!(matches!(error, StablePortError::Save { .. }));
-        let selected_port = selected_port.get().expect("writer saw selected port");
-        let rebound = bind_loopback(selected_port.get())
-            .expect("failed transaction must release its listener before returning");
-        assert_eq!(listener_port(&rebound), selected_port.get());
+            assert!(matches!(error, StablePortError::Save { .. }));
+            let selected_port = selected_port.get().expect("writer saw selected port");
+            // Proof of release: rebinding the just-used port must succeed. An
+            // unrelated process can grab the freed port first on a busy machine;
+            // that is the retryable race, distinct from a leaked listener (which
+            // this same process would hold, failing every attempt).
+            match bind_loopback(selected_port.get()) {
+                Ok(rebound) => {
+                    assert_eq!(listener_port(&rebound), selected_port.get());
+                    Ok(())
+                }
+                Err(err) => Err(format!("port {} unavailable: {err}", selected_port.get())),
+            }
+        });
     }
 
     #[test]
@@ -510,41 +539,55 @@ mod tests {
 
     #[test]
     fn accepted_connection_does_not_force_saved_port_replacement_on_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let config_path = temp.path().join("config.toml");
-        let runtime = Runtime::new().expect("runtime");
+        retry_ephemeral_port_scenario(|| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let config_path = temp.path().join("config.toml");
+            let runtime = Runtime::new().expect("runtime");
 
-        let first = prepare_stable_listener(
-            runtime.handle(),
-            &config_path,
-            Ipv4Addr::LOCALHOST.into(),
-            request(None, false),
-        )
-        .expect("first listener");
-        let first_port = first.port();
-        let listener = first.into_listener();
-        listener
-            .set_nonblocking(false)
-            .expect("blocking accept fixture");
-        let client = TcpStream::connect((Ipv4Addr::LOCALHOST, first_port.get()))
-            .expect("connect to first listener");
-        let (accepted, _) = listener.accept().expect("accept fixture connection");
-        accepted
-            .shutdown(Shutdown::Both)
-            .expect("actively close server connection");
-        drop(accepted);
-        drop(listener);
-        drop(client);
+            let first = prepare_stable_listener(
+                runtime.handle(),
+                &config_path,
+                Ipv4Addr::LOCALHOST.into(),
+                request(None, false),
+            )
+            .expect("first listener");
+            let first_port = first.port();
+            let listener = first.into_listener();
+            listener
+                .set_nonblocking(false)
+                .expect("blocking accept fixture");
+            let client = TcpStream::connect((Ipv4Addr::LOCALHOST, first_port.get()))
+                .expect("connect to first listener");
+            let (accepted, _) = listener.accept().expect("accept fixture connection");
+            accepted
+                .shutdown(Shutdown::Both)
+                .expect("actively close server connection");
+            drop(accepted);
+            drop(listener);
+            drop(client);
 
-        let restarted = prepare_stable_listener(
-            runtime.handle(),
-            &config_path,
-            Ipv4Addr::LOCALHOST.into(),
-            request(None, false),
-        )
-        .expect("restart must reuse the saved port after a real connection");
+            let restarted = prepare_stable_listener(
+                runtime.handle(),
+                &config_path,
+                Ipv4Addr::LOCALHOST.into(),
+                request(None, false),
+            )
+            .expect("restart must reuse the saved port after a real connection");
 
-        assert_eq!(restarted.port(), first_port);
-        assert_eq!(restarted.outcome(), StablePortOutcome::Reused);
+            // The invariant under test: a real accepted connection does not force
+            // the saved port to be replaced. If an unrelated process grabbed the
+            // freed port during the drop→restart window the outcome is a fallback
+            // to a fresh port — retry with a new ephemeral port rather than
+            // failing spuriously (issue #3339).
+            if restarted.port() != first_port {
+                return Err(format!(
+                    "saved port {} was taken before restart (got {})",
+                    first_port.get(),
+                    restarted.port().get()
+                ));
+            }
+            assert_eq!(restarted.outcome(), StablePortOutcome::Reused);
+            Ok(())
+        });
     }
 }
