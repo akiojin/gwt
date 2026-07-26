@@ -13237,7 +13237,7 @@ fn app_state_view_uses_cached_intake_classification_without_git() {
 }
 
 #[test]
-fn app_runtime_select_project_tab_is_process_free_for_many_worktrees() {
+fn app_runtime_ordered_project_tab_ack_is_process_free_for_many_worktrees() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13267,22 +13267,34 @@ fn app_runtime_select_project_tab_is_process_free_for_many_worktrees() {
             &[],
         ),
     ];
-    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
-    runtime
-        .last_work_events_ingest
-        .borrow_mut()
-        .insert(target_repo, std::time::Instant::now());
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
 
-    let events = runtime.select_project_tab_events("tab-2");
+    let events = runtime.navigate_project_tab_events(
+        "client-1",
+        "tab-2",
+        Some("project-nav-many-worktrees".to_string()),
+    );
 
     assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(matches!(
+        events.as_slice(),
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::NavigationResult {
+                interaction_id,
+                outcome: NavigationOutcome::Accepted,
+                ..
+            },
+        }] if client_id == "client-1" && interaction_id == "project-nav-many-worktrees"
+    ));
+    assert!(matches!(
+        recorded.lock().expect("event log").as_slice(),
+        [UserEvent::NavigationFollowup]
+    ));
     let invocations = fs::read_to_string(&git_log).unwrap_or_default();
     assert!(
         invocations.trim().is_empty(),
-        "SelectProjectTab synchronous path must not run repository processes; \
+        "ordered project-tab ACK path must not run repository processes; \
          invocations:\n{invocations}"
     );
 }
