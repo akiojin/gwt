@@ -32,6 +32,29 @@ fn run_gwtd_json(
     child.wait_with_output().expect("wait gwtd")
 }
 
+/// Run the real Stop hook dispatcher against the isolated discussion log.
+fn run_gwtd_stop_hook(root: &Path, home: &Path) -> std::process::Output {
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(root)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("GWT_SESSION_ID")
+        .env_remove("GWT_SESSION_RUNTIME_PATH")
+        .args(["hook", "event", "Stop"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd Stop hook");
+    child
+        .stdin
+        .as_mut()
+        .expect("gwtd Stop stdin")
+        .write_all(br#"{"stop_hook_active":false}"#)
+        .expect("write Stop hook JSON");
+    child.wait_with_output().expect("wait gwtd Stop hook")
+}
+
 /// Locate the single machine-local work-notes discussions file under the
 /// isolated HOME (`<home>/.gwt/projects/<repo-hash>/work-notes/discussions.md`).
 fn home_discussions_path(home: &Path) -> PathBuf {
@@ -146,6 +169,146 @@ fn discussion_update_rewrites_existing_section_instead_of_appending_duplicate() 
     );
     assert!(!content.contains("First summary"));
     assert!(content.contains("Updated summary"));
+}
+
+#[test]
+fn discussion_update_keeps_nested_h2_inside_entry_and_preserves_next_dated_entry() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+
+    let update = |title: &str, summary: &str| {
+        run_gwtd_json(
+            repo.path(),
+            home.path(),
+            serde_json::json!({
+                "schema_version": 1,
+                "operation": "discussion.update",
+                "params": {
+                    "date": "2026-07-26",
+                    "title": title,
+                    "status": "active",
+                    "summary": summary,
+                    "next": "Continue"
+                }
+            }),
+        )
+    };
+
+    let first = update(
+        "Discussion boundary",
+        "First summary.\n\n## 2026- 7-06 — Nested note\n\nKeep this nested H2.\n\n## Discussion TODO\n\n### Proposal 3248-E - Continue work [active]\n- Next Question: Old question.",
+    );
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let later = update("Later proposal", "This entry must remain unchanged.");
+    assert!(
+        later.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&later.stderr)
+    );
+
+    let discussions_path = home_discussions_path(home.path());
+    let mut legacy_duplicate =
+        fs::read_to_string(&discussions_path).expect("read discussions before duplicate seed");
+    let later_heading = "## 2026-07-26 — Later proposal";
+    legacy_duplicate = legacy_duplicate.replacen(
+        later_heading,
+        &format!(
+            "## Legacy gwt-discussion state\n\n\
+             Status: active\n\n\
+             Summary:\n\
+             Migrated from legacy .gwt/discussion.md.\n\n\
+             ## Discussion TODO\n\n\
+             ### Proposal Legacy - Resume [parked]\n\
+             - Next Question: Preserve this legacy state.\n\n\
+             {later_heading}"
+        ),
+        1,
+    );
+    legacy_duplicate.push_str(
+        "\n## 2026-07-26 — Discussion boundary\n\nStatus: active\n\nSummary:\nLegacy duplicate.\n\nNext:\nContinue\n",
+    );
+    fs::write(&discussions_path, legacy_duplicate).expect("seed legacy duplicate entry");
+
+    let replacement = update(
+        "Discussion boundary",
+        "Updated summary.\n\n## 2026- 7-06 — Nested note\n\nKeep this nested H2.\n\n## Discussion TODO\n\n### Proposal 3248-E - Continue work [active]\n- Next Question: New question.",
+    );
+    assert!(
+        replacement.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+
+    let content = fs::read_to_string(home_discussions_path(home.path())).expect("read discussions");
+    assert_eq!(
+        content
+            .matches("## 2026-07-26 — Discussion boundary")
+            .count(),
+        1,
+        "the updated proposal must keep one dated entry"
+    );
+    assert_eq!(
+        content.matches("## Discussion TODO").count(),
+        2,
+        "the current nested TODO and standalone migrated TODO must each remain once"
+    );
+    assert_eq!(
+        content.matches("## 2026- 7-06 — Nested note").count(),
+        1,
+        "a non-canonical date-like H2 must remain entry body content"
+    );
+    assert_eq!(
+        content
+            .matches("### Proposal 3248-E - Continue work [active]")
+            .count(),
+        1,
+        "the Stop hook parser must see one current proposal"
+    );
+    assert!(!content.contains("First summary."));
+    assert!(!content.contains("- Next Question: Old question."));
+    assert!(!content.contains("Legacy duplicate."));
+    assert!(content.contains("Updated summary."));
+    assert_eq!(content.matches("- Next Question: New question.").count(), 1);
+    assert_eq!(
+        content.matches("## Legacy gwt-discussion state").count(),
+        1,
+        "a standalone migrated legacy entry must survive the dated update"
+    );
+    assert!(content.contains("Migrated from legacy .gwt/discussion.md."));
+    assert!(content.contains("### Proposal Legacy - Resume [parked]"));
+    assert!(content.contains("- Next Question: Preserve this legacy state."));
+    assert_eq!(
+        content.matches("## 2026-07-26 — Later proposal").count(),
+        1,
+        "the next dated entry must be preserved"
+    );
+    assert!(content.contains("This entry must remain unchanged."));
+
+    let stop = run_gwtd_stop_hook(repo.path(), home.path());
+    assert!(
+        stop.status.success(),
+        "Stop hook should succeed, stderr: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let stop_stdout = String::from_utf8_lossy(&stop.stdout);
+    assert!(
+        stop_stdout.contains("Discussion is still [active]"),
+        "real Stop hook should surface the active proposal: {stop_stdout}"
+    );
+    assert_eq!(
+        stop_stdout.matches("New question.").count(),
+        1,
+        "real Stop hook should surface only the current question: {stop_stdout}"
+    );
+    assert!(
+        !stop_stdout.contains("Old question."),
+        "real Stop hook must not surface the replaced question: {stop_stdout}"
+    );
 }
 
 #[test]
