@@ -1,5 +1,7 @@
 pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
+#[doc(hidden)]
+pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod backend_service;
 pub mod board_audience;
 pub mod board_provider;

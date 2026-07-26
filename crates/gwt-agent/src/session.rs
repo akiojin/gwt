@@ -795,6 +795,19 @@ where
 }
 
 fn write_session_toml_atomic(path: &Path, content: &str) -> io::Result<()> {
+    write_session_toml_atomic_with_replace(path, content, |temporary, destination| {
+        fs::rename(temporary, destination)
+    })
+}
+
+fn write_session_toml_atomic_with_replace<F>(
+    path: &Path,
+    content: &str,
+    replace: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -823,11 +836,7 @@ fn write_session_toml_atomic(path: &Path, content: &str) -> io::Result<()> {
         return Err(error);
     }
 
-    if cfg!(windows) && path.exists() {
-        fs::remove_file(path)?;
-    }
-
-    if let Err(error) = fs::rename(&tmp_path, path) {
+    if let Err(error) = replace(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(error);
     }
@@ -1515,6 +1524,47 @@ display_name = "Codex"
             .expect("reload cleared Session")
             .execution_binding
             .is_none());
+    }
+
+    #[test]
+    fn failed_atomic_session_replace_preserves_existing_record_and_cleans_temporary_file() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let path = dir.path().join("candidate.toml");
+        fs::write(&path, "old durable Session record").expect("seed existing Session record");
+
+        let error = write_session_toml_atomic_with_replace(
+            &path,
+            "new Session record",
+            |temporary, destination| {
+                assert!(
+                    temporary.exists(),
+                    "temporary record must be durable before replace"
+                );
+                assert_eq!(
+                    fs::read_to_string(destination).expect("read existing destination"),
+                    "old durable Session record",
+                    "replacement must never pre-delete the sole recovery record",
+                );
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated atomic replace failure",
+                ))
+            },
+        )
+        .expect_err("simulated replace failure must surface");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read preserved destination"),
+            "old durable Session record",
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("read sessions dir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-")),
+            "failed replacement must clean the uncommitted temporary record",
+        );
     }
 
     #[test]

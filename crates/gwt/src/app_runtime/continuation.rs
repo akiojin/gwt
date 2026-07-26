@@ -565,6 +565,8 @@ fn durable_fresh_execution_candidate(
         kind: owner_kind,
         number: binding.owner_number,
     };
+    let project_root = gwt::validated_project_state_root_for_session_recovery(session)
+        .map_err(|error| error.to_string())?;
     let Some(attempt) = gwt::cli::execution_state::fresh_linked_owner_launch_for_session(
         &session.worktree_path,
         owner,
@@ -582,13 +584,6 @@ fn durable_fresh_execution_candidate(
                 .to_string(),
         );
     }
-    let project_root = session
-        .project_state_root
-        .clone()
-        .filter(|root| !root.as_os_str().is_empty())
-        .ok_or_else(|| {
-            "persisted fresh-launch Session has no canonical Project State root".to_string()
-        })?;
     Ok(Some(DurableFreshExecutionCandidate {
         project_root,
         worktree_path: session.worktree_path.clone(),

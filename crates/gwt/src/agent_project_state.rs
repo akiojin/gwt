@@ -1244,6 +1244,42 @@ fn validate_visible_project_state_root(
     Ok(project_anchor)
 }
 
+#[doc(hidden)]
+pub fn validated_project_state_root_for_session_recovery(session: &Session) -> Result<PathBuf> {
+    let declared_repo_hash = required_session_repo_hash(session)?;
+    let worktree_root = git_toplevel(&session.worktree_path, "recovery worktree")?;
+    let observed_repo_hash = repo_hash_for_mutation(&worktree_root, "recovery worktree")?;
+    if observed_repo_hash != declared_repo_hash {
+        return Err(mutation_error(format!(
+            "Session repo hash mismatch for Session {}: ledger={declared_repo_hash}, runtime={observed_repo_hash}",
+            session.id
+        )));
+    }
+
+    let project_state_root = canonicalize_mutation_path(
+        &strict_project_state_root(session)?,
+        "recovery Project State root",
+    )?;
+    let project_anchor =
+        validate_visible_project_state_root(&project_state_root, declared_repo_hash, &session.id)?;
+    let worktree_anchor = canonical_repository_anchor(&worktree_root).map_err(|error| {
+        mutation_error(format!(
+            "canonical repository mismatch for Session {}: {error}",
+            session.id
+        ))
+    })?;
+    if project_anchor != worktree_anchor {
+        return Err(mutation_error(format!(
+            "canonical repository mismatch for Session {}: Project State anchor {} does not match worktree anchor {}",
+            session.id,
+            project_anchor.display(),
+            worktree_anchor.display()
+        )));
+    }
+
+    Ok(normalize_mutation_path(&project_state_root))
+}
+
 fn mutation_error(message: impl Into<String>) -> GwtError {
     GwtError::Other(message.into())
 }
@@ -4175,6 +4211,15 @@ mod tests {
             &["init", "--bare", bare_repo.to_str().unwrap()],
             temp.path(),
         );
+        run_git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/gwt/recovery-workspace.git",
+            ],
+            &bare_repo,
+        );
 
         let bootstrap = temp.path().join("bootstrap");
         run_git(
@@ -4202,6 +4247,11 @@ mod tests {
         let session = Session::new(&worktree, "work/20260601-0934", gwt_agent::AgentId::Codex);
         assert_eq!(
             canonical_project_state_root_for_session(&session, &worktree),
+            dunce::canonicalize(&workspace_home).expect("canonical workspace home")
+        );
+        assert_eq!(
+            validated_project_state_root_for_session_recovery(&session)
+                .expect("validate derived recovery Project State root"),
             dunce::canonicalize(&workspace_home).expect("canonical workspace home")
         );
     }

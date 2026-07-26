@@ -9278,6 +9278,163 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
 }
 
 #[test]
+fn startup_does_not_commit_foreign_same_operation_for_stale_activated_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-activated-foreign-root");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+
+    let foreign = temp.path().join("foreign-project-state");
+    fs::create_dir_all(&foreign).expect("create foreign repository");
+    init_repo(&foreign);
+    let foreign_transaction = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+        &foreign,
+        &fixture.operation_id,
+        |_projection, _work_items, _| Ok(((), Vec::new())),
+        || {
+            Err(gwt_core::error::GwtError::Other(
+                "leave foreign same-operation marker Prepared".to_string(),
+            ))
+        },
+    );
+    assert!(foreign_transaction.is_err());
+    let foreign_repo_hash = detect_repo_hash(&foreign)
+        .expect("foreign repo hash")
+        .to_string();
+    gwt_agent::update_session(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+        |session| {
+            session.project_state_root = Some(foreign.clone());
+            session.repo_hash = Some(foreign_repo_hash.clone());
+            session
+                .execution_binding
+                .as_mut()
+                .expect("candidate execution binding")
+                .repo_hash = foreign_repo_hash.clone();
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.restore_window_on_startup = false;
+            Ok(())
+        },
+    )
+    .expect("persist stale foreign Session identity");
+
+    let runtime_root = temp.path().join(".gwt");
+    drop(fixture.runtime);
+    let tab = sample_project_tab(
+        "tab-restarted",
+        "Repo",
+        fixture.repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+
+    restarted.bootstrap();
+
+    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-after-foreign-activated-recovery",
+        Utc::now(),
+    );
+    unrelated.title = Some("Foreign marker must remain unresolved".to_string());
+    assert!(
+        gwt_core::workspace_projection::record_workspace_work_event(&foreign, unrelated).is_err(),
+        "startup must not commit a same-operation Workspace marker from a foreign Session root",
+    );
+}
+
+#[test]
+fn startup_does_not_delete_aborted_session_when_project_state_root_is_foreign() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "fresh-aborted-foreign-root");
+    let prepared = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+        &fixture.repo,
+        &fixture.operation_id,
+        |_projection, _work_items, _| Ok(((), Vec::new())),
+        || {
+            gwt::cli::execution_state::abort_successor(
+                &fixture.repo,
+                fixture.owner,
+                &fixture
+                    .runtime
+                    .pending_fresh_execution_launches
+                    .get(&fixture.window_id)
+                    .expect("pending fresh launch")
+                    .request,
+                "simulated crash after durable abort",
+            )?;
+            Err(gwt_core::error::GwtError::Other(
+                "leave canonical Workspace marker Prepared".to_string(),
+            ))
+        },
+    );
+    assert!(prepared.is_err());
+
+    let foreign = temp.path().join("foreign-aborted-project-state");
+    fs::create_dir_all(&foreign).expect("create foreign repository");
+    init_repo(&foreign);
+    let foreign_repo_hash = detect_repo_hash(&foreign)
+        .expect("foreign repo hash")
+        .to_string();
+    gwt_agent::update_session(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+        |session| {
+            session.project_state_root = Some(foreign.clone());
+            session.repo_hash = Some(foreign_repo_hash.clone());
+            session
+                .execution_binding
+                .as_mut()
+                .expect("candidate execution binding")
+                .repo_hash = foreign_repo_hash.clone();
+            Ok(())
+        },
+    )
+    .expect("persist stale foreign Session identity");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+
+    let runtime_root = temp.path().join(".gwt");
+    drop(fixture.runtime);
+    let tab = sample_project_tab(
+        "tab-restarted",
+        "Repo",
+        fixture.repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+
+    restarted.bootstrap();
+
+    assert!(
+        candidate_path.exists(),
+        "a foreign Missing result must not delete the sole Session recovery record",
+    );
+    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-after-foreign-aborted-recovery",
+        Utc::now(),
+    );
+    unrelated.title = Some("Canonical marker must remain unresolved".to_string());
+    assert!(
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
+            .is_err(),
+        "startup must retain the canonical Prepared marker when Session root identity is invalid",
+    );
+}
+
+#[test]
 fn aborted_fresh_execution_cleanup_retains_pending_when_exact_session_was_replaced() {
     let _env_guard = env_test_lock()
         .lock()
@@ -9380,6 +9537,70 @@ fn startup_retries_aborted_fresh_execution_candidate_cleanup() {
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
             .expect("read preserved predecessor"),
+        Some(fixture.predecessor_binding),
+    );
+}
+
+#[test]
+fn startup_retains_aborted_cleanup_after_io_failure_and_retries_successfully() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "fresh-aborted-io-retry");
+    gwt::cli::execution_state::abort_successor(
+        &fixture.repo,
+        fixture.owner,
+        &fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .get(&fixture.window_id)
+            .expect("pending fresh launch")
+            .request,
+        "simulated crash after durable abort",
+    )
+    .expect("abort fresh candidate");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let removal_blocker = fixture
+        .runtime
+        .sessions_dir
+        .join("runtime")
+        .join("424242")
+        .join(format!("{}.json", fixture.candidate_session_id));
+    fs::create_dir_all(&removal_blocker)
+        .expect("create directory-shaped runtime sidecar removal blocker");
+    let runtime_root = temp.path().join(".gwt");
+    drop(fixture.runtime);
+    let tab = sample_project_tab(
+        "tab-restarted",
+        "Repo",
+        fixture.repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+
+    restarted.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        candidate_path.exists(),
+        "cleanup I/O failure must retain the Session as durable retry evidence",
+    );
+    fs::remove_dir(&removal_blocker).expect("clear cleanup I/O blocker");
+
+    restarted.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        !candidate_path.exists(),
+        "a later startup reconciliation must finish cleanup after the I/O blocker clears",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read preserved predecessor after retry"),
         Some(fixture.predecessor_binding),
     );
 }
