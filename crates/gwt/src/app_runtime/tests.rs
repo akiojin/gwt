@@ -8983,6 +8983,150 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
 }
 
 #[test]
+fn fresh_execution_callback_failure_rejects_work_marker_and_retains_unaborted_candidate() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-callback-failure");
+    fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&fixture.window_id)
+        .expect("pending fresh launch")
+        .request
+        .principal_id = "mismatched-process-local-principal".to_string();
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+
+    let _events = fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+
+    let attempt = gwt::cli::execution_state::continuation_attempt_for_operation(
+        &fixture.repo,
+        fixture.owner,
+        &fixture.operation_id,
+    )
+    .expect("read durable attempt")
+    .expect("durable attempt");
+    assert_eq!(
+        attempt.status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        "the callback refusal must not be misclassified as a durable abort"
+    );
+    assert!(
+        fixture
+            .runtime
+            .sessions_dir
+            .join(format!("{}.toml", fixture.candidate_session_id))
+            .exists(),
+        "cleanup must retain the candidate Session until Aborted is durably proven"
+    );
+
+    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-unrelated-after-fresh-callback-failure",
+        Utc::now(),
+    );
+    unrelated.title = Some("Unrelated writer after rejected callback".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
+        .expect("fresh callback failure must reject its external Prepared Work marker");
+}
+
+#[test]
+fn fresh_execution_activated_response_loss_repairs_projection_pointer_and_workspace_commit() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-activated-repair");
+    fixture
+        .issuer
+        .promote_prepared(&fixture.token, &fixture.binding)
+        .expect("promote Prepared capability before simulated commit response loss");
+    let transaction = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+        &fixture.repo,
+        &fixture.operation_id,
+        |_projection, _work_items, _| Ok(((), Vec::new())),
+        || {
+            gwt::cli::execution_state::activate_successor(
+                &fixture.repo,
+                fixture.owner,
+                &fixture
+                    .runtime
+                    .pending_fresh_execution_launches
+                    .get(&fixture.window_id)
+                    .expect("pending fresh launch")
+                    .request,
+            )
+            .map_err(gwt_core::error::GwtError::Io)?;
+            Err(gwt_core::error::GwtError::Other(
+                "simulated response loss after ledger activation".to_string(),
+            ))
+        },
+    );
+    assert!(
+        transaction.is_err(),
+        "response loss must leave reconciliation work"
+    );
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+        .expect("trusted worktree directory");
+    for path in [
+        trusted_dir.join("execution-control.json"),
+        trusted_dir.join("execution-generation-pointer.json"),
+        fixture
+            .repo
+            .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
+        fixture
+            .repo
+            .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+    ] {
+        if path.exists() {
+            fs::remove_file(&path).expect("remove partial activation projection artifact");
+        }
+    }
+    assert!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).is_err(),
+        "the fixture must expose an Activated ledger with an incomplete projection/pointer"
+    );
+
+    let events = fixture
+        .runtime
+        .fresh_execution_launch_failed_events(&fixture.window_id, "simulated response loss");
+
+    assert!(
+        !events.is_empty(),
+        "Activated reconciliation must converge to the normal completion events"
+    );
+    assert!(!fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read repaired current binding"),
+        Some(fixture.binding.identity.clone()),
+    );
+    assert_eq!(
+        gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+            &fixture.repo,
+            &fixture.operation_id,
+            gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+        )
+        .expect("read committed Workspace transaction"),
+        gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+    );
+}
+
+#[test]
 fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projection_until_ready() {
     let _env_guard = env_test_lock()
         .lock()

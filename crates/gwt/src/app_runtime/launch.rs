@@ -498,10 +498,33 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             container_runtime,
         )?;
 
-        if gwt::cli::execution_state::current_execution_binding(worktree, owner)
-            .map_err(|error| error.to_string())?
-            .is_some()
+        let mut current_binding =
+            gwt::cli::execution_state::current_execution_binding(worktree, owner)
+                .map_err(|error| error.to_string())?;
+        if current_binding.is_none()
+            && gwt::cli::execution_state::load(worktree)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|legacy| {
+                    legacy.owner_kind == owner.kind
+                        && legacy.owner_number == owner.number
+                        && legacy.status
+                            == gwt::cli::execution_state::ExecutionControlStatus::Blocked
+                })
         {
+            // A pre-generation terminal ECR is still authoritative audit
+            // evidence. Import its exact bytes before any launch writer can
+            // materialize a new Active record over it; the ordinary Blocked
+            // successor transaction below then owns readiness/activation.
+            gwt::cli::execution_state::ensure_generation_ledger(
+                worktree,
+                owner,
+                gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+            )
+            .map_err(|error| error.to_string())?;
+            current_binding = gwt::cli::execution_state::current_execution_binding(worktree, owner)
+                .map_err(|error| error.to_string())?;
+        }
+        if current_binding.is_some() {
             let ledger = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| {
@@ -3549,6 +3572,144 @@ mod agent_endpoint_env_tests {
                 &planned_identity,
             )
             .expect("read Prepared authority")
+        );
+    }
+
+    #[test]
+    fn explicit_linked_owner_launch_imports_generationless_blocked_predecessor_before_preparing_fresh_lifetime(
+    ) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let project = home.path().join("project");
+        init_execution_repo(&project);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 1974,
+        };
+        let legacy_session_id = "fe3a92d8-60c6-46ae-8a83-1b3bac0891fa";
+        gwt::cli::execution_state::materialize_at_launch(
+            &project,
+            owner.kind,
+            owner.number,
+            legacy_session_id,
+            "$gwt-execute #1974",
+            false,
+        )
+        .expect("materialize legacy flat execution");
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &project,
+                legacy_session_id,
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "legacy delivery stopped before PR handoff".to_string(),
+                    missing_verification: Some("legacy browser verification".to_string()),
+                },
+            )
+            .expect("settle legacy flat execution"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(&project, owner)
+                .expect("probe generation-less legacy state")
+                .is_none(),
+            "the regression fixture must not pre-create a generation ledger"
+        );
+        let legacy_projection = gwt::cli::trusted_store::read(&project, "execution-control.json")
+            .expect("read trusted legacy projection")
+            .expect("trusted legacy projection");
+
+        let mut successor =
+            gwt_agent::Session::new(&project, "work/issue-1974", gwt_agent::AgentId::Codex);
+        successor.project_state_root = Some(project.clone());
+        successor.linked_issue_number = Some(owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &successor.id);
+        persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut successor, None)
+            .expect("persist fresh launch Session before authority");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut env = HashMap::new();
+
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &sessions_dir,
+            session: &mut successor,
+            project_root: &project,
+            worktree: &project,
+            producing_owner: Some(owner),
+            prepared_continuation: None,
+            execution_entrypoint: "$gwt-execute #1974",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("prepare a fresh lifetime from the generation-less Blocked predecessor");
+
+        assert_eq!(
+            gwt::cli::trusted_store::read(&project, "execution-control.json")
+                .expect("read imported predecessor projection")
+                .expect("imported predecessor projection"),
+            legacy_projection,
+            "pre-readiness launch must preserve the exact terminal predecessor bytes"
+        );
+        let ledger = gwt::cli::execution_state::load_generation_ledger(&project, owner)
+            .expect("read imported legacy ledger")
+            .expect("imported legacy ledger");
+        assert_eq!(ledger.generations.len(), 1);
+        assert_eq!(
+            ledger.generations[0].execution_control_json, legacy_projection,
+            "legacy terminal bytes must remain the immutable predecessor snapshot"
+        );
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+        );
+        assert_eq!(
+            ledger.generations[0].identity.initial_session_id,
+            legacy_session_id
+        );
+        let persisted =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", successor.id)))
+                .expect("reload fresh Prepared Session");
+        let binding = persisted
+            .execution_binding
+            .expect("fresh launch must persist a Prepared successor binding");
+        assert_ne!(
+            gwt::cli::execution_state::current_execution_binding(&project, owner)
+                .expect("read current predecessor binding")
+                .expect("current predecessor binding"),
+            binding.identity,
+            "Prepared successor must not become current before authenticated Ready"
+        );
+        let attempt = gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
+            &project,
+            owner,
+            &successor.id,
+        )
+        .expect("read fresh Prepared attempt")
+        .expect("fresh Prepared attempt");
+        assert_eq!(
+            attempt.status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
+        );
+        assert!(env.contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV));
+        let token = env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("fresh Prepared capability token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate fresh Prepared capability");
+        assert_eq!(
+            grant.principal().execution_authority_kind(),
+            crate::embedded_server::AgentExecutionAuthorityKind::Prepared
         );
     }
 

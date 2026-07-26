@@ -517,6 +517,13 @@ pub(super) fn pending_execution_activation_status(pending: &PendingContinueWork)
 pub(super) fn pending_fresh_execution_activation_status(
     pending: &PendingFreshExecutionLaunch,
 ) -> Option<bool> {
+    pending_fresh_execution_attempt_status(pending)
+        .map(|status| status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated)
+}
+
+fn pending_fresh_execution_attempt_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<gwt::cli::execution_state::ContinuationAttemptStatus> {
     gwt::cli::execution_state::continuation_attempt_for_operation(
         &pending.worktree_path,
         pending.owner,
@@ -524,9 +531,7 @@ pub(super) fn pending_fresh_execution_activation_status(
     )
     .ok()
     .flatten()
-    .map(|attempt| {
-        attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
-    })
+    .map(|attempt| attempt.status)
 }
 
 fn pending_execution_is_activated(pending: &PendingContinueWork) -> bool {
@@ -2587,6 +2592,19 @@ impl AppRuntime {
         window_id: &str,
         pending: &PendingFreshExecutionLaunch,
     ) -> Vec<OutboundEvent> {
+        // The ledger commit is authoritative and pointer-last publication is
+        // repairable. Re-running the exact Activated operation restores a
+        // projection/pointer pair lost after the ledger write without
+        // appending a second generation.
+        if gwt::cli::execution_state::activate_successor(
+            &pending.worktree_path,
+            pending.owner,
+            &pending.request,
+        )
+        .is_err()
+        {
+            return Vec::new();
+        }
         if gwt_core::workspace_projection::resolve_workspace_state_external_commit(
             &pending.project_root,
             &pending.operation_id,
@@ -2649,30 +2667,50 @@ impl AppRuntime {
         else {
             return Vec::new();
         };
-        let Some(is_activated) = pending_fresh_execution_activation_status(&pending) else {
+        let Some(status) = pending_fresh_execution_attempt_status(&pending) else {
             // Preserve the exact candidate evidence when durable authority is
             // unreadable. A later correlated retry can reconcile safely.
             return Vec::new();
         };
-        if is_activated {
+        if status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated {
             return self.reconcile_activated_fresh_execution_launch_events(window_id, &pending);
         }
 
-        let abort = gwt::cli::execution_state::abort_successor(
-            &pending.worktree_path,
-            pending.owner,
-            &pending.request,
-            "fresh linked-owner launch failed before SessionStart",
+        if status == gwt::cli::execution_state::ContinuationAttemptStatus::Prepared {
+            let _ = gwt::cli::execution_state::abort_successor(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.request,
+                "fresh linked-owner launch failed before SessionStart",
+            );
+        }
+        let Some(status) = pending_fresh_execution_attempt_status(&pending) else {
+            return Vec::new();
+        };
+        if status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated {
+            return self.reconcile_activated_fresh_execution_launch_events(window_id, &pending);
+        }
+
+        let workspace_rejected = matches!(
+            gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                &pending.project_root,
+                &pending.operation_id,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
+            ),
+            Ok(
+                gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
+                    | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing
+            )
         );
-        if abort.is_err() {
-            match pending_fresh_execution_activation_status(&pending) {
-                Some(true) => {
-                    return self
-                        .reconcile_activated_fresh_execution_launch_events(window_id, &pending)
-                }
-                Some(false) => {}
-                None => return Vec::new(),
-            }
+        if !workspace_rejected {
+            return Vec::new();
+        }
+        if status != gwt::cli::execution_state::ContinuationAttemptStatus::Aborted {
+            // A callback refusal can leave the attempt durably Prepared. The
+            // Work marker is safe to reject because the owner ledger proves
+            // activation did not commit, but the candidate Session remains
+            // reconciliation evidence until an Aborted event is durable.
+            return Vec::new();
         }
 
         self.stop_window_runtime_without_session_projection(window_id);
@@ -2802,11 +2840,19 @@ impl AppRuntime {
 
         let already_activated = pending_fresh_execution_activation_status(&pending) == Some(true);
         let transaction_result = if already_activated {
-            gwt_core::workspace_projection::resolve_workspace_state_external_commit(
-                &pending.project_root,
-                &pending.operation_id,
-                gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+            gwt::cli::execution_state::activate_successor(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.request,
             )
+            .map_err(gwt_core::error::GwtError::Io)
+            .and_then(|_| {
+                gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                    &pending.project_root,
+                    &pending.operation_id,
+                    gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+                )
+            })
             .and_then(|resolution| {
                 if resolution
                     == gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed
@@ -2888,6 +2934,15 @@ impl AppRuntime {
                     self,
                     "the fresh generation activation transaction was rejected",
                 );
+            }
+            if gwt::cli::execution_state::activate_successor(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.request,
+            )
+            .is_err()
+            {
+                return Vec::new();
             }
             if gwt_core::workspace_projection::resolve_workspace_state_external_commit(
                 &pending.project_root,
