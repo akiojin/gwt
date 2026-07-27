@@ -682,6 +682,79 @@ fn scan_candidates_ignores_claims_until_launch_time() {
 }
 
 #[test]
+fn status_view_at_keeps_existing_state_before_three_poll_intervals() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-07-27T10:00:00Z");
+
+    let status = monitor.status_view_at("2026-07-27T10:00:29Z");
+
+    assert_eq!(status.state, "idle");
+    assert_eq!(status.last_error, None);
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
+}
+
+#[test]
+fn status_view_at_marks_scan_stalled_at_three_poll_intervals() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-07-27T10:00:00Z");
+
+    let status = monitor.status_view_at("2026-07-27T10:00:30Z");
+
+    assert_eq!(status.state, "error");
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("Issue Monitor scan stalled; last scan at 2026-07-27T10:00:00Z")
+    );
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
+}
+
+#[test]
+fn status_view_at_preserves_explicit_error_when_scan_is_stalled() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.record_scan_error("2026-07-27T10:00:00Z", "GitHub API unavailable");
+
+    let status = monitor.status_view_at("2026-07-27T10:00:30Z");
+
+    assert_eq!(status.state, "error");
+    assert_eq!(status.last_error.as_deref(), Some("GitHub API unavailable"));
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
+}
+
+#[test]
+fn status_view_at_fails_open_for_invalid_or_future_scan_timestamp() {
+    for last_scan_at in ["not-a-timestamp", "2026-07-27T10:00:31Z"] {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        });
+        scan_issue_monitor_candidates(&mut monitor, &[], last_scan_at);
+
+        let status = monitor.status_view_at("2026-07-27T10:00:30Z");
+
+        assert_eq!(status.state, "idle", "last_scan_at={last_scan_at}");
+        assert_eq!(status.last_error, None, "last_scan_at={last_scan_at}");
+        assert_eq!(
+            status.last_scan_at.as_deref(),
+            Some(last_scan_at),
+            "last_scan_at={last_scan_at}"
+        );
+    }
+}
+
+#[test]
 fn scan_error_keeps_visible_queue_candidates() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
@@ -1158,6 +1231,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     let loaded = LoadedIssueMonitorCandidates {
         issues: vec![issue(42, &["bug"]), issue(43, &["enhancement"])],
         source: IssueMonitorCandidateSource::Live,
+        live_error: None,
     };
     scan_loaded_issue_monitor_candidates(
         &mut monitor,

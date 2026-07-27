@@ -136,6 +136,227 @@ pub fn resolve_review_model(
     }
 }
 
+/// Durable delivery state for an Issue Monitor side effect. `Prepared` is
+/// guaranteed not to have been submitted remotely; `Attempting` crosses the
+/// submission boundary and therefore requires read-back or compensation after
+/// an ambiguous result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorEffectState {
+    Prepared,
+    Attempting,
+}
+
+/// The remote mutation described by one durable Issue Monitor journal entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorEffectPayload {
+    AcquireClaim {
+        issue_number: u64,
+        claim_id: String,
+        owner: String,
+        heartbeat_at: String,
+        expires_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launched_work_id: Option<String>,
+    },
+    ReleaseClaim {
+        issue_number: u64,
+        claim_id: String,
+    },
+    ArmAutoMerge {
+        issue_number: u64,
+        pr_number: u64,
+        reviewed_sha: String,
+    },
+    DisarmAutoMerge {
+        issue_number: u64,
+        pr_number: u64,
+        compensates_effect_id: String,
+    },
+}
+
+/// Stable identity of one delivery attempt. Results are accepted only when all
+/// three fields still match the journal entry that crossed the execution fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorEffectAttemptKey {
+    pub effect_id: String,
+    pub authority_epoch: u64,
+    pub attempt: u32,
+}
+
+/// One durable side-effect proposal or in-flight delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingIssueMonitorEffect {
+    pub effect_id: String,
+    pub authority_epoch: u64,
+    pub attempt: u32,
+    pub state: IssueMonitorEffectState,
+    pub payload: IssueMonitorEffectPayload,
+}
+
+impl PendingIssueMonitorEffect {
+    pub fn prepared(
+        effect_id: impl Into<String>,
+        authority_epoch: u64,
+        payload: IssueMonitorEffectPayload,
+    ) -> Self {
+        Self {
+            effect_id: effect_id.into(),
+            authority_epoch,
+            attempt: 0,
+            state: IssueMonitorEffectState::Prepared,
+            payload,
+        }
+    }
+
+    pub fn attempt_key(&self) -> IssueMonitorEffectAttemptKey {
+        IssueMonitorEffectAttemptKey {
+            effect_id: self.effect_id.clone(),
+            authority_epoch: self.authority_epoch,
+            attempt: self.attempt,
+        }
+    }
+}
+
+fn effect_matches_key(
+    effect: &PendingIssueMonitorEffect,
+    key: &IssueMonitorEffectAttemptKey,
+) -> bool {
+    effect.effect_id == key.effect_id
+        && effect.authority_epoch == key.authority_epoch
+        && effect.attempt == key.attempt
+}
+
+fn mark_effect_attempting(
+    pending_effects: &mut [PendingIssueMonitorEffect],
+    key: &IssueMonitorEffectAttemptKey,
+) -> bool {
+    let Some(effect) = pending_effects
+        .iter_mut()
+        .find(|effect| effect_matches_key(effect, key))
+    else {
+        return false;
+    };
+    if effect.state != IssueMonitorEffectState::Prepared {
+        return false;
+    }
+    effect.state = IssueMonitorEffectState::Attempting;
+    true
+}
+
+fn complete_attempting_effect(
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    key: &IssueMonitorEffectAttemptKey,
+) -> Option<PendingIssueMonitorEffect> {
+    let index = pending_effects.iter().position(|effect| {
+        effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
+    })?;
+    Some(pending_effects.remove(index))
+}
+
+fn advance_autonomous_effect_authority(
+    autonomous_mode: &mut bool,
+    effect_authority_epoch: &mut u64,
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    enabled: bool,
+) -> Option<u64> {
+    let next_epoch = advance_effect_authority(effect_authority_epoch, pending_effects)?;
+    *autonomous_mode = enabled;
+    Some(next_epoch)
+}
+
+fn advance_effect_authority(
+    effect_authority_epoch: &mut u64,
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+) -> Option<u64> {
+    let next_epoch = effect_authority_epoch.checked_add(1)?;
+    let mut next_effects = pending_effects.clone();
+    let attempting = next_effects
+        .iter()
+        .filter(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::AcquireClaim { .. }
+                        | IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    next_effects.retain(|effect| {
+        effect.state != IssueMonitorEffectState::Prepared
+            || !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim { .. }
+                    | IssueMonitorEffectPayload::ArmAutoMerge { .. }
+            )
+    });
+
+    for effect in attempting {
+        let (effect_id, payload, already_compensated) = match &effect.payload {
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number,
+                claim_id,
+                ..
+            } => {
+                let already = next_effects.iter().any(|pending| {
+                    matches!(
+                        &pending.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim {
+                            issue_number: pending_issue,
+                            claim_id: pending_claim,
+                        } if pending_issue == issue_number && pending_claim == claim_id
+                    )
+                });
+                (
+                    format!("release:{}:{next_epoch}", effect.effect_id),
+                    IssueMonitorEffectPayload::ReleaseClaim {
+                        issue_number: *issue_number,
+                        claim_id: claim_id.clone(),
+                    },
+                    already,
+                )
+            }
+            IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number,
+                pr_number,
+                ..
+            } => {
+                let already = next_effects.iter().any(|pending| {
+                    matches!(
+                        &pending.payload,
+                        IssueMonitorEffectPayload::DisarmAutoMerge {
+                            compensates_effect_id,
+                            ..
+                        } if compensates_effect_id == &effect.effect_id
+                    )
+                });
+                (
+                    format!("disarm:{}:{next_epoch}", effect.effect_id),
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: *issue_number,
+                        pr_number: *pr_number,
+                        compensates_effect_id: effect.effect_id.clone(),
+                    },
+                    already,
+                )
+            }
+            IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::DisarmAutoMerge { .. } => continue,
+        };
+        if !already_compensated {
+            next_effects.push(PendingIssueMonitorEffect::prepared(
+                effect_id, next_epoch, payload,
+            ));
+        }
+    }
+
+    *effect_authority_epoch = next_epoch;
+    *pending_effects = next_effects;
+    Some(next_epoch)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -178,6 +399,14 @@ pub struct IssueMonitorPrefs {
     /// in-flight attempt survives a daemon restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub autonomous_records: Vec<AutonomousIssueRecord>,
+    /// Monotonic authority generation for every remotely mutating effect.
+    /// Missing values in pre-journal prefs intentionally deserialize as zero.
+    #[serde(default)]
+    pub effect_authority_epoch: u64,
+    /// Durable side-effect journal. Empty is omitted to preserve the compact
+    /// shape of existing prefs files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_effects: Vec<PendingIssueMonitorEffect>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -196,6 +425,8 @@ impl Default for IssueMonitorPrefs {
             autonomous_mode: false,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
+            effect_authority_epoch: 0,
+            pending_effects: Vec::new(),
         }
     }
 }
@@ -247,6 +478,52 @@ impl IssueMonitorPrefs {
         self.launching_issues
             .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
         true
+    }
+
+    /// Commit the execution fence for an exact Prepared delivery tuple.
+    pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        mark_effect_attempting(&mut self.pending_effects, key)
+    }
+
+    /// Remove an Attempting journal entry only when the completed delivery
+    /// tuple is still exact.
+    pub fn complete_pending_effect(
+        &mut self,
+        key: &IssueMonitorEffectAttemptKey,
+    ) -> Option<PendingIssueMonitorEffect> {
+        complete_attempting_effect(&mut self.pending_effects, key)
+    }
+
+    /// Return an exact Attempting tuple to Prepared under a fresh attempt
+    /// number after a failure known to have happened before remote submission.
+    pub fn retry_pending_effect(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        let Some(effect) = self.pending_effects.iter_mut().find(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
+        }) else {
+            return false;
+        };
+        let Some(next_attempt) = effect.attempt.checked_add(1) else {
+            return false;
+        };
+        effect.attempt = next_attempt;
+        effect.state = IssueMonitorEffectState::Prepared;
+        true
+    }
+
+    pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
+        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+    }
+
+    /// Advance autonomous authority atomically. Turning autonomous mode off
+    /// cancels unsubmitted arm proposals and durably compensates every
+    /// outcome-ambiguous arm attempt. Overflow rejects the whole transition.
+    pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        advance_autonomous_effect_authority(
+            &mut self.autonomous_mode,
+            &mut self.effect_authority_epoch,
+            &mut self.pending_effects,
+            enabled,
+        )
     }
 }
 
@@ -583,6 +860,12 @@ pub struct IssueMonitorState {
     merged_issues: BTreeSet<u64>,
     /// SPEC #3200 FR-001: opt-in autonomous (unattended) resolution mode.
     autonomous_mode: bool,
+    /// SPEC #3200 Phase 7: authority generation and durable remote-effect
+    /// journal, mirrored losslessly by [`IssueMonitorPrefs`].
+    #[serde(default)]
+    effect_authority_epoch: u64,
+    #[serde(default)]
+    pending_effects: Vec<PendingIssueMonitorEffect>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     autonomous_tuning: AutonomousTuning,
     /// SPEC #3200 T-016/T-022: per-issue autonomous lifecycle records keyed by
@@ -973,7 +1256,7 @@ fn with_issue_monitor_prefs_lock<T>(
         .write(true)
         .truncate(false)
         .open(path.with_extension("lock"))?;
-    lock.lock_exclusive()?;
+    gwt_core::operation_deadline::lock_exclusive(&lock)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock);
     match (result, unlock_result) {
@@ -1074,6 +1357,8 @@ impl IssueMonitorState {
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
             autonomous_mode: false,
+            effect_authority_epoch: 0,
+            pending_effects: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
@@ -1130,6 +1415,8 @@ impl IssueMonitorState {
         }
         state.merged_issues = prefs.merged_issues.into_iter().collect();
         state.autonomous_mode = prefs.autonomous_mode;
+        state.effect_authority_epoch = prefs.effect_authority_epoch;
+        state.pending_effects = prefs.pending_effects;
         state.autonomous_tuning = prefs.autonomous_tuning;
         for record in prefs.autonomous_records {
             state.autonomous_records.insert(record.issue_number, record);
@@ -1173,6 +1460,8 @@ impl IssueMonitorState {
                 .collect(),
             merged_issues: self.merged_issues.iter().copied().collect(),
             autonomous_mode: self.autonomous_mode,
+            effect_authority_epoch: self.effect_authority_epoch,
+            pending_effects: self.pending_effects.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
         }
@@ -1450,12 +1739,43 @@ impl IssueMonitorState {
         }
     }
 
+    /// Advance remote-effect authority together with the global monitor switch.
+    /// Turning the monitor off cancels effects that provably were not submitted
+    /// and appends compensation for every outcome-ambiguous claim/arm attempt.
+    /// A checked epoch overflow rejects the complete transition.
+    pub fn set_enabled_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        let next_epoch =
+            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+
+        self.config.enabled = enabled;
+        self.launch_auth_required = false;
+        if !enabled {
+            self.active_launches.clear();
+            self.pending_launches.clear();
+        }
+        Some(next_epoch)
+    }
+
+    /// Advance authority for a control that changes daemon decision state but
+    /// does not itself require a compensation rewrite.
+    pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
+        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+    }
+
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
         self.config.max_active = max_active_agents.max(1);
     }
 
     pub fn record_scan_error(&mut self, now: impl Into<String>, error: impl Into<String>) {
         self.last_scan_at = Some(now.into());
+        self.last_error = Some(error.into());
+        self.launch_auth_required = false;
+    }
+
+    /// Project an uncommitted control-plane failure without changing any
+    /// durable preference or authority field. A later successful scan clears
+    /// this transient operator-facing error through the normal scan path.
+    pub fn record_control_commit_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
         self.launch_auth_required = false;
     }
@@ -1493,6 +1813,8 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
         self.launch_profile = disk.launch_profile.clone();
         self.autonomous_mode = disk.autonomous_mode;
+        self.effect_authority_epoch = disk.effect_authority_epoch;
+        self.pending_effects = disk.pending_effects.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
 
@@ -2038,6 +2360,31 @@ impl IssueMonitorState {
         }
     }
 
+    /// Project scan staleness onto the existing status error surface using a
+    /// caller-supplied clock so daemon publication and tests stay deterministic.
+    pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
+        let mut status = self.status_view();
+        if !status.enabled || status.last_error.is_some() {
+            return status;
+        }
+        let Some(last_scan_at) = status.last_scan_at.as_deref() else {
+            return status;
+        };
+        let Some(elapsed_secs) = rfc3339_elapsed_secs(last_scan_at, now) else {
+            return status;
+        };
+        let Ok(elapsed_secs) = u64::try_from(elapsed_secs) else {
+            return status;
+        };
+        if elapsed_secs >= self.config.poll_interval_secs.saturating_mul(3) {
+            status.state = "error".to_string();
+            status.last_error = Some(format!(
+                "Issue Monitor scan stalled; last scan at {last_scan_at}"
+            ));
+        }
+        status
+    }
+
     /// SPEC #3200 T-001/FR-001: read the opt-in autonomous mode flag.
     pub fn autonomous_mode(&self) -> bool {
         self.autonomous_mode
@@ -2047,6 +2394,91 @@ impl IssueMonitorState {
     /// keeps the SPEC #3165 human-gated behavior exactly.
     pub fn set_autonomous_mode(&mut self, enabled: bool) {
         self.autonomous_mode = enabled;
+    }
+
+    /// Current durable remote-effect authority generation.
+    pub fn effect_authority_epoch(&self) -> u64 {
+        self.effect_authority_epoch
+    }
+
+    /// Read the durable journal without granting callers mutable access around
+    /// the exact delivery-tuple guards.
+    pub fn pending_effects(&self) -> &[PendingIssueMonitorEffect] {
+        &self.pending_effects
+    }
+
+    /// Add a fully formed scan proposal. Only a current-authority Prepared
+    /// entry with a fresh stable id may enter the local proposal journal.
+    pub fn prepare_effect(&mut self, effect: PendingIssueMonitorEffect) -> bool {
+        if effect.effect_id.is_empty()
+            || effect.state != IssueMonitorEffectState::Prepared
+            || effect.authority_epoch != self.effect_authority_epoch
+            || self
+                .pending_effects
+                .iter()
+                .any(|pending| pending.effect_id == effect.effect_id)
+        {
+            return false;
+        }
+        self.pending_effects.push(effect);
+        true
+    }
+
+    /// Add one Prepared effect under the current authority. An empty or reused
+    /// stable id is rejected without changing the journal.
+    pub fn prepare_pending_effect(
+        &mut self,
+        effect_id: impl Into<String>,
+        payload: IssueMonitorEffectPayload,
+    ) -> Option<IssueMonitorEffectAttemptKey> {
+        let effect_id = effect_id.into();
+        if effect_id.is_empty()
+            || self
+                .pending_effects
+                .iter()
+                .any(|effect| effect.effect_id == effect_id)
+        {
+            return None;
+        }
+        let effect =
+            PendingIssueMonitorEffect::prepared(effect_id, self.effect_authority_epoch, payload);
+        let key = effect.attempt_key();
+        self.pending_effects.push(effect);
+        Some(key)
+    }
+
+    pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        mark_effect_attempting(&mut self.pending_effects, key)
+    }
+
+    pub fn complete_pending_effect(
+        &mut self,
+        key: &IssueMonitorEffectAttemptKey,
+    ) -> Option<PendingIssueMonitorEffect> {
+        complete_attempting_effect(&mut self.pending_effects, key)
+    }
+
+    pub fn retry_pending_effect(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        let Some(effect) = self.pending_effects.iter_mut().find(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
+        }) else {
+            return false;
+        };
+        let Some(next_attempt) = effect.attempt.checked_add(1) else {
+            return false;
+        };
+        effect.attempt = next_attempt;
+        effect.state = IssueMonitorEffectState::Prepared;
+        true
+    }
+
+    pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        advance_autonomous_effect_authority(
+            &mut self.autonomous_mode,
+            &mut self.effect_authority_epoch,
+            &mut self.pending_effects,
+            enabled,
+        )
     }
 
     /// SPEC #3200 T-032/FR-003/004: the pure two-stage opt-in pre-gate — an issue
@@ -2546,6 +2978,75 @@ impl IssueMonitorState {
         )
     }
 
+    /// Select durable claim proposals without calling GitHub. The returned
+    /// count is the number of newly prepared logical claims; active slots are
+    /// consumed only after the serialized executor confirms acquisition.
+    pub fn prepare_claim_effects_with_probe(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        completed_probe: impl Fn(u64) -> bool,
+    ) -> usize {
+        let max_active = self.config.max_active.max(1).min(active_cap);
+        if !self.config.enabled || !self.gui_connected || max_active == 0 {
+            return 0;
+        }
+        let pending_claims = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut available = max_active
+            .saturating_sub(self.active_launches.len())
+            .saturating_sub(pending_claims.len());
+        if available == 0 {
+            return 0;
+        }
+
+        let mut prepared = 0;
+        for issue_number in self.queue.iter().copied().collect::<Vec<_>>() {
+            if available == 0 {
+                break;
+            }
+            if pending_claims.contains(&issue_number) {
+                continue;
+            }
+            let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
+                continue;
+            };
+            if completed_probe(issue_number) {
+                self.record_merged(issue_number);
+                continue;
+            }
+            let kind = issue_monitor_linked_issue_kind(&issue);
+            let launched_work_id = knowledge_launch_target_branch_name(kind, issue_number);
+            let effect_id = format!("claim:{issue_number}:{}:{now}", self.effect_authority_epoch);
+            let claim_id = format!("gwt-auto-improve:{effect_id}");
+            if self
+                .prepare_pending_effect(
+                    effect_id,
+                    IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number,
+                        claim_id,
+                        owner: owner.to_string(),
+                        heartbeat_at: now.to_string(),
+                        expires_at: expiry_from_now_lexical(now, self.config.claim_ttl_secs),
+                        launched_work_id: Some(launched_work_id),
+                    },
+                )
+                .is_some()
+            {
+                prepared += 1;
+                available -= 1;
+            }
+        }
+        prepared
+    }
+
     pub fn claim_next_launch_requests_with_active_cap<C: IssueClient>(
         &mut self,
         client: &C,
@@ -2708,7 +3209,7 @@ impl IssueMonitorState {
     /// A failed disarm must never strand a live armed auto-merge behind a
     /// NeedsHuman screen. No-op while the mode is ON.
     pub fn kill_switch_disarm_targets(&self) -> Vec<(u64, u64)> {
-        if self.autonomous_mode {
+        if self.config.enabled && self.autonomous_mode {
             return Vec::new();
         }
         self.autonomous_records
@@ -2756,6 +3257,25 @@ impl IssueMonitorState {
                 ),
             );
         }
+    }
+
+    /// Apply a confirmed durable claim effect and enqueue the corresponding GUI
+    /// launch exactly once. Returns false if the scanned issue disappeared
+    /// before the executor result committed.
+    pub fn apply_confirmed_claim(
+        &mut self,
+        issue_number: u64,
+        claim_id: impl Into<String>,
+        now: &str,
+    ) -> bool {
+        let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
+            return false;
+        };
+        self.record_claimed(issue, claim_id);
+        if let Some(request) = self.next_launch_request(now) {
+            self.pending_launches.push_back(request);
+        }
+        true
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
@@ -3127,6 +3647,37 @@ mod tests {
             state: IssueMonitorIssueState::Open,
             body: None,
             url: None,
+        }
+    }
+
+    fn pending_arm_effect(
+        effect_id: &str,
+        authority_epoch: u64,
+        attempt: u32,
+        state: IssueMonitorEffectState,
+    ) -> PendingIssueMonitorEffect {
+        PendingIssueMonitorEffect {
+            effect_id: effect_id.to_string(),
+            authority_epoch,
+            attempt,
+            state,
+            payload: IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                reviewed_sha: "abc123".to_string(),
+            },
+        }
+    }
+
+    fn effect_attempt_key(
+        effect_id: &str,
+        authority_epoch: u64,
+        attempt: u32,
+    ) -> IssueMonitorEffectAttemptKey {
+        IssueMonitorEffectAttemptKey {
+            effect_id: effect_id.to_string(),
+            authority_epoch,
+            attempt,
         }
     }
 
@@ -3916,6 +4467,294 @@ mod tests {
         assert_eq!(prefs.autonomous_tuning.max_attempts, 3);
         assert_eq!(prefs.merged_issues, vec![42], "existing fields preserved");
         assert!(!IssueMonitorPrefs::default().autonomous_mode);
+    }
+
+    #[test]
+    fn pre_effect_journal_prefs_default_to_epoch_zero_and_no_pending_effects() {
+        // SPEC #3200 Phase 7 T-137 / FR-044: prefs written before the durable
+        // effect journal existed must remain readable. Missing authority and
+        // journal fields mean "no prior authority" rather than a parse error or
+        // a fabricated effect.
+        let legacy = r#"{
+            "enabled": true,
+            "max_active_agents": 2,
+            "priority_order": [7],
+            "autonomous_mode": true
+        }"#;
+
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(legacy).expect("pre-journal prefs deserialize");
+
+        assert_eq!(prefs.effect_authority_epoch, 0);
+        assert!(prefs.pending_effects.is_empty());
+        assert!(prefs.enabled);
+        assert!(prefs.autonomous_mode);
+        assert_eq!(prefs.priority_order, vec![7]);
+    }
+
+    #[test]
+    fn prepared_and_attempting_effects_round_trip_every_authority_field() {
+        // A restart must retain the complete delivery identity. Dropping any of
+        // effect_id / epoch / attempt / payload would make a stale result look
+        // current or make an ambiguous remote mutation impossible to reconcile.
+        let prepared =
+            pending_arm_effect("arm:7:99:abc123:4", 4, 0, IssueMonitorEffectState::Prepared);
+        let attempting = PendingIssueMonitorEffect {
+            effect_id: "disarm:arm:7:99:abc123:4".to_string(),
+            authority_epoch: 5,
+            attempt: 3,
+            state: IssueMonitorEffectState::Attempting,
+            payload: IssueMonitorEffectPayload::DisarmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                compensates_effect_id: "arm:7:99:abc123:4".to_string(),
+            },
+        };
+        let prefs = IssueMonitorPrefs {
+            effect_authority_epoch: 5,
+            pending_effects: vec![prepared.clone(), attempting.clone()],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let json = serde_json::to_string(&prefs).expect("effect journal serializes");
+        let restored: IssueMonitorPrefs =
+            serde_json::from_str(&json).expect("effect journal deserializes");
+
+        assert_eq!(restored.effect_authority_epoch, 5);
+        assert_eq!(restored.pending_effects, vec![prepared, attempting]);
+    }
+
+    #[test]
+    fn effect_attempt_and_result_transitions_require_the_exact_delivery_tuple() {
+        // The executor may finish after a control advanced authority or after a
+        // retry allocated a newer attempt. Both Prepared -> Attempting and the
+        // confirmed-result transition must compare all three tuple components.
+        let prepared = pending_arm_effect("arm-7", 12, 4, IssueMonitorEffectState::Prepared);
+        let exact = effect_attempt_key("arm-7", 12, 4);
+        let mismatches = [
+            effect_attempt_key("other-effect", 12, 4),
+            effect_attempt_key("arm-7", 13, 4),
+            effect_attempt_key("arm-7", 12, 5),
+        ];
+
+        for mismatch in &mismatches {
+            let mut prefs = IssueMonitorPrefs {
+                effect_authority_epoch: 12,
+                pending_effects: vec![prepared.clone()],
+                ..IssueMonitorPrefs::default()
+            };
+            let before = prefs.clone();
+            assert!(!prefs.mark_pending_effect_attempting(mismatch));
+            assert_eq!(prefs, before, "mismatched Attempting transition is inert");
+        }
+
+        let mut attempting = IssueMonitorPrefs {
+            effect_authority_epoch: 12,
+            pending_effects: vec![prepared],
+            ..IssueMonitorPrefs::default()
+        };
+        assert!(attempting.mark_pending_effect_attempting(&exact));
+        assert_eq!(
+            attempting.pending_effects[0].state,
+            IssueMonitorEffectState::Attempting
+        );
+
+        for mismatch in &mismatches {
+            let mut prefs = attempting.clone();
+            let before = prefs.clone();
+            assert!(prefs.complete_pending_effect(mismatch).is_none());
+            assert_eq!(prefs, before, "mismatched result transition is inert");
+        }
+
+        let completed = attempting
+            .complete_pending_effect(&exact)
+            .expect("the exact Attempting result is accepted");
+        assert_eq!(completed.effect_id, "arm-7");
+        assert!(attempting.pending_effects.is_empty());
+    }
+
+    #[test]
+    fn autonomous_control_rejects_authority_epoch_wrap_atomically() {
+        // Authority must never wrap to zero: an ancient effect could otherwise
+        // regain the same epoch. The mode change and journal rewrite are one
+        // atomic transition, so overflow leaves every field untouched.
+        let mut prefs = IssueMonitorPrefs {
+            autonomous_mode: true,
+            effect_authority_epoch: u64::MAX,
+            pending_effects: vec![pending_arm_effect(
+                "arm-max",
+                u64::MAX,
+                0,
+                IssueMonitorEffectState::Prepared,
+            )],
+            ..IssueMonitorPrefs::default()
+        };
+        let before = prefs.clone();
+
+        assert_eq!(
+            prefs.set_autonomous_mode_with_effect_revocation(false),
+            None,
+            "checked epoch overflow rejects the control transition"
+        );
+        assert_eq!(prefs, before);
+    }
+
+    #[test]
+    fn autonomous_off_cancels_prepared_arm_and_compensates_attempting_arm_durably() {
+        // Prepared means no remote request was submitted, so OFF can cancel it.
+        // Attempting is outcome-ambiguous: retain it for result reconciliation
+        // and add a new-epoch disarm. Re-enabling autonomous mode must not revoke
+        // that safety compensation.
+        let prepared = pending_arm_effect("arm-prepared", 7, 0, IssueMonitorEffectState::Prepared);
+        let attempting =
+            pending_arm_effect("arm-attempting", 7, 2, IssueMonitorEffectState::Attempting);
+        let mut prefs = IssueMonitorPrefs {
+            autonomous_mode: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![prepared, attempting.clone()],
+            ..IssueMonitorPrefs::default()
+        };
+
+        assert_eq!(
+            prefs.set_autonomous_mode_with_effect_revocation(false),
+            Some(8)
+        );
+        assert!(!prefs.autonomous_mode);
+        assert_eq!(prefs.effect_authority_epoch, 8);
+        assert!(prefs
+            .pending_effects
+            .iter()
+            .all(|effect| effect.effect_id != "arm-prepared"));
+        assert!(prefs.pending_effects.contains(&attempting));
+
+        let compensation = prefs
+            .pending_effects
+            .iter()
+            .find(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: 7,
+                        pr_number: 99,
+                        compensates_effect_id,
+                    } if compensates_effect_id == "arm-attempting"
+                )
+            })
+            .cloned()
+            .expect("Attempting arm receives durable disarm compensation");
+        assert_eq!(compensation.authority_epoch, 8);
+        assert_eq!(compensation.attempt, 0);
+        assert_eq!(compensation.state, IssueMonitorEffectState::Prepared);
+        assert!(!compensation.effect_id.is_empty());
+        assert_ne!(compensation.effect_id, "arm-attempting");
+
+        assert_eq!(
+            prefs.set_autonomous_mode_with_effect_revocation(true),
+            Some(9)
+        );
+        assert!(prefs.autonomous_mode);
+        assert_eq!(prefs.effect_authority_epoch, 9);
+        assert!(
+            prefs.pending_effects.contains(&compensation),
+            "a newer ON authority cannot erase an unfinished safety disarm"
+        );
+    }
+
+    #[test]
+    fn scan_claim_planning_is_side_effect_free_and_deduplicated() {
+        // Phase 7 T-140: the cloned scan may select candidates, but GitHub
+        // mutation begins only after the proposal commits and is fenced by the
+        // daemon executor. Repeated scans must retain one stable proposal.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-27T00:00:00Z",
+        );
+
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-27T00:00:01Z",
+                2,
+                |_| false,
+            ),
+            2
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-27T00:00:02Z",
+                2,
+                |_| false,
+            ),
+            0,
+            "an uncommitted/replayed scan cannot duplicate logical claims"
+        );
+        assert_eq!(monitor.active_count(), 0, "planning does not claim a slot");
+        assert_eq!(monitor.pending_effects().len(), 2);
+        assert!(monitor.pending_effects().iter().all(|effect| matches!(
+            effect.payload,
+            IssueMonitorEffectPayload::AcquireClaim { .. }
+        )));
+    }
+
+    #[test]
+    fn disabling_monitor_cancels_prepared_claim_and_compensates_attempting_claim() {
+        let prepared = PendingIssueMonitorEffect::prepared(
+            "claim-prepared",
+            3,
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-prepared".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-27T00:00:00Z".to_string(),
+                expires_at: "2026-07-27T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        );
+        let mut attempting = PendingIssueMonitorEffect::prepared(
+            "claim-attempting",
+            3,
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 43,
+                claim_id: "claim-attempting".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-27T00:00:00Z".to_string(),
+                expires_at: "2026-07-27T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-43".to_string()),
+            },
+        );
+        attempting.state = IssueMonitorEffectState::Attempting;
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: 3,
+                pending_effects: vec![prepared, attempting.clone()],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(4));
+        assert!(!monitor.config.enabled);
+        assert!(monitor.pending_effects().contains(&attempting));
+        assert!(!monitor
+            .pending_effects()
+            .iter()
+            .any(|effect| effect.effect_id == "claim-prepared"));
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 43,
+                claim_id,
+            } if claim_id == "claim-attempting"
+        )));
     }
 
     #[test]
@@ -5006,9 +5845,18 @@ mod tests {
         monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
         monitor.begin_review(7, 99, "abc123");
         monitor.begin_delivering(7);
+        monitor.set_enabled(true);
 
         // Mode ON ⇒ no targets (deliveries are still owned by the loop).
         assert!(monitor.kill_switch_disarm_targets().is_empty());
+
+        monitor.set_enabled(false);
+        assert_eq!(
+            monitor.kill_switch_disarm_targets(),
+            vec![(7, 99)],
+            "global monitor OFF is also a kill switch for an armed delivery"
+        );
+        monitor.set_enabled(true);
 
         monitor.set_autonomous_mode(false);
         assert_eq!(

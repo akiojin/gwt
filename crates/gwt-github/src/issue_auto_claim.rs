@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber};
+use crate::{
+    client::{OwnerMutationError, OwnerMutationResult},
+    ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber,
+};
 
 const CLAIM_BEGIN: &str = "<!-- gwt-auto-improve-claim v1 -->";
 const CLAIM_END: &str = "<!-- /gwt-auto-improve-claim -->";
@@ -131,6 +134,12 @@ pub enum ClaimAcquireOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimReleaseOutcome {
+    Released(ClaimComment),
+    AlreadyReleased(Option<ClaimComment>),
+}
+
 pub fn extract_claim_comments(comments: &[CommentSnapshot]) -> Vec<ClaimComment> {
     comments
         .iter()
@@ -179,6 +188,133 @@ pub fn acquire_claim<C: IssueClient>(
         }
         None => Ok(ClaimAcquireOutcome::Acquired(own_claim)),
     }
+}
+
+/// Acquire a stable logical claim while preserving whether a mutation was
+/// definitely not submitted or may have reached GitHub. An unknown outcome is
+/// intentionally left to the durable executor for authoritative replay.
+pub fn acquire_claim_mutation<C: IssueClient>(
+    client: &C,
+    issue_number: IssueNumber,
+    claim: ClaimComment,
+    now: &str,
+) -> OwnerMutationResult<ClaimAcquireOutcome> {
+    let claims = fetch_claims(client, issue_number).map_err(OwnerMutationError::PreSubmit)?;
+    if let Some(winner) = select_winning_claim(&claims, now) {
+        if winner.claim_id != claim.claim_id {
+            if let Some(existing) = claims.iter().find(|existing| {
+                existing.claim_id == claim.claim_id && claim_is_active(existing, now)
+            }) {
+                let mut lost = existing.clone();
+                lost.status = ClaimStatus::Lost;
+                if let Some(comment_id) = lost.comment_id {
+                    client.patch_comment_mutation(comment_id, &render_claim_comment(&lost))?;
+                }
+                return Ok(ClaimAcquireOutcome::Lost {
+                    own_claim: lost,
+                    winning_claim: winner.clone(),
+                });
+            }
+            return Ok(ClaimAcquireOutcome::Blocked(winner.clone()));
+        }
+    }
+    if let Some(existing) = claims
+        .iter()
+        .find(|existing| existing.claim_id == claim.claim_id)
+    {
+        let mut refreshed = claim;
+        refreshed.comment_id = existing.comment_id;
+        refreshed.status = ClaimStatus::Active;
+        if let Some(comment_id) = existing.comment_id {
+            client.patch_comment_mutation(comment_id, &render_claim_comment(&refreshed))?;
+        }
+        return resolve_claim_after_mutation(client, issue_number, refreshed, now);
+    }
+
+    let created = client.create_comment_mutation(issue_number, &render_claim_comment(&claim))?;
+    let mut own_claim = claim;
+    own_claim.comment_id = Some(created.id);
+    resolve_claim_after_mutation(client, issue_number, own_claim, now)
+}
+
+fn resolve_claim_after_mutation<C: IssueClient>(
+    client: &C,
+    issue_number: IssueNumber,
+    mut own_claim: ClaimComment,
+    now: &str,
+) -> OwnerMutationResult<ClaimAcquireOutcome> {
+    let claims =
+        fetch_claims(client, issue_number).map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
+    match select_winning_claim(&claims, now) {
+        Some(winner) if winner.claim_id == own_claim.claim_id => {
+            Ok(ClaimAcquireOutcome::Acquired(winner.clone()))
+        }
+        Some(winner) => {
+            own_claim.status = ClaimStatus::Lost;
+            if let Some(comment_id) = own_claim.comment_id {
+                client.patch_comment_mutation(comment_id, &render_claim_comment(&own_claim))?;
+            }
+            Ok(ClaimAcquireOutcome::Lost {
+                own_claim,
+                winning_claim: winner.clone(),
+            })
+        }
+        None => Err(OwnerMutationError::RemoteOutcomeUnknown(
+            ApiError::Unexpected("claim mutation readback has no active winner".to_string()),
+        )),
+    }
+}
+
+/// Release the claim identified by its stable logical id.
+///
+/// Replaying a release after a daemon restart is idempotent: an absent claim,
+/// or a claim already in a terminal state, is treated as the target state and
+/// does not issue another patch.
+pub fn release_claim<C: IssueClient>(
+    client: &C,
+    issue_number: IssueNumber,
+    claim_id: &str,
+) -> Result<ClaimReleaseOutcome, ApiError> {
+    let claim = fetch_claims(client, issue_number)?
+        .into_iter()
+        .find(|claim| claim.claim_id == claim_id);
+    let Some(mut claim) = claim else {
+        return Ok(ClaimReleaseOutcome::AlreadyReleased(None));
+    };
+    if claim.status != ClaimStatus::Active {
+        return Ok(ClaimReleaseOutcome::AlreadyReleased(Some(claim)));
+    }
+
+    let Some(comment_id) = claim.comment_id else {
+        return Ok(ClaimReleaseOutcome::AlreadyReleased(Some(claim)));
+    };
+    claim.status = ClaimStatus::Released;
+    client.patch_comment(comment_id, &render_claim_comment(&claim))?;
+    Ok(ClaimReleaseOutcome::Released(claim))
+}
+
+/// Mutation-aware release used by the durable side-effect executor.
+pub fn release_claim_mutation<C: IssueClient>(
+    client: &C,
+    issue_number: IssueNumber,
+    claim_id: &str,
+) -> OwnerMutationResult<ClaimReleaseOutcome> {
+    let claim = fetch_claims(client, issue_number)
+        .map_err(OwnerMutationError::PreSubmit)?
+        .into_iter()
+        .find(|claim| claim.claim_id == claim_id);
+    let Some(mut claim) = claim else {
+        return Ok(ClaimReleaseOutcome::AlreadyReleased(None));
+    };
+    if claim.status != ClaimStatus::Active {
+        return Ok(ClaimReleaseOutcome::AlreadyReleased(Some(claim)));
+    }
+    let Some(comment_id) = claim.comment_id else {
+        return Ok(ClaimReleaseOutcome::AlreadyReleased(Some(claim)));
+    };
+    claim.status = ClaimStatus::Released;
+    client.patch_comment_mutation(comment_id, &render_claim_comment(&claim))?;
+    Ok(ClaimReleaseOutcome::Released(claim))
 }
 
 fn fetch_claims<C: IssueClient>(

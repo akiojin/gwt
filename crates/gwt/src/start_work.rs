@@ -201,16 +201,35 @@ fn local_branch_resolves_to_commit(repo_path: &Path, branch_name: &str) -> Resul
         .any(|branch| branch == branch_name))
 }
 
+fn run_launch_agent_git(
+    repo_path: &Path,
+    args: &[&str],
+) -> std::io::Result<gwt_core::process_console::SpawnOutput> {
+    gwt_core::process_console::spawn_logged_blocking(
+        &gwt_core::process_console::global(),
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        args,
+        gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
+            .current_dir(repo_path)
+            .forward_output(false),
+    )
+}
+
+fn launch_agent_git_exit_status(exit_code: Option<i32>) -> String {
+    match exit_code {
+        Some(code) if cfg!(windows) => format!("exit code: {code}"),
+        Some(code) => format!("exit status: {code}"),
+        None => "unknown exit status".to_string(),
+    }
+}
+
 fn symbolic_head_branch(repo_path: &Path) -> Result<Option<String>, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(repo_path)
-        .output()
+    let output = run_launch_agent_git(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|error| format!("git symbolic-ref HEAD: {error}"))?;
-    match output.status.code() {
+    match output.exit_code {
         Some(0) => {
-            let raw_branch = String::from_utf8_lossy(&output.stdout);
-            let branch = normalize_launch_branch_name(raw_branch.trim());
+            let branch = normalize_launch_branch_name(output.stdout.trim());
             if branch.is_empty() {
                 Err(format!(
                     "git symbolic-ref HEAD in {} returned an empty branch",
@@ -224,8 +243,8 @@ fn symbolic_head_branch(repo_path: &Path) -> Result<Option<String>, String> {
         _ => Err(format!(
             "git symbolic-ref HEAD in {} failed with status {}: {}",
             repo_path.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            launch_agent_git_exit_status(output.exit_code),
+            output.stderr.trim()
         )),
     }
 }
@@ -235,23 +254,19 @@ fn local_branches_resolving_to_commits(
     pattern: &str,
 ) -> Result<Vec<String>, String> {
     let format = "--format=%(refname)\t%(objecttype)\t%(*objecttype)";
-    let output = gwt_core::process::hidden_command("git")
-        .args(["for-each-ref", format, pattern])
-        .current_dir(repo_path)
-        .output()
+    let output = run_launch_agent_git(repo_path, &["for-each-ref", format, pattern])
         .map_err(|error| format!("git for-each-ref {pattern}: {error}"))?;
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
+    if !output.success() {
         return Err(format!(
             "git for-each-ref {pattern} in {} failed with status {}: {}",
             repo_path.display(),
-            output.status,
-            stderr
+            launch_agent_git_exit_status(output.exit_code),
+            output.stderr.trim()
         ));
     }
 
     let mut branches = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.stdout.lines() {
         if line.trim().is_empty() {
             continue;
         }
@@ -278,13 +293,8 @@ fn local_branches_resolving_to_commits(
 }
 
 fn is_git_worktree(repo_path: &Path) -> bool {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(repo_path)
-        .output();
-    output.is_ok_and(|output| {
-        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
-    })
+    let output = run_launch_agent_git(repo_path, &["rev-parse", "--is-inside-work-tree"]);
+    output.is_ok_and(|output| output.success() && output.stdout.trim() == "true")
 }
 
 fn has_usable_worktree_for_branch(worktrees: &[gwt_git::WorktreeInfo], branch_name: &str) -> bool {
@@ -475,6 +485,66 @@ mod tests {
         assert_eq!(
             crate::start_work::resolve_launch_agent_base_branch(&repo),
             Ok("feature/current".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_agent_base_branch_stops_hanging_git_at_operation_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fake_git = temp.path().join("git");
+        fs::write(
+            &fake_git,
+            r#"#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
+  sleep 2
+  printf '%s\n' 'true'
+  exit 0
+fi
+if [ "$1" = "symbolic-ref" ]; then
+  printf '%s\n' 'main'
+  exit 0
+fi
+if [ "$1" = "for-each-ref" ]; then
+  printf 'refs/heads/main\tcommit\t\n'
+  exit 0
+fi
+exit 1
+"#,
+        )
+        .expect("write fake git");
+        fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+        let path = std::env::join_paths(
+            std::iter::once(temp.path().to_path_buf()).chain(
+                std::env::var_os("PATH")
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(std::env::split_paths),
+            ),
+        )
+        .expect("compose PATH");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", path);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo path");
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(150),
+        );
+
+        let error = crate::start_work::resolve_launch_agent_base_branch(&repo)
+            .expect_err("ambient deadline must stop the hanging launch-agent git lookup");
+
+        assert!(error.contains("deadline"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1_500),
+            "hanging git outlived the deadline: {:?}",
+            started.elapsed()
         );
     }
 

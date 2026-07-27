@@ -104,11 +104,13 @@ pub use issue_monitor::{
     mutate_issue_monitor_prefs_recovering, save_issue_monitor_prefs, scan_issue_monitor_candidates,
     scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
     AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue,
+    IssueMonitorConfig, IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload,
+    IssueMonitorEffectState, IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue,
     IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue,
     IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, MonitorInboxState, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorStatusView, MonitorInboxState, PendingIssueMonitorEffect,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,

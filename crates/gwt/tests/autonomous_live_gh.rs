@@ -1,10 +1,10 @@
 //! SPEC #3200 T-003/T-100 — live-integration E2E: the autonomous merge loop
-//! EXECUTES through the real production code path (the real `advance_autonomous_in_flight`
-//! orchestration, the real `gwt_git::pr_status` / `branch_protection` fetchers that
-//! actually spawn `gh`, and the real `merge_pr_auto`) against a SCRIPTED MOCK `gh`
-//! on PATH. No real GitHub is touched — but unlike the unit tests, the actual
-//! subprocess pipeline (spawn → gh → parse → gate → merge) runs, so the
-//! irreversible merge call is genuinely exercised end-to-end and observed.
+//! EXECUTES the scan/proposal half through the real `advance_autonomous_in_flight`
+//! orchestration, then exercises the same real `gwt_git` readback/arm adapter used
+//! by the daemon's serialized executor against a SCRIPTED MOCK `gh` on PATH.
+//! No real GitHub is touched. The daemon transaction/fence contract has focused
+//! coverage in `cli::daemon::server`; this test keeps the cross-crate subprocess
+//! pipeline (spawn → gh → parse → gate → proposal → arm) live and observable.
 //!
 //! Both scenarios live in ONE test: PATH + mock env are process-global, so a
 //! single sequential test avoids cross-thread env races.
@@ -17,8 +17,9 @@ use std::path::Path;
 
 use gwt::issue_monitor_worker::advance_autonomous_in_flight;
 use gwt::{
-    AutonomousPhase, IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorPrefs, IssueMonitorState, MonitorInboxState,
+    AutonomousPhase, IssueMonitorConfig, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorPrefs, IssueMonitorState,
+    MonitorInboxState,
 };
 
 const BODY: &str = "## Acceptance Criteria\n- [ ] AC-1: returns 200\n";
@@ -36,6 +37,8 @@ all="$*"
 case "$all" in
   *api*"/protection"*)
     echo '{"required_status_checks":{"contexts":["build"]},"restrictions":null,"allow_force_pushes":{"enabled":false}}' ;;
+  *"pr view"*state,headRefOid,autoMergeRequest,mergeCommit*)
+    echo '{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":null}' ;;
   *"pr view"*headRefOid*)         echo '{"headRefOid":"abc123"}' ;;
   *"pr view"*statusCheckRollup*)  echo '{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
   *"pr view"*mergeCommit*)        echo '{"mergeCommit":{"oid":"squashcommit999"}}' ;;
@@ -62,6 +65,7 @@ fn reviewed_monitor() -> IssueMonitorState {
     let mut monitor = IssueMonitorState::with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
+            enabled: true,
             autonomous_mode: true,
             ..IssueMonitorPrefs::default()
         },
@@ -100,17 +104,62 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     let _ = fs::remove_file(&merge_log);
     let mut monitor = reviewed_monitor();
 
-    // Tick 1: Reviewing → real fetchers (mock gh) → real gate → real merge_pr_auto.
+    // Tick 1: Reviewing → real fetchers (mock gh) → real gate → durable arm
+    // proposal. The scan itself has no authority to invoke the remote mutation.
     advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now);
     assert_eq!(
         monitor.autonomous_record(42).map(|r| r.phase),
+        Some(AutonomousPhase::Reviewing),
+        "gate pass remains Reviewing until the exact executor result commits",
+    );
+    assert!(
+        fs::read_to_string(&merge_log)
+            .unwrap_or_default()
+            .is_empty(),
+        "the proposal-only scan must not invoke the remote merge adapter",
+    );
+    let effect = monitor
+        .pending_effects()
+        .first()
+        .cloned()
+        .expect("gate pass prepares an arm effect");
+    assert_eq!(effect.state, IssueMonitorEffectState::Prepared);
+    let IssueMonitorEffectPayload::ArmAutoMerge {
+        issue_number,
+        pr_number,
+        reviewed_sha,
+    } = &effect.payload
+    else {
+        panic!("gate pass must prepare ArmAutoMerge");
+    };
+    assert_eq!(
+        (*issue_number, *pr_number, reviewed_sha.as_str()),
+        (42, 7, SHA)
+    );
+    assert_eq!(effect.authority_epoch, monitor.effect_authority_epoch());
+
+    // The daemon persists Prepared, fences the exact tuple as Attempting, and
+    // only then calls this adapter from its serialized executor. Exercise that
+    // real subprocess boundary here, then model the already-focused exact
+    // result commit before allowing Delivering.
+    let key = effect.attempt_key();
+    assert!(monitor.mark_pending_effect_attempting(&key));
+    let remote = gwt_git::pr_status::fetch_pr_auto_merge_remote_state(&repo, 7)
+        .expect("mock gh returns an authoritative open PR state");
+    let outcome = gwt_git::pr_status::arm_pr_auto_merge(&repo, 7, SHA, &remote);
+    assert!(outcome.is_success(), "arm outcome: {outcome:?}");
+    assert!(monitor.complete_pending_effect(&key).is_some());
+    monitor.begin_delivering(42);
+    monitor.record_auto_merge_armed(42);
+    assert_eq!(
+        monitor.autonomous_record(42).map(|r| r.phase),
         Some(AutonomousPhase::Delivering),
-        "gate passed against live (mock) gh ⇒ Delivering",
+        "only the committed executor success enters Delivering",
     );
     let log = fs::read_to_string(&merge_log).unwrap_or_default();
     assert!(
         log.contains("MERGE") && log.contains("pr merge"),
-        "the real merge_pr_auto invoked `gh pr merge --auto` (log={log:?})",
+        "the real arm adapter invoked `gh pr merge --auto` (log={log:?})",
     );
 
     // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed ⇒ done.

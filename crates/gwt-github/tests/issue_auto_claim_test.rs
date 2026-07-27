@@ -1,6 +1,7 @@
 use gwt_github::issue_auto_claim::{
-    acquire_claim, claim_is_active, parse_claim_comment, render_claim_comment,
-    select_winning_claim, ClaimAcquireOutcome, ClaimComment, ClaimStatus,
+    acquire_claim, acquire_claim_mutation, claim_is_active, parse_claim_comment, release_claim,
+    render_claim_comment, select_winning_claim, ClaimAcquireOutcome, ClaimComment,
+    ClaimReleaseOutcome, ClaimStatus,
 };
 use gwt_github::{
     CommentId, CommentSnapshot, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
@@ -192,5 +193,149 @@ fn acquire_claim_refreshes_existing_claim_for_same_owner() {
     assert_eq!(
         client.call_log(),
         vec!["fetch:#42", "patch_comment:comment:9"]
+    );
+}
+
+#[test]
+fn stable_claim_id_replay_reuses_existing_winner_without_duplicate_logical_launch() {
+    let client = FakeIssueClient::new();
+    let existing = claim(
+        "stable-effect-claim",
+        "host-a/old-process",
+        "2026-06-23T10:00:00Z",
+        "2026-06-23T10:30:00Z",
+    );
+    client.seed(snapshot(vec![comment(9, &existing)]));
+    let replayed = claim(
+        "stable-effect-claim",
+        "host-a/restarted-process",
+        "2026-06-23T10:05:00Z",
+        "2026-06-23T10:35:00Z",
+    );
+
+    for _ in 0..2 {
+        let outcome = acquire_claim(
+            &client,
+            IssueNumber(42),
+            replayed.clone(),
+            "2026-06-23T10:06:00Z",
+        )
+        .expect("stable claim replay reconciles");
+        match outcome {
+            ClaimAcquireOutcome::Acquired(acquired) => {
+                assert_eq!(acquired.comment_id, Some(CommentId(9)));
+                assert_eq!(acquired.claim_id, "stable-effect-claim");
+            }
+            other => panic!("expected existing logical acquisition, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        client.call_log(),
+        vec!["fetch:#42", "fetch:#42"],
+        "restart replay must neither create nor patch a duplicate claim"
+    );
+    assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+}
+
+#[test]
+fn expired_stable_claim_never_overrides_a_current_foreign_winner() {
+    let client = FakeIssueClient::new();
+    let expired_own = claim(
+        "stable-effect-claim",
+        "host-a/old-process",
+        "2026-06-23T09:00:00Z",
+        "2026-06-23T09:30:00Z",
+    );
+    let foreign = claim(
+        "foreign-current-claim",
+        "host-b/process",
+        "2026-06-23T10:00:00Z",
+        "2026-06-23T10:30:00Z",
+    );
+    client.seed(snapshot(vec![
+        comment(9, &expired_own),
+        comment(10, &foreign),
+    ]));
+    let replayed = claim(
+        "stable-effect-claim",
+        "host-a/restarted-process",
+        "2026-06-23T10:05:00Z",
+        "2026-06-23T10:35:00Z",
+    );
+
+    let outcome =
+        acquire_claim_mutation(&client, IssueNumber(42), replayed, "2026-06-23T10:05:00Z")
+            .expect("foreign winner is an ordinary blocked outcome");
+
+    assert!(matches!(
+        outcome,
+        ClaimAcquireOutcome::Blocked(ref winner) if winner.claim_id == "foreign-current-claim"
+    ));
+    assert_eq!(
+        client.call_log(),
+        vec!["fetch:#42"],
+        "the expired stable claim is not reactivated while another lease is live"
+    );
+}
+
+#[test]
+fn expired_stable_claim_is_renewed_and_read_back_without_duplicate_comment() {
+    let client = FakeIssueClient::new();
+    let expired = claim(
+        "stable-effect-claim",
+        "host-a/old-process",
+        "2026-06-23T09:00:00Z",
+        "2026-06-23T09:30:00Z",
+    );
+    client.seed(snapshot(vec![comment(9, &expired)]));
+    let replayed = claim(
+        "stable-effect-claim",
+        "host-a/restarted-process",
+        "2026-06-23T10:05:00Z",
+        "2026-06-23T10:35:00Z",
+    );
+
+    let outcome =
+        acquire_claim_mutation(&client, IssueNumber(42), replayed, "2026-06-23T10:05:00Z")
+            .expect("stable claim renews");
+
+    assert!(matches!(outcome, ClaimAcquireOutcome::Acquired(_)));
+    assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+    assert_eq!(
+        client.call_log(),
+        vec!["fetch:#42", "patch_comment:comment:9", "fetch:#42"]
+    );
+}
+
+#[test]
+fn releasing_same_stable_claim_id_twice_is_idempotent() {
+    let client = FakeIssueClient::new();
+    let existing = claim(
+        "stable-effect-claim",
+        "host-a/session-a",
+        "2026-06-23T10:00:00Z",
+        "2026-06-23T10:30:00Z",
+    );
+    client.seed(snapshot(vec![comment(9, &existing)]));
+
+    let first = release_claim(&client, IssueNumber(42), "stable-effect-claim")
+        .expect("first release succeeds");
+    assert!(matches!(first, ClaimReleaseOutcome::Released(_)));
+
+    let second = release_claim(&client, IssueNumber(42), "stable-effect-claim")
+        .expect("replayed release succeeds");
+    assert!(matches!(second, ClaimReleaseOutcome::AlreadyReleased(_)));
+
+    let stored = client.comments(IssueNumber(42));
+    assert_eq!(stored.len(), 1);
+    let released = parse_claim_comment(Some(stored[0].id), &stored[0].body)
+        .expect("released claim remains machine-readable");
+    assert_eq!(released.claim_id, "stable-effect-claim");
+    assert_eq!(released.status, ClaimStatus::Released);
+    assert_eq!(
+        client.call_log(),
+        vec!["fetch:#42", "patch_comment:comment:9", "fetch:#42"],
+        "second release observes the target state and does not patch again"
     );
 }

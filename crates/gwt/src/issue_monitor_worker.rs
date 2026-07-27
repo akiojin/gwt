@@ -20,6 +20,15 @@ pub struct IssueMonitorDaemonPayload {
 pub struct LoadedIssueMonitorCandidates {
     pub issues: Vec<IssueMonitorIssue>,
     pub source: IssueMonitorCandidateSource,
+    /// The live-list failure that forced a cache fallback. Kept alongside the
+    /// stale read model so timeout/error status is never rendered as healthy.
+    pub live_error: Option<String>,
+}
+
+impl LoadedIssueMonitorCandidates {
+    pub fn authorizes_remote_effects(&self) -> bool {
+        self.source == IssueMonitorCandidateSource::Live && self.live_error.is_none()
+    }
 }
 
 pub fn issue_monitor_daemon_payloads(
@@ -70,10 +79,11 @@ pub fn issue_monitor_daemon_payloads(
         }
     }
 
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     payloads.extend([
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
-            payload: serde_json::to_value(monitor.status_view())
+            payload: serde_json::to_value(monitor.status_view_at(&now))
                 .expect("issue monitor status serializes"),
         },
         IssueMonitorDaemonPayload {
@@ -130,6 +140,7 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 source: IssueMonitorCandidateSource::Live,
+                live_error: None,
             });
         }
         Err(error) => error,
@@ -164,6 +175,7 @@ where
         Ok(issues) => Ok(LoadedIssueMonitorCandidates {
             issues,
             source: IssueMonitorCandidateSource::Live,
+            live_error: None,
         }),
         Err(live_error) => {
             for issues in cache_results.into_iter().flatten() {
@@ -171,6 +183,7 @@ where
                     return Ok(LoadedIssueMonitorCandidates {
                         issues,
                         source: IssueMonitorCandidateSource::Cache,
+                        live_error: Some(live_error),
                     });
                 }
             }
@@ -188,13 +201,20 @@ pub fn scan_loaded_issue_monitor_candidates(
     repo_path: &Path,
     now: &str,
 ) -> IssueMonitorScanSummary {
-    scan_issue_monitor_candidates_with_provenance(
+    let summary = scan_issue_monitor_candidates_with_provenance(
         monitor,
         &loaded.issues,
         loaded.source,
         repo_path,
         now,
-    )
+    );
+    if let Some(error) = &loaded.live_error {
+        monitor.record_scan_error(
+            now,
+            format!("issue list failed; using cache fallback: {error}"),
+        );
+    }
+    summary
 }
 
 /// Issue #3225: GitHub-derived completion probe for the claim loop — "does
@@ -296,7 +316,7 @@ pub fn apply_autonomous_eligibility(
     repo_path: &Path,
     now: &str,
 ) {
-    if !monitor.autonomous_mode() {
+    if !monitor.config.enabled || !monitor.autonomous_mode() {
         return;
     }
     // Only fetch branch protection for candidates whose transient-retry backoff
@@ -341,7 +361,7 @@ pub fn advance_autonomous_in_flight(
     daemon_secret: &[u8],
     now: &str,
 ) {
-    if !monitor.autonomous_mode() {
+    if !monitor.config.enabled || !monitor.autonomous_mode() {
         return;
     }
     let base_branch = resolve_default_base_branch(repo_path);
@@ -420,24 +440,30 @@ pub fn advance_autonomous_in_flight(
                             pr,
                             reviewed_sha = %inputs.reviewed_sha,
                             token = %token,
-                            "autonomous gate PASS — arming auto-merge"
+                            "autonomous gate PASS — preparing auto-merge authority"
                         );
-                        monitor.begin_delivering(issue_number);
-                        // Bind the arm to the reviewed head SHA so GitHub refuses
-                        // to merge if the head advanced past what the gate reviewed.
-                        // codex #3217 review: announce the arm ONLY on success —
-                        // a failed arm must not leave a success toast while the
-                        // record would otherwise sit in Delivering with nothing
-                        // armed. Fail closed: escalate so the operator acts.
-                        if gwt_git::pr_status::merge_pr_auto(repo_path, pr, &inputs.reviewed_sha) {
-                            monitor.record_auto_merge_armed(issue_number);
-                        } else {
-                            tracing::warn!(issue = issue_number, pr, "auto-merge arm failed");
-                            monitor.escalate_to_needs_human(
+                        // The scan is a side-effect-free proposal builder. It
+                        // must never submit `gh pr merge --auto` from a cloned
+                        // monitor because the daemon may reject this result as
+                        // stale after a concurrent OFF/control transition. The
+                        // driver persists Prepared, fences Attempting in a
+                        // second transaction, then the serialized executor owns
+                        // the remote mutation and result reconciliation.
+                        let epoch = monitor.effect_authority_epoch();
+                        monitor.prepare_effect(crate::PendingIssueMonitorEffect {
+                            effect_id: format!(
+                                "arm:{issue_number}:{pr}:{}:{epoch}",
+                                inputs.reviewed_sha
+                            ),
+                            authority_epoch: epoch,
+                            attempt: 0,
+                            state: crate::IssueMonitorEffectState::Prepared,
+                            payload: crate::IssueMonitorEffectPayload::ArmAutoMerge {
                                 issue_number,
-                                "auto-merge arming failed after gate pass — arm manually or relaunch",
-                            );
-                        }
+                                pr_number: pr,
+                                reviewed_sha: inputs.reviewed_sha,
+                            },
+                        });
                     }
                     crate::issue_monitor_gate::GateAction::WaitForCi => {}
                     crate::issue_monitor_gate::GateAction::Remediate(reason) => {
@@ -566,18 +592,21 @@ pub fn github_remote_owner_and_repo(
 ) -> Result<(String, String), GitHubRemoteResolutionError> {
     let git_root = gwt_git::worktree::main_worktree_root(repo_path)
         .unwrap_or_else(|_| repo_path.to_path_buf());
-    let output = gwt_core::process::hidden_command("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&git_root)
-        .output()
-        .map_err(|error| GitHubRemoteResolutionError::CommandSpawnFailed(error.to_string()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &gwt_core::process_console::global(),
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        &["remote", "get-url", "origin"],
+        gwt_core::process_console::SpawnOptions::new("git remote get-url origin")
+            .current_dir(&git_root)
+            .forward_output(false),
+    )
+    .map_err(|error| GitHubRemoteResolutionError::CommandSpawnFailed(error.to_string()))?;
     github_remote_owner_and_repo_from_get_url_output(
-        output.status.success(),
-        output.status.code(),
-        &stdout,
-        &stderr,
+        output.success(),
+        output.exit_code,
+        &output.stdout,
+        &output.stderr,
     )
 }
 
@@ -758,6 +787,29 @@ mod tests {
                 && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)),
             "queued notice surfaces once a GUI connects"
         );
+    }
+
+    #[test]
+    fn payloads_surface_stalled_scan_through_status_error() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        });
+        crate::scan_issue_monitor_candidates(&mut monitor, &[], "2000-01-01T00:00:00Z");
+
+        let payloads = issue_monitor_daemon_payloads(&mut monitor, false);
+
+        let status = payloads
+            .iter()
+            .find(|payload| payload.event == "status")
+            .expect("status payload");
+        assert_eq!(status.payload["state"], "error");
+        assert_eq!(
+            status.payload["last_error"],
+            "Issue Monitor scan stalled; last scan at 2000-01-01T00:00:00Z"
+        );
+        assert_eq!(status.payload["last_scan_at"], "2000-01-01T00:00:00Z");
     }
 
     #[test]
@@ -944,6 +996,8 @@ mod tests {
         )
         .expect("live result");
         assert_eq!(live.source, IssueMonitorCandidateSource::Live);
+        assert!(live.authorizes_remote_effects());
+        assert_eq!(live.live_error, None);
         assert_eq!(live.issues, vec![live_issue]);
 
         let empty_live = resolve_loaded_issue_monitor_candidates(
@@ -952,6 +1006,7 @@ mod tests {
         )
         .expect("empty live result still authoritative");
         assert_eq!(empty_live.source, IssueMonitorCandidateSource::Live);
+        assert!(empty_live.authorizes_remote_effects());
         assert!(empty_live.issues.is_empty());
 
         let cache = resolve_loaded_issue_monitor_candidates(
@@ -960,6 +1015,8 @@ mod tests {
         )
         .expect("cache fallback");
         assert_eq!(cache.source, IssueMonitorCandidateSource::Cache);
+        assert!(!cache.authorizes_remote_effects());
+        assert_eq!(cache.live_error.as_deref(), Some("gh unavailable"));
         assert_eq!(cache.issues, vec![cached_issue]);
 
         let error = resolve_loaded_issue_monitor_candidates(
@@ -968,6 +1025,32 @@ mod tests {
         )
         .expect_err("no usable cache preserves live error");
         assert_eq!(error, "gh unavailable");
+    }
+
+    #[test]
+    fn cached_candidates_preserve_live_scan_error_after_read_model_refresh() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let loaded = LoadedIssueMonitorCandidates {
+            issues: vec![issue(42)],
+            source: IssueMonitorCandidateSource::Cache,
+            live_error: Some("operation deadline exceeded at issue-list stage".to_string()),
+        };
+
+        let summary = scan_loaded_issue_monitor_candidates(
+            &mut monitor,
+            &loaded,
+            dir.path(),
+            "2026-07-27T00:00:00Z",
+        );
+
+        assert_eq!(summary.scanned, 1);
+        assert_eq!(
+            monitor.status_view().last_error.as_deref(),
+            Some(
+                "issue list failed; using cache fallback: operation deadline exceeded at issue-list stage"
+            )
+        );
     }
 
     #[test]
@@ -1025,6 +1108,62 @@ mod tests {
         assert_eq!(
             github_remote_owner_and_repo(tmp.path()).expect("workspace home origin"),
             ("owner".to_string(), "repo".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_remote_owner_and_repo_stops_hanging_git_at_operation_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fake_git = temp.path().join("git");
+        std::fs::write(
+            &fake_git,
+            r#"#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--path-format=absolute" ]; then
+  printf '%s/.git\n' "$PWD"
+  exit 0
+fi
+if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ]; then
+  sleep 2
+  printf '%s\n' 'https://github.com/owner/repo.git'
+  exit 0
+fi
+exit 1
+"#,
+        )
+        .expect("write fake git");
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+        let path = std::env::join_paths(
+            std::iter::once(temp.path().to_path_buf()).chain(
+                std::env::var_os("PATH")
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(std::env::split_paths),
+            ),
+        )
+        .expect("compose PATH");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", path);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo path");
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(150),
+        );
+
+        let error = github_remote_owner_and_repo(&repo)
+            .expect_err("ambient deadline must stop the hanging git remote lookup");
+
+        assert!(error.to_string().contains("deadline"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1_500),
+            "hanging git outlived the deadline: {:?}",
+            started.elapsed()
         );
     }
 
@@ -1154,6 +1293,29 @@ mod tests {
             "off ⇒ phase unchanged, no network/merge",
         );
         assert!(monitor.take_pending_review_dispatches().is_empty());
+    }
+
+    #[test]
+    fn advance_autonomous_in_flight_is_noop_when_global_monitor_is_disabled() {
+        use crate::{AutonomousPhase, IssueMonitorConfig, IssueMonitorState};
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        monitor.set_autonomous_phase(50, AutonomousPhase::Reviewing);
+
+        advance_autonomous_in_flight(
+            &mut monitor,
+            &[],
+            "owner/repo",
+            std::path::Path::new("/tmp/repo"),
+            b"secret",
+            "2026-06-29T00:00:00Z",
+        );
+
+        assert_eq!(
+            monitor.autonomous_record(50).map(|record| record.phase),
+            Some(AutonomousPhase::Reviewing)
+        );
+        assert!(monitor.pending_effects().is_empty());
     }
 
     #[test]

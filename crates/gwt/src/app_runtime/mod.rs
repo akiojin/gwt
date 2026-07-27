@@ -639,20 +639,24 @@ impl ProjectTabRuntime {
     }
 }
 
-/// Issue #3222: whether a local Issue Monitor pass may claim + launch, or must
-/// only observe (scan for a fresh snapshot without side effects). ACK and
-/// window-close handling runs `Observe`; user-driven refresh/config flows run
-/// `ClaimAndLaunch`.
+/// Whether a GUI-local Issue Monitor pass may refresh the read-only cache.
+/// Successful daemon controls do not run a local pass at all: the daemon is the
+/// sole writer and broadcasts the committed projection. When publication is
+/// unavailable, `Scan` preserves the GUI's read model without granting Unix
+/// GUI code authority to execute remote effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueMonitorScanPolicy {
-    ClaimAndLaunch,
-    Observe,
+    Scan,
+    CacheOnly,
 }
 
-fn load_mutate_and_persist_issue_monitor_state<T>(
+fn load_mutate_and_persist_issue_monitor_state<T: Default>(
     prefs_path: &Path,
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
 ) -> (gwt::IssueMonitorState, T) {
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + std::time::Duration::from_millis(250),
+    );
     let mut mutation = Some(mutation);
     let mut monitor = None;
     let mut result = None;
@@ -676,24 +680,25 @@ fn load_mutate_and_persist_issue_monitor_state<T>(
             "issue monitor GUI prefs transaction failed"
         );
     }
-    let mut monitor = monitor.unwrap_or_else(|| {
+    let monitor = monitor.unwrap_or_else(|| {
         let prefs = gwt::load_issue_monitor_prefs(prefs_path)
             .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
         gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
     });
-    let result = result.unwrap_or_else(|| {
-        mutation
-            .take()
-            .expect("issue monitor prefs mutation remains available")(&mut monitor)
-    });
-    (monitor, result)
+    // A timed-out/failed transaction did not commit authority. Never render a
+    // volatile mutation as if it had won: callers receive canonical disk state
+    // and a neutral result while the original closure is dropped unapplied.
+    (monitor, result.unwrap_or_default())
 }
 
-fn rebase_mutate_and_persist_issue_monitor_state<T>(
+fn rebase_mutate_and_persist_issue_monitor_state<T: Default>(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
 ) -> T {
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + std::time::Duration::from_millis(250),
+    );
     let mut mutation = Some(mutation);
     let mut result = None;
     let recovery_baseline = monitor.prefs();
@@ -712,11 +717,12 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
             "issue monitor GUI prefs transaction failed"
         );
     }
-    result.unwrap_or_else(|| {
-        mutation
-            .take()
-            .expect("issue monitor prefs mutation remains available")(monitor)
-    })
+    if result.is_none() {
+        let prefs =
+            gwt::load_issue_monitor_prefs(prefs_path).unwrap_or_else(|_| recovery_baseline.clone());
+        *monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    }
+    result.unwrap_or_default()
 }
 
 pub(crate) type RuntimeIssueClient = Arc<dyn gwt_github::IssueClient>;
@@ -1306,7 +1312,7 @@ impl AppRuntime {
         let mut stale_window: Option<String> = None;
         let mut events = self.local_issue_monitor_events_with_policy(
             None,
-            IssueMonitorScanPolicy::Observe,
+            IssueMonitorScanPolicy::CacheOnly,
             |monitor| {
                 stale_window = monitor
                     .take_failed_window(issue_number)
@@ -1418,7 +1424,7 @@ impl AppRuntime {
         let requeue_windows = monitor_windows;
         self.local_issue_monitor_events_with_policy(
             None,
-            IssueMonitorScanPolicy::Observe,
+            IssueMonitorScanPolicy::CacheOnly,
             move |monitor| {
                 for window_id in &requeue_windows {
                     monitor.requeue_window(window_id);
@@ -1440,11 +1446,39 @@ impl AppRuntime {
         client_id: Option<&str>,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
-        self.local_issue_monitor_events_with_policy(
-            client_id,
-            IssueMonitorScanPolicy::ClaimAndLaunch,
-            apply,
-        )
+        let policy = if cfg!(unix) {
+            IssueMonitorScanPolicy::CacheOnly
+        } else {
+            // Windows does not yet have the long-running daemon. Its local
+            // fallback still uses the same durable proposal/fence/result
+            // protocol before any claim mutation.
+            IssueMonitorScanPolicy::Scan
+        };
+        self.local_issue_monitor_events_with_policy(client_id, policy, apply)
+    }
+
+    fn issue_monitor_control_result_events(
+        &mut self,
+        client_id: &str,
+        publication: Result<(), String>,
+        operation: &'static str,
+        apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
+        match publication {
+            // The daemon ACK confirms enqueue, and its committed status is
+            // broadcast asynchronously. Persisting the same non-idempotent
+            // authority mutation here would advance the epoch twice and leave
+            // the daemon's canonical generation stale.
+            Ok(()) => Vec::new(),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    operation,
+                    "issue monitor control daemon publish failed; using local fallback"
+                );
+                self.local_issue_monitor_events(client_id, apply_fallback)
+            }
+        }
     }
 
     fn quick_register_issue_events(
@@ -1606,12 +1640,59 @@ impl AppRuntime {
                 // claim anchor exceeded claim_ttl_secs so a crash cannot leak a slot.
                 monitor.expire_stale_unbound_launches(&now);
             });
-        let mut launch_requests = Vec::new();
-        let mut settings_required_request = None;
+        if policy == IssueMonitorScanPolicy::CacheOnly {
+            let (cached_issues, cache_error, origin_error) = {
+                // Remote resolution performs `git rev-parse` followed by
+                // `git remote get-url`. Give both commands one shared,
+                // still-UI-bounded budget; 250ms could expire between them on
+                // a loaded machine and misreport a configured origin as an
+                // unstartable process.
+                let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                );
+                let cache_root =
+                    gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
+                let (cached_issues, cache_error) =
+                    match gwt::issue_monitor_worker::load_cached_issue_monitor_candidates(
+                        &cache_root,
+                    ) {
+                        Ok(issues) => (issues, None),
+                        Err(error) => (Vec::new(), Some(format!("issue cache failed: {error}"))),
+                    };
+                let origin_error =
+                    gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
+                        .err()
+                        .map(|error| error.to_string());
+                (cached_issues, cache_error, origin_error)
+            };
+            rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+                gwt::scan_issue_monitor_candidates(monitor, &cached_issues, &now);
+                if monitor.config.enabled {
+                    monitor.set_gui_connected(true);
+                }
+                if let Some(error) = cache_error.as_deref().or(origin_error.as_deref()) {
+                    monitor.record_scan_error(&now, error);
+                }
+            });
+            return self.issue_monitor_snapshot_events_for(client_id, monitor);
+        }
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
         let mut loaded_for_commit = None;
+        #[cfg(not(unix))]
+        let mut local_repo_identity = None;
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
             Ok((owner, repo)) => {
+                #[cfg(not(unix))]
+                {
+                    // Existing Attempting/safety journal entries reconcile by
+                    // exact remote readback even when the candidate list is
+                    // unavailable or stale. Only *new* claim proposals below
+                    // require authoritative Live provenance.
+                    local_repo_identity = Some((owner.clone(), repo.clone()));
+                }
                 match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     &project_root,
                     &owner,
@@ -1631,61 +1712,27 @@ impl AppRuntime {
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
                         }
-                        // Issue #3222: ACK / window-close flows scan for a fresh
-                        // snapshot (inbox rows for the UI) but must NEVER claim
-                        // or launch — re-entrant claiming on a disk snapshot
-                        // that cannot see other in-flight claims is what
-                        // spawned duplicate windows past max_active.
-                        if monitor.config.enabled
-                            && matches!(policy, IssueMonitorScanPolicy::ClaimAndLaunch)
+                        #[cfg(not(unix))]
+                        if loaded.authorizes_remote_effects()
+                            && monitor.config.enabled
+                            && monitor.has_launch_profile()
                         {
-                            let launch_profile_ready = monitor.has_launch_profile();
-                            let active_cap = if launch_profile_ready {
-                                monitor.config.max_active.max(1)
-                            } else {
-                                0
-                            };
-                            if !launch_profile_ready {
-                                settings_required_request = monitor.inbox.iter().find_map(|item| {
-                                    (item.state == gwt::MonitorInboxState::Queued).then(|| {
-                                        (
-                                            item.issue.number,
-                                            gwt::issue_monitor::issue_monitor_linked_issue_kind(
-                                                &item.issue,
-                                            ),
-                                        )
-                                    })
-                                });
-                            } else if monitor.active_count() < active_cap {
+                            let active_cap = monitor.config.max_active.max(1);
+                            if monitor.active_count() < active_cap {
                                 let monitor_owner =
                                     format!("{}:{}", whoami::username(), std::process::id());
-                                match gwt_github::client::http::HttpIssueClient::from_gh_auth(
-                                    &owner, &repo,
-                                ) {
-                                    Ok(client) => {
-                                        launch_requests = monitor
-                                            .claim_next_launch_requests_with_probe(
-                                                &client,
-                                                &monitor_owner,
-                                                &now,
-                                                active_cap,
-                                                |issue_number| {
-                                                    gwt::issue_monitor_worker::issue_completed_by_merged_pr(
-                                                        &owner,
-                                                        &repo,
-                                                        issue_number,
-                                                    )
-                                                },
-                                            );
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            error = %error,
-                                            "issue monitor GitHub claim authentication unavailable"
-                                        );
-                                        monitor.record_launch_auth_required(now.as_str());
-                                    }
-                                }
+                                monitor.prepare_claim_effects_with_probe(
+                                    &monitor_owner,
+                                    &now,
+                                    active_cap,
+                                    |issue_number| {
+                                        gwt::issue_monitor_worker::issue_completed_by_merged_pr(
+                                            &owner,
+                                            &repo,
+                                            issue_number,
+                                        )
+                                    },
+                                );
                             }
                         }
                         loaded_for_commit = Some(loaded);
@@ -1701,16 +1748,275 @@ impl AppRuntime {
             }
         }
 
+        // Persist the refreshed read model only. Remote-effect proposals are
+        // produced by the daemon scan and executed only after its durable
+        // Prepared -> Attempting fence.
+        rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+            if let Some(loaded) = &loaded_for_commit {
+                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                    monitor,
+                    loaded,
+                    &project_root,
+                    &now,
+                );
+            }
+        });
+        #[cfg(not(unix))]
+        let mut launch_events = local_repo_identity
+            .map(|(owner, repo)| {
+                self.drive_local_issue_monitor_claim_effects(
+                    &prefs_path,
+                    &owner,
+                    &repo,
+                    &mut monitor,
+                )
+            })
+            .unwrap_or_default();
+        #[cfg(unix)]
         let mut launch_events = Vec::new();
-        let mut launch_failures = Vec::new();
-        if let Some((issue_number, linked_issue_kind)) = settings_required_request {
-            launch_events.extend(self.open_issue_monitor_settings_required_events(
-                client_id,
-                issue_number,
-                linked_issue_kind,
-            ));
+        launch_events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
+        launch_events
+    }
+
+    /// Windows compatibility driver. Until named-pipe daemon support exists,
+    /// the GUI owns a synchronous single-flight claim executor, but it follows
+    /// the same durable two-transaction authority protocol as the Unix daemon:
+    /// proposal commit -> Attempting fence commit -> remote call -> exact result
+    /// commit. It never executes arm/disarm effects; autonomous delivery remains
+    /// daemon-only on platforms that provide the runtime daemon.
+    #[cfg_attr(unix, allow(dead_code))]
+    fn drive_local_issue_monitor_claim_effects(
+        &mut self,
+        prefs_path: &Path,
+        owner: &str,
+        repo: &str,
+        monitor: &mut gwt::IssueMonitorState,
+    ) -> Vec<OutboundEvent> {
+        use gwt_github::client::OwnerMutationError;
+        use gwt_github::issue_auto_claim::{
+            acquire_claim_mutation, release_claim_mutation, ClaimAcquireOutcome, ClaimComment,
+            ClaimStatus,
+        };
+
+        enum Outcome {
+            Claim(gwt_github::client::OwnerMutationResult<ClaimAcquireOutcome>),
+            Revoked(
+                gwt_github::client::OwnerMutationResult<
+                    gwt_github::issue_auto_claim::ClaimReleaseOutcome,
+                >,
+            ),
+            Release(
+                gwt_github::client::OwnerMutationResult<
+                    gwt_github::issue_auto_claim::ClaimReleaseOutcome,
+                >,
+            ),
         }
-        for request in launch_requests {
+
+        let initial_count = monitor.pending_effects().len();
+        for _ in 0..initial_count.max(1) {
+            let effect = monitor
+                .pending_effects()
+                .iter()
+                .find(|effect| {
+                    effect.state == gwt::IssueMonitorEffectState::Attempting
+                        && matches!(
+                            effect.payload,
+                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
+                                | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
+                        )
+                })
+                .cloned()
+                .or_else(|| {
+                    rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |monitor| {
+                        let effect = monitor
+                            .pending_effects()
+                            .iter()
+                            .find(|effect| {
+                                effect.state == gwt::IssueMonitorEffectState::Prepared
+                                    && matches!(
+                                        effect.payload,
+                                        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
+                                            | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
+                                    )
+                            })
+                            .cloned()?;
+                        let key = effect.attempt_key();
+                        monitor.mark_pending_effect_attempting(&key);
+                        monitor
+                            .pending_effects()
+                            .iter()
+                            .find(|pending| pending.attempt_key() == key)
+                            .cloned()
+                    })
+                });
+            let Some(effect) = effect else { break };
+            let key = effect.attempt_key();
+            let authority_current = effect.authority_epoch == monitor.effect_authority_epoch()
+                && monitor.config.enabled;
+            let client = match gwt_github::client::http::HttpIssueClient::from_gh_auth(owner, repo)
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    monitor.record_launch_auth_required(
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    );
+                    tracing::warn!(error = %error, "local issue monitor claim auth unavailable");
+                    break;
+                }
+            };
+            let now = chrono::Utc::now();
+            let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let outcome = match &effect.payload {
+                gwt::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    claim_id,
+                    owner,
+                    heartbeat_at,
+                    expires_at,
+                    launched_work_id,
+                } if authority_current => {
+                    let ttl = chrono::DateTime::parse_from_rfc3339(heartbeat_at)
+                        .ok()
+                        .zip(chrono::DateTime::parse_from_rfc3339(expires_at).ok())
+                        .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
+                        .filter(|ttl: &u64| *ttl > 0)
+                        .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
+                    Outcome::Claim(acquire_claim_mutation(
+                        &client,
+                        gwt_github::IssueNumber(*issue_number),
+                        ClaimComment {
+                            comment_id: None,
+                            claim_id: claim_id.clone(),
+                            owner: owner.clone(),
+                            issue_number: *issue_number,
+                            status: ClaimStatus::Active,
+                            heartbeat_at: now_text.clone(),
+                            expires_at: (now + chrono::Duration::seconds(ttl as i64))
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            launched_work_id: launched_work_id.clone(),
+                        },
+                        &now_text,
+                    ))
+                }
+                gwt::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    claim_id,
+                    ..
+                } => Outcome::Revoked(release_claim_mutation(
+                    &client,
+                    gwt_github::IssueNumber(*issue_number),
+                    claim_id,
+                )),
+                gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number,
+                    claim_id,
+                } => Outcome::Release(release_claim_mutation(
+                    &client,
+                    gwt_github::IssueNumber(*issue_number),
+                    claim_id,
+                )),
+                _ => break,
+            };
+
+            // 0 = unknown/failed commit, 1 = settled, 2 = retry later.
+            let transition =
+                rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |monitor| {
+                    if !monitor.pending_effects().iter().any(|pending| {
+                        pending.state == gwt::IssueMonitorEffectState::Attempting
+                            && pending.attempt_key() == key
+                    }) {
+                        return 0_u8;
+                    }
+                    let current = monitor.effect_authority_epoch() == key.authority_epoch
+                        && monitor.config.enabled;
+                    match (&effect.payload, outcome) {
+                        (
+                            gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. },
+                            Outcome::Claim(Ok(ClaimAcquireOutcome::Acquired(claim))),
+                        ) => {
+                            monitor.complete_pending_effect(&key);
+                            if current {
+                                monitor.apply_confirmed_claim(
+                                    *issue_number,
+                                    claim.claim_id,
+                                    &now_text,
+                                );
+                            }
+                            1
+                        }
+                        (
+                            gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. },
+                            Outcome::Claim(Ok(ClaimAcquireOutcome::Blocked(winner)))
+                            | Outcome::Claim(Ok(ClaimAcquireOutcome::Lost {
+                                winning_claim: winner,
+                                ..
+                            })),
+                        ) => {
+                            monitor.complete_pending_effect(&key);
+                            if current {
+                                if let Some(issue) = monitor
+                                    .inbox_item(*issue_number)
+                                    .map(|item| item.issue.clone())
+                                {
+                                    monitor.record_blocked_by_claim(
+                                        issue,
+                                        winner.owner,
+                                        winner.expires_at,
+                                    );
+                                }
+                            }
+                            1
+                        }
+                        (
+                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
+                            Outcome::Revoked(Ok(_)),
+                        )
+                        | (
+                            gwt::IssueMonitorEffectPayload::ReleaseClaim { .. },
+                            Outcome::Release(Ok(_)),
+                        ) => {
+                            monitor.complete_pending_effect(&key);
+                            1
+                        }
+                        (
+                            gwt::IssueMonitorEffectPayload::ReleaseClaim { .. },
+                            Outcome::Release(Err(OwnerMutationError::PreSubmit(_))),
+                        ) => {
+                            monitor.retry_pending_effect(&key);
+                            2
+                        }
+                        (
+                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
+                            Outcome::Claim(Err(OwnerMutationError::PreSubmit(_))),
+                        ) if current => {
+                            monitor.retry_pending_effect(&key);
+                            2
+                        }
+                        (
+                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
+                            Outcome::Claim(Err(OwnerMutationError::PreSubmit(_)))
+                            | Outcome::Revoked(Err(OwnerMutationError::PreSubmit(_))),
+                        ) => {
+                            monitor.complete_pending_effect(&key);
+                            1
+                        }
+                        (
+                            _,
+                            Outcome::Claim(Err(OwnerMutationError::RemoteOutcomeUnknown(_)))
+                            | Outcome::Revoked(Err(OwnerMutationError::RemoteOutcomeUnknown(_)))
+                            | Outcome::Release(Err(OwnerMutationError::RemoteOutcomeUnknown(_))),
+                        ) => 0,
+                        _ => 0,
+                    }
+                });
+            if transition != 1 {
+                break;
+            }
+        }
+
+        let mut events = Vec::new();
+        let mut failures = Vec::new();
+        for request in monitor.take_pending_launch_requests() {
             let request_events = self.auto_launch_issue_monitor_request_events(
                 request.issue_number,
                 request.linked_issue_kind,
@@ -1722,59 +2028,18 @@ impl AppRuntime {
                 } if *issue_number == request.issue_number => Some(message.clone()),
                 _ => None,
             }) {
-                launch_failures.push((request.issue_number, message));
+                failures.push((request.issue_number, message));
             }
-            launch_events.extend(request_events);
+            events.extend(request_events);
         }
-        // Issue #3222: persist the claim-side state (Launching without a bound
-        // window yet, plus any recorded launch failures) so the next handler /
-        // the async launch ACK sees the in-flight claims and cannot re-claim
-        // them into duplicate windows.
-        rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
-            if let Some(loaded) = &loaded_for_commit {
-                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
-                    monitor,
-                    loaded,
-                    &project_root,
-                    &now,
-                );
-            }
-            for (issue_number, message) in launch_failures {
-                monitor.record_launch_failed(issue_number, message);
-            }
-        });
-        let mut events = launch_events;
-        events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
-        events
-    }
-
-    fn open_issue_monitor_settings_required_events(
-        &mut self,
-        client_id: Option<&str>,
-        issue_number: u64,
-        linked_issue_kind: gwt::LinkedIssueKind,
-    ) -> Vec<OutboundEvent> {
-        if self.launch_wizard.is_some() {
-            return Vec::new();
-        }
-        let target_client_id = client_id.unwrap_or("__issue_monitor__");
-        let events = self.open_issue_monitor_configure_wizard_events(
-            target_client_id,
-            issue_number,
-            linked_issue_kind,
-        );
-        if client_id.is_some() {
-            return events;
-        }
-        events
-            .into_iter()
-            .map(|mut event| {
-                if matches!(event.target, DispatchTarget::Client(_)) {
-                    event.target = DispatchTarget::Broadcast;
+        if !failures.is_empty() {
+            rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |monitor| {
+                for (issue_number, message) in failures {
+                    monitor.record_launch_failed(issue_number, message);
                 }
-                event
-            })
-            .collect()
+            });
+        }
+        events
     }
 
     fn local_issue_monitor_agent_failed_events(
@@ -1789,6 +2054,9 @@ impl AppRuntime {
         };
 
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
             .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
         let mut monitor =
@@ -2400,78 +2668,66 @@ impl AppRuntime {
                         return events;
                     }
                 }
-                match self.publish_issue_monitor_control(serde_json::json!({ "enabled": enabled }))
-                {
-                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
-                        monitor.set_enabled(enabled)
-                    }),
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %error,
-                            "issue monitor control daemon publish failed; using local fallback"
-                        );
-                        self.local_issue_monitor_events(&client_id, |monitor| {
-                            monitor.set_enabled(enabled)
-                        })
-                    }
-                }
+                let publication =
+                    self.publish_issue_monitor_control(serde_json::json!({ "enabled": enabled }));
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "enabled",
+                    |monitor| {
+                        let _ = monitor.set_enabled_with_effect_revocation(enabled);
+                    },
+                )
             }
             FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
-                match self.publish_issue_monitor_control(
+                let publication = self.publish_issue_monitor_control(
                     serde_json::json!({ "autonomous_mode": enabled }),
-                ) {
-                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
-                        monitor.set_autonomous_mode(enabled)
-                    }),
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %error,
-                            "issue monitor autonomous-mode daemon publish failed; using local fallback"
-                        );
-                        self.local_issue_monitor_events(&client_id, |monitor| {
-                            monitor.set_autonomous_mode(enabled)
-                        })
-                    }
-                }
+                );
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "autonomous-mode",
+                    |monitor| {
+                        let _ = monitor.set_autonomous_mode_with_effect_revocation(enabled);
+                    },
+                )
             }
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
-                match self.publish_issue_monitor_control(
+                let publication = self.publish_issue_monitor_control(
                     serde_json::json!({ "max_active_agents": max_active_agents }),
-                ) {
-                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
-                        monitor.set_max_active_agents(max_active_agents)
-                    }),
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %error,
-                            "issue monitor max-active daemon publish failed; using local fallback"
-                        );
-                        self.local_issue_monitor_events(&client_id, |monitor| {
-                            monitor.set_max_active_agents(max_active_agents)
-                        })
-                    }
-                }
+                );
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "max-active",
+                    |monitor| {
+                        if monitor.advance_effect_authority_epoch().is_some() {
+                            monitor.set_max_active_agents(max_active_agents);
+                        }
+                    },
+                )
             }
             FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
                 let priority_order = issue_numbers;
-                match self.publish_issue_monitor_control(
+                let publication = self.publish_issue_monitor_control(
                     serde_json::json!({ "priority_order": priority_order.clone() }),
-                ) {
-                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
-                        monitor.reorder_queued_issues(&priority_order)
-                    }),
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %error,
-                            "issue monitor reorder daemon publish failed; using local fallback"
-                        );
-                        self.local_issue_monitor_events(&client_id, |monitor| {
-                            monitor.reorder_queued_issues(&priority_order)
-                        })
-                    }
-                }
+                );
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "reorder",
+                    |monitor| {
+                        if monitor.advance_effect_authority_epoch().is_some() {
+                            monitor.reorder_queued_issues(&priority_order);
+                        }
+                    },
+                )
             }
-            FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events(&client_id, |_| {}),
+            FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events_with_policy(
+                Some(&client_id),
+                IssueMonitorScanPolicy::Scan,
+                |_| {},
+            ),
             FrontendEvent::QuickRegisterIssue { title, launch } => {
                 self.quick_register_issue_events(&client_id, title, launch)
             }
