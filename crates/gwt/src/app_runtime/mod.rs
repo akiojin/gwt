@@ -3419,27 +3419,6 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn resize_runtime_to_window(&self, window_id: &str) {
-        let Some(address) = self.window_lookup.get(window_id) else {
-            return;
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return;
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return;
-        };
-        if !window.preset.requires_process() {
-            return;
-        }
-        if let Some(runtime) = self.runtimes.get(window_id) {
-            if let Ok(mut pane) = runtime.pane.lock() {
-                let (cols, rows) = geometry_to_pty_size(&window.geometry);
-                let _ = pane.resize(cols.max(20), rows.max(6));
-            }
-        }
-    }
-
     pub(crate) fn tab(&self, tab_id: &str) -> Option<&ProjectTabRuntime> {
         self.tabs.iter().find(|tab| tab.id == tab_id)
     }

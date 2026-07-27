@@ -91,12 +91,20 @@
         attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        clearTerminalOutputBeforeSnapshot,
         createTerminalFitScheduler,
+        createTerminalSnapshotWriteCoordinator,
         createTerminalViewportRefreshScheduler,
+        decodeTerminalSnapshotBoundary,
         elementHasLayoutBox,
         gateTerminalInputForReadiness,
+        mergeTerminalActivationIntent,
+        observeTerminalFontMetricsReady,
         rearmRefreshOnVisible,
         runTerminalActivationSequence,
+        runTerminalFitRequest,
+        runTerminalRevealActivation,
+        takeTerminalActivationIntent,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
       import {
@@ -235,6 +243,10 @@
         },
         canWrite: canRefreshTerminalViewport,
         onFlush: (windowId) => {
+          const runtime = terminalMap.get(windowId);
+          if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
+            return;
+          }
           scheduleTerminalViewportRefresh(windowId);
         },
       });
@@ -2378,18 +2390,18 @@
             if (!runtime || !element) {
               return;
             }
-            if (!canRefreshTerminalViewport(windowId)) {
-              if (persist) {
-                sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
-              }
-              return;
-            }
-            runTerminalActivationSequence({
-              runtime,
-              windowId,
-              shouldFocus: false,
-              shouldPersistGeometry: persist,
-              sendGeometry,
+            return runTerminalFitRequest({
+              persist,
+              canFit: () => canRefreshTerminalViewport(windowId),
+              markPending: () => markTerminalViewportRefreshPending(windowId),
+              activate: () =>
+                runTerminalActivationSequence({
+                  runtime,
+                  windowId,
+                  shouldFocus: false,
+                  shouldPersistGeometry: persist,
+                  sendGeometry,
+                }),
             });
           }
         );
@@ -2669,10 +2681,7 @@
         return true;
       }
 
-      function rearmPendingTerminalViewportRefresh(
-        windowId,
-        { shouldPersistGeometry = true } = {},
-      ) {
+      function consumePendingTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
           return false;
@@ -2683,9 +2692,24 @@
           clearPendingRefresh: () => {
             runtime.viewportRefreshPending = false;
           },
-          scheduleRefresh: () => {
-            forceTerminalViewportRefresh(windowId, { shouldPersistGeometry });
-          },
+        });
+      }
+
+      function activateTerminalOnReveal(windowId) {
+        const activation = runTerminalRevealActivation({
+          schedulePendingOutput: () => terminalOutputBatcher.schedulePending(windowId),
+          consumePendingRefresh: () =>
+            consumePendingTerminalViewportRefresh(windowId),
+          scheduleActivation: ({ shouldPersistGeometry }) =>
+            scheduleTerminalFocusActivation(windowId, {
+              shouldPersistGeometry,
+              reason: "visibility_reveal",
+            }),
+        });
+        traceUi(UI_TRACE_EVENT.terminalVisibilityReveal, {
+          window_id: windowId,
+          pending_output_scheduled: activation.pendingOutputScheduled,
+          pending_refresh_consumed: activation.pendingRefreshConsumed,
         });
       }
 
@@ -2708,9 +2732,14 @@
           if (!canRefreshTerminalViewport(windowId)) {
             continue;
           }
-          if (!rearmPendingTerminalViewportRefresh(windowId)) {
-            scheduleTerminalViewportRefresh(windowId);
+          if (consumePendingTerminalViewportRefresh(windowId)) {
+            scheduleTerminalFocusActivation(windowId, {
+              shouldPersistGeometry: true,
+              reason: "visibility_restore",
+            });
+            continue;
           }
+          scheduleTerminalViewportRefresh(windowId);
         }
       }
 
@@ -2719,7 +2748,14 @@
         { shouldPersistGeometry = true, reason = "focus_activation" } = {},
       ) {
         const runtime = terminalMap.get(windowId);
-        if (!runtime || runtime.activationFrame !== null) {
+        if (!runtime) {
+          return;
+        }
+        runtime.pendingActivationIntent = mergeTerminalActivationIntent(
+          runtime.pendingActivationIntent,
+          { shouldPersistGeometry, reason },
+        );
+        if (runtime.activationFrame !== null) {
           return;
         }
         runtime.activationFrame = requestAnimationFrame(() => {
@@ -2728,6 +2764,14 @@
           if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
             return;
           }
+          const { intent, pendingIntent } = takeTerminalActivationIntent(
+            activeRuntime.pendingActivationIntent,
+          );
+          activeRuntime.pendingActivationIntent = pendingIntent;
+          if (!intent) {
+            return;
+          }
+          const { shouldPersistGeometry, reason } = intent;
           // Issue #2704 — suppress only the trailing `terminal.focus()`
           // step when a modal is open or a text input owns focus, so the
           // Clone Project URL/Search field (and other modal inputs) keep
@@ -3665,6 +3709,7 @@
           cleanup,
           viewportRefreshPending: false,
           activationFrame: null,
+          pendingActivationIntent: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
           // `isReady` flips to `true` AFTER the first
           // runTerminalActivationSequence has run inside the rAF below,
@@ -3678,6 +3723,7 @@
           // producing the post-launch corruption symptom.
           isReady: false,
           deferredWrites: [],
+          snapshotWriteCoordinator: null,
           hasOutput: false,
           // Issue #2937: bounds the focus-path reflow retry in
           // scheduleTerminalFocusActivation when the revealed container's
@@ -3690,6 +3736,37 @@
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
+        runtime.snapshotWriteCoordinator = createTerminalSnapshotWriteCoordinator({
+          terminal,
+          hasPendingSnapshot: () => pendingSnapshotMap.has(windowId),
+          takePendingSnapshot: () => {
+            if (!pendingSnapshotMap.has(windowId)) {
+              return { present: false };
+            }
+            const snapshot = pendingSnapshotMap.get(windowId);
+            pendingSnapshotMap.delete(windowId);
+            return { present: true, snapshot };
+          },
+          discardPendingSnapshot: () => pendingSnapshotMap.delete(windowId),
+          decodeSnapshot: (snapshot) =>
+            decodeTerminalSnapshotBoundary(decodeBase64(snapshot)),
+          isRuntimeCurrent: () => terminalMap.get(windowId) === runtime,
+          installLiveDecoder: (decoder) => decoderMap.set(windowId, decoder),
+          onSnapshotFailureSettled: () => {
+            decoderMap.set(windowId, new TextDecoder());
+            flushDeferredTerminalWrites(windowId, runtime);
+          },
+          onLatestSnapshotWritten: () => {
+            try {
+              forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
+            } finally {
+              flushDeferredTerminalWrites(windowId, runtime);
+            }
+          },
+          onError: (error, stage) => {
+            console.warn(`terminal snapshot ${stage} failed for ${windowId}`, error);
+          },
+        });
         // SPEC-2008 Phase 26.A / FR-057: schedule the initial fit
         // handshake. The handshake only completes once the runtime's
         // element is actually visible — see completeInitialFitHandshake.
@@ -3700,6 +3777,21 @@
         requestAnimationFrame(() => completeInitialFitHandshake(windowId));
 
         return runtime;
+      }
+
+      function flushDeferredTerminalWrites(windowId, runtime) {
+        if (
+          terminalMap.get(windowId) !== runtime ||
+          runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true ||
+          runtime.deferredWrites.length === 0
+        ) {
+          return;
+        }
+        const flush = runtime.deferredWrites;
+        runtime.deferredWrites = [];
+        for (const chunk of flush) {
+          writeOutput(windowId, chunk);
+        }
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
@@ -3753,10 +3845,8 @@
         runtime.handshakeAttempts = 0;
         runtime.isReady = true;
 
-        const snapshot = pendingSnapshotMap.get(windowId);
-        if (snapshot) {
-          replaceTerminalSnapshot(windowId, snapshot);
-          pendingSnapshotMap.delete(windowId);
+        if (pendingSnapshotMap.has(windowId)) {
+          runtime.snapshotWriteCoordinator.start();
         }
 
         const pending = pendingOutputMap.get(windowId);
@@ -3770,13 +3860,7 @@
         // Flush any terminal_output WebSocket bytes that arrived
         // between createTerminalRuntime returning and this handshake
         // firing.
-        if (runtime.deferredWrites.length) {
-          const flush = runtime.deferredWrites;
-          runtime.deferredWrites = [];
-          for (const chunk of flush) {
-            writeOutput(windowId, chunk);
-          }
-        }
+        flushDeferredTerminalWrites(windowId, runtime);
       }
 
       function writeOutput(windowId, base64) {
@@ -3799,7 +3883,10 @@
             // deferred queue. The createTerminalRuntime rAF flushes this
             // queue after the activation sequence so writes land at the
             // real cols/rows instead of xterm's default 80×24 grid.
-            if (runtime.isReady === false) {
+            if (
+              runtime.isReady === false ||
+              runtime.snapshotWriteCoordinator?.shouldDeferOutput() === true
+            ) {
               runtime.deferredWrites.push(base64);
               return;
             }
@@ -3813,11 +3900,14 @@
 
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
-        if (!runtime) {
-          pendingSnapshotMap.set(windowId, base64);
-          return;
-        }
-        if (base64) {
+        clearTerminalOutputBeforeSnapshot({
+          windowId,
+          runtime,
+          pendingOutputMap,
+          clearBatchedOutput: (id) => terminalOutputBatcher.clear(id),
+        });
+        pendingSnapshotMap.set(windowId, base64);
+        if (base64 && runtime) {
           runtime.hasOutput = true;
         }
         // SPEC-2008 Phase 26.A / FR-057: snapshots that arrive before
@@ -3825,25 +3915,10 @@
         // by the createTerminalRuntime rAF after activation completes.
         // This prevents a snapshot reset+write from rendering at xterm's
         // default 80×24 grid.
-        if (runtime.isReady === false) {
-          pendingSnapshotMap.set(windowId, base64);
+        if (!runtime || runtime.isReady === false) {
           return;
         }
-        terminalOutputBatcher.clear(windowId);
-        const decoder = decoderMap.get(windowId);
-        runtime.terminal.reset();
-        runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {
-          // SPEC-2008 Phase 26.B / FR-056: `terminal.reset()` wipes the
-          // internal viewport (scroll position, cell metrics caches,
-          // alternate-buffer marker). The previous code only scheduled a
-          // viewport refresh, which short-circuits whenever the window is
-          // hidden — leaving the next visible activation with stale state
-          // and dead scrollback wheel. Force the render-before-fit
-          // sequence directly so the viewport is consistent the moment the
-          // snapshot lands. We skip focus stealing (`shouldFocus: false`)
-          // because snapshot replays happen on background tabs too.
-          forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
-        });
+        runtime.snapshotWriteCoordinator.start();
       }
 
       function mockContentForPreset(preset) {
@@ -4983,23 +5058,7 @@
                 element,
                 shouldHide: true,
                 hasTerminal: terminalMap.has(windowId),
-                onReveal: () => {
-                  const pendingOutputScheduled =
-                    terminalOutputBatcher.schedulePending(windowId);
-                  const pendingRefreshRearmed = rearmPendingTerminalViewportRefresh(
-                    windowId,
-                    { shouldPersistGeometry: false },
-                  );
-                  traceUi(UI_TRACE_EVENT.terminalVisibilityReveal, {
-                    window_id: windowId,
-                    pending_output_scheduled: pendingOutputScheduled,
-                    pending_refresh_rearmed: pendingRefreshRearmed,
-                  });
-                  scheduleTerminalFocusActivation(windowId, {
-                    shouldPersistGeometry: false,
-                    reason: "visibility_reveal",
-                  });
-                },
+                onReveal: () => activateTerminalOnReveal(windowId),
               });
             }
             for (const windowId of visibility.removed) {
@@ -5061,23 +5120,7 @@
                 element,
                 shouldHide: !visibleWindowData(windowData),
                 hasTerminal: terminalMap.has(windowData.id),
-                onReveal: () => {
-                  const pendingOutputScheduled =
-                    terminalOutputBatcher.schedulePending(windowData.id);
-                  const pendingRefreshRearmed = rearmPendingTerminalViewportRefresh(
-                    windowData.id,
-                    { shouldPersistGeometry: false },
-                  );
-                  traceUi(UI_TRACE_EVENT.terminalVisibilityReveal, {
-                    window_id: windowData.id,
-                    pending_output_scheduled: pendingOutputScheduled,
-                    pending_refresh_rearmed: pendingRefreshRearmed,
-                  });
-                  scheduleTerminalFocusActivation(windowData.id, {
-                    shouldPersistGeometry: false,
-                    reason: "visibility_reveal",
-                  });
-                },
+                onReveal: () => activateTerminalOnReveal(windowData.id),
               });
             }
 
@@ -6487,6 +6530,13 @@
         beforeFan: () => {
           frontendUnits.projectWorkspaceShell.renderWindowList();
         },
+      });
+      observeTerminalFontMetricsReady({
+        fontsReady: document.fonts?.ready,
+        terminalIds: () => terminalMap.keys(),
+        canRefresh: canRefreshTerminalViewport,
+        scheduleFit: scheduleTerminalFit,
+        markPending: markTerminalViewportRefreshPending,
       });
       document.addEventListener("visibilitychange", () => {
         if (document.hidden) {

@@ -5433,15 +5433,52 @@ test("Terminal output writes are gated while windows are hidden", () => {
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
-  assert.match(
-    renderWorkspaceBody,
-    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?rearmPendingTerminalViewportRefresh\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?\}\s*\)[\s\S]*?scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"visibility_reveal"[\s\S]*?\}\s*\)/,
-    "hidden project-tab reveal must re-arm pending output before viewport/focus activation",
+  const revealActivationBody = extractFunctionBody(
+    appSource,
+    "activateTerminalOnReveal",
   );
   assert.match(
     renderWorkspaceBody,
-    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowData\.id\)[\s\S]*?rearmPendingTerminalViewportRefresh\(\s*windowData\.id,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?\}\s*\)[\s\S]*?scheduleTerminalFocusActivation\(\s*windowData\.id,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"visibility_reveal"[\s\S]*?\}\s*\)/,
-    "hidden window-tab reveal must re-arm pending output before viewport/focus activation",
+    /onReveal:\s*\(\)\s*=>\s*activateTerminalOnReveal\(windowId\)/,
+    "hidden project-tab reveal must delegate to the shared activation router",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /onReveal:\s*\(\)\s*=>\s*activateTerminalOnReveal\(windowData\.id\)/,
+    "hidden window-tab reveal must delegate to the shared activation router",
+  );
+  assert.equal(
+    (renderWorkspaceBody.match(/activateTerminalOnReveal\(/g) || []).length,
+    2,
+    "the two reveal surfaces must each enter the shared router exactly once",
+  );
+  assert.match(
+    revealActivationBody,
+    /runTerminalRevealActivation\(\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?consumePendingRefresh:[\s\S]*?consumePendingTerminalViewportRefresh\(windowId\)[\s\S]*?scheduleTerminalFocusActivation\(windowId,\s*\{[\s\S]*?shouldPersistGeometry,[\s\S]*?reason:\s*"visibility_reveal"/,
+    "the shared router must consume pending refresh and use one activation scheduler owner",
+  );
+  const revealRouterSource = readFileSync(
+    resolve(here, "../terminal-viewport-reflow.js"),
+    "utf8",
+  );
+  const revealRouterBody = extractFunctionBody(
+    revealRouterSource,
+    "runTerminalRevealActivation",
+  );
+  assert.match(
+    revealRouterBody,
+    /const\s+options\s*=\s*\{\s*shouldPersistGeometry:\s*true\s*\}/,
+    "reveal routing must always request authoritative persisted geometry",
+  );
+  assert.match(
+    revealRouterBody,
+    /scheduleActivation\(options\)/,
+    "every reveal must schedule one persisted activation after consuming pending refresh",
+  );
+  assert.doesNotMatch(
+    revealRouterBody,
+    /if\s*\(!pendingRefreshConsumed/,
+    "pending refresh state must not select a competing geometry owner",
   );
 });
 
