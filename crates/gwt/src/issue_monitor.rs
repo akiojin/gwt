@@ -509,6 +509,8 @@ impl IssueMonitorPrefs {
             .collect::<BTreeSet<_>>();
         self.launching_issues
             .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
+        self.pending_launch_deliveries
+            .retain(|delivery| !adopted_failure_numbers.contains(&delivery.issue_number));
         true
     }
 
@@ -2393,6 +2395,8 @@ impl IssueMonitorState {
             self.queue.retain(|queued| *queued != issue_number);
             self.pending_launches
                 .retain(|pending| pending.issue_number != issue_number);
+            self.pending_launch_deliveries
+                .retain(|delivery| delivery.issue_number != issue_number);
             if !self.launched_windows.contains_key(&issue_number) {
                 self.active_launches
                     .retain(|active| *active != issue_number);
@@ -2490,6 +2494,8 @@ impl IssueMonitorState {
             self.launching_claimed_at.remove(&issue_number);
             self.pending_launches
                 .retain(|pending| pending.issue_number != issue_number);
+            self.pending_launch_deliveries
+                .retain(|delivery| delivery.issue_number != issue_number);
             if let Some(item) = self
                 .inbox
                 .iter_mut()

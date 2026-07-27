@@ -15,7 +15,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use gwt::issue_monitor_worker::advance_autonomous_in_flight;
+use gwt::issue_monitor_worker::try_advance_autonomous_in_flight;
 use gwt::{
     AutonomousPhase, IssueMonitorConfig, IssueMonitorEffectPayload, IssueMonitorEffectState,
     IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorPrefs, IssueMonitorState,
@@ -80,6 +80,33 @@ fn reviewed_monitor() -> IssueMonitorState {
     monitor
 }
 
+fn init_repo_with_default_branch(repo: &Path) {
+    let init = gwt_core::process::hidden_command("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(repo)
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let origin_head = gwt_core::process::hidden_command("git")
+        .args([
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ])
+        .current_dir(repo)
+        .output()
+        .expect("set origin HEAD");
+    assert!(
+        origin_head.status.success(),
+        "git symbolic-ref failed: {}",
+        String::from_utf8_lossy(&origin_head.stderr)
+    );
+}
+
 #[test]
 fn autonomous_merge_pipeline_executes_through_mock_gh() {
     let tmp = std::env::temp_dir().join(format!("gwt-mockgh-{}", std::process::id()));
@@ -90,7 +117,7 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("chmod mock gh");
     let merge_log = tmp.join("merge.log");
     let repo = tmp.join("repo");
-    fs::create_dir_all(&repo).expect("mkdir repo");
+    init_repo_with_default_branch(&repo);
 
     let orig_path = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{}", bin.display(), orig_path));
@@ -106,7 +133,8 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
 
     // Tick 1: Reviewing → real fetchers (mock gh) → real gate → durable arm
     // proposal. The scan itself has no authority to invoke the remote mutation.
-    advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now);
+    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+        .expect("gate scan succeeds");
     assert_eq!(
         monitor.autonomous_record(42).map(|r| r.phase),
         Some(AutonomousPhase::Reviewing),
@@ -163,7 +191,8 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     );
 
     // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed ⇒ done.
-    advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now);
+    try_advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now)
+        .expect("delivery scan succeeds");
     assert!(
         monitor.autonomous_record(42).is_none(),
         "merged head (headRefOid) == reviewed_sha ⇒ record cleared (completion)",
