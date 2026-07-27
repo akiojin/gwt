@@ -31,6 +31,97 @@ impl LoadedIssueMonitorCandidates {
     }
 }
 
+/// External stage owned by one side-effect-free Issue Monitor scan proposal.
+/// The stage is retained in errors so operators and tests can distinguish the
+/// boundary that failed instead of observing a lossy bool/None/default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorScanStage {
+    RemoteResolution,
+    CandidateLoad,
+    MergeReconciliation,
+    DefaultBaseBranch,
+    BranchProtection,
+    OpenPrReadback,
+    HeadShaReadback,
+    PrDiffReadback,
+    StatusCheckReadback,
+    MergeCommitReadback,
+    ClaimCompletionReadback,
+    ProposalReturn,
+}
+
+impl IssueMonitorScanStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteResolution => "remote-resolution",
+            Self::CandidateLoad => "candidate-load",
+            Self::MergeReconciliation => "merge-reconciliation",
+            Self::DefaultBaseBranch => "default-base-branch",
+            Self::BranchProtection => "branch-protection",
+            Self::OpenPrReadback => "open-pr-readback",
+            Self::HeadShaReadback => "head-sha-readback",
+            Self::PrDiffReadback => "pr-diff-readback",
+            Self::StatusCheckReadback => "status-check-readback",
+            Self::MergeCommitReadback => "merge-commit-readback",
+            Self::ClaimCompletionReadback => "claim-completion-readback",
+            Self::ProposalReturn => "proposal-return",
+        }
+    }
+}
+
+impl fmt::Display for IssueMonitorScanStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueMonitorScanFailure {
+    pub stage: IssueMonitorScanStage,
+    pub detail: String,
+}
+
+impl IssueMonitorScanFailure {
+    pub fn new(stage: IssueMonitorScanStage, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for IssueMonitorScanFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "issue monitor scan failed at {} stage: {}",
+            self.stage, self.detail
+        )
+    }
+}
+
+impl std::error::Error for IssueMonitorScanFailure {}
+
+pub fn ensure_scan_deadline(stage: IssueMonitorScanStage) -> Result<(), IssueMonitorScanFailure> {
+    gwt_core::operation_deadline::ensure_remaining(stage.as_str())
+        .map(|_| ())
+        .map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))
+}
+
+pub(crate) fn run_scan_stage<T, E>(
+    stage: IssueMonitorScanStage,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, IssueMonitorScanFailure>
+where
+    E: fmt::Display,
+{
+    ensure_scan_deadline(stage)?;
+    let value =
+        operation().map_err(|error| IssueMonitorScanFailure::new(stage, error.to_string()))?;
+    ensure_scan_deadline(stage)?;
+    Ok(value)
+}
+
 pub fn issue_monitor_daemon_payloads(
     monitor: &mut IssueMonitorState,
     gui_connected: bool,
@@ -223,17 +314,8 @@ pub fn scan_loaded_issue_monitor_candidates(
 /// ANY branch, not just the monitor's own `work/issue-N`. Fails open (false)
 /// on errors so a transient gh failure never blocks real work.
 pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) -> bool {
-    match crate::cli::issue::fetch_linked_prs_via_gh(
-        owner,
-        repo,
-        gwt_github::IssueNumber(issue_number),
-    ) {
-        // codex #3226 review: only a PR that actually CLOSES the issue counts
-        // — a merged PR that merely references it (Refs #N / partial work)
-        // must not mark the issue done.
-        Ok(prs) => prs
-            .iter()
-            .any(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged")),
+    match try_issue_completed_by_merged_pr(owner, repo, issue_number) {
+        Ok(completed) => completed,
         Err(error) => {
             tracing::debug!(
                 issue = issue_number,
@@ -243,6 +325,26 @@ pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) 
             false
         }
     }
+}
+
+/// Checked completion probe used by scan proposal transactions.
+pub fn try_issue_completed_by_merged_pr(
+    owner: &str,
+    repo: &str,
+    issue_number: u64,
+) -> Result<bool, IssueMonitorScanFailure> {
+    let prs = run_scan_stage(IssueMonitorScanStage::ClaimCompletionReadback, || {
+        crate::cli::issue::fetch_linked_prs_via_gh(
+            owner,
+            repo,
+            gwt_github::IssueNumber(issue_number),
+        )
+    })?;
+    // codex #3226 review: only a PR that actually CLOSES the issue counts — a
+    // merged PR that merely references it (Refs #N / partial work) is not done.
+    Ok(prs
+        .iter()
+        .any(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged")))
 }
 
 /// Mark any active launched Issue whose work branch has a merged PR as
@@ -283,21 +385,47 @@ pub fn parse_default_base_branch(symbolic_ref_stdout: &str) -> String {
 /// Resolve the repo's default base branch (the branch autonomous PRs merge
 /// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
 pub fn resolve_default_base_branch(repo_path: &Path) -> String {
-    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
-        .unwrap_or_else(|_| repo_path.to_path_buf());
+    try_resolve_default_base_branch(repo_path).unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "issue monitor default base branch unavailable");
+        "main".to_string()
+    })
+}
+
+/// Checked default-base resolution used by deadline-integral scans.
+pub fn try_resolve_default_base_branch(
+    repo_path: &Path,
+) -> Result<String, IssueMonitorScanFailure> {
+    let git_root = run_scan_stage(IssueMonitorScanStage::DefaultBaseBranch, || {
+        gwt_git::worktree::main_worktree_root(repo_path)
+    })?;
     let hub = gwt_core::process_console::global();
-    let output = gwt_core::process_console::spawn_logged_blocking(
-        &hub,
-        gwt_core::process_console::ProcessKind::Git,
-        "git",
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-        gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
-            .current_dir(&git_root),
-    );
-    match output {
-        Ok(output) if output.success() => parse_default_base_branch(&output.stdout),
-        _ => "main".to_string(),
+    let output = run_scan_stage(IssueMonitorScanStage::DefaultBaseBranch, || {
+        gwt_core::process_console::spawn_logged_blocking(
+            &hub,
+            gwt_core::process_console::ProcessKind::Git,
+            "git",
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
+                .current_dir(&git_root),
+        )
+    })?;
+    if !output.success() {
+        return Err(IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::DefaultBaseBranch,
+            format!(
+                "git symbolic-ref origin/HEAD failed: {}",
+                output.stderr.trim()
+            ),
+        ));
     }
+    let branch = parse_default_base_branch(&output.stdout);
+    if output.stdout.trim().is_empty() || output.stdout.trim() == "origin/" {
+        return Err(IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::DefaultBaseBranch,
+            "git symbolic-ref origin/HEAD returned an empty branch",
+        ));
+    }
+    Ok(branch)
 }
 
 /// SPEC #3200 T-041: apply the pre-launch autonomous eligibility gate to every
@@ -314,8 +442,21 @@ pub fn apply_autonomous_eligibility(
     repo_path: &Path,
     now: &str,
 ) {
+    if let Err(error) = try_apply_autonomous_eligibility(monitor, issues, repo_slug, repo_path, now)
+    {
+        tracing::warn!(error = %error, "issue monitor autonomous eligibility scan failed");
+    }
+}
+
+pub fn try_apply_autonomous_eligibility(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    now: &str,
+) -> Result<(), IssueMonitorScanFailure> {
     if !monitor.config.enabled || !monitor.autonomous_mode() {
-        return;
+        return Ok(());
     }
     // Only fetch branch protection for candidates whose transient-retry backoff
     // window has elapsed (retry_ready) — a backed-off issue is skipped this scan
@@ -326,13 +467,16 @@ pub fn apply_autonomous_eligibility(
         .filter(|issue| monitor.retry_ready(issue.number, now))
         .collect();
     if candidates.is_empty() {
-        return;
+        return Ok(());
     }
-    let base_branch = resolve_default_base_branch(repo_path);
-    let protection = gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
+    let base_branch = try_resolve_default_base_branch(repo_path)?;
+    let protection = run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
+        gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, &base_branch)
+    })?;
     for issue in candidates {
         let _ = monitor.prepare_autonomous_candidate(issue, &protection, now);
     }
+    Ok(())
 }
 
 /// SPEC #3200 Option A (daemon-direct + token): advance every in-flight
@@ -359,10 +503,25 @@ pub fn advance_autonomous_in_flight(
     daemon_secret: &[u8],
     now: &str,
 ) {
-    if !monitor.config.enabled || !monitor.autonomous_mode() {
-        return;
+    if let Err(error) =
+        try_advance_autonomous_in_flight(monitor, issues, repo_slug, repo_path, daemon_secret, now)
+    {
+        tracing::warn!(error = %error, "issue monitor autonomous progress scan failed");
     }
-    let base_branch = resolve_default_base_branch(repo_path);
+}
+
+pub fn try_advance_autonomous_in_flight(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    daemon_secret: &[u8],
+    now: &str,
+) -> Result<(), IssueMonitorScanFailure> {
+    if !monitor.config.enabled || !monitor.autonomous_mode() {
+        return Ok(());
+    }
+    let base_branch = try_resolve_default_base_branch(repo_path)?;
     for issue_number in monitor.autonomous_in_flight_issues() {
         let Some(record) = monitor.autonomous_record(issue_number).cloned() else {
             continue;
@@ -376,10 +535,14 @@ pub fn advance_autonomous_in_flight(
                 else {
                     continue;
                 };
-                if let Some(pr) =
-                    gwt_git::pr_status::fetch_open_pr_number_for_branch(repo_path, &branch)
-                {
-                    if let Some(sha) = gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr) {
+                if let Some(pr) = run_scan_stage(IssueMonitorScanStage::OpenPrReadback, || {
+                    gwt_git::pr_status::try_fetch_open_pr_number_for_branch(repo_path, &branch)
+                })? {
+                    if let Some(sha) =
+                        run_scan_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                            gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                        })?
+                    {
                         monitor.begin_review(issue_number, pr, &sha);
                         let criteria = issues
                             .iter()
@@ -389,8 +552,10 @@ pub fn advance_autonomous_in_flight(
                                 crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
                             })
                             .unwrap_or_default();
-                        let diff = gwt_git::pr_status::fetch_pr_diff(repo_path, pr, 200_000)
-                            .unwrap_or_default();
+                        let diff = run_scan_stage(IssueMonitorScanStage::PrDiffReadback, || {
+                            gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
+                        })?
+                        .unwrap_or_default();
                         let linked_issue_kind = issues
                             .iter()
                             .find(|issue| issue.number == issue_number)
@@ -409,10 +574,16 @@ pub fn advance_autonomous_in_flight(
             }
             crate::AutonomousPhase::Reviewing => {
                 let Some(pr) = record.pr_number else { continue };
-                let protection =
-                    gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
-                let rollup = gwt_git::pr_status::fetch_pr_status_check_rollup(repo_path, pr);
-                let head = gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr).unwrap_or_default();
+                let protection = run_scan_stage(IssueMonitorScanStage::BranchProtection, || {
+                    gwt_git::branch_protection::try_fetch_branch_protection(repo_slug, &base_branch)
+                })?;
+                let rollup = run_scan_stage(IssueMonitorScanStage::StatusCheckReadback, || {
+                    gwt_git::pr_status::try_fetch_pr_status_check_rollup(repo_path, pr)
+                })?;
+                let head = run_scan_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                    gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                })?
+                .unwrap_or_default();
                 let body = issues
                     .iter()
                     .find(|issue| issue.number == issue_number)
@@ -485,10 +656,17 @@ pub fn advance_autonomous_in_flight(
                 // / merge-commit produces a NEW oid, while `headRefOid` is the head
                 // tip that was actually merged (== reviewed SHA when HEAD did not
                 // advance). Live-verified against real GitHub (SPEC #3200 layer-4).
-                if gwt_git::pr_status::fetch_pr_merge_commit_sha(repo_path, pr).is_some() {
+                if run_scan_stage(IssueMonitorScanStage::MergeCommitReadback, || {
+                    gwt_git::pr_status::try_fetch_pr_merge_commit_sha(repo_path, pr)
+                })?
+                .is_some()
+                {
                     let reviewed = record.reviewed_sha.clone().unwrap_or_default();
                     let merged_head =
-                        gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr).unwrap_or_default();
+                        run_scan_stage(IssueMonitorScanStage::HeadShaReadback, || {
+                            gwt_git::pr_status::try_fetch_pr_head_sha(repo_path, pr)
+                        })?
+                        .unwrap_or_default();
                     if crate::issue_monitor_authz::merged_sha_matches_reviewed(
                         &reviewed,
                         &merged_head,
@@ -511,6 +689,7 @@ pub fn advance_autonomous_in_flight(
             _ => {}
         }
     }
+    Ok(())
 }
 
 pub fn load_cached_issue_monitor_candidates(
@@ -1065,6 +1244,19 @@ mod tests {
             parse_github_remote_url("https://example.com/owner/repo"),
             None
         );
+    }
+
+    #[test]
+    fn proposal_return_deadline_expiry_is_stage_typed() {
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        let error = ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)
+            .expect_err("expired final deadline must reject the proposal");
+
+        assert_eq!(error.stage, IssueMonitorScanStage::ProposalReturn);
+        assert!(error.to_string().contains("proposal-return"));
     }
 
     #[test]

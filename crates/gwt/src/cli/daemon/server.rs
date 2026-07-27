@@ -635,52 +635,6 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                     }
                     publish_issue_monitor_payloads(&hub, &mut monitor);
                 }
-                (captured_revision, captured_authority_epoch, scan_result) = wait_for_issue_monitor_scan(&mut in_flight_scan) => {
-                    in_flight_scan = None;
-                    match scan_result {
-                        Ok(scanned_monitor) => {
-                            if accept_completed_issue_monitor_scan(
-                                &prefs_path,
-                                &mut monitor,
-                                scanned_monitor,
-                                captured_revision,
-                                revision,
-                                captured_authority_epoch,
-                            ) {
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
-                                effect_execution_requested =
-                                    !monitor.pending_effects().is_empty();
-                            } else {
-                                // A direct prefs writer (for example launch-
-                                // profile save or a daemon-unavailable GUI
-                                // fallback) may have advanced the authority
-                                // epoch. The rejected commit rebases that newer
-                                // snapshot into `monitor`; reconcile any adopted
-                                // journal before the coalesced retry.
-                                effect_execution_requested =
-                                    !monitor.pending_effects().is_empty();
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
-                                scan_requested = true;
-                                tokio::task::yield_now().await;
-                            }
-                        }
-                        Err(error) => {
-                            monitor = scan_join_failure_fallback(
-                                monitor.clone(),
-                                error.to_string(),
-                                chrono::Utc::now()
-                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                            );
-                            let Some(next_revision) = revision.checked_add(1) else {
-                                tracing::error!("issue monitor revision exhausted; stopping worker");
-                                break;
-                            };
-                            revision = next_revision;
-                            persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
-                            publish_issue_monitor_payloads(&hub, &mut monitor);
-                        }
-                    }
-                }
                 _ = wait_for_issue_monitor_deadline(scan_watchdog_deadline) => {
                     if expire_issue_monitor_scan_at_watchdog(
                         &mut in_flight_scan,
@@ -698,6 +652,84 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                         // started spawn_blocking work is not abortable and must
                         // remain the sole lane owner until it really joins.
                         scan_requested = true;
+                    }
+                }
+                (captured_revision, captured_authority_epoch, captured_deadline, scan_result) = wait_for_issue_monitor_scan(&mut in_flight_scan) => {
+                    in_flight_scan = None;
+                    match scan_result {
+                        Ok(Ok(scanned_monitor)) => {
+                            if accept_completed_issue_monitor_scan(
+                                &prefs_path,
+                                &mut monitor,
+                                scanned_monitor,
+                                captured_revision,
+                                revision,
+                                captured_authority_epoch,
+                                captured_deadline,
+                            ) {
+                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                effect_execution_requested =
+                                    !monitor.pending_effects().is_empty();
+                            } else if captured_revision == revision
+                                && Instant::now() >= captured_deadline
+                            {
+                                monitor.record_scan_error(
+                                    chrono::Utc::now()
+                                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                    "issue monitor scan completed at or after the outer watchdog boundary",
+                                );
+                                let Some(next_revision) = revision.checked_add(1) else {
+                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    break;
+                                };
+                                revision = next_revision;
+                                persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                scan_requested = true;
+                            } else {
+                                // A direct prefs writer (for example launch-
+                                // profile save or a daemon-unavailable GUI
+                                // fallback) may have advanced the authority
+                                // epoch. The rejected commit rebases that newer
+                                // snapshot into `monitor`; reconcile any adopted
+                                // journal before the coalesced retry.
+                                effect_execution_requested =
+                                    !monitor.pending_effects().is_empty();
+                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                scan_requested = true;
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                        Ok(Err(failure)) => {
+                            monitor = scan_failure_fallback(
+                                monitor.clone(),
+                                failure,
+                                chrono::Utc::now()
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            );
+                            let Some(next_revision) = revision.checked_add(1) else {
+                                tracing::error!("issue monitor revision exhausted; stopping worker");
+                                break;
+                            };
+                            revision = next_revision;
+                            persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+                            publish_issue_monitor_payloads(&hub, &mut monitor);
+                        }
+                        Err(error) => {
+                            monitor = scan_join_failure_fallback(
+                                monitor.clone(),
+                                error.to_string(),
+                                chrono::Utc::now()
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            );
+                            let Some(next_revision) = revision.checked_add(1) else {
+                                tracing::error!("issue monitor revision exhausted; stopping worker");
+                                break;
+                            };
+                            revision = next_revision;
+                            persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+                            publish_issue_monitor_payloads(&hub, &mut monitor);
+                        }
                     }
                 }
                 effect_result = wait_for_issue_monitor_effect(&mut in_flight_effect) => {
@@ -1097,7 +1129,9 @@ fn revoke_issue_monitor_effect_authority_for_shutdown(
 struct InFlightIssueMonitorScan {
     revision: u64,
     authority_epoch: u64,
-    handle: tokio::task::JoinHandle<crate::IssueMonitorState>,
+    handle: tokio::task::JoinHandle<
+        Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
+    >,
     deadline: Instant,
     watchdog_fired: bool,
 }
@@ -1131,7 +1165,11 @@ async fn wait_for_issue_monitor_scan(
 ) -> (
     u64,
     u64,
-    Result<crate::IssueMonitorState, tokio::task::JoinError>,
+    Instant,
+    Result<
+        Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
+        tokio::task::JoinError,
+    >,
 ) {
     let Some(scan) = in_flight.as_mut() else {
         return std::future::pending().await;
@@ -1139,6 +1177,7 @@ async fn wait_for_issue_monitor_scan(
     (
         scan.revision,
         scan.authority_epoch,
+        scan.deadline,
         (&mut scan.handle).await,
     )
 }
@@ -1763,15 +1802,19 @@ async fn scan_issue_monitor_once(
     // Keep a copy of the prior state so a `spawn_blocking` panic preserves it
     // instead of collapsing to a fresh default (see `scan_join_failure_fallback`).
     let preserved = monitor.clone();
-    spawn_issue_monitor_scan(scope, monitor, gui_connected)
-        .await
-        .unwrap_or_else(|error| {
-            scan_join_failure_fallback(
-                preserved,
-                error.to_string(),
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            )
-        })
+    match spawn_issue_monitor_scan(scope, monitor, gui_connected).await {
+        Ok(Ok(scanned)) => scanned,
+        Ok(Err(failure)) => scan_failure_fallback(
+            preserved,
+            failure,
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        Err(error) => scan_join_failure_fallback(
+            preserved,
+            error.to_string(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1779,7 +1822,9 @@ fn spawn_issue_monitor_scan(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
-) -> tokio::task::JoinHandle<crate::IssueMonitorState> {
+) -> tokio::task::JoinHandle<
+    Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
+> {
     let deadline = Instant::now() + ISSUE_MONITOR_SCAN_TIMEOUT;
     spawn_issue_monitor_scan_with_deadline(scope, monitor, gui_connected, deadline)
 }
@@ -1789,7 +1834,9 @@ fn spawn_issue_monitor_scan_with_deadline(
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
     deadline: Instant,
-) -> tokio::task::JoinHandle<crate::IssueMonitorState> {
+) -> tokio::task::JoinHandle<
+    Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
+> {
     tokio::task::spawn_blocking(move || {
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
@@ -1811,6 +1858,15 @@ fn scan_join_failure_fallback(
     now: String,
 ) -> crate::IssueMonitorState {
     preserved.record_scan_error(now, format!("issue monitor worker join failed: {error}"));
+    preserved
+}
+
+fn scan_failure_fallback(
+    mut preserved: crate::IssueMonitorState,
+    failure: crate::issue_monitor_worker::IssueMonitorScanFailure,
+    now: String,
+) -> crate::IssueMonitorState {
+    preserved.record_scan_error(now, failure.to_string());
     preserved
 }
 
@@ -1913,8 +1969,15 @@ fn accept_completed_issue_monitor_scan(
     captured_revision: u64,
     current_revision: u64,
     captured_authority_epoch: u64,
+    captured_deadline: Instant,
 ) -> bool {
-    if captured_revision != current_revision {
+    // Keep the scan's absolute deadline ambient through the synchronous prefs
+    // transaction. The commit helper installs its own prefs timeout, but the
+    // scoped deadline contract takes the minimum, so lock contention cannot
+    // let a result that was ready just before the watchdog boundary commit
+    // after that boundary.
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(captured_deadline);
+    if Instant::now() >= captured_deadline || captured_revision != current_revision {
         return false;
     }
     commit_issue_monitor_scan_if_current(prefs_path, monitor, scanned, captured_authority_epoch)
@@ -2619,7 +2682,9 @@ fn scan_issue_monitor_once_blocking(
     scope: RuntimeScope,
     mut monitor: crate::IssueMonitorState,
     gui_connected: bool,
-) -> crate::IssueMonitorState {
+) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
+    use crate::issue_monitor_worker::{IssueMonitorScanFailure, IssueMonitorScanStage};
+
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // Issue #3222: refresh the GUI-owned prefs fields (launch profile / tuning)
     // from disk. They have no control frame — the GUI writes them straight to
@@ -2634,25 +2699,26 @@ fn scan_issue_monitor_once_blocking(
     // #3223 follow-up (codex P2): expire claimed-but-never-acked launches past
     // claim_ttl_secs so a crashed launch cannot hold a slot forever.
     monitor.expire_stale_unbound_launches(&now);
-    let (owner, repo) =
-        match crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root) {
-            Ok(owner_repo) => owner_repo,
-            Err(error) => {
-                monitor.record_scan_error(now, error.to_string());
-                return monitor;
-            }
-        };
-    let loaded = match crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
-        &scope.project_root,
-        &owner,
-        &repo,
-    ) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            monitor.record_scan_error(now, format!("issue list failed: {error}"));
-            return monitor;
-        }
-    };
+    let (owner, repo) = crate::issue_monitor_worker::run_scan_stage(
+        IssueMonitorScanStage::RemoteResolution,
+        || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
+    )?;
+    let loaded = crate::issue_monitor_worker::run_scan_stage(
+        IssueMonitorScanStage::CandidateLoad,
+        || {
+            crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+                &scope.project_root,
+                &owner,
+                &repo,
+            )
+        },
+    )?;
+    if let Some(error) = &loaded.live_error {
+        return Err(IssueMonitorScanFailure::new(
+            IssueMonitorScanStage::CandidateLoad,
+            format!("live issue list failed; cache proposal discarded: {error}"),
+        ));
+    }
     let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
@@ -2660,25 +2726,26 @@ fn scan_issue_monitor_once_blocking(
         &scope.project_root,
         &now,
     );
-    if let Err(error) = crate::issue_monitor_worker::reconcile_issue_monitor_merges(
-        &mut monitor,
-        &scope.project_root,
-    ) {
-        let error = format!("issue monitor merge reconciliation failed: {error}");
-        tracing::warn!(error = %error, "issue monitor merge reconciliation failed");
-        monitor.record_scan_error(now.as_str(), error);
-    }
+    crate::issue_monitor_worker::run_scan_stage(
+        IssueMonitorScanStage::MergeReconciliation,
+        || {
+            crate::issue_monitor_worker::reconcile_issue_monitor_merges(
+                &mut monitor,
+                &scope.project_root,
+            )
+        },
+    )?;
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
     if loaded.authorizes_remote_effects() {
-        crate::issue_monitor_worker::apply_autonomous_eligibility(
+        crate::issue_monitor_worker::try_apply_autonomous_eligibility(
             &mut monitor,
             &loaded.issues,
             &format!("{owner}/{repo}"),
             &scope.project_root,
             &now,
-        );
+        )?;
     }
     monitor.recover_stuck_autonomous(&now);
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
@@ -2704,14 +2771,14 @@ fn scan_issue_monitor_once_blocking(
     // (PR detect → review → gate → merge → watch). No-op unless autonomous mode
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
     if loaded.authorizes_remote_effects() {
-        crate::issue_monitor_worker::advance_autonomous_in_flight(
+        crate::issue_monitor_worker::try_advance_autonomous_in_flight(
             &mut monitor,
             &loaded.issues,
             &format!("{owner}/{repo}"),
             &scope.project_root,
             daemon_run_secret(),
             &now,
-        );
+        )?;
     }
     if loaded.authorizes_remote_effects() && monitor.config.enabled && gui_connected {
         let active_cap = if monitor.has_launch_profile() {
@@ -2720,21 +2787,22 @@ fn scan_issue_monitor_once_blocking(
             0
         };
         if monitor.active_count() < active_cap {
-            monitor.prepare_claim_effects_with_probe(
+            monitor.try_prepare_claim_effects_with_probe(
                 &monitor_owner,
                 &now,
                 active_cap,
                 |issue_number| {
-                    crate::issue_monitor_worker::issue_completed_by_merged_pr(
+                    crate::issue_monitor_worker::try_issue_completed_by_merged_pr(
                         &owner,
                         &repo,
                         issue_number,
                     )
                 },
-            );
+            )?;
         }
     }
-    monitor
+    crate::issue_monitor_worker::ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)?;
+    Ok(monitor)
 }
 
 fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
@@ -3193,7 +3261,7 @@ mod tests {
         let fake_gh = temp_root.join("gh");
         fs::write(
             &fake_gh,
-            r#"#!/bin/sh
+            r###"#!/bin/sh
 case "$*" in
   *"--method POST"*|*"--method PATCH"*|*"-X POST"*|*"-X PATCH"*|*"pr merge"*)
     if [ -n "$GWT_FAKE_GH_MUTATION_MARKER" ]; then
@@ -3235,9 +3303,33 @@ if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "lis
   printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED"}]'
   exit 0
 fi
+if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
+  case "$*" in
+    *"/branches/"*"/protection"*)
+      printf '%s\n' 'operation deadline expired during branch protection' >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
+  case "$*" in
+    *"timelineItems"*)
+      printf '%s\n' 'operation deadline expired during linked PR readback' >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$GWT_FAKE_GH_MODE" = "branch_protection_fail" ]; then
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"## Acceptance Criteria\n- [ ] AC-1: verified by tests","labels":[{"name":"auto-improve"},{"name":"auto-merge"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "claim_probe_fail" ]; then
+  printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"auto-improve"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+  exit 0
+fi
 printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
 exit 0
-"#,
+"###,
         )
         .expect("write fake gh");
         use std::os::unix::fs::PermissionsExt;
@@ -4105,6 +4197,7 @@ exit 0
             4,
             5,
             base.effect_authority_epoch,
+            Instant::now() + Duration::from_secs(1),
         ));
         assert_eq!(
             crate::load_issue_monitor_prefs(&prefs_path)
@@ -4557,12 +4650,14 @@ exit 0
         let scope = sample_scope(&temp);
         let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
 
-        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect_err("missing origin is a typed scan failure");
 
-        let error = monitor
-            .status_view()
-            .last_error
-            .expect("origin resolution error");
+        assert_eq!(
+            failure.stage,
+            crate::issue_monitor_worker::IssueMonitorScanStage::RemoteResolution
+        );
+        let error = failure.detail;
         assert!(
             error.starts_with("Git origin remote is not configured"),
             "unexpected error: {error}"
@@ -4578,12 +4673,14 @@ exit 0
         let scope = sample_scope(&temp);
         let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
 
-        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect_err("non-GitHub origin is a typed scan failure");
 
-        let error = monitor
-            .status_view()
-            .last_error
-            .expect("origin resolution error");
+        assert_eq!(
+            failure.stage,
+            crate::issue_monitor_worker::IssueMonitorScanStage::RemoteResolution
+        );
+        let error = failure.detail;
         assert_eq!(
             error,
             "Git origin remote is not a GitHub URL: https://example.com/owner/repo.git"
@@ -4627,20 +4724,145 @@ exit 0
             },
         );
 
-        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
-        let status = monitor.status_view();
-        let error = status.last_error.expect("merge reconciliation error");
-        assert!(error.contains("merge reconciliation failed"), "{error}");
+        let preserved = monitor.clone();
+        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect_err("merge reconciliation failure stays typed");
+        assert_eq!(
+            failure.stage,
+            crate::issue_monitor_worker::IssueMonitorScanStage::MergeReconciliation
+        );
+        let error = failure.to_string();
+        assert!(error.contains("merge-reconciliation"), "{error}");
         assert!(error.contains("gh merged query failed"), "{error}");
+        let monitor =
+            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        let status = monitor.status_view();
         assert_eq!(
             status.active_count, 1,
             "query failure keeps the active slot"
         );
-        assert_eq!(
-            monitor.inbox_item(43).map(|item| item.state),
-            Some(crate::MonitorInboxState::Launched),
-            "query failure must not fabricate a merged transition"
+        assert!(monitor
+            .prefs()
+            .launched_issues
+            .iter()
+            .any(|launched| launched.issue_number == 43));
+        assert!(!monitor.prefs().merged_issues.contains(&43));
+    }
+
+    #[test]
+    fn daemon_scan_preserves_branch_protection_transport_failure_stage() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "branch_protection_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let symbolic_ref = gwt_core::process::hidden_command("git")
+            .args([
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("set origin HEAD");
+        assert!(symbolic_ref.success());
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let preserved = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
         );
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &preserved.prefs(),
+        )
+        .expect("seed issue monitor prefs");
+
+        let failure = super::scan_issue_monitor_once_blocking(scope, preserved.clone(), false)
+            .expect_err("branch-protection transport failure stays typed");
+
+        assert_eq!(
+            failure.stage,
+            crate::issue_monitor_worker::IssueMonitorScanStage::BranchProtection
+        );
+        assert!(failure.detail.contains("deadline"), "{failure}");
+        assert!(preserved.pending_effects().is_empty());
+        assert!(preserved.prefs().autonomous_records.is_empty());
+    }
+
+    #[test]
+    fn daemon_scan_preserves_claim_completion_readback_failure_stage() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "claim_probe_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let mut preserved = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 1,
+                launch_profile: Some(sample_issue_monitor_profile()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        preserved.set_gui_connected(true);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &preserved.prefs(),
+        )
+        .expect("seed issue monitor prefs");
+
+        let failure = super::scan_issue_monitor_once_blocking(scope, preserved.clone(), true)
+            .expect_err("claim completion readback failure stays typed");
+
+        assert_eq!(
+            failure.stage,
+            crate::issue_monitor_worker::IssueMonitorScanStage::ClaimCompletionReadback
+        );
+        assert!(failure.detail.contains("linked PR readback"), "{failure}");
+        assert!(preserved.pending_effects().is_empty());
+        assert!(preserved.prefs().launching_issues.is_empty());
     }
 
     #[test]
@@ -4689,7 +4911,8 @@ exit 0
             },
         );
 
-        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("merged scan succeeds");
 
         assert_eq!(monitor.status_view().active_count, 0);
         assert_eq!(
@@ -4732,7 +4955,8 @@ exit 0
         let monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
 
-        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect("live scan succeeds");
         super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
 
         assert_eq!(
@@ -6027,7 +6251,7 @@ exit 1
         let handle = tokio::task::spawn_blocking(move || {
             started_tx.send(()).expect("signal started scan");
             release_rx.recv().expect("release scan");
-            late
+            Ok(late)
         });
         started_rx
             .recv_timeout(Duration::from_secs(1))
@@ -6060,7 +6284,7 @@ exit 1
             .is_some_and(|error| error.contains("outer watchdog stage")));
 
         release_tx.send(()).expect("release scan");
-        let (captured_revision, captured_epoch, result) = tokio::time::timeout(
+        let (captured_revision, captured_epoch, captured_deadline, result) = tokio::time::timeout(
             Duration::from_secs(1),
             super::wait_for_issue_monitor_scan(&mut in_flight),
         )
@@ -6068,7 +6292,9 @@ exit 1
         .expect("started scan eventually joins");
         assert_eq!(captured_revision, 7);
         assert_eq!(captured_epoch, 11);
-        let late_result = result.expect("late scan result remains inspectable");
+        let late_result = result
+            .expect("late scan task joins")
+            .expect("late scan result remains inspectable");
         assert_eq!(late_result.status_view().max_active_agents, 9);
         let revision_after_watchdog = 8;
         assert!(!super::accept_completed_issue_monitor_scan(
@@ -6078,6 +6304,7 @@ exit 1
             captured_revision,
             revision_after_watchdog,
             captured_epoch,
+            captured_deadline,
         ));
         assert_eq!(
             crate::load_issue_monitor_prefs(&prefs_path)
@@ -6104,12 +6331,157 @@ exit 1
             revision_after_watchdog,
             revision_after_watchdog,
             11,
+            Instant::now() + Duration::from_secs(1),
         ));
         assert_eq!(
             canonical.status_view().last_scan_at.as_deref(),
             Some("2026-07-27T00:00:01Z")
         );
         assert_eq!(canonical.status_view().last_error, None);
+    }
+
+    #[test]
+    fn completed_scan_at_deadline_is_rejected_without_persisting_proposals() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut canonical = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            initial.clone(),
+        );
+        let mut scanned = canonical.clone();
+        assert!(
+            scanned.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
+                "claim:42:late",
+                7,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    claim_id: "claim-late".to_string(),
+                    owner: "host/session".to_string(),
+                    heartbeat_at: "2026-07-28T00:00:00Z".to_string(),
+                    expires_at: "2026-07-28T00:30:00Z".to_string(),
+                    launched_work_id: Some("work/issue-42".to_string()),
+                },
+            ))
+        );
+
+        assert!(!super::accept_completed_issue_monitor_scan(
+            &prefs_path,
+            &mut canonical,
+            scanned,
+            9,
+            9,
+            7,
+            Instant::now(),
+        ));
+        assert!(crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload prefs")
+            .pending_effects
+            .is_empty());
+        assert!(canonical.pending_effects().is_empty());
+    }
+
+    #[test]
+    fn completed_scan_cannot_wait_past_deadline_for_prefs_lock_then_commit() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
+        let mut canonical = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            initial.clone(),
+        );
+        let mut scanned = canonical.clone();
+        assert!(
+            scanned.prepare_effect(crate::PendingIssueMonitorEffect::prepared(
+                "claim:42:lock-boundary",
+                7,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    claim_id: "claim-lock-boundary".to_string(),
+                    owner: "host/session".to_string(),
+                    heartbeat_at: "2026-07-28T00:00:00Z".to_string(),
+                    expires_at: "2026-07-28T00:30:00Z".to_string(),
+                    launched_work_id: Some("work/issue-42".to_string()),
+                },
+            ))
+        );
+        let deadline = Instant::now() + Duration::from_millis(30);
+        let thread_prefs_path = prefs_path.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal accept start");
+            let accepted = super::accept_completed_issue_monitor_scan(
+                &thread_prefs_path,
+                &mut canonical,
+                scanned,
+                9,
+                9,
+                7,
+                deadline,
+            );
+            (accepted, canonical)
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("accept thread started");
+        std::thread::sleep(Duration::from_millis(80));
+        FileExt::unlock(&lock).expect("release prefs lock after scan deadline");
+        let (accepted, canonical) = join.join().expect("accept thread joins");
+
+        assert!(!accepted);
+        assert!(canonical.pending_effects().is_empty());
+        assert!(crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload prefs")
+            .pending_effects
+            .is_empty());
+    }
+
+    #[test]
+    fn typed_scan_failure_preserves_the_canonical_state_and_journal() {
+        let effect = crate::PendingIssueMonitorEffect::prepared(
+            "release:claim:42",
+            7,
+            crate::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+            },
+        );
+        let preserved = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: 7,
+                pending_effects: vec![effect.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let failure = crate::issue_monitor_worker::IssueMonitorScanFailure::new(
+            crate::issue_monitor_worker::IssueMonitorScanStage::BranchProtection,
+            "operation deadline expired",
+        );
+
+        let failed =
+            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+
+        assert_eq!(failed.effect_authority_epoch(), 7);
+        assert_eq!(failed.pending_effects(), &[effect]);
+        assert!(failed
+            .status_view()
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("branch-protection")));
     }
 
     #[tokio::test]
@@ -7267,7 +7639,12 @@ exit 1
             legacy_failed_prefs(&scope.project_root),
         );
 
-        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let preserved = monitor.clone();
+        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect_err("remote failure stays typed");
+        let mut monitor =
+            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
 
         assert_eq!(
             monitor.prefs().legacy_git_launch_failure_migration_version,
@@ -7688,7 +8065,12 @@ exit 1
             },
         );
 
-        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let preserved = monitor.clone();
+        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
+            .expect_err("remote failure stays typed");
+        let mut monitor =
+            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
         let prefs = monitor.prefs();
 
         assert_eq!(

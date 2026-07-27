@@ -1286,6 +1286,11 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
             .open(&tmp)?;
         scratch.write_all(content)?;
         scratch.sync_all()?;
+        // Deadline-aware transactions may spend their remaining budget on
+        // serialization or scratch fsync. Recheck immediately before the
+        // canonical rename so an expired proposal cannot become visible after
+        // its acceptance boundary.
+        gwt_core::operation_deadline::ensure_remaining("Issue Monitor durable rename")?;
         fs::rename(&tmp, path)?;
         #[cfg(test)]
         if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE")
@@ -3265,9 +3270,27 @@ impl IssueMonitorState {
         active_cap: usize,
         completed_probe: impl Fn(u64) -> bool,
     ) -> usize {
+        match self.try_prepare_claim_effects_with_probe(owner, now, active_cap, |issue_number| {
+            Ok::<bool, std::convert::Infallible>(completed_probe(issue_number))
+        }) {
+            Ok(prepared) => prepared,
+            Err(never) => match never {},
+        }
+    }
+
+    /// Fallible proposal planner for deadline-integral scan transactions. A
+    /// probe error is returned to the scan owner instead of being collapsed to
+    /// `false`; callers discard the cloned proposal state on error.
+    pub fn try_prepare_claim_effects_with_probe<E>(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
+    ) -> Result<usize, E> {
         let max_active = self.config.max_active.max(1).min(active_cap);
         if !self.config.enabled || !self.gui_connected || max_active == 0 {
-            return 0;
+            return Ok(0);
         }
         let pending_claims = self
             .pending_effects
@@ -3281,7 +3304,7 @@ impl IssueMonitorState {
             .saturating_sub(self.active_launches.len())
             .saturating_sub(pending_claims.len());
         if available == 0 {
-            return 0;
+            return Ok(0);
         }
 
         let mut prepared = 0;
@@ -3295,7 +3318,7 @@ impl IssueMonitorState {
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
                 continue;
             };
-            if completed_probe(issue_number) {
+            if completed_probe(issue_number)? {
                 self.record_merged(issue_number);
                 continue;
             }
@@ -3322,7 +3345,7 @@ impl IssueMonitorState {
                 available -= 1;
             }
         }
-        prepared
+        Ok(prepared)
     }
 
     pub fn claim_next_launch_requests_with_active_cap<C: IssueClient>(
@@ -5099,6 +5122,38 @@ mod tests {
     }
 
     #[test]
+    fn claim_proposal_planning_preserves_completion_probe_failure() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-28T00:00:00Z",
+        );
+
+        let error = monitor
+            .try_prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-28T00:00:01Z",
+                2,
+                |issue_number| {
+                    if issue_number == 43 {
+                        Err("merged-pr readback failed")
+                    } else {
+                        Ok(false)
+                    }
+                },
+            )
+            .expect_err("completion probe failure must not become false");
+
+        assert_eq!(error, "merged-pr readback failed");
+    }
+
+    #[test]
     fn claim_proposals_use_distinct_uuid_identity_and_preserve_it_across_retry_restart() {
         fn prepare(owner: &str) -> IssueMonitorState {
             let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
@@ -5461,6 +5516,33 @@ mod tests {
             "failed atomic write must not leave a partial scratch file"
         );
         assert!(path.is_dir(), "failed rename leaves destination untouched");
+    }
+
+    #[test]
+    fn expired_deadline_rejects_durable_write_before_canonical_rename() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("issue-monitor.json");
+        fs::write(&path, b"original").expect("seed canonical bytes");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        let error = super::durable_atomic_write(&path, b"replacement")
+            .expect_err("expired deadline must reject the canonical rename");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(fs::read(&path).expect("read canonical bytes"), b"original");
+        let scratch_prefix = ".issue-monitor.json.tmp-";
+        assert!(
+            fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(scratch_prefix)),
+            "deadline rejection must clean the scratch file"
+        );
     }
 
     #[cfg(not(unix))]

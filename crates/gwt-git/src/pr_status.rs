@@ -699,14 +699,22 @@ pub fn extract_status_check_rollup(json: &str) -> String {
 
 /// Find the open PR number for a work `branch` (fail-closed `Option`).
 pub fn fetch_open_pr_number_for_branch(repo_path: &Path, branch: &str) -> Option<u64> {
-    fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh_command)
+    try_fetch_open_pr_number_for_branch(repo_path, branch)
+        .ok()
+        .flatten()
 }
 
-fn fetch_open_pr_number_for_branch_with<F>(
+/// Checked variant used by scan transactions that must preserve transport and
+/// deadline failures instead of conflating them with "no open PR".
+pub fn try_fetch_open_pr_number_for_branch(repo_path: &Path, branch: &str) -> Result<Option<u64>> {
+    try_fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh_command)
+}
+
+fn try_fetch_open_pr_number_for_branch_with<F>(
     repo_path: &Path,
     branch: &str,
     mut run_gh: F,
-) -> Option<u64>
+) -> Result<Option<u64>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
@@ -715,50 +723,102 @@ where
         &[
             "pr", "list", "--head", branch, "--state", "open", "--json", "number",
         ],
-    )
-    .ok()?;
+    )?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr list open branch: {}",
+            output.stderr.trim()
+        )));
     }
-    parse_open_pr_number(&output.stdout)
+    let _: Vec<serde_json::Value> = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr list open branch JSON: {error}")))?;
+    Ok(parse_open_pr_number(&output.stdout))
+}
+
+#[cfg(test)]
+fn fetch_open_pr_number_for_branch_with<F>(repo_path: &Path, branch: &str, run_gh: F) -> Option<u64>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    try_fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh)
+        .ok()
+        .flatten()
 }
 
 /// Fetch a PR's head SHA — the SHA the gate binds the review/merge to
 /// (fail-closed `Option`).
 pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
-    fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+    try_fetch_pr_head_sha(repo_path, number).ok().flatten()
 }
 
-fn fetch_pr_head_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_head_sha_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<Option<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "headRefOid"]).ok()?;
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "headRefOid"])?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr view headRefOid: {}",
+            output.stderr.trim()
+        )));
     }
-    parse_pr_head_sha(&output.stdout)
+    let _: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view headRefOid JSON: {error}")))?;
+    Ok(parse_pr_head_sha(&output.stdout))
 }
 
 /// Fetch a PR's `statusCheckRollup` array JSON (fail-closed: `"[]"` on any
 /// failure so the gate treats CI as vacuous, never a pass).
 pub fn fetch_pr_status_check_rollup(repo_path: &Path, number: u64) -> String {
-    fetch_pr_status_check_rollup_with(repo_path, number, run_gh_command)
+    try_fetch_pr_status_check_rollup(repo_path, number).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn fetch_pr_status_check_rollup_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> String
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_status_check_rollup(repo_path: &Path, number: u64) -> Result<String> {
+    try_fetch_pr_status_check_rollup_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_status_check_rollup_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<String>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    match run_gh(
+    let output = run_gh(
         repo_path,
         &["pr", "view", &number, "--json", "statusCheckRollup"],
-    ) {
-        Ok(output) if output.success => extract_status_check_rollup(&output.stdout),
-        _ => "[]".to_string(),
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view statusCheckRollup: {}",
+            output.stderr.trim()
+        )));
     }
+    let _: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view statusCheckRollup JSON: {error}")))?;
+    Ok(extract_status_check_rollup(&output.stdout))
+}
+
+#[cfg(test)]
+fn fetch_pr_status_check_rollup_with<F>(repo_path: &Path, number: u64, run_gh: F) -> String
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    try_fetch_pr_status_check_rollup_with(repo_path, number, run_gh)
+        .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Fetch a PR's unified diff for the independent review agent. Capped to
@@ -766,24 +826,53 @@ where
 /// `None` on any gh failure (the review then runs without a diff and, being
 /// adversarial + fail-closed, will reject).
 pub fn fetch_pr_diff(repo_path: &Path, number: u64, max_bytes: usize) -> Option<String> {
-    fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+    try_fetch_pr_diff(repo_path, number, max_bytes)
+        .ok()
+        .flatten()
 }
 
-fn fetch_pr_diff_with<F>(
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_diff(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+fn try_fetch_pr_diff_with<F>(
     repo_path: &Path,
     number: u64,
     max_bytes: usize,
     mut run_gh: F,
-) -> Option<String>
+) -> Result<Option<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    let output = run_gh(repo_path, &["pr", "diff", &number]).ok()?;
+    let output = run_gh(repo_path, &["pr", "diff", &number])?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr diff: {}",
+            output.stderr.trim()
+        )));
     }
-    Some(truncate_diff(&output.stdout, max_bytes))
+    Ok(Some(truncate_diff(&output.stdout, max_bytes)))
+}
+
+#[cfg(test)]
+fn fetch_pr_diff_with<F>(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+    run_gh: F,
+) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh)
+        .ok()
+        .flatten()
 }
 
 fn truncate_diff(diff: &str, max_bytes: usize) -> String {
@@ -1086,24 +1175,78 @@ pub fn parse_pr_merge_commit_sha(json: &str) -> Option<String> {
 
 /// Fetch a merged PR's merge-commit SHA (fail-closed `Option`).
 pub fn fetch_pr_merge_commit_sha(repo_path: &Path, number: u64) -> Option<String> {
-    fetch_pr_merge_commit_sha_with(repo_path, number, run_gh_command)
+    try_fetch_pr_merge_commit_sha(repo_path, number)
+        .ok()
+        .flatten()
 }
 
-fn fetch_pr_merge_commit_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_merge_commit_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    try_fetch_pr_merge_commit_sha_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_merge_commit_sha_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<Option<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "mergeCommit"]).ok()?;
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "mergeCommit"])?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr view mergeCommit: {}",
+            output.stderr.trim()
+        )));
     }
-    parse_pr_merge_commit_sha(&output.stdout)
+    let _: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view mergeCommit JSON: {error}")))?;
+    Ok(parse_pr_merge_commit_sha(&output.stdout))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_pr_readbacks_preserve_runner_failures() {
+        let failure = || Err(GwtError::Git("operation deadline expired".to_string()));
+
+        assert!(try_fetch_open_pr_number_for_branch_with(
+            Path::new("/repo"),
+            "work/issue-42",
+            |_, _| failure(),
+        )
+        .expect_err("open PR readback must preserve failure")
+        .to_string()
+        .contains("deadline"));
+        assert!(
+            try_fetch_pr_head_sha_with(Path::new("/repo"), 42, |_, _| failure())
+                .expect_err("head SHA readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+        assert!(
+            try_fetch_pr_status_check_rollup_with(Path::new("/repo"), 42, |_, _| failure(),)
+                .expect_err("rollup readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+        assert!(
+            try_fetch_pr_diff_with(Path::new("/repo"), 42, 1024, |_, _| failure())
+                .expect_err("diff readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+        assert!(
+            try_fetch_pr_merge_commit_sha_with(Path::new("/repo"), 42, |_, _| failure())
+                .expect_err("merge readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+    }
 
     #[test]
     fn parse_pr_titles_by_branch_maps_head_ref_to_title_and_prefers_latest() {
