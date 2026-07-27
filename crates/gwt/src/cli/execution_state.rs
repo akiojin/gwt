@@ -729,6 +729,14 @@ pub(crate) fn settle_completed_best_effort(
     session_id: &str,
     expected_owner_number: u64,
 ) {
+    // T-247: build.complete settlement also skips while obligations stay
+    // open — the ECR stays active and the Stop gate keeps holding.
+    if let Some(refusal) =
+        crate::cli::action_obligation::open_obligation_refusal(worktree, session_id, &[])
+    {
+        tracing::warn!(%refusal, "execution control settlement skipped");
+        return;
+    }
     match settle_completed_with_evidence(worktree, session_id, Some(expected_owner_number)) {
         Ok(Ok(_)) => {}
         Ok(Err(status)) => {
@@ -862,6 +870,14 @@ pub(super) fn run<E: CliEnv>(
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
+            // T-247: completion cannot paper over unhandled prompt
+            // obligations — settle or defer them first.
+            if let Some(refusal) =
+                crate::cli::action_obligation::open_obligation_refusal(&worktree, &session_id, &[])
+            {
+                out.push_str(&format!("execution: completion refused — {refusal}\n"));
+                return Ok(2);
+            }
             match settle_completed_with_evidence(&worktree, &session_id, None)
                 .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
             {
@@ -2900,6 +2916,68 @@ mod tests {
         // T-124: unauthorized settlement attempts (session mismatch) and
         // tampered-record refusals auto-capture one deduped
         // issue-spec-workflow improvement candidate.
+        #[test]
+        fn complete_refused_while_obligations_open_then_defer_clears() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-t247");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-t247")).unwrap();
+
+            // An unsettled issue-update obligation refuses completion BEFORE
+            // the evidence gate (the message names the obligation, not the
+            // missing verification record).
+            crate::cli::action_obligation::mark_from_prompt(
+                dir.path(),
+                "sess-t247",
+                "Issue #1 にコメントを追加して",
+            )
+            .unwrap();
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("open action obligations"), "{out}");
+            assert!(out.contains("issue_update"), "{out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+
+            // Deferring through execution.blocked clears the refusal; the
+            // next completion attempt reaches the evidence gate instead.
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "cannot comment".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(
+                code, 0,
+                "already settled records report idempotently: {out}"
+            );
+            assert!(!out.contains("open action obligations"), "{out}");
+        }
+
+        // T-247: build.complete settlement skips while obligations stay
+        // open — the ECR keeps holding the Stop gate.
+        #[test]
+        fn best_effort_settlement_skips_while_obligations_open() {
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-t247b")).unwrap();
+            crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-t247b", "実装して")
+                .unwrap();
+            settle_completed_best_effort(dir.path(), "sess-t247b", 3248);
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "open obligations must keep the record active"
+            );
+        }
+
         #[test]
         fn blocked_defers_obligations_on_no_record_and_already_settled() {
             let _env_lock = crate::env_test_lock()
