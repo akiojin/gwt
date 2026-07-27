@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs, io,
+    fs,
+    io::{self, Write},
     path::Path,
 };
 
@@ -39,6 +40,8 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
 /// version 0; fresh projects start at this current version and never replay a
 /// historical migration.
 pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
+const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
+const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
@@ -163,6 +166,8 @@ pub enum IssueMonitorEffectPayload {
     ReleaseClaim {
         issue_number: u64,
         claim_id: String,
+        #[serde(default)]
+        owner: String,
     },
     ArmAutoMerge {
         issue_number: u64,
@@ -261,6 +266,9 @@ fn advance_autonomous_effect_authority(
     pending_effects: &mut Vec<PendingIssueMonitorEffect>,
     enabled: bool,
 ) -> Option<u64> {
+    if *autonomous_mode == enabled {
+        return Some(*effect_authority_epoch);
+    }
     let next_epoch = advance_effect_authority(effect_authority_epoch, pending_effects)?;
     *autonomous_mode = enabled;
     Some(next_epoch)
@@ -298,6 +306,7 @@ fn advance_effect_authority(
             IssueMonitorEffectPayload::AcquireClaim {
                 issue_number,
                 claim_id,
+                owner,
                 ..
             } => {
                 let already = next_effects.iter().any(|pending| {
@@ -306,7 +315,10 @@ fn advance_effect_authority(
                         IssueMonitorEffectPayload::ReleaseClaim {
                             issue_number: pending_issue,
                             claim_id: pending_claim,
-                        } if pending_issue == issue_number && pending_claim == claim_id
+                            owner: pending_owner,
+                        } if pending_issue == issue_number
+                            && pending_claim == claim_id
+                            && pending_owner == owner
                     )
                 });
                 (
@@ -314,6 +326,7 @@ fn advance_effect_authority(
                     IssueMonitorEffectPayload::ReleaseClaim {
                         issue_number: *issue_number,
                         claim_id: claim_id.clone(),
+                        owner: owner.clone(),
                     },
                     already,
                 )
@@ -355,6 +368,14 @@ fn advance_effect_authority(
     *effect_authority_epoch = next_epoch;
     *pending_effects = next_effects;
     Some(next_epoch)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorControlReceipt {
+    pub control_id: String,
+    pub should_scan: bool,
+    #[serde(default)]
+    pub authority_changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +428,11 @@ pub struct IssueMonitorPrefs {
     /// shape of existing prefs files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_effects: Vec<PendingIssueMonitorEffect>,
+    /// Receipt for the most recently admitted daemon control. The control ID
+    /// is generated per admission and reused only by that control's retry, so
+    /// one slot is sufficient while the worker enforces a FIFO retry barrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_control_receipt: Option<IssueMonitorControlReceipt>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -427,6 +453,7 @@ impl Default for IssueMonitorPrefs {
             autonomous_records: Vec::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
+            last_control_receipt: None,
         }
     }
 }
@@ -866,6 +893,8 @@ pub struct IssueMonitorState {
     effect_authority_epoch: u64,
     #[serde(default)]
     pending_effects: Vec<PendingIssueMonitorEffect>,
+    #[serde(default)]
+    last_control_receipt: Option<IssueMonitorControlReceipt>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     autonomous_tuning: AutonomousTuning,
     /// SPEC #3200 T-016/T-022: per-issue autonomous lifecycle records keyed by
@@ -1225,16 +1254,199 @@ fn unique_corrupt_prefs_path(path: &Path) -> std::path::PathBuf {
     ))
 }
 
-fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    // Windows does not support opening a directory through std::fs::File.
+    // The scratch file itself is still sync_all'd before the atomic rename;
+    // match the repository's other durable writers by treating directory
+    // metadata sync as an explicit compatibility no-op off Unix.
+    Ok(())
+}
+
+fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
     let tmp = unique_prefs_tmp_path(path);
-    fs::write(&tmp, content.as_bytes())?;
-    fs::rename(&tmp, path)
+    let result = (|| {
+        let mut scratch = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        scratch.write_all(content)?;
+        scratch.sync_all()?;
+        fs::rename(&tmp, path)?;
+        #[cfg(test)]
+        if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE")
+            .is_some_and(|target| Path::new(&target) == path)
+        {
+            let fail_once = path.with_extension("parent-sync-fail-once");
+            if fail_once.exists() {
+                fs::remove_file(fail_once)?;
+                return Err(io::Error::other(
+                    "injected Issue Monitor prefs parent sync failure after rename",
+                ));
+            }
+        }
+        sync_parent_directory(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
+    durable_atomic_write(path, content.as_bytes())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorAuthorityFence {
+    pub version: u32,
+    pub pid: u32,
+    pub instance_id: String,
+}
+
+impl IssueMonitorAuthorityFence {
+    pub fn current_process() -> Self {
+        Self {
+            version: ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+            pid: std::process::id(),
+            instance_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorAuthorityFenceState {
+    Missing,
+    LegacyShutdownRevoke,
+    Active(IssueMonitorAuthorityFence),
+}
+
+pub fn issue_monitor_authority_fence_path(prefs_path: &Path) -> std::path::PathBuf {
+    prefs_path.with_extension("shutdown-revoke")
+}
+
+pub fn load_issue_monitor_authority_fence(
+    prefs_path: &Path,
+) -> io::Result<IssueMonitorAuthorityFenceState> {
+    let path = issue_monitor_authority_fence_path(prefs_path);
+    let content = match fs::read(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(IssueMonitorAuthorityFenceState::Missing);
+        }
+        Err(error) => return Err(error),
+    };
+    if content == LEGACY_SHUTDOWN_REVOKE_FENCE {
+        return Ok(IssueMonitorAuthorityFenceState::LegacyShutdownRevoke);
+    }
+    let fence: IssueMonitorAuthorityFence = serde_json::from_slice(&content).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse Issue Monitor authority fence failed: {error}"),
+        )
+    })?;
+    if fence.version != ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
+        || fence.pid == 0
+        || fence.instance_id.trim().is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Issue Monitor authority fence has invalid identity fields",
+        ));
+    }
+    Ok(IssueMonitorAuthorityFenceState::Active(fence))
+}
+
+pub fn persist_issue_monitor_authority_fence(
+    prefs_path: &Path,
+    fence: &IssueMonitorAuthorityFence,
+) -> io::Result<()> {
+    let content = serde_json::to_vec_pretty(fence).map_err(io::Error::other)?;
+    durable_atomic_write(&issue_monitor_authority_fence_path(prefs_path), &content)
+}
+
+pub fn persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path: &Path) -> io::Result<()> {
+    durable_atomic_write(
+        &issue_monitor_authority_fence_path(prefs_path),
+        LEGACY_SHUTDOWN_REVOKE_FENCE,
+    )
+}
+
+pub fn establish_issue_monitor_authority_fence(
+    prefs_path: &Path,
+    current: &IssueMonitorAuthorityFence,
+    is_process_alive: impl Fn(u32) -> bool,
+) -> io::Result<IssueMonitorPrefs> {
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
+        match load_issue_monitor_authority_fence(prefs_path)? {
+            IssueMonitorAuthorityFenceState::Missing => {
+                persist_issue_monitor_authority_fence(prefs_path, current)?;
+            }
+            IssueMonitorAuthorityFenceState::Active(existing) if is_process_alive(existing.pid) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "Issue Monitor authority fence is owned by live daemon pid {}",
+                        existing.pid
+                    ),
+                ));
+            }
+            IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
+            | IssueMonitorAuthorityFenceState::Active(_) => {
+                prefs.advance_effect_authority_epoch().ok_or_else(|| {
+                    io::Error::other("Issue Monitor authority epoch exhausted during fence replay")
+                })?;
+                save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+                persist_issue_monitor_authority_fence(prefs_path, current)?;
+            }
+        }
+        Ok(prefs)
+    })
+}
+
+pub fn clear_issue_monitor_authority_fence(
+    prefs_path: &Path,
+    expected: &IssueMonitorAuthorityFence,
+) -> io::Result<()> {
+    match load_issue_monitor_authority_fence(prefs_path)? {
+        IssueMonitorAuthorityFenceState::Active(current) if current == *expected => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Issue Monitor authority fence identity changed before clear",
+            ));
+        }
+    }
+    let path = issue_monitor_authority_fence_path(prefs_path);
+    fs::remove_file(&path)?;
+    #[cfg(test)]
+    if let Some(fail_once) = std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_FENCE_PARENT_SYNC_ONCE")
+    {
+        let fail_once = std::path::PathBuf::from(fail_once);
+        if fail_once.exists() {
+            fs::remove_file(fail_once)?;
+            return Err(io::Error::other(
+                "injected Issue Monitor authority fence parent sync failure",
+            ));
+        }
+    }
+    sync_parent_directory(&path)
 }
 
 fn with_issue_monitor_prefs_lock<T>(
@@ -1291,6 +1503,49 @@ pub fn mutate_issue_monitor_prefs<T>(
     with_issue_monitor_prefs_lock(path, || {
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let result = mutation(&mut prefs);
+        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, result))
+    })
+}
+
+/// Fail-closed prefs transaction whose mutation may reject before any save.
+/// The stable sibling lock is held across latest-load, validation, and the
+/// durable atomic writer. Returning `Err` from `mutation` leaves the canonical
+/// bytes untouched and creates no scratch write.
+pub fn try_mutate_issue_monitor_prefs<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock(path, || {
+        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let result = mutation(&mut prefs)?;
+        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, result))
+    })
+}
+
+/// Local fallback transaction ordered against daemon startup by the same
+/// stable prefs lock. A daemon that establishes its lifetime authority fence
+/// before this closure acquires the lock wins; the fallback then returns an
+/// error before mutation or save. If the fallback wins, startup waits and sees
+/// its committed prefs after the lock is released.
+pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock(path, || {
+        match load_issue_monitor_authority_fence(path)? {
+            IssueMonitorAuthorityFenceState::Missing => {}
+            IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
+            | IssueMonitorAuthorityFenceState::Active(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor daemon authority fence appeared before local fallback commit",
+                ));
+            }
+        }
+        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let result = mutation(&mut prefs)?;
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
     })
@@ -1359,6 +1614,7 @@ impl IssueMonitorState {
             autonomous_mode: false,
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
+            last_control_receipt: None,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
@@ -1417,6 +1673,7 @@ impl IssueMonitorState {
         state.autonomous_mode = prefs.autonomous_mode;
         state.effect_authority_epoch = prefs.effect_authority_epoch;
         state.pending_effects = prefs.pending_effects;
+        state.last_control_receipt = prefs.last_control_receipt;
         state.autonomous_tuning = prefs.autonomous_tuning;
         for record in prefs.autonomous_records {
             state.autonomous_records.insert(record.issue_number, record);
@@ -1462,9 +1719,18 @@ impl IssueMonitorState {
             autonomous_mode: self.autonomous_mode,
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
+            last_control_receipt: self.last_control_receipt.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
         }
+    }
+
+    pub fn last_control_receipt(&self) -> Option<&IssueMonitorControlReceipt> {
+        self.last_control_receipt.as_ref()
+    }
+
+    pub fn set_last_control_receipt(&mut self, receipt: IssueMonitorControlReceipt) {
+        self.last_control_receipt = Some(receipt);
     }
 
     /// SPEC #3200 T-022: read-only access to an issue's autonomous record.
@@ -1744,6 +2010,9 @@ impl IssueMonitorState {
     /// and appends compensation for every outcome-ambiguous claim/arm attempt.
     /// A checked epoch overflow rejects the complete transition.
     pub fn set_enabled_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        if self.config.enabled == enabled {
+            return Some(self.effect_authority_epoch);
+        }
         let next_epoch =
             advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
 
@@ -1815,6 +2084,7 @@ impl IssueMonitorState {
         self.autonomous_mode = disk.autonomous_mode;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
+        self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
 
@@ -3024,8 +3294,9 @@ impl IssueMonitorState {
             }
             let kind = issue_monitor_linked_issue_kind(&issue);
             let launched_work_id = knowledge_launch_target_branch_name(kind, issue_number);
-            let effect_id = format!("claim:{issue_number}:{}:{now}", self.effect_authority_epoch);
-            let claim_id = format!("gwt-auto-improve:{effect_id}");
+            let proposal_id = uuid::Uuid::new_v4();
+            let effect_id = format!("claim:{issue_number}:{proposal_id}");
+            let claim_id = format!("gwt-auto-improve:{proposal_id}");
             if self
                 .prepare_pending_effect(
                     effect_id,
@@ -3771,6 +4042,42 @@ mod tests {
         monitor
     }
 
+    fn assert_manual_relaunch_accepts_fresh_lifecycle_failures(base: &IssueMonitorState) {
+        for (agent_failure, expected_state) in [
+            (false, MonitorInboxState::LaunchFailed),
+            (true, MonitorInboxState::AgentFailed),
+        ] {
+            let mut relaunched = base.clone();
+            relaunched.complete_active_launch(7, "tab-1::manual-relaunch-7");
+            assert_eq!(relaunched.active_count(), 1, "manual relaunch is active");
+            assert_eq!(
+                relaunched.inbox_item(7).map(|item| item.state),
+                Some(MonitorInboxState::Launched)
+            );
+
+            if agent_failure {
+                relaunched.record_agent_issue_failed(7, "fresh manual agent failure");
+            } else {
+                relaunched.record_launch_failed(7, "fresh manual launch failure");
+            }
+
+            assert_eq!(
+                relaunched.inbox_item(7).map(|item| item.state),
+                Some(expected_state),
+                "new launch tracking distinguishes a fresh failure from receipt replay"
+            );
+            assert_eq!(relaunched.active_count(), 0);
+            assert!(
+                relaunched
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == 7),
+                "fresh manual relaunch failure is persisted"
+            );
+        }
+    }
+
     #[test]
     fn launching_claims_survive_prefs_roundtrip_and_are_not_reclaimed() {
         // Issue #3222: a claimed-but-not-yet-acked launch (Launching, no window
@@ -4493,6 +4800,37 @@ mod tests {
     }
 
     #[test]
+    fn control_receipt_defaults_absent_and_round_trips_through_state_and_rebase() {
+        let legacy = r#"{
+            "enabled": true,
+            "max_active_agents": 1,
+            "priority_order": []
+        }"#;
+        let legacy: IssueMonitorPrefs =
+            serde_json::from_str(legacy).expect("pre-receipt prefs deserialize");
+        assert_eq!(legacy.last_control_receipt, None);
+        assert_eq!(IssueMonitorPrefs::default().last_control_receipt, None);
+
+        let receipt = IssueMonitorControlReceipt {
+            control_id: uuid::Uuid::new_v4().to_string(),
+            should_scan: true,
+            authority_changed: false,
+        };
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                last_control_receipt: Some(receipt.clone()),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert_eq!(restored.prefs().last_control_receipt, Some(receipt.clone()));
+
+        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        stale.rebase_daemon_driver_prefs(&restored.prefs());
+        assert_eq!(stale.prefs().last_control_receipt, Some(receipt));
+    }
+
+    #[test]
     fn prepared_and_attempting_effects_round_trip_every_authority_field() {
         // A restart must retain the complete delivery identity. Dropping any of
         // effect_id / epoch / attempt / payload would make a stale result look
@@ -4597,6 +4935,55 @@ mod tests {
             "checked epoch overflow rejects the control transition"
         );
         assert_eq!(prefs, before);
+    }
+
+    #[test]
+    fn same_value_authority_controls_are_idempotent_at_epoch_max() {
+        let arm = pending_arm_effect("arm-max", u64::MAX, 3, IssueMonitorEffectState::Attempting);
+        let mut autonomous = IssueMonitorPrefs {
+            autonomous_mode: true,
+            effect_authority_epoch: u64::MAX,
+            pending_effects: vec![arm],
+            ..IssueMonitorPrefs::default()
+        };
+        let autonomous_before = autonomous.clone();
+
+        assert_eq!(
+            autonomous.set_autonomous_mode_with_effect_revocation(true),
+            Some(u64::MAX)
+        );
+        assert_eq!(autonomous, autonomous_before);
+
+        let claim = PendingIssueMonitorEffect {
+            effect_id: "claim-max".to_string(),
+            authority_epoch: u64::MAX,
+            attempt: 2,
+            state: IssueMonitorEffectState::Attempting,
+            payload: IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-max".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-27T00:00:00Z".to_string(),
+                expires_at: "2026-07-27T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        };
+        let mut enabled = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: u64::MAX,
+                pending_effects: vec![claim],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let enabled_before = enabled.prefs();
+
+        assert_eq!(
+            enabled.set_enabled_with_effect_revocation(true),
+            Some(u64::MAX)
+        );
+        assert_eq!(enabled.prefs(), enabled_before);
     }
 
     #[test]
@@ -4705,6 +5092,69 @@ mod tests {
     }
 
     #[test]
+    fn claim_proposals_use_distinct_uuid_identity_and_preserve_it_across_retry_restart() {
+        fn prepare(owner: &str) -> IssueMonitorState {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-27T00:00:00Z");
+            assert_eq!(
+                monitor
+                    .prepare_claim_effects_with_probe(owner, "2026-07-27T00:00:01Z", 1, |_| false,),
+                1
+            );
+            monitor
+        }
+
+        fn identity(effect: &PendingIssueMonitorEffect) -> (&str, &str) {
+            let IssueMonitorEffectPayload::AcquireClaim { claim_id, .. } = &effect.payload else {
+                panic!("expected claim proposal");
+            };
+            (&effect.effect_id, claim_id)
+        }
+
+        let mut first = prepare("host-a/session-a");
+        let second = prepare("host-b/session-b");
+        let first_effect = first.pending_effects()[0].clone();
+        let second_effect = second.pending_effects()[0].clone();
+        let (first_effect_id, first_claim_id) = identity(&first_effect);
+        let (second_effect_id, second_claim_id) = identity(&second_effect);
+
+        assert_ne!(first_effect_id, second_effect_id);
+        assert_ne!(first_claim_id, second_claim_id);
+        let effect_uuid = first_effect_id
+            .rsplit(':')
+            .next()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .expect("effect identity ends in a UUID");
+        let claim_uuid = first_claim_id
+            .strip_prefix("gwt-auto-improve:")
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .expect("claim identity carries a UUID");
+        assert_eq!(effect_uuid, claim_uuid, "one UUID identifies the proposal");
+
+        let first_key = first_effect.attempt_key();
+        assert!(first.mark_pending_effect_attempting(&first_key));
+        assert!(first.retry_pending_effect(&first_key));
+        assert_eq!(
+            identity(&first.pending_effects()[0]),
+            (first_effect_id, first_claim_id)
+        );
+
+        let encoded = serde_json::to_string(&first.prefs()).expect("prefs serialize");
+        let restored_prefs: IssueMonitorPrefs =
+            serde_json::from_str(&encoded).expect("prefs deserialize");
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+        assert_eq!(
+            identity(&restored.pending_effects()[0]),
+            (first_effect_id, first_claim_id)
+        );
+    }
+
+    #[test]
     fn disabling_monitor_cancels_prepared_claim_and_compensates_attempting_claim() {
         let prepared = PendingIssueMonitorEffect::prepared(
             "claim-prepared",
@@ -4753,8 +5203,56 @@ mod tests {
             IssueMonitorEffectPayload::ReleaseClaim {
                 issue_number: 43,
                 claim_id,
-            } if claim_id == "claim-attempting"
+                owner,
+            } if claim_id == "claim-attempting" && owner == "host/session"
         )));
+
+        let encoded = serde_json::to_string(&monitor.prefs()).expect("prefs serialize");
+        let restored: IssueMonitorPrefs =
+            serde_json::from_str(&encoded).expect("prefs deserialize after restart");
+        assert!(restored.pending_effects.iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 43,
+                claim_id,
+                owner,
+            } if claim_id == "claim-attempting" && owner == "host/session"
+        )));
+    }
+
+    #[test]
+    fn ownerless_legacy_release_journal_deserializes_without_being_dropped() {
+        let prefs: IssueMonitorPrefs = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "max_active_agents": 1,
+                "priority_order": [],
+                "pending_effects": [{
+                    "effect_id": "release:legacy",
+                    "authority_epoch": 4,
+                    "attempt": 2,
+                    "state": "attempting",
+                    "payload": {
+                        "kind": "release_claim",
+                        "issue_number": 42,
+                        "claim_id": "stable-effect-claim"
+                    }
+                }]
+            }"#,
+        )
+        .expect("legacy ownerless journal remains readable");
+
+        assert!(matches!(
+            prefs.pending_effects.as_slice(),
+            [PendingIssueMonitorEffect {
+                payload: IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number: 42,
+                    claim_id,
+                    owner,
+                },
+                ..
+            }] if claim_id == "stable-effect-claim" && owner.is_empty()
+        ));
     }
 
     #[test]
@@ -4926,6 +5424,46 @@ mod tests {
             path.parent(),
             "scratch stays in the target's dir so the rename is atomic"
         );
+    }
+
+    #[test]
+    fn failed_atomic_prefs_rename_removes_unique_scratch_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("issue-monitor.json");
+        fs::create_dir(&path).expect("make destination a directory");
+
+        let error = super::save_issue_monitor_prefs(
+            &path,
+            &super::IssueMonitorPrefs {
+                enabled: true,
+                ..super::IssueMonitorPrefs::default()
+            },
+        )
+        .expect_err("rename over a directory must fail");
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        let scratch_prefix = ".issue-monitor.json.tmp-";
+        assert!(
+            fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(scratch_prefix)),
+            "failed atomic write must not leave a partial scratch file"
+        );
+        assert!(path.is_dir(), "failed rename leaves destination untouched");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn parent_directory_sync_is_a_non_unix_compatibility_noop() {
+        let missing_parent =
+            std::path::Path::new("definitely-missing-parent").join("issue-monitor.json");
+
+        super::sync_parent_directory(&missing_parent)
+            .expect("non-Unix durable writers do not open directory handles");
     }
 
     #[test]
@@ -6028,6 +6566,15 @@ mod tests {
             Some(MonitorInboxState::Queued),
             "re-queued for automatic relaunch (not parked in LaunchFailed)"
         );
+
+        let mut pre_materialization = monitor.clone();
+        pre_materialization.record_launch_failed(7, "fresh pre-materialization failure");
+        assert_eq!(
+            pre_materialization.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "a distinct admission before materialization cannot be mistaken for receipt replay"
+        );
+        assert_manual_relaunch_accepts_fresh_lifecycle_failures(&monitor);
     }
 
     #[test]
@@ -6053,6 +6600,8 @@ mod tests {
             monitor.inbox_item(7).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman)
         );
+
+        assert_manual_relaunch_accepts_fresh_lifecycle_failures(&monitor);
     }
 
     #[test]

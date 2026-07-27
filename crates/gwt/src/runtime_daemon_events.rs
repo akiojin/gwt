@@ -9,6 +9,42 @@ pub const RUNTIME_STATUS_CHANNEL: &str = "runtime_status";
 pub const RUNTIME_HOOK_CHANNEL: &str = "runtime_hook";
 pub const ISSUE_MONITOR_CHANNEL: &str = "issue_monitor";
 pub const ISSUE_MONITOR_CONTROL_CHANNEL: &str = "issue_monitor_control";
+pub const ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR: &str =
+    "issue monitor control rejected: authority recovery is blocked";
+pub const ISSUE_MONITOR_CONTROL_CLOSED_ERROR: &str =
+    "issue monitor control rejected: worker is closed";
+pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
+    "issue monitor control rejected before commit";
+pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
+    "issue monitor control rejected: admission is full";
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorControlPublishError {
+    TransportUnavailable(String),
+    OutcomeUnknown(String),
+    Busy(String),
+    RecoveryBlocked,
+    Rejected(String),
+}
+
+impl IssueMonitorControlPublishError {
+    pub fn allows_local_fallback(&self) -> bool {
+        matches!(self, Self::TransportUnavailable(_))
+    }
+}
+
+impl std::fmt::Display for IssueMonitorControlPublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TransportUnavailable(message)
+            | Self::OutcomeUnknown(message)
+            | Self::Busy(message)
+            | Self::Rejected(message) => formatter.write_str(message),
+            Self::RecoveryBlocked => {
+                formatter.write_str(ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeDaemonEvent {

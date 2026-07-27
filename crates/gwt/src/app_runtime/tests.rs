@@ -6424,9 +6424,11 @@ No viable candidates found in PATH \
 #[test]
 fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
     let temp = tempdir().expect("tempdir");
-    let tab = sample_project_tab_with_window(
+    init_repo_with_initial_commit(temp.path());
+    let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
+        temp.path().to_path_buf(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
@@ -6467,9 +6469,11 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
 #[test]
 fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
     let temp = tempdir().expect("tempdir");
-    let tab = sample_project_tab_with_window(
+    init_repo_with_initial_commit(temp.path());
+    let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
+        temp.path().to_path_buf(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
@@ -6513,7 +6517,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     Cache::new(issue_cache_root(&repo))
         .write_snapshot(&sample_issue_snapshot(
             42,
@@ -6634,7 +6638,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     Cache::new(issue_cache_root(&repo))
         .write_snapshot(&sample_issue_snapshot(
             42,
@@ -17326,6 +17330,9 @@ fn app_runtime_published_issue_monitor_control_has_one_authority_writer() {
     // A successful daemon publication must not replay the same authority
     // mutation through the GUI prefs path. The committed daemon projection is
     // delivered by BroadcastHub after its single disk transaction.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -17364,6 +17371,581 @@ fn app_runtime_published_issue_monitor_control_has_one_authority_writer() {
     assert!(persisted.autonomous_mode);
     assert_eq!(persisted.effect_authority_epoch, 7);
     assert!(persisted.pending_effects.is_empty());
+}
+
+#[test]
+fn app_runtime_lifecycle_ack_never_replays_local_writer() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: None,
+            }],
+            failed_issues: vec![gwt::IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "prior failure".to_string(),
+                window_id: Some("tab-1::stale-agent".to_string()),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed lifecycle prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "stale-agent",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let launched =
+        runtime.issue_monitor_launch_succeeded_result_events(42, "tab-1::agent-1", Ok(()));
+    let failed = runtime.issue_monitor_launch_failed_result_events(42, "launch failed", Ok(()));
+
+    assert!(launched
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(
+        !runtime.window_lookup.contains_key("tab-1::stale-agent"),
+        "ACK closes the stale failed window captured before daemon commit"
+    );
+    assert!(failed.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorLaunchFailed { issue_number, .. } if *issue_number == 42
+    )));
+    assert_eq!(
+        fs::read(&prefs_path).expect("reload prefs"),
+        before,
+        "ACKed lifecycle controls have exactly one daemon writer"
+    );
+
+    let rejected = runtime.issue_monitor_launch_failed_result_events(
+        42,
+        "must not be displayed as committed",
+        Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked),
+    );
+    assert!(rejected
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
+    assert_eq!(
+        fs::read(&prefs_path).expect("reload rejected prefs"),
+        before
+    );
+}
+
+#[test]
+fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            autonomous_records: vec![gwt::AutonomousIssueRecord {
+                issue_number: 42,
+                phase: gwt::AutonomousPhase::Implementing,
+                active_launch_id: None,
+                attempts: 1,
+                acceptance_snapshot: None,
+                retry_not_before: None,
+                last_heartbeat: None,
+                pr_number: None,
+                reviewed_sha: None,
+                review_passed: None,
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed autonomous lifecycle prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1";
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.to_string(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+        },
+    );
+
+    let events = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        "agent failed",
+        Some(42),
+        Ok(()),
+    );
+
+    assert!(!runtime
+        .pending_launch_feedback_contexts
+        .contains_key(window_id));
+    assert!(!runtime.window_lookup.contains_key(window_id));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, issue_number }
+            if level == "error" && message == "agent failed" && *issue_number == Some(42)
+    )));
+    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+}
+
+#[test]
+fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: false,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed default-mode lifecycle prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1";
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.to_string(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+        },
+    );
+
+    let events = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        "agent failed",
+        Some(42),
+        Ok(()),
+    );
+
+    assert!(!runtime
+        .pending_launch_feedback_contexts
+        .contains_key(window_id));
+    assert!(
+        runtime.window_lookup.contains_key(window_id),
+        "default mode retains the failed terminal for operator inspection"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, issue_number, .. }
+            if level == "error" && *issue_number == Some(42)
+    )));
+    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+}
+
+#[test]
+fn app_runtime_agent_failed_fallback_is_fail_closed_on_corrupt_prefs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    fs::create_dir_all(prefs_path.parent().expect("prefs parent")).expect("create prefs parent");
+    let corrupt = b"{\"enabled\":true";
+    fs::write(&prefs_path, corrupt).expect("seed corrupt prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo,
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1";
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.to_string(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+        },
+    );
+
+    let events = runtime.issue_monitor_agent_failed_result_events(
+        window_id,
+        "agent failed",
+        Some(42),
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon not running".to_string(),
+            ),
+        ),
+    );
+
+    assert_eq!(fs::read(&prefs_path).expect("read raw prefs"), corrupt);
+    assert!(fs::read_dir(prefs_path.parent().expect("prefs parent"))
+        .expect("read prefs parent")
+        .flatten()
+        .all(|entry| !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("issue-monitor.json.corrupt-")));
+    assert!(runtime
+        .pending_launch_feedback_contexts
+        .contains_key(window_id));
+    assert!(runtime.window_lookup.contains_key(window_id));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("local fallback control commit failed")
+    )));
+}
+
+#[test]
+fn app_runtime_launch_failed_fallback_lock_timeout_has_zero_commit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: None,
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed lifecycle prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open prefs lock");
+    lock.lock_exclusive().expect("hold prefs lock");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let started = Instant::now();
+    let events = runtime.issue_monitor_launch_failed_result_events(
+        42,
+        "launch failed",
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon not running".to_string(),
+            ),
+        ),
+    );
+    FileExt::unlock(&lock).expect("release prefs lock");
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+    assert!(fs::read_dir(prefs_path.parent().expect("prefs parent"))
+        .expect("read prefs parent")
+        .flatten()
+        .all(|entry| !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("issue-monitor.json.corrupt-")));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, issue_number }
+            if level == "error"
+                && message.contains("local fallback control commit failed")
+                && *issue_number == Some(42)
+    )));
+}
+
+#[test]
+fn app_runtime_spawn_fallback_rechecks_new_daemon_fence_before_commit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: None,
+            }],
+            effect_authority_epoch: 7,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let fence = gwt::IssueMonitorAuthorityFence::current_process();
+    gwt::persist_issue_monitor_authority_fence(&prefs_path, &fence)
+        .expect("daemon establishes fence after publisher Spawn classification");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.issue_monitor_launch_failed_result_events(
+        42,
+        "launch failed",
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "publisher observed missing endpoint".to_string(),
+            ),
+        ),
+    );
+
+    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("authority fence appeared")
+    )));
+}
+
+#[test]
+fn app_runtime_lifecycle_recovery_blocked_preserves_corrupt_prefs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    fs::create_dir_all(prefs_path.parent().expect("prefs parent")).expect("create prefs parent");
+    let corrupt = b"{\"enabled\":true";
+    fs::write(&prefs_path, corrupt).expect("seed corrupt prefs");
+    let quarantine_count = || {
+        fs::read_dir(prefs_path.parent().expect("prefs parent"))
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("issue-monitor.json.corrupt-")
+            })
+            .count()
+    };
+    let before_quarantines = quarantine_count();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let blocked = Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked);
+
+    let mut events = runtime.issue_monitor_agent_failed_result_events(
+        "tab-1::agent-1",
+        "agent failed",
+        Some(42),
+        blocked.clone(),
+    );
+    events.extend(runtime.issue_monitor_window_closed_result_events("tab-1::agent-1", blocked));
+
+    assert_eq!(fs::read(&prefs_path).expect("read corrupt prefs"), corrupt);
+    assert_eq!(quarantine_count(), before_quarantines);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorStatus { status }
+            if status.last_error.as_deref().is_some_and(|error| error.contains(
+                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+            ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains(
+                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+            )
+    )));
+}
+
+#[test]
+fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let journal = vec![gwt::PendingIssueMonitorEffect::prepared(
+        "release:claim:42:7",
+        7,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42,
+            claim_id: "stable-claim-42".to_string(),
+            owner: "host/session".to_string(),
+        },
+    )];
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            effect_authority_epoch: 7,
+            pending_effects: journal.clone(),
+            max_active_agents: 1,
+            priority_order: vec![42],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let max_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetIssueMonitorMaxActiveAgents {
+            max_active_agents: 4,
+        },
+    );
+    let reorder_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ReorderIssueMonitorIssues {
+            issue_numbers: vec![99, 42],
+        },
+    );
+
+    assert!(
+        !max_events.is_empty() && !reorder_events.is_empty(),
+        "missing daemon forces the atomic GUI fallback writer"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(persisted.max_active_agents, 4);
+    assert_eq!(persisted.priority_order, vec![99, 42]);
+    assert_eq!(persisted.effect_authority_epoch, 7);
+    assert_eq!(persisted.pending_effects, journal);
+}
+
+#[test]
+fn app_runtime_recovery_blocked_control_never_recovers_or_mutates_corrupt_prefs() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    fs::create_dir_all(prefs_path.parent().expect("prefs parent")).expect("create prefs parent");
+    let corrupt = b"{\"enabled\":true";
+    fs::write(&prefs_path, corrupt).expect("seed corrupt prefs");
+    let quarantine_count = || {
+        fs::read_dir(prefs_path.parent().expect("prefs parent"))
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("issue-monitor.json.corrupt-")
+            })
+            .count()
+    };
+    let before_quarantines = quarantine_count();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let events = runtime.issue_monitor_control_result_events(
+        "client-1",
+        Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked),
+        "enabled",
+        |monitor| {
+            let _ = monitor.set_enabled_with_effect_revocation(false);
+        },
+    );
+
+    assert_eq!(fs::read(&prefs_path).expect("read corrupt prefs"), corrupt);
+    assert_eq!(quarantine_count(), before_quarantines);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorStatus { status }
+            if status.last_error.as_deref().is_some_and(|error| error.contains(
+                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+            ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error"
+                && message.contains(
+                    gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                )
+    )));
 }
 
 #[cfg(unix)]
@@ -17490,6 +18072,87 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert!(persisted.autonomous_mode);
     assert_eq!(persisted.effect_authority_epoch, 7);
+}
+
+#[test]
+fn app_runtime_enabled_fallback_epoch_overflow_is_zero_write_error() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: u64::MAX,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed exhausted prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetIssueMonitorEnabled { enabled: false },
+    );
+
+    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("authority epoch exhausted")
+    )));
+    let status = events.iter().find_map(|event| match &event.event {
+        BackendEvent::IssueMonitorStatus { status } => Some(status),
+        _ => None,
+    });
+    assert!(status.is_some_and(|status| status.enabled));
+}
+
+#[test]
+fn app_runtime_autonomous_fallback_epoch_overflow_is_zero_write_error() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: u64::MAX,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed exhausted prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetIssueMonitorAutonomousMode { enabled: false },
+    );
+
+    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("authority epoch exhausted")
+    )));
+    let status = events.iter().find_map(|event| match &event.event {
+        BackendEvent::IssueMonitorStatus { status } => Some(status),
+        _ => None,
+    });
+    assert!(status.is_some_and(|status| status.autonomous_mode));
 }
 
 #[test]
@@ -18031,7 +18694,7 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let cache = Cache::new(issue_cache_root(&repo));
     for number in [3165, 3166, 3167] {
         cache

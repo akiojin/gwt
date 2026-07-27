@@ -1230,29 +1230,39 @@ impl AppRuntime {
     }
 
     #[cfg(unix)]
-    fn publish_issue_monitor_control(&self, payload: serde_json::Value) -> Result<(), String> {
+    fn publish_issue_monitor_control(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
         let Some(project_root) = self.active_project_root() else {
-            return Err("no active project".to_string());
+            return Err(
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                    "no active project".to_string(),
+                ),
+            );
         };
         let payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "control",
             payload,
             std::process::id(),
         );
-        gwt::daemon_publisher::publish_event(
-            project_root,
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
-            payload,
-        )
+        gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
     }
 
     #[cfg(not(unix))]
-    fn publish_issue_monitor_control(&self, _payload: serde_json::Value) -> Result<(), String> {
-        Err("Issue Monitor daemon control is unavailable on this platform".to_string())
+    fn publish_issue_monitor_control(
+        &self,
+        _payload: serde_json::Value,
+    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "Issue Monitor daemon control is unavailable on this platform".to_string(),
+            ),
+        )
     }
 
     pub(crate) fn issue_monitor_launch_failed_events(
-        &self,
+        &mut self,
         issue_number: u64,
         message: &str,
     ) -> Vec<OutboundEvent> {
@@ -1261,29 +1271,65 @@ impl AppRuntime {
         } else {
             message.to_string()
         };
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+        let publication = self.publish_issue_monitor_control(serde_json::json!({
             "launch_failed": {
                 "issue_number": issue_number,
-                "message": message,
+                "message": message.clone(),
             }
-        })) {
-            tracing::debug!(
-                error = %error,
-                issue_number,
-                "issue monitor launch-failed daemon publish failed"
-            );
+        }));
+        self.issue_monitor_launch_failed_result_events(issue_number, &message, publication)
+    }
+
+    fn issue_monitor_launch_failed_result_events(
+        &mut self,
+        issue_number: u64,
+        message: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+    ) -> Vec<OutboundEvent> {
+        let (mut events, committed) = match publication {
+            Ok(()) => (Vec::new(), true),
+            Err(error) if error.allows_local_fallback() => {
+                match self.commit_local_issue_monitor_control(|monitor| {
+                    monitor.record_launch_failed(issue_number, message.to_string());
+                }) {
+                    Ok((monitor, ())) => {
+                        (self.issue_monitor_snapshot_events_for(None, monitor), true)
+                    }
+                    Err(local_error) => (
+                        self.issue_monitor_control_error_events(
+                            None,
+                            local_error,
+                            "launch-failed",
+                            Some(issue_number),
+                        ),
+                        false,
+                    ),
+                }
+            }
+            Err(error) => (
+                self.issue_monitor_control_error_events(
+                    None,
+                    error,
+                    "launch-failed",
+                    Some(issue_number),
+                ),
+                false,
+            ),
+        };
+        if committed {
+            events.extend([
+                OutboundEvent::broadcast(BackendEvent::IssueMonitorLaunchFailed {
+                    issue_number,
+                    message: message.to_string(),
+                }),
+                OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: message.to_string(),
+                    issue_number: Some(issue_number),
+                }),
+            ]);
         }
-        vec![
-            OutboundEvent::broadcast(BackendEvent::IssueMonitorLaunchFailed {
-                issue_number,
-                message: message.clone(),
-            }),
-            OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                level: "error".to_string(),
-                message,
-                issue_number: Some(issue_number),
-            }),
-        ]
+        events
     }
 
     pub(crate) fn issue_monitor_launch_succeeded_events(
@@ -1291,39 +1337,103 @@ impl AppRuntime {
         issue_number: u64,
         window_id: &str,
     ) -> Vec<OutboundEvent> {
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+        let stale_window = self.issue_monitor_failed_window_read_only(issue_number, window_id);
+        let publication = self.publish_issue_monitor_control(serde_json::json!({
             "launched": {
                 "issue_number": issue_number,
                 "window_id": window_id,
             }
-        })) {
-            tracing::debug!(
-                error = %error,
-                issue_number,
-                window_id,
-                "issue monitor launched daemon publish failed"
-            );
-        }
+        }));
+        self.issue_monitor_launch_succeeded_result_events_with_stale(
+            issue_number,
+            window_id,
+            publication,
+            stale_window,
+        )
+    }
+
+    #[cfg(test)]
+    fn issue_monitor_launch_succeeded_result_events(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+    ) -> Vec<OutboundEvent> {
+        let stale_window = self.issue_monitor_failed_window_read_only(issue_number, window_id);
+        self.issue_monitor_launch_succeeded_result_events_with_stale(
+            issue_number,
+            window_id,
+            publication,
+            stale_window,
+        )
+    }
+
+    fn issue_monitor_launch_succeeded_result_events_with_stale(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+        ack_stale_window: Option<String>,
+    ) -> Vec<OutboundEvent> {
         let window_id = window_id.to_string();
         // #3165 error-window lifecycle (default mode): when an issue relaunches
         // after a failure, close the stale agent window from the prior attempt so
         // it is replaced rather than left on the canvas. Guard against closing the
         // freshly launched window if it happens to reuse the same id.
         let mut stale_window: Option<String> = None;
-        let mut events = self.local_issue_monitor_events_with_policy(
-            None,
-            IssueMonitorScanPolicy::CacheOnly,
-            |monitor| {
-                stale_window = monitor
-                    .take_failed_window(issue_number)
-                    .filter(|stale| *stale != window_id);
-                monitor.complete_active_launch(issue_number, window_id.clone());
-            },
-        );
+        let mut events = match publication {
+            Ok(()) => {
+                stale_window = ack_stale_window;
+                Vec::new()
+            }
+            Err(error) if error.allows_local_fallback() => {
+                match self.commit_local_issue_monitor_control(|monitor| {
+                    let stale_window = monitor
+                        .take_failed_window(issue_number)
+                        .filter(|stale| *stale != window_id);
+                    monitor.complete_active_launch(issue_number, window_id.clone());
+                    stale_window
+                }) {
+                    Ok((monitor, committed_stale_window)) => {
+                        stale_window = committed_stale_window;
+                        self.issue_monitor_snapshot_events_for(None, monitor)
+                    }
+                    Err(local_error) => self.issue_monitor_control_error_events(
+                        None,
+                        local_error,
+                        "launch-succeeded",
+                        Some(issue_number),
+                    ),
+                }
+            }
+            Err(error) => self.issue_monitor_control_error_events(
+                None,
+                error,
+                "launch-succeeded",
+                Some(issue_number),
+            ),
+        };
         if let Some(stale) = stale_window {
             events.extend(self.close_window_events(&stale));
         }
         events
+    }
+
+    fn issue_monitor_failed_window_read_only(
+        &self,
+        issue_number: u64,
+        fresh_window_id: &str,
+    ) -> Option<String> {
+        let project_root = self.active_project_root()?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .ok()?;
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        monitor
+            .take_failed_window(issue_number)
+            .filter(|stale| stale != fresh_window_id)
     }
 
     pub(crate) fn issue_monitor_agent_failed_events(
@@ -1348,16 +1458,157 @@ impl AppRuntime {
         if let Some(issue_number) = issue_number_hint {
             agent_failed_payload["issue_number"] = serde_json::json!(issue_number);
         }
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+        let publication = self.publish_issue_monitor_control(serde_json::json!({
             "agent_failed": agent_failed_payload,
-        })) {
-            tracing::debug!(
-                error = %error,
+        }));
+        self.issue_monitor_agent_failed_result_events(
+            window_id,
+            message,
+            issue_number_hint,
+            publication,
+        )
+    }
+
+    fn issue_monitor_agent_failed_result_events(
+        &mut self,
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+    ) -> Vec<OutboundEvent> {
+        match publication {
+            Ok(()) => self.finalize_issue_monitor_agent_failed_events(
                 window_id,
-                "issue monitor agent-failed daemon publish failed"
-            );
+                message,
+                issue_number_hint,
+                None,
+                false,
+            ),
+            Err(error) if error.allows_local_fallback() => {
+                let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    std::time::Instant::now() + std::time::Duration::from_secs(60),
+                );
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let project_root = self.active_project_root().map(Path::to_path_buf);
+                let loaded = project_root.as_ref().map(|project_root| {
+                    match gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root) {
+                        Ok((owner, repo)) => {
+                            gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+                                project_root,
+                                &owner,
+                                &repo,
+                            )
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                });
+                match self.commit_local_issue_monitor_control(|monitor| {
+                    if let (Some(project_root), Some(loaded)) = (&project_root, loaded) {
+                        match loaded {
+                            Ok(loaded) => {
+                                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                                    monitor,
+                                    &loaded,
+                                    project_root,
+                                    &now,
+                                );
+                            }
+                            Err(error) => monitor.record_scan_error(&now, error),
+                        }
+                    }
+                    let issue_number = if let Some(issue_number) = issue_number_hint {
+                        monitor.record_agent_issue_failed(issue_number, message.to_string());
+                        Some(issue_number)
+                    } else {
+                        monitor.record_agent_window_failed(window_id, message.to_string())
+                    };
+                    if issue_number.is_none() {
+                        monitor.record_scan_error(
+                            &now,
+                            format!(
+                                "agent window {window_id} failed but no monitored Issue mapping was found: {message}"
+                            ),
+                        );
+                    }
+                    issue_number
+                }) {
+                    Ok((monitor, issue_number)) => self.finalize_issue_monitor_agent_failed_events(
+                        window_id,
+                        message,
+                        issue_number,
+                        Some(monitor),
+                        true,
+                    ),
+                    Err(local_error) => self.issue_monitor_control_error_events(
+                        None,
+                        local_error,
+                        "agent-failed",
+                        issue_number_hint,
+                    ),
+                }
+            }
+            Err(error) => self.issue_monitor_control_error_events(
+                None,
+                error,
+                "agent-failed",
+                issue_number_hint,
+            ),
         }
-        self.local_issue_monitor_agent_failed_events(window_id, message, issue_number_hint)
+    }
+
+    fn finalize_issue_monitor_agent_failed_events(
+        &mut self,
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        committed_monitor: Option<gwt::IssueMonitorState>,
+        emit_local_snapshot: bool,
+    ) -> Vec<OutboundEvent> {
+        let monitor = committed_monitor.or_else(|| {
+            let project_root = self.active_project_root()?;
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+            )
+            .ok()?;
+            Some(gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs,
+            ))
+        });
+        let prefs = monitor.as_ref().map(gwt::IssueMonitorState::prefs);
+        let issue_number = issue_number_hint.or_else(|| {
+            prefs.as_ref().and_then(|prefs| {
+                prefs.failed_issues.iter().find_map(|failed| {
+                    (failed.window_id.as_deref() == Some(window_id)).then_some(failed.issue_number)
+                })
+            })
+        });
+        let autoclose_failed_window = issue_number.is_some_and(|issue_number| {
+            prefs.as_ref().is_some_and(|prefs| {
+                prefs.autonomous_mode
+                    && prefs
+                        .autonomous_records
+                        .iter()
+                        .any(|record| record.issue_number == issue_number)
+            })
+        });
+        self.pending_launch_feedback_contexts.remove(window_id);
+        let mut events = if emit_local_snapshot {
+            monitor
+                .map(|monitor| self.issue_monitor_snapshot_events_for(None, monitor))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message: message.to_string(),
+            issue_number,
+        }));
+        if autoclose_failed_window {
+            events.extend(self.close_window_after_issue_monitor_finalize_events(window_id));
+        }
+        events
     }
 
     /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
@@ -1397,48 +1648,58 @@ impl AppRuntime {
                 return Vec::new();
             };
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-            let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-                .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
-            let monitor =
-                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-            window_ids
-                .iter()
-                .filter(|window_id| monitor.launched_window_issue(window_id).is_some())
-                .cloned()
-                .collect()
+            match gwt::load_issue_monitor_prefs(&prefs_path) {
+                Ok(prefs) => {
+                    let monitor = gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        prefs,
+                    );
+                    window_ids
+                        .iter()
+                        .filter(|window_id| monitor.launched_window_issue(window_id).is_some())
+                        .cloned()
+                        .collect()
+                }
+                Err(_) => window_ids.to_vec(),
+            }
         };
         if monitor_windows.is_empty() {
             return Vec::new();
         }
-        for window_id in &monitor_windows {
-            if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+        let mut events = Vec::new();
+        for window_id in monitor_windows {
+            let publication = self.publish_issue_monitor_control(serde_json::json!({
                 "window_closed": { "window_id": window_id },
-            })) {
-                tracing::debug!(
-                    error = %error,
-                    window_id = %window_id,
-                    "issue monitor window-closed daemon publish failed"
-                );
-            }
+            }));
+            events.extend(self.issue_monitor_window_closed_result_events(&window_id, publication));
         }
-        let requeue_windows = monitor_windows;
-        self.local_issue_monitor_events_with_policy(
-            None,
-            IssueMonitorScanPolicy::CacheOnly,
-            move |monitor| {
-                for window_id in &requeue_windows {
-                    monitor.requeue_window(window_id);
-                }
-            },
-        )
+        events
     }
 
-    fn local_issue_monitor_events(
+    fn issue_monitor_window_closed_result_events(
         &mut self,
-        client_id: &str,
-        apply: impl FnOnce(&mut gwt::IssueMonitorState),
+        window_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
-        self.local_issue_monitor_events_for(Some(client_id), apply)
+        match publication {
+            Ok(()) => Vec::new(),
+            Err(error) if error.allows_local_fallback() => {
+                match self.commit_local_issue_monitor_control(|monitor| {
+                    monitor.requeue_window(window_id);
+                }) {
+                    Ok((monitor, ())) => self.issue_monitor_snapshot_events_for(None, monitor),
+                    Err(local_error) => self.issue_monitor_control_error_events(
+                        None,
+                        local_error,
+                        "window-closed",
+                        None,
+                    ),
+                }
+            }
+            Err(error) => {
+                self.issue_monitor_control_error_events(None, error, "window-closed", None)
+            }
+        }
     }
 
     fn local_issue_monitor_events_for(
@@ -1449,9 +1710,6 @@ impl AppRuntime {
         let policy = if cfg!(unix) {
             IssueMonitorScanPolicy::CacheOnly
         } else {
-            // Windows does not yet have the long-running daemon. Its local
-            // fallback still uses the same durable proposal/fence/result
-            // protocol before any claim mutation.
             IssueMonitorScanPolicy::Scan
         };
         self.local_issue_monitor_events_with_policy(client_id, policy, apply)
@@ -1460,25 +1718,219 @@ impl AppRuntime {
     fn issue_monitor_control_result_events(
         &mut self,
         client_id: &str,
-        publication: Result<(), String>,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
         operation: &'static str,
         apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
         match publication {
-            // The daemon ACK confirms enqueue, and its committed status is
-            // broadcast asynchronously. Persisting the same non-idempotent
-            // authority mutation here would advance the epoch twice and leave
-            // the daemon's canonical generation stale.
+            // The daemon ACK confirms the canonical control transaction
+            // committed. Persisting it again here would advance authority
+            // twice and leave the daemon's generation stale.
             Ok(()) => Vec::new(),
-            Err(error) => {
+            Err(error) if error.allows_local_fallback() => {
                 tracing::debug!(
                     error = %error,
                     operation,
                     "issue monitor control daemon publish failed; using local fallback"
                 );
-                self.local_issue_monitor_events(client_id, apply_fallback)
+                match self.commit_local_issue_monitor_control(apply_fallback) {
+                    Ok((monitor, ())) => {
+                        self.issue_monitor_snapshot_events_for(Some(client_id), monitor)
+                    }
+                    Err(local_error) => self.issue_monitor_control_error_events(
+                        Some(client_id),
+                        local_error,
+                        operation,
+                        None,
+                    ),
+                }
+            }
+            Err(error) => {
+                self.issue_monitor_control_error_events(Some(client_id), error, operation, None)
             }
         }
+    }
+
+    fn issue_monitor_authorizing_control_result_events(
+        &mut self,
+        client_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+        operation: &'static str,
+        apply_fallback: impl FnOnce(&mut gwt::IssueMonitorState) -> Result<(), String>,
+    ) -> Vec<OutboundEvent> {
+        match publication {
+            Ok(()) => Vec::new(),
+            Err(error) if error.allows_local_fallback() => {
+                match self.commit_local_issue_monitor_authorizing_control(apply_fallback) {
+                    Ok((monitor, ())) => {
+                        self.issue_monitor_snapshot_events_for(Some(client_id), monitor)
+                    }
+                    Err(local_error) => self.issue_monitor_control_error_events(
+                        Some(client_id),
+                        local_error,
+                        operation,
+                        None,
+                    ),
+                }
+            }
+            Err(error) => {
+                self.issue_monitor_control_error_events(Some(client_id), error, operation, None)
+            }
+        }
+    }
+
+    fn commit_local_issue_monitor_control<T>(
+        &self,
+        mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
+    ) -> Result<
+        (gwt::IssueMonitorState, T),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
+        let project_root = self.active_project_root().ok_or_else(|| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
+                "local fallback control commit failed: no active project".to_string(),
+            )
+        })?;
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let (cached_issues, projection_error, now) =
+            Self::load_local_issue_monitor_fallback_projection(project_root);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
+        gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let result = mutation(&mut monitor);
+            Self::apply_local_issue_monitor_fallback_projection(
+                &mut monitor,
+                &cached_issues,
+                projection_error.as_deref(),
+                &now,
+            );
+            *prefs = monitor.prefs();
+            Ok((monitor, result))
+        })
+        .map(|(_, committed)| committed)
+        .map_err(|error| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(format!(
+                "local fallback control commit failed: {error}"
+            ))
+        })
+    }
+
+    fn commit_local_issue_monitor_authorizing_control<T>(
+        &self,
+        mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> Result<T, String>,
+    ) -> Result<
+        (gwt::IssueMonitorState, T),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+    > {
+        let project_root = self.active_project_root().ok_or_else(|| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
+                "local fallback control commit failed: no active project".to_string(),
+            )
+        })?;
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let (cached_issues, projection_error, now) =
+            Self::load_local_issue_monitor_fallback_projection(project_root);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
+        gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            let result = mutation(&mut monitor).map_err(std::io::Error::other)?;
+            Self::apply_local_issue_monitor_fallback_projection(
+                &mut monitor,
+                &cached_issues,
+                projection_error.as_deref(),
+                &now,
+            );
+            *prefs = monitor.prefs();
+            Ok((monitor, result))
+        })
+        .map(|(_, committed)| committed)
+        .map_err(|error| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(format!(
+                "local fallback control commit failed: {error}"
+            ))
+        })
+    }
+
+    fn load_local_issue_monitor_fallback_projection(
+        project_root: &Path,
+    ) -> (Vec<gwt::IssueMonitorIssue>, Option<String>, String) {
+        let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        let cache_root = gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+        let (cached_issues, cache_error) =
+            match gwt::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root) {
+                Ok(issues) => (issues, None),
+                Err(error) => (Vec::new(), Some(format!("issue cache failed: {error}"))),
+            };
+        let origin_error = gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root)
+            .err()
+            .map(|error| error.to_string());
+        (
+            cached_issues,
+            cache_error.or(origin_error),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+    }
+
+    fn apply_local_issue_monitor_fallback_projection(
+        monitor: &mut gwt::IssueMonitorState,
+        cached_issues: &[gwt::IssueMonitorIssue],
+        projection_error: Option<&str>,
+        now: &str,
+    ) {
+        monitor.expire_stale_unbound_launches(now);
+        gwt::scan_issue_monitor_candidates(monitor, cached_issues, now);
+        if monitor.config.enabled {
+            monitor.set_gui_connected(true);
+        }
+        if let Some(error) = projection_error {
+            monitor.record_scan_error(now, error);
+        }
+    }
+
+    fn issue_monitor_control_error_events(
+        &self,
+        client_id: Option<&str>,
+        error: gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        operation: &'static str,
+        issue_number: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(
+            error = %error,
+            operation,
+            "issue monitor control outcome is rejected or uncertain; local fallback denied"
+        );
+        let prefs = self
+            .active_project_root()
+            .map(gwt::issue_monitor_prefs_path_for_repo_path)
+            .and_then(|path| gwt::load_issue_monitor_prefs(&path).ok())
+            .unwrap_or_else(gwt::IssueMonitorPrefs::recovery_default);
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        let message = error.to_string();
+        monitor.record_control_commit_error(message.clone());
+        let mut events = self.issue_monitor_snapshot_events_for(client_id, monitor);
+        let toast = BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message,
+            issue_number,
+        };
+        events.push(match client_id {
+            Some(client_id) => OutboundEvent::reply(client_id, toast),
+            None => OutboundEvent::broadcast(toast),
+        });
+        events
     }
 
     fn quick_register_issue_events(
@@ -1901,19 +2353,23 @@ impl AppRuntime {
                 gwt::IssueMonitorEffectPayload::AcquireClaim {
                     issue_number,
                     claim_id,
+                    owner,
                     ..
                 } => Outcome::Revoked(release_claim_mutation(
                     &client,
                     gwt_github::IssueNumber(*issue_number),
                     claim_id,
+                    owner,
                 )),
                 gwt::IssueMonitorEffectPayload::ReleaseClaim {
                     issue_number,
                     claim_id,
+                    owner,
                 } => Outcome::Release(release_claim_mutation(
                     &client,
                     gwt_github::IssueNumber(*issue_number),
                     claim_id,
+                    owner,
                 )),
                 _ => break,
             };
@@ -2038,91 +2494,6 @@ impl AppRuntime {
                     monitor.record_launch_failed(issue_number, message);
                 }
             });
-        }
-        events
-    }
-
-    fn local_issue_monitor_agent_failed_events(
-        &mut self,
-        window_id: &str,
-        message: &str,
-        issue_number_hint: Option<u64>,
-    ) -> Vec<OutboundEvent> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            return Vec::new();
-        };
-
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-        );
-        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
-            .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
-        let mut monitor =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-
-        let loaded = gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
-            .map_err(|error| error.to_string())
-            .and_then(|(owner, repo)| {
-                gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
-                    &project_root,
-                    &owner,
-                    &repo,
-                )
-                .map_err(|error| format!("issue list failed: {error}"))
-            });
-
-        let issue_number = rebase_mutate_and_persist_issue_monitor_state(
-            &prefs_path,
-            &mut monitor,
-            |monitor| {
-                match &loaded {
-                    Ok(loaded) => {
-                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
-                            monitor,
-                            loaded,
-                            &project_root,
-                            &now,
-                        );
-                    }
-                    Err(error) => monitor.record_scan_error(now.as_str(), error),
-                }
-                let issue_number = if let Some(issue_number) = issue_number_hint {
-                    monitor.record_agent_issue_failed(issue_number, message.to_string());
-                    Some(issue_number)
-                } else {
-                    monitor.record_agent_window_failed(window_id, message.to_string())
-                };
-                if issue_number.is_none() {
-                    monitor.record_scan_error(
-                        now.as_str(),
-                        format!("agent window {window_id} failed but no monitored Issue mapping was found: {message}"),
-                    );
-                }
-                issue_number
-            },
-        );
-        if issue_number_hint.is_some() {
-            self.pending_launch_feedback_contexts.remove(window_id);
-        }
-
-        // #3165/#3200 error-window lifecycle: an autonomous (two-stage opt-in)
-        // failure auto-closes its stale agent window so the bounded retry
-        // relaunches into a clean canvas. A default failure keeps the window on
-        // the canvas for human inspection (closed later on explicit Launch Now).
-        let autoclose_failed_window = issue_number
-            .map(|number| monitor.should_autoclose_failed_window(number))
-            .unwrap_or(false);
-
-        let mut events = self.issue_monitor_snapshot_events_for(None, monitor);
-        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-            level: "error".to_string(),
-            message: message.to_string(),
-            issue_number,
-        }));
-        if autoclose_failed_window {
-            events.extend(self.close_window_events(window_id));
         }
         events
     }
@@ -2670,12 +3041,15 @@ impl AppRuntime {
                 }
                 let publication =
                     self.publish_issue_monitor_control(serde_json::json!({ "enabled": enabled }));
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_authorizing_control_result_events(
                     &client_id,
                     publication,
                     "enabled",
                     |monitor| {
-                        let _ = monitor.set_enabled_with_effect_revocation(enabled);
+                        monitor
+                            .set_enabled_with_effect_revocation(enabled)
+                            .ok_or_else(|| "authority epoch exhausted".to_string())?;
+                        Ok(())
                     },
                 )
             }
@@ -2683,12 +3057,15 @@ impl AppRuntime {
                 let publication = self.publish_issue_monitor_control(
                     serde_json::json!({ "autonomous_mode": enabled }),
                 );
-                self.issue_monitor_control_result_events(
+                self.issue_monitor_authorizing_control_result_events(
                     &client_id,
                     publication,
                     "autonomous-mode",
                     |monitor| {
-                        let _ = monitor.set_autonomous_mode_with_effect_revocation(enabled);
+                        monitor
+                            .set_autonomous_mode_with_effect_revocation(enabled)
+                            .ok_or_else(|| "authority epoch exhausted".to_string())?;
+                        Ok(())
                     },
                 )
             }
@@ -2701,9 +3078,7 @@ impl AppRuntime {
                     publication,
                     "max-active",
                     |monitor| {
-                        if monitor.advance_effect_authority_epoch().is_some() {
-                            monitor.set_max_active_agents(max_active_agents);
-                        }
+                        monitor.set_max_active_agents(max_active_agents);
                     },
                 )
             }
@@ -2717,9 +3092,7 @@ impl AppRuntime {
                     publication,
                     "reorder",
                     |monitor| {
-                        if monitor.advance_effect_authority_epoch().is_some() {
-                            monitor.reorder_queued_issues(&priority_order);
-                        }
+                        monitor.reorder_queued_issues(&priority_order);
                     },
                 )
             }
