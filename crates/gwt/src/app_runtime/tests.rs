@@ -42,12 +42,13 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
 use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
-    save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
-    AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
-    KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
-    LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    record_issue_monitor_scan_failures, save_start_work_workspace_projection,
+    save_workspace_launch_projection, ActiveAgentSession, AgentKanbanLaunchTarget,
+    AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
+    DispatchTarget, KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
+    WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -720,6 +721,14 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh refresh failed\r\n\
   exit /b 1\r\n\
 )\r\n\
+if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
+  if /I \"%1 %2\"==\"pr list\" (\r\n\
+    echo []\r\n\
+    exit /b 0\r\n\
+  )\r\n\
+  >&2 echo gh refresh failed\r\n\
+  exit /b 1\r\n\
+)\r\n\
 echo [{\"number\":43,\"title\":\"Refreshed issue\",\"body\":\"Fresh body\",\"labels\":[{\"name\":\"bug\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
 exit /b 0\r\n",
             )
@@ -742,6 +751,18 @@ exit /b 0\r\n",
 	if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
 	  printf '%s\n' 'gh refresh failed' >&2
 	  exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "cache_merge_empty" ]; then
+  printf '%s\n' 'gh refresh failed' >&2
+  exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\n' 'gh merged query failed' >&2
+  exit 1
 fi
 printf '%s\n' '[{"number":43,"title":"Refreshed issue","body":"Fresh body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-04-20T00:00:00Z"}]'
 exit 0
@@ -6508,9 +6529,16 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "cache_merge_empty");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -17333,6 +17361,95 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     assert!(
         persisted.failed_issues.is_empty(),
         "marker and cleanup are persisted by the final atomic save"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "merge_fail");
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "window-43".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed launched issue");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("issue monitor status");
+    let error = status
+        .last_error
+        .as_deref()
+        .expect("merge reconciliation error");
+    assert!(error.contains("merge reconciliation failed"), "{error}");
+    assert!(error.contains("gh merged query failed"), "{error}");
+    assert_eq!(
+        status.active_count, 1,
+        "query failure keeps the active slot"
+    );
+
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox");
+    assert_eq!(
+        inbox
+            .iter()
+            .find(|item| item.issue.number == 43)
+            .map(|item| item.state),
+        Some(gwt::MonitorInboxState::Launched),
+        "query failure must not fabricate a merged transition"
+    );
+}
+
+#[test]
+fn issue_monitor_scan_failures_prefer_launch_failure_over_merge_query_error() {
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+
+    record_issue_monitor_scan_failures(
+        &mut monitor,
+        "2026-07-27T00:00:00Z",
+        Some("issue monitor merge reconciliation failed: gh unavailable".to_string()),
+        vec![(43, "agent binary missing".to_string())],
+    );
+
+    assert_eq!(
+        monitor.status_view().last_error.as_deref(),
+        Some("issue #43: agent binary missing"),
+        "the later, issue-specific launch failure must remain operator-visible"
     );
 }
 
