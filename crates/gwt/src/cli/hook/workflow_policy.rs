@@ -412,6 +412,7 @@ const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
     "verification-run.json",
     "verification-plan.json",
     "intake-outcome.json",
+    "action-obligations.json",
 ];
 
 fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, HookError> {
@@ -1491,6 +1492,7 @@ Coverage requirements.
             ".gwt/skill-state/verification-run.json",
             ".gwt/skill-state/verification-plan.json",
             ".gwt/skill-state/intake-outcome.json",
+            ".gwt/skill-state/action-obligations.json",
         ] {
             let event = HookEvent {
                 tool_name: Some("Edit".to_string()),

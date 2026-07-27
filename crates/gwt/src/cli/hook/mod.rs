@@ -11,6 +11,7 @@
 //! Individual hook handlers (runtime-state, block-*, forward) will live in
 //! sibling files and consume these types.
 
+pub mod action_obligation_stop_check;
 pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;

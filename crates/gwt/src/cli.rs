@@ -5,6 +5,7 @@
 //! module owns argv parsing, dispatches to the high-level SPEC operations in
 //! `gwt-github`, and writes the result to stdout/stderr.
 
+pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;

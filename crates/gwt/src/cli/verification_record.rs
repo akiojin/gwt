@@ -648,6 +648,20 @@ pub(super) fn run<E: CliEnv>(
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
             let (record, transcript) = run_verification(&worktree, &session_id, &commands)
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            if record.all_passed && record.plan_covered {
+                // P11: only an all-passing run that covers the registered
+                // plan settles implementation/verification obligations — a
+                // plan-less trivial run must not (vacuous-settlement fix).
+                crate::cli::action_obligation::settle_kinds_best_effort(
+                    &worktree,
+                    &session_id,
+                    &[
+                        crate::cli::action_obligation::ObligationKind::Verification,
+                        crate::cli::action_obligation::ObligationKind::Implementation,
+                    ],
+                    &format!("verify.run {}", record.record_id),
+                );
+            }
             out.push_str(&transcript);
             out.push_str(&format!(
                 "verify: {status} — record {id} ({count} command(s), owner {owner})\n",
@@ -1144,5 +1158,62 @@ mod tests {
         )
         .expect_err("missing GWT_SESSION_ID must fail");
         assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
+    }
+
+    // P11 review fix: only a plan-covering all-passing run settles
+    // implementation/verification obligations — a plan-less trivial run
+    // must not (vacuous-settlement guard).
+    #[test]
+    fn verify_run_settles_obligations_only_when_plan_covered() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
+            .unwrap();
+
+        // Plan-less run: passes, but does not cover any registered plan.
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob"),
+            vec![crate::cli::action_obligation::ObligationKind::Implementation],
+            "plan-less run must not settle obligations"
+        );
+
+        // Registered plan + covering run settles.
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-ob".to_string(),
+                owner_number: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob").is_empty(),
+            "plan-covering run must settle implementation obligations"
+        );
     }
 }
