@@ -719,6 +719,21 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
     })
 }
 
+fn record_issue_monitor_scan_failures(
+    monitor: &mut gwt::IssueMonitorState,
+    now: &str,
+    merge_reconciliation_error: Option<String>,
+    launch_failures: Vec<(u64, String)>,
+) {
+    if let Some(error) = merge_reconciliation_error {
+        tracing::warn!(error = %error, "issue monitor merge reconciliation failed");
+        monitor.record_scan_error(now, error);
+    }
+    for (issue_number, message) in launch_failures {
+        monitor.record_launch_failed(issue_number, message);
+    }
+}
+
 pub(crate) type RuntimeIssueClient = Arc<dyn gwt_github::IssueClient>;
 pub(crate) type RuntimeIssueClientFactory =
     Arc<dyn Fn(&str, &str) -> Result<RuntimeIssueClient, gwt_github::ApiError> + Send + Sync>;
@@ -1609,6 +1624,7 @@ impl AppRuntime {
         let mut launch_requests = Vec::new();
         let mut settings_required_request = None;
         let mut loaded_for_commit = None;
+        let mut merge_reconciliation_error = None;
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
             Ok((owner, repo)) => {
@@ -1624,10 +1640,15 @@ impl AppRuntime {
                             &project_root,
                             &now,
                         );
-                        gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
-                            &mut monitor,
-                            &project_root,
-                        );
+                        merge_reconciliation_error =
+                            gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
+                                &mut monitor,
+                                &project_root,
+                            )
+                            .err()
+                            .map(|error| {
+                                format!("issue monitor merge reconciliation failed: {error}")
+                            });
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
                         }
@@ -1739,9 +1760,12 @@ impl AppRuntime {
                     &now,
                 );
             }
-            for (issue_number, message) in launch_failures {
-                monitor.record_launch_failed(issue_number, message);
-            }
+            record_issue_monitor_scan_failures(
+                monitor,
+                now.as_str(),
+                merge_reconciliation_error,
+                launch_failures,
+            );
         });
         let mut events = launch_events;
         events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
