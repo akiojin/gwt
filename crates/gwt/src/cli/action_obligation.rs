@@ -335,6 +335,34 @@ pub fn defer_all_best_effort(worktree: &Path, session_id: &str, reason: &str) {
     );
 }
 
+/// T-247: completion/ready operations refuse while producing obligations
+/// stay open. `excluding` lets self-settling operations skip their own
+/// kind (a PR mutation settles `pr` on success).
+pub fn open_obligation_refusal(
+    worktree: &Path,
+    session_id: &str,
+    excluding: &[ObligationKind],
+) -> Option<String> {
+    let open: Vec<ObligationKind> = open_kinds(worktree, session_id)
+        .into_iter()
+        .filter(|kind| !excluding.contains(kind))
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    let kinds = open
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "open action obligations [{kinds}] from this session's prompts are unsettled (T-247). \
+         Settle them first — `issue.comment` / `issue.spec.edit` for issue_update, a plan-covering \
+         all-passing `verify.run` for implementation/verification, `pr.create` / `pr.edit` / `pr.ready` \
+         for pr — or defer them with `execution.blocked` and a non-empty `params.reason`."
+    ))
+}
+
 /// Open (unsettled) obligation kinds for the session — the Stop gate input.
 pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
     match load(worktree) {
@@ -475,6 +503,32 @@ mod tests {
             .unwrap()
             .evidence
             .contains("deferred: execution.blocked"));
+    }
+
+    // T-247: the refusal helper lists open kinds and honors exclusions.
+    #[test]
+    fn open_obligation_refusal_lists_kinds_and_honors_exclusions() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_from_prompt(dir.path(), "sess-1", "PR を作成して").unwrap();
+        mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
+
+        let refusal = open_obligation_refusal(dir.path(), "sess-1", &[]).unwrap();
+        assert!(refusal.contains("pr"), "{refusal}");
+        assert!(refusal.contains("issue_update"), "{refusal}");
+
+        // A PR mutation settles its own kind — excluding it leaves only the
+        // issue update in the way.
+        let refusal = open_obligation_refusal(dir.path(), "sess-1", &[ObligationKind::Pr]).unwrap();
+        assert!(refusal.contains("issue_update"), "{refusal}");
+        assert!(!refusal.contains("[pr"), "{refusal}");
+
+        settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::IssueUpdate],
+            "issue.comment",
+        );
+        assert!(open_obligation_refusal(dir.path(), "sess-1", &[ObligationKind::Pr]).is_none());
     }
 
     // No-secrets: raw prompts never persist, only digests.
