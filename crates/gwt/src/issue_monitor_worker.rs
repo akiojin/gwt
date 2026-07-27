@@ -228,28 +228,24 @@ pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) 
 /// Mark any active launched Issue whose work branch has a merged PR as
 /// `Merged`, freeing the active slot. Skips the network call when nothing is
 /// launched, and leaves work launched when the PR query fails (so a transient
-/// error never closes the slot on a false signal).
-pub fn reconcile_issue_monitor_merges(monitor: &mut IssueMonitorState, repo_path: &Path) {
+/// error never closes the slot on a false signal). Query failures are returned
+/// so the scan owner can surface them after its final state rebase.
+pub fn reconcile_issue_monitor_merges(
+    monitor: &mut IssueMonitorState,
+    repo_path: &Path,
+) -> gwt_core::Result<Vec<u64>> {
     if monitor.active_launched_branches().is_empty() {
-        return;
+        return Ok(Vec::new());
     }
-    match gwt_git::pr_status::fetch_merged_pr_branches(repo_path) {
-        Ok(merged_branches) => {
-            let merged = monitor.reconcile_merged_branches(&merged_branches);
-            if !merged.is_empty() {
-                tracing::info!(
-                    issues = ?merged,
-                    "issue monitor marked merged work and freed active slots"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                "issue monitor merge reconciliation skipped (PR query failed)"
-            );
-        }
+    let merged_branches = gwt_git::pr_status::fetch_merged_pr_branches(repo_path)?;
+    let merged = monitor.reconcile_merged_branches(&merged_branches);
+    if !merged.is_empty() {
+        tracing::info!(
+            issues = ?merged,
+            "issue monitor marked merged work and freed active slots"
+        );
     }
+    Ok(merged)
 }
 
 /// Parse `git symbolic-ref --short refs/remotes/origin/HEAD` output (e.g.
@@ -267,6 +263,8 @@ pub fn parse_default_base_branch(symbolic_ref_stdout: &str) -> String {
 /// Resolve the repo's default base branch (the branch autonomous PRs merge
 /// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
 pub fn resolve_default_base_branch(repo_path: &Path) -> String {
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
@@ -274,7 +272,7 @@ pub fn resolve_default_base_branch(repo_path: &Path) -> String {
         "git",
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
         gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
-            .current_dir(repo_path),
+            .current_dir(&git_root),
     );
     match output {
         Ok(output) if output.success() => parse_default_base_branch(&output.stdout),
@@ -1165,5 +1163,43 @@ mod tests {
         // Empty / unresolved ⇒ fail-closed to main.
         assert_eq!(parse_default_base_branch(""), "main");
         assert_eq!(parse_default_base_branch("origin/"), "main");
+    }
+
+    #[test]
+    fn resolve_default_base_branch_uses_child_bare_repo_for_workspace_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let symbolic_ref = gwt_core::process::hidden_command("git")
+            .args([
+                "--git-dir",
+                bare_repo.to_str().expect("bare repo path"),
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("set origin HEAD");
+        assert!(
+            symbolic_ref.status.success(),
+            "git symbolic-ref failed: {}",
+            String::from_utf8_lossy(&symbolic_ref.stderr)
+        );
+
+        assert_eq!(resolve_default_base_branch(tmp.path()), "develop");
     }
 }
