@@ -3991,7 +3991,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
 }
 
 #[test]
-fn app_runtime_dock_window_tab_resizes_group_runtimes() {
+fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
     let temp = tempdir().expect("tempdir");
     let tab = sample_project_tab(
         "tab-1",
@@ -4033,6 +4033,20 @@ fn app_runtime_dock_window_tab_resizes_group_runtimes() {
         );
     }
 
+    const REAL_COLS: u16 = 151;
+    const REAL_ROWS: u16 = 43;
+    for window_id in [&shell_id, &claude_id] {
+        runtime
+            .runtimes
+            .get(window_id)
+            .expect("runtime")
+            .pane
+            .lock()
+            .expect("pane")
+            .resize(REAL_COLS, REAL_ROWS)
+            .expect("resize");
+    }
+
     let target_geometry = runtime
         .tab("tab-1")
         .expect("tab")
@@ -4041,7 +4055,11 @@ fn app_runtime_dock_window_tab_resizes_group_runtimes() {
         .expect("claude")
         .geometry
         .clone();
-    let (expected_cols, expected_rows) = geometry_to_pty_size(&target_geometry);
+    assert_ne!(
+        geometry_to_pty_size(&target_geometry),
+        (REAL_COLS, REAL_ROWS),
+        "sentinel must differ from the dock geometry approximation",
+    );
 
     let events = runtime.dock_window_tab_events(&shell_id, &claude_id);
 
@@ -4054,8 +4072,81 @@ fn app_runtime_dock_window_tab_resizes_group_runtimes() {
             .pane
             .lock()
             .expect("pane");
-        assert_eq!(pane.screen().size(), (expected_rows, expected_cols));
+        assert_eq!(
+            pane.screen().size(),
+            (REAL_ROWS, REAL_COLS),
+            "dock must not clobber the frontend-fitted PTY size",
+        );
     }
+}
+
+#[test]
+fn app_runtime_detach_window_tab_preserves_real_fit_pty_size() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell, WindowPreset::Claude],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let shell_id = combined_window_id("tab-1", "shell-1");
+    let claude_id = combined_window_id("tab-1", "claude-1");
+    assert_eq!(
+        runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
+        1,
+    );
+    insert_test_pane_runtime(&mut runtime, &shell_id);
+
+    const REAL_COLS: u16 = 149;
+    const REAL_ROWS: u16 = 37;
+    runtime
+        .runtimes
+        .get(&shell_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .resize(REAL_COLS, REAL_ROWS)
+        .expect("resize");
+
+    let detached_geometry = WindowGeometry {
+        x: 120.0,
+        y: 80.0,
+        width: 920.0,
+        height: 580.0,
+    };
+    assert_ne!(
+        geometry_to_pty_size(&detached_geometry),
+        (REAL_COLS, REAL_ROWS),
+        "sentinel must differ from the detached geometry approximation",
+    );
+
+    let events = runtime.detach_window_tab_events(&shell_id, detached_geometry.clone());
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
+    let detached = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .window("shell-1")
+        .expect("shell");
+    assert_eq!(detached.geometry, detached_geometry);
+    assert_eq!(detached.tab_group_id, None);
+    let pane = runtime
+        .runtimes
+        .get(&shell_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane");
+    assert_eq!(
+        pane.screen().size(),
+        (REAL_ROWS, REAL_COLS),
+        "detach must not clobber the frontend-fitted PTY size",
+    );
 }
 
 #[test]

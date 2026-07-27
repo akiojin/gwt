@@ -22,8 +22,8 @@
 use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
-    close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus,
+    close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
+    WindowPreset, WindowProcessStatus,
 };
 
 impl AppRuntime {
@@ -170,33 +170,18 @@ impl AppRuntime {
         if address.tab_id != target_address.tab_id {
             return Vec::new();
         }
-        let resize_window_ids = {
+        let updated = {
             let Some(tab) = self.tab_mut(&address.tab_id) else {
                 return Vec::new();
             };
-            if !tab
-                .workspace
-                .dock_window_tab(&address.raw_id, &target_address.raw_id)
-            {
-                return Vec::new();
-            }
             tab.workspace
-                .window(&address.raw_id)
-                .and_then(|window| window.tab_group_id.clone())
-                .map(|group_id| {
-                    tab.workspace
-                        .persisted()
-                        .windows
-                        .iter()
-                        .filter(|window| window.tab_group_id.as_deref() == Some(group_id.as_str()))
-                        .map(|window| combined_window_id(&address.tab_id, &window.id))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| vec![id.to_string(), target_id.to_string()])
+                .dock_window_tab(&address.raw_id, &target_address.raw_id)
         };
-        for window_id in resize_window_ids {
-            self.resize_runtime_to_window(&window_id);
+        if !updated {
+            return Vec::new();
         }
+        // Docking mutates shared canvas geometry, but the frontend's
+        // revisioned xterm fit remains authoritative for the live PTY grid.
         self.activate_tab_for_window_events(address.tab_id)
     }
 
@@ -238,7 +223,8 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        self.resize_runtime_to_window(id);
+        // Detaching mutates canvas geometry, but the frontend's revisioned
+        // xterm fit remains authoritative for the live PTY grid.
         self.activate_tab_for_window_events(address.tab_id)
     }
 
