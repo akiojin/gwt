@@ -253,6 +253,23 @@ fn with_write_lease_for_resolved_dir_wait<T>(
     result
 }
 
+/// T-177 core: turn a trusted-state I/O or parse failure into an
+/// actionable repair message for the canonical operations. The raw error
+/// used to surface as a misleading "network error"; store failures are a
+/// local health problem with local repair paths.
+#[must_use]
+pub fn store_health_error(context: &str, err: &std::io::Error) -> String {
+    format!(
+        "trusted state unhealthy while {context}: {err}. The execution/verification records \
+         under the repo-scoped trusted store (`~/.gwt/projects/<repo-hash>/trusted/<worktree-key>/`) \
+         or their worktree mirrors (`.gwt/skill-state/`) could not be read or parsed. Repair by \
+         rerunning the canonical writer: `execution.adopt` with a non-empty `params.reason` rewrites \
+         the execution control record; `verify.plan` / `verify.run` rewrite verification state; \
+         `intake.outcome.record` rewrites the intake outcome. If the failure persists, inspect the \
+         store directory for filesystem problems."
+    )
+}
+
 /// True when the worktree is under trusted-store management: launch
 /// materialization wrote the Execution Control Record's trusted copy, so
 /// every later canonical `verify.plan` / `verify.run` write produced a

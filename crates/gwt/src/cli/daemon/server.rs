@@ -658,7 +658,14 @@ fn scan_issue_monitor_once_blocking(
         &scope.project_root,
         &now,
     );
-    crate::issue_monitor_worker::reconcile_issue_monitor_merges(&mut monitor, &scope.project_root);
+    if let Err(error) = crate::issue_monitor_worker::reconcile_issue_monitor_merges(
+        &mut monitor,
+        &scope.project_root,
+    ) {
+        let error = format!("issue monitor merge reconciliation failed: {error}");
+        tracing::warn!(error = %error, "issue monitor merge reconciliation failed");
+        monitor.record_scan_error(now.as_str(), error);
+    }
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
@@ -726,7 +733,7 @@ fn scan_issue_monitor_once_blocking(
                         error = %error,
                         "issue monitor GitHub claim authentication unavailable"
                     );
-                    monitor.record_launch_auth_required(now);
+                    monitor.record_launch_auth_required(now.as_str());
                 }
             }
         }
@@ -1147,6 +1154,18 @@ mod tests {
 if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
   printf '%s\n' 'gh refresh failed' >&2
   exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\n' 'gh merged query failed' >&2
+  exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ "$(git rev-parse --is-bare-repository 2>/dev/null)" != "true" ]; then
+    printf '%s\n' 'gh merged query ran outside child bare repository' >&2
+    exit 1
+  fi
+  printf '%s\n' '[{"headRefName":"work/issue-43","state":"MERGED"}]'
+  exit 0
 fi
 printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
 exit 0
@@ -1739,6 +1758,116 @@ exit 0
     }
 
     #[test]
+    fn daemon_scan_records_merge_reconciliation_error_and_preserves_active_slot() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "merge_fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "window-43".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let status = monitor.status_view();
+        let error = status.last_error.expect("merge reconciliation error");
+        assert!(error.contains("merge reconciliation failed"), "{error}");
+        assert!(error.contains("gh merged query failed"), "{error}");
+        assert_eq!(
+            status.active_count, 1,
+            "query failure keeps the active slot"
+        );
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Launched),
+            "query failure must not fabricate a merged transition"
+        );
+    }
+
+    #[test]
+    fn daemon_scan_reconciles_merged_issue_from_workspace_home_child_bare_repo() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "merge_success");
+
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = workspace_home.join("repo.git");
+        fs::create_dir_all(&workspace_home).expect("create workspace home");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&bare_repo)
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        git_remote_add_origin(&bare_repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            workspace_home,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "window-43".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        assert_eq!(monitor.status_view().active_count, 0);
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged),
+            "a positive merged-branch signal from the child bare repo frees the slot"
+        );
+        assert!(monitor.prefs().merged_issues.contains(&43));
+    }
+
+    #[test]
     fn daemon_live_scan_migrates_and_atomically_persists_legacy_failure() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -1865,6 +1994,49 @@ exit 0
         assert!(
             persisted.merged_issues.contains(&42),
             "scan-driven merge completion is persisted, so a restart will not re-launch it"
+        );
+    }
+
+    #[test]
+    fn daemon_persist_does_not_restore_a_launch_merged_by_the_scan() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor-prefs.json");
+        let disk = crate::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &disk).expect("seed launched prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                ..crate::IssueMonitorConfig::default()
+            },
+            disk,
+        );
+        assert_eq!(monitor.status_view().active_count, 1);
+
+        monitor.record_merged(42);
+        assert_eq!(monitor.status_view().active_count, 0);
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.status_view().active_count,
+            0,
+            "the persist rebase must not restore the stale disk launch"
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(persisted.merged_issues.contains(&42));
+        assert!(
+            persisted
+                .launched_issues
+                .iter()
+                .all(|launched| launched.issue_number != 42),
+            "the merged issue must not persist as both launched and merged"
         );
     }
 

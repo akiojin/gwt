@@ -878,9 +878,11 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&format!("execution: completion refused — {refusal}\n"));
                 return Ok(2);
             }
-            match settle_completed_with_evidence(&worktree, &session_id, None)
-                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
-            {
+            match settle_completed_with_evidence(&worktree, &session_id, None).map_err(|err| {
+                SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
+                ))
+            })? {
                 Ok(result) => result,
                 Err(status) => {
                     out.push_str(&format!(
@@ -909,7 +911,11 @@ pub(super) fn run<E: CliEnv>(
                     missing_verification,
                 },
             )
-            .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+            .map_err(|err| {
+                SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
+                ))
+            })?
         }
     };
     match result {
@@ -1055,7 +1061,11 @@ fn run_reopen(
     crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_reopen_locked(worktree, session_id, reason, out))
     })
-    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    .map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?
 }
 
 fn run_reopen_locked(
@@ -1064,8 +1074,11 @@ fn run_reopen_locked(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let Some(mut record) =
-        load(worktree).map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    let Some(mut record) = load(worktree).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?
     else {
         out.push_str(
             "execution: reopen refused — no execution control record exists; start the linked owner through gwt-execute\n",
@@ -1091,11 +1104,19 @@ fn run_reopen_locked(
             // Only an in-flight record with embedded recoveries needs the
             // rolling-upgrade write. A modern idempotent retry stays a true
             // no-op and cannot fail because of an unnecessary rewrite.
-            if recovery_storage_needs_upgrade(worktree)
-                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
-            {
-                save(worktree, &record)
-                    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+            if recovery_storage_needs_upgrade(worktree).map_err(|err| {
+                SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
+                ))
+            })? {
+                save(worktree, &record).map_err(|err| {
+                    SpecOpsError::from(ApiError::Unexpected(
+                        crate::cli::trusted_store::store_health_error(
+                            "settling execution state",
+                            &err,
+                        ),
+                    ))
+                })?;
             }
             out.push_str(&format!(
                 "execution: {kind} #{number} is already active for session {session}\n",
@@ -1141,8 +1162,11 @@ fn run_reopen_locked(
     }
 
     use crate::cli::verification_record as vr;
-    let Some(plan) = vr::load_plan(worktree)
-        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    let Some(plan) = vr::load_plan(worktree).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?
     else {
         out.push_str(
             "execution: reopen refused — no verification plan exists; run verify.plan with params.derive:true, then verify.run\n",
@@ -1171,8 +1195,11 @@ fn run_reopen_locked(
         );
         return Ok(2);
     }
-    let Some(verification) =
-        vr::load(worktree).map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    let Some(verification) = vr::load(worktree).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?
     else {
         out.push_str(
             "execution: reopen refused — no verification run record exists; run verify.run\n",
@@ -1252,8 +1279,11 @@ fn run_reopen_locked(
     });
     record.status = ExecutionControlStatus::Active;
     record.settled_at = None;
-    save(worktree, &record)
-        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    save(worktree, &record).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?;
     out.push_str(&format!(
         "execution: reopened {kind} #{number} for session {session} using verification record {record_id}; completion remains pending\n",
         kind = record.owner_kind.as_str(),
@@ -1288,7 +1318,11 @@ fn run_adopt(
     crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_adopt_locked(worktree, session_id, reason, out))
     })
-    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    .map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?
 }
 
 fn run_adopt_locked(
@@ -1297,8 +1331,11 @@ fn run_adopt_locked(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let Some(mut record) =
-        load(worktree).map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    let Some(mut record) = load(worktree).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?
     else {
         out.push_str("execution: no execution control record to adopt — a linked-owner launch materializes one\n");
         return Ok(0);
@@ -1328,8 +1365,11 @@ fn run_adopt_locked(
         transferred_at: Utc::now(),
     });
     record.primary_session_id = session_id.to_string();
-    save(worktree, &record)
-        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    save(worktree, &record).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error("settling execution state", &err),
+        ))
+    })?;
     out.push_str(&format!(
         "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record)\n",
         kind = record.owner_kind.as_str(),
@@ -2098,6 +2138,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2352,6 +2393,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2378,6 +2420,7 @@ mod tests {
                     commands: vec!["git --exec-path".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2723,6 +2766,7 @@ mod tests {
                     commands: vec![failing_command.clone()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2751,6 +2795,7 @@ mod tests {
                     commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                     derived: true,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -2979,6 +3024,44 @@ mod tests {
         }
 
         #[test]
+        fn store_health_failure_surfaces_repair_guidance() {
+            // T-177 core: a malformed record at a canonical operation
+            // surfaces the store-health repair path, not a raw
+            // network-flavored error. Hook readers stay fail-open.
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-health");
+            let dir = tempfile::tempdir().unwrap();
+            let path = state_path(dir.path());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "{not json").unwrap();
+
+            let err = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "runner down".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("trusted state unhealthy"), "{message}");
+            assert!(message.contains("execution.adopt"), "{message}");
+            assert!(!message.contains("network"), "{message}");
+
+            // The Stop gate keeps failing open on the same malformed state.
+            assert_eq!(
+                crate::cli::hook::execution_control_stop_check::handle_with_input(
+                    dir.path(),
+                    "{}",
+                    Some("sess-health"),
+                ),
+                crate::cli::hook::HookOutput::Silent
+            );
+        }
+
+        #[test]
         fn blocked_defers_obligations_on_no_record_and_already_settled() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -3145,6 +3228,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -3196,6 +3280,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -3432,6 +3517,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -3554,6 +3640,7 @@ mod tests {
                     commands: vec!["git --version".to_string()],
                     derived: false,
                     worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },

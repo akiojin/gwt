@@ -127,6 +127,13 @@ pub struct VerificationPlanRecord {
     /// hand-picked (`verify.plan` with `params.derive:true`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub derived: bool,
+    /// T-131 core Coverage Map: the surface classification the derived
+    /// matrix covers (e.g. `rust(gwt,gwt-core)`, `skills`, `docs(2)`).
+    /// Integrity-hash covered, so the coverage rationale is auditable and
+    /// tamper-evident; empty for hand-picked plans. Acceptance-scenario
+    /// (AS/FR) binding is T-131 full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<String>,
     /// Content-level worktree fingerprint at plan registration. Derived
     /// matrices are valid only for this exact change set; a later surface
     /// change requires deriving and registering a new plan.
@@ -211,7 +218,14 @@ fn register_plan(
 ) -> io::Result<VerificationPlanRecord> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
         let fingerprint = worktree_fingerprint(worktree);
-        register_plan_unleased(worktree, session_id, commands, derived, fingerprint)
+        register_plan_unleased(
+            worktree,
+            session_id,
+            commands,
+            Vec::new(),
+            derived,
+            fingerprint,
+        )
     })
 }
 
@@ -219,6 +233,7 @@ fn register_plan_unleased(
     worktree: &Path,
     session_id: &str,
     commands: Vec<String>,
+    surfaces: Vec<String>,
     derived: bool,
     worktree_fingerprint: String,
 ) -> io::Result<VerificationPlanRecord> {
@@ -228,6 +243,7 @@ fn register_plan_unleased(
         owner_number,
         commands,
         derived,
+        surfaces,
         worktree_fingerprint,
         created_at: Utc::now(),
         content_hash: String::new(),
@@ -262,6 +278,7 @@ fn derive_and_register_plan(
             worktree,
             session_id,
             derived.commands.clone(),
+            derived.surfaces.clone(),
             true,
             fingerprint_after,
         )?;
@@ -1525,8 +1542,16 @@ pub(super) fn run<E: CliEnv>(
                             .to_string(),
                     )));
                 }
-                let plan = register_plan(&worktree, &session_id, commands.clone(), false)
-                    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+                let plan = register_plan(&worktree, &session_id, commands.clone(), false).map_err(
+                    |err| {
+                        SpecOpsError::from(ApiError::Unexpected(
+                            crate::cli::trusted_store::store_health_error(
+                                "updating verification state",
+                                &err,
+                            ),
+                        ))
+                    },
+                )?;
                 (commands, plan)
             };
             out.push_str(&format!(
@@ -1544,6 +1569,18 @@ pub(super) fn run<E: CliEnv>(
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
             let (record, transcript) = run_verification(&worktree, &session_id, &commands)
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+            // T-131 core: surface the coverage map of the plan this run
+            // covered, so the rationale travels with the evidence output.
+            if record.plan_covered {
+                if let Ok(Some(plan)) = load_plan(&worktree) {
+                    if !plan.surfaces.is_empty() {
+                        out.push_str(&format!(
+                            "verify: coverage map [{}]\n",
+                            plan.surfaces.join(", ")
+                        ));
+                    }
+                }
+            }
             if record.all_passed && record.plan_covered {
                 // P11: only an all-passing run that covers the registered
                 // plan settles implementation/verification obligations — a
@@ -1598,6 +1635,7 @@ pub(crate) mod tests {
                 commands: commands.to_vec(),
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1625,6 +1663,77 @@ pub(crate) mod tests {
             plan_derived: false,
             content_hash: String::new(),
         }
+    }
+
+    // T-131 core: the Coverage Map (derived surface classification) is
+    // persisted on the plan record, roundtrips, and is integrity-hash
+    // covered — editing it after registration is tamper-evident.
+    #[test]
+    fn plan_surfaces_roundtrip_and_are_hash_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-cov".to_string(),
+                owner_number: Some(3248),
+                commands: vec!["cargo test -p gwt --lib".to_string()],
+                derived: true,
+                surfaces: vec!["rust(gwt)".to_string(), "docs(1)".to_string()],
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let loaded = load_plan(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            loaded.surfaces,
+            vec!["rust(gwt)".to_string(), "docs(1)".to_string()]
+        );
+        assert!(plan_integrity_ok(&loaded));
+
+        let mut tampered = loaded.clone();
+        tampered.surfaces = vec!["docs(1)".to_string()];
+        assert!(
+            !plan_integrity_ok(&tampered),
+            "coverage map edits must break the integrity hash"
+        );
+    }
+
+    // T-131 core: verify.plan derive:true persists the surface
+    // classification it derived from the change set.
+    #[test]
+    fn derived_registration_records_coverage_map() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let git = |args: &[&str]| {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        git(&["checkout", "-q", "-b", "work/coverage"]);
+        let src = dir.path().join("crates/gwt-core/src/lib.rs");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "pub fn x() {}").unwrap();
+
+        let (derived, plan) = derive_and_register_plan(dir.path(), "sess-cov").unwrap();
+        assert!(!derived.surfaces.is_empty());
+        assert_eq!(plan.surfaces, derived.surfaces);
+        assert!(plan.derived);
+        let loaded = load_plan(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.surfaces, derived.surfaces);
+        assert!(plan_integrity_ok(&loaded));
     }
 
     // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
@@ -1656,6 +1765,7 @@ pub(crate) mod tests {
             commands: vec!["cargo test -p gwt --lib".to_string()],
             derived: false,
             worktree_fingerprint: String::new(),
+            surfaces: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -1730,6 +1840,7 @@ pub(crate) mod tests {
             commands: vec!["git --version".to_string()],
             derived: false,
             worktree_fingerprint: String::new(),
+            surfaces: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -1873,6 +1984,7 @@ pub(crate) mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: true,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2039,6 +2151,7 @@ pub(crate) mod tests {
                 commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2079,6 +2192,7 @@ pub(crate) mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2103,6 +2217,7 @@ pub(crate) mod tests {
                 commands: commands.clone(),
                 derived: true,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2128,6 +2243,7 @@ pub(crate) mod tests {
                 commands: vec!["git --exec-path".to_string()],
                 derived: true,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2155,6 +2271,7 @@ pub(crate) mod tests {
                 commands: commands.clone(),
                 derived: true,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2230,6 +2347,7 @@ pub(crate) mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
