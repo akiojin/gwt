@@ -335,6 +335,86 @@ pub fn defer_all_best_effort(worktree: &Path, session_id: &str, reason: &str) {
     );
 }
 
+/// T-243 core: classify assertive completion claims in assistant prose.
+/// Deliberately narrow — only implemented/fixed and verified/tests-pass
+/// claim forms (ja+en). PR/issue mentions are excluded: they appear in
+/// historical summaries far too often to classify safely (T-243 full).
+#[must_use]
+pub fn classify_commitments(text: &str) -> Vec<ObligationKind> {
+    let lower = text.to_lowercase();
+    let mut kinds = Vec::new();
+    const IMPLEMENTED_CLAIMS: &[&str] = &[
+        "実装しました",
+        "実装済み",
+        "実装完了",
+        "修正しました",
+        "修正済み",
+        "対応済み",
+        "implemented",
+        "fixed the",
+        "has been fixed",
+    ];
+    const VERIFIED_CLAIMS: &[&str] = &[
+        "検証しました",
+        "検証済み",
+        "テストは全て",
+        "全テスト成功",
+        "verified",
+        "all tests pass",
+        "tests pass",
+        "tests are green",
+    ];
+    if IMPLEMENTED_CLAIMS.iter().any(|claim| lower.contains(claim)) {
+        kinds.push(ObligationKind::Implementation);
+    }
+    if VERIFIED_CLAIMS.iter().any(|claim| lower.contains(claim)) {
+        kinds.push(ObligationKind::Verification);
+    }
+    kinds
+}
+
+/// T-243 core: turn UNBACKED completion claims into open obligations. A
+/// claim is backed when the session's ledger holds ANY entry of that kind
+/// (open entries already block; settled entries prove the canonical
+/// evidence ran). Sessions without a ledger are skipped entirely — the
+/// scanner never invents context (fail-open for pre-P11 flows). Returns
+/// the kinds it newly opened.
+pub fn mark_unbacked_commitments(
+    worktree: &Path,
+    session_id: &str,
+    claimed: &[ObligationKind],
+) -> io::Result<Vec<ObligationKind>> {
+    if claimed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(state) = load(worktree)? else {
+        return Ok(Vec::new());
+    };
+    if state.session_id != session_id || !integrity_ok(&state) {
+        return Ok(Vec::new());
+    }
+    let mut opened = Vec::new();
+    for kind in claimed {
+        if state.obligations.iter().any(|entry| entry.kind == *kind) {
+            continue;
+        }
+        let synthetic = format!("assistant-commitment:{}", kind.as_str());
+        match crate::cli::trusted_store::with_write_lease_wait(
+            worktree,
+            std::time::Duration::from_millis(300),
+            || mark_locked(worktree, session_id, &synthetic, *kind),
+        ) {
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                mark_locked(worktree, session_id, &synthetic, *kind)?;
+            }
+            Err(err) => return Err(err),
+            Ok(()) => {}
+        }
+        opened.push(*kind);
+    }
+    Ok(opened)
+}
+
 /// T-247: completion/ready operations refuse while producing obligations
 /// stay open. `excluding` lets self-settling operations skip their own
 /// kind (a PR mutation settles `pr` on success).
@@ -503,6 +583,64 @@ mod tests {
             .unwrap()
             .evidence
             .contains("deferred: execution.blocked"));
+    }
+
+    // T-243 core: only assertive completion claims classify; requests,
+    // status text, and historical PR mentions stay out.
+    #[test]
+    fn commitment_classifier_is_narrow() {
+        assert_eq!(
+            classify_commitments("バグを修正しました。全テスト成功です。"),
+            vec![ObligationKind::Implementation, ObligationKind::Verification]
+        );
+        assert_eq!(
+            classify_commitments("The fix has been fixed and all tests pass."),
+            vec![ObligationKind::Implementation, ObligationKind::Verification]
+        );
+        assert!(classify_commitments("バグを修正してください").is_empty());
+        assert!(classify_commitments("テストを実行して確認します").is_empty());
+        assert!(classify_commitments("PR #3308 マージ済み / 関連 95 GREEN").is_empty());
+        assert!(classify_commitments("fmt / clippy PASS").is_empty());
+    }
+
+    // T-243 core: unbacked claims open obligations; backed claims and
+    // ledger-less sessions never do.
+    #[test]
+    fn unbacked_commitments_open_obligations_backed_ones_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        // No ledger at all → the scanner invents nothing.
+        assert!(
+            mark_unbacked_commitments(dir.path(), "sess-1", &[ObligationKind::Implementation],)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Ledger exists (producing prompt) and implementation evidence is
+        // settled → an implementation claim is backed; a verification
+        // claim is not and opens the obligation.
+        mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
+        settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::Implementation],
+            "verify.run vr-x",
+        );
+        let opened = mark_unbacked_commitments(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::Implementation, ObligationKind::Verification],
+        )
+        .unwrap();
+        assert_eq!(opened, vec![ObligationKind::Verification]);
+        assert_eq!(
+            open_kinds(dir.path(), "sess-1"),
+            vec![ObligationKind::Verification]
+        );
+        // Re-scanning does not stack duplicates.
+        let opened =
+            mark_unbacked_commitments(dir.path(), "sess-1", &[ObligationKind::Verification])
+                .unwrap();
+        assert!(opened.is_empty());
     }
 
     // T-247: the refusal helper lists open kinds and honors exclusions.

@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use super::{context::HookContext, envelope::stop_hook_active_from, HookOutput};
+use super::{context::HookContext, envelope::stop_hook_active_from, HookEvent, HookOutput};
 use crate::cli::action_obligation;
 
 /// UserPromptSubmit entry: arm typed obligations for producing prompts in
@@ -68,7 +68,44 @@ pub fn handle_with_input(
     };
     let open = action_obligation::open_kinds(&resolved, session.trim());
     if open.is_empty() {
-        return HookOutput::Silent;
+        // T-243 core: no open obligations — scan the latest assistant
+        // message for completion claims with no ledger backing. An
+        // unbacked "implemented"/"verified" claim opens the matching
+        // obligation and blocks through this same gate; claims backed by
+        // settled evidence pass. Unparsable transcripts and ledger-less
+        // sessions fail open.
+        let claimed = HookEvent::read_from_str(input)
+            .ok()
+            .flatten()
+            .and_then(|event| event.transcript_path)
+            .map(|transcript| {
+                super::execution_completion_stop_check::transcript_path_for_worktree(
+                    &resolved,
+                    &transcript,
+                )
+            })
+            .and_then(|path| {
+                super::execution_completion_stop_check::read_transcript_tail(&path).ok()
+            })
+            .and_then(|tail| super::execution_completion_stop_check::latest_assistant_text(&tail))
+            .map(|text| action_obligation::classify_commitments(&text))
+            .unwrap_or_default();
+        let opened =
+            action_obligation::mark_unbacked_commitments(&resolved, session.trim(), &claimed)
+                .unwrap_or_default();
+        if opened.is_empty() {
+            return HookOutput::Silent;
+        }
+        let kinds = opened
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return HookOutput::stop_block(format!(
+            "The latest assistant message claims completed work with no recorded evidence: [{kinds}] (assistant commitment scanner, SPEC-3248 T-243).
+             Prose is not evidence. Back the claim with the canonical operations — register the matrix with `verify.plan` (derive:true) and produce an all-passing `verify.run` — or, if the work is genuinely blocked, run `execution.blocked` with a non-empty `params.reason`.
+             Claims backed by recorded evidence pass this gate automatically."
+        ));
     }
     let kinds = open
         .iter()
@@ -124,6 +161,60 @@ mod tests {
         );
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
+            HookOutput::Silent
+        );
+    }
+
+    // T-243 core: an unbacked completion claim in the latest assistant
+    // message blocks; the same claim backed by settled evidence passes.
+    #[test]
+    fn unbacked_assistant_claims_block_until_evidence_exists() {
+        let dir = mk_worktree(&EXECUTION_PROFILE);
+        // Ledger exists: the producing prompt opened (and evidence settled)
+        // an implementation obligation.
+        action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
+        action_obligation::settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[action_obligation::ObligationKind::Implementation],
+            "verify.run vr-x",
+        );
+
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"検証しました。全テスト成功です。\"}]}}\n",
+        )
+        .unwrap();
+        let input =
+            serde_json::json!({ "transcript_path": transcript.to_string_lossy() }).to_string();
+
+        let output = handle_with_input(dir.path(), &input, Some("sess-1"));
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected StopBlock, got {output:?}");
+        };
+        assert!(reason.contains("no recorded evidence"), "{reason}");
+        assert!(reason.contains("verification"), "{reason}");
+
+        // Settling the verification evidence backs the claim — the same
+        // transcript now passes.
+        action_obligation::settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[action_obligation::ObligationKind::Verification],
+            "verify.run vr-y",
+        );
+        assert_eq!(
+            handle_with_input(dir.path(), &input, Some("sess-1")),
+            HookOutput::Silent
+        );
+
+        // Ledger-less sessions are never scanned.
+        let bare = mk_worktree(&EXECUTION_PROFILE);
+        let input =
+            serde_json::json!({ "transcript_path": transcript.to_string_lossy() }).to_string();
+        assert_eq!(
+            handle_with_input(bare.path(), &input, Some("sess-1")),
             HookOutput::Silent
         );
     }
