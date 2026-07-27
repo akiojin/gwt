@@ -852,6 +852,11 @@ pub(super) fn run<E: CliEnv>(
             return Ok(2);
         }
     }
+    // P11 review fix: `execution.blocked` must defer open obligations on
+    // EVERY outcome the agent reads as success — including NoRecord
+    // (unlinked launches) and AlreadySettled — or the Stop gate's
+    // advertised escape becomes a silent no-op.
+    let mut deferral_reason: Option<String> = None;
     let result = match command {
         ExecutionCommand::Adopt { .. } | ExecutionCommand::Reopen { .. } => {
             unreachable!("handled above")
@@ -879,6 +884,7 @@ pub(super) fn run<E: CliEnv>(
                     "execution.blocked requires a non-empty params.reason".to_string(),
                 )));
             }
+            deferral_reason = Some(reason.clone());
             settle(
                 &worktree,
                 &session_id,
@@ -892,6 +898,18 @@ pub(super) fn run<E: CliEnv>(
     };
     match result {
         SettleResult::Settled(record) => {
+            if record.status == ExecutionControlStatus::Blocked {
+                // P11: a terminal blocked settlement defers every open
+                // obligation with the blocker on record.
+                crate::cli::action_obligation::defer_all_best_effort(
+                    &worktree,
+                    &session_id,
+                    record
+                        .blocked_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded"),
+                );
+            }
             out.push_str(&format!(
                 "execution: {status} for {kind} #{number} (session {session})\n",
                 status = match record.status {
@@ -906,12 +924,32 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
         SettleResult::NoRecord => {
+            if let Some(reason) = &deferral_reason {
+                crate::cli::action_obligation::defer_all_best_effort(
+                    &worktree,
+                    &session_id,
+                    reason,
+                );
+                out.push_str(
+                    "execution: open action obligations deferred with the blocker reason\n",
+                );
+            }
             out.push_str(
                 "execution: no execution control record for this worktree — nothing to settle\n",
             );
             Ok(0)
         }
         SettleResult::AlreadySettled(record) => {
+            if let Some(reason) = &deferral_reason {
+                crate::cli::action_obligation::defer_all_best_effort(
+                    &worktree,
+                    &session_id,
+                    reason,
+                );
+                out.push_str(
+                    "execution: open action obligations deferred with the blocker reason\n",
+                );
+            }
             out.push_str(&format!(
                 "execution: record already settled ({status:?}) for {kind} #{number}\n",
                 status = record.status,
@@ -1075,10 +1113,10 @@ fn run_reopen_locked(
         );
         return Ok(2);
     };
-    if !record
+    if record
         .blocked_reason
         .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
         out.push_str(
             "execution: reopen refused — the Blocked record has no non-empty blocker reason and cannot be recovered canonically\n",
@@ -2862,6 +2900,50 @@ mod tests {
         // T-124: unauthorized settlement attempts (session mismatch) and
         // tampered-record refusals auto-capture one deduped
         // issue-spec-workflow improvement candidate.
+        #[test]
+        fn blocked_defers_obligations_on_no_record_and_already_settled() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob2");
+            let dir = tempfile::tempdir().unwrap();
+
+            // NoRecord path (unlinked launch): blocked still defers.
+            crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob2", "実装して")
+                .unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "runner unavailable".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("obligations deferred"), "{out}");
+            assert!(crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob2").is_empty());
+
+            // AlreadySettled path: a settled record must not strand newly
+            // armed obligations either.
+            let mut settled = active_record("sess-ob2");
+            settled.status = ExecutionControlStatus::Completed;
+            settled.settled_at = Some(Utc::now());
+            save(dir.path(), &settled).unwrap();
+            crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob2", "検証して")
+                .unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "cannot verify".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("obligations deferred"), "{out}");
+            assert!(crate::cli::action_obligation::open_kinds(dir.path(), "sess-ob2").is_empty());
+        }
+
         #[test]
         fn settlement_refusals_capture_improvement_candidate() {
             let _env_lock = crate::env_test_lock()
