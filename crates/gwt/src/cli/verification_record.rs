@@ -1542,8 +1542,16 @@ pub(super) fn run<E: CliEnv>(
                             .to_string(),
                     )));
                 }
-                let plan = register_plan(&worktree, &session_id, commands.clone(), false)
-                    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+                let plan = register_plan(&worktree, &session_id, commands.clone(), false).map_err(
+                    |err| {
+                        SpecOpsError::from(ApiError::Unexpected(
+                            crate::cli::trusted_store::store_health_error(
+                                "updating verification state",
+                                &err,
+                            ),
+                        ))
+                    },
+                )?;
                 (commands, plan)
             };
             out.push_str(&format!(
