@@ -46,7 +46,7 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
     HookOutput::Silent
 }
 
-fn transcript_path_for_worktree(worktree: &Path, transcript_path: &str) -> PathBuf {
+pub(super) fn transcript_path_for_worktree(worktree: &Path, transcript_path: &str) -> PathBuf {
     let path = PathBuf::from(transcript_path);
     if path.is_absolute() {
         path
@@ -55,7 +55,7 @@ fn transcript_path_for_worktree(worktree: &Path, transcript_path: &str) -> PathB
     }
 }
 
-fn read_transcript_tail(path: &Path) -> std::io::Result<String> {
+pub(super) fn read_transcript_tail(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(TRANSCRIPT_TAIL_LIMIT);
@@ -65,7 +65,7 @@ fn read_transcript_tail(path: &Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn latest_assistant_text(transcript_tail: &str) -> Option<String> {
+pub(super) fn latest_assistant_text(transcript_tail: &str) -> Option<String> {
     let mut latest = None;
     for line in transcript_tail.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
