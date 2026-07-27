@@ -356,6 +356,20 @@ pub(crate) fn auto_record_issue_operation(
     number: u64,
 ) {
     let worktree = gwt_core::paths::resolve_current_worktree_root(repo_path);
+    // SPEC-3248 P11: the same canonical success points settle open
+    // issue-update obligations for the current session, in any lane.
+    if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        crate::cli::action_obligation::settle_kinds_best_effort(
+            &worktree,
+            &session_id,
+            &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+            source_operation,
+        );
+    }
     let profile = gwt_skills::resolve_lane_for_worktree(&worktree);
     if profile.id != "intake" {
         return;

@@ -431,6 +431,19 @@ where
 }
 
 fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+    run_gh_command_with(repo_path, args, spawn_gh_command)
+}
+
+fn run_gh_command_with<F>(repo_path: &Path, args: &[&str], mut spawn_gh: F) -> Result<GhCliOutput>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let command_root =
+        crate::worktree::main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    spawn_gh(&command_root, args)
+}
+
+fn spawn_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     let hub = gwt_core::process_console::global();
     let label = format!("gh {}", args.join(" "));
     let options =
@@ -1130,6 +1143,41 @@ mod tests {
         );
         assert!(!branches.contains("work/b"), "open PRs are excluded");
         assert_eq!(branches.len(), 2, "empty head refs are skipped");
+    }
+
+    #[test]
+    fn run_gh_command_uses_child_bare_repo_cwd_for_workspace_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let expected = std::fs::canonicalize(&bare_repo).expect("canonical bare repo");
+        let mut observed_cwd = None;
+
+        let output = run_gh_command_with(tmp.path(), &["pr", "list"], |cwd, args| {
+            observed_cwd = Some(cwd.to_path_buf());
+            assert_eq!(args, ["pr", "list"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: "[]".to_string(),
+                stderr: String::new(),
+            })
+        })
+        .expect("run fake gh command");
+
+        assert!(output.success);
+        assert_eq!(observed_cwd.as_deref(), Some(expected.as_path()));
     }
 
     #[test]

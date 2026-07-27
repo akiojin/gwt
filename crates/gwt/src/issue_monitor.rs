@@ -2497,9 +2497,13 @@ impl IssueMonitorState {
     /// claims) and its next persist dropped the GUI's in-flight claims.
     /// Union-merge: entries already known in memory win; removals propagate via
     /// the existing control frames (Launched / LaunchFailed / WindowClosed).
+    /// A merge completion produced by the current scan is terminal, however,
+    /// and must win over the stale in-flight entry still present on disk until
+    /// this transaction commits the new merged marker.
     pub fn merge_inflight_launches_from_disk(&mut self, disk: &IssueMonitorPrefs) {
         for launched in &disk.launched_issues {
-            if launched.window_id.is_empty() {
+            if launched.window_id.is_empty() || self.merged_issues.contains(&launched.issue_number)
+            {
                 continue;
             }
             self.launched_windows
@@ -2510,6 +2514,9 @@ impl IssueMonitorState {
             }
         }
         for entry in &disk.launching_issues {
+            if self.merged_issues.contains(&entry.issue_number) {
+                continue;
+            }
             if !self.active_launches.contains(&entry.issue_number) {
                 self.active_launches.push(entry.issue_number);
                 if let Some(claimed_at) = &entry.claimed_at {
