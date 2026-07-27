@@ -4143,16 +4143,29 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface));
 }
 
+/* SPEC-2041 Phase 23 / Issue #3291 — the single bottom-right layout owner for
+   transient alerts and the persistent update CTA. It deliberately has no
+   live-region semantics; each child surface retains its own ARIA contract. */
+.operator-notice-stack {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  width: min(440px, calc(100vw - var(--space-8)));
+  pointer-events: none;
+}
+
 /* SPEC #3206 — unified bottom-right alerts toast stack. Replaces the three
    hand-offset systems (board-mention / agent-completion / attention) with one
    self-arranging managed stack; severity is carried by data-level, and the
    whole card is clickable (role=button) for the jump-to action. */
 .toast-alerts {
-  position: fixed;
-  right: var(--space-4);
-  bottom: var(--space-4);
-  z-index: 1001;
-  width: min(360px, calc(100vw - var(--space-8)));
+  order: 0;
+  width: min(360px, 100%);
   pointer-events: none;
 }
 .toast-alerts__list {

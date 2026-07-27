@@ -233,21 +233,25 @@ body::after {
 }
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
-   earlier split toast + persistent button flow.
-   User verification 2026-06-12: the SPEC-2356 sidebar placement was hard to
-   notice — the CTA floats fixed bottom-right again. */
+   earlier split toast + persistent button flow. User verification 2026-06-12
+   keeps the CTA bottom-right; Phase 23 delegates fixed positioning to the
+   shared operator notice stack so alerts can occupy the lane above it. */
 .update-cta-shell {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  display: inline-flex;
+  order: 1;
+  display: flex;
+  width: 100%;
+  max-width: 100%;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-1);
-  z-index: 9999;
+  pointer-events: none;
 }
 
 .update-cta {
   display: inline-flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   min-height: 40px;
   padding: 10px 14px 10px 16px;
@@ -260,6 +264,7 @@ body::after {
   letter-spacing: var(--tracking-mono);
   color: var(--color-state-active);
   cursor: pointer;
+  pointer-events: auto;
   overflow: hidden;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
@@ -269,6 +274,7 @@ body::after {
 }
 
 .update-cta__dismiss {
+  flex: 0 0 auto;
   width: 28px;
   height: 28px;
   border-radius: var(--radius-md);
@@ -279,6 +285,7 @@ body::after {
   border: 1px solid var(--color-border);
   box-shadow: var(--shadow-2);
   color: var(--color-text-muted);
+  pointer-events: auto;
   font: inherit;
   letter-spacing: inherit;
   font-size: var(--type-base);

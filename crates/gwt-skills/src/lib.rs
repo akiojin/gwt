@@ -865,12 +865,21 @@ mod tests {
                 "gwt-manage-pr",
                 "User Verification Result",
                 "current user's language",
+                "execution.reopen",
+                "temporary question",
+                "params.derive:true",
+                "cannot be repaired in the same execution lifetime",
+                "fresh linked-owner launch",
             ] {
                 assert!(
                     execute_skill.contains(required),
                     "expected gwt-execute guidance in {relative}: {required}"
                 );
             }
+            assert!(
+                !execute_skill.contains("adopt is also the repair path"),
+                "{relative} must not direct integrity-failed records to adopt"
+            );
         }
 
         let execute_command =

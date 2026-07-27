@@ -442,7 +442,7 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
         "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.reopen` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
@@ -575,7 +575,14 @@ fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> b
     if command_segments_are_goal_safe(command) {
         return true;
     }
-    if has_shell_output_redirection(command) {
+    // Redirects into the worktree-local `.gwt/` directory are intake
+    // bookkeeping (issue #3265) — `jq ... > .gwt/work/...` stages envelope
+    // payloads without touching production source. Everything else that
+    // writes a file still needs an owner.
+    if !super::segments::output_redirect_file_targets(command)
+        .iter()
+        .all(|target| is_worktree_gwt_bookkeeping_target(target, worktree_root))
+    {
         return false;
     }
     if is_standalone_json_envelope_command(command) {
@@ -596,6 +603,46 @@ fn is_ownerless_safe_segment(segment: &str, worktree_root: &Path) -> bool {
         || is_workspace_identity_update_segment(segment)
         || is_board_post_segment(segment)
         || is_low_risk_worktree_file_op_segment(segment, worktree_root)
+        // A bare `gwtd` reading its JSON envelope from stdin — the sink of a
+        // `jq ... | gwtd` pipeline — is transport, exactly like the sanctioned
+        // standalone heredoc envelope (issue #3265).
+        || is_gwtd_only_segment(segment)
+}
+
+/// A redirect target counts as bookkeeping only inside the worktree-local
+/// `.gwt/` directory: a relative path whose first component is `.gwt`, or an
+/// absolute path under `<worktree>/.gwt/`. Parent traversal never qualifies,
+/// and neither does the trusted execution/evidence state, which has canonical
+/// writers only.
+///
+/// The hook sees the redirect word before the shell applies quote removal,
+/// expansion, and globbing, so a target still carrying shell metacharacters
+/// cannot be resolved to a path — `.gwt/'..'/src/lib.rs` and `.gwt/$OUT` both
+/// escape the directory once bash is done with them. Those fail closed.
+fn is_worktree_gwt_bookkeeping_target(target: &str, worktree_root: &Path) -> bool {
+    if target.contains([
+        '\'', '"', '\\', '$', '`', '*', '?', '[', ']', '{', '}', '~', '!',
+    ]) {
+        return false;
+    }
+    let path = Path::new(target);
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    // P9a trusted state mirror: `execution.*` / `verify.*` own these files.
+    if target.to_lowercase().contains(".gwt/skill-state/") {
+        return false;
+    }
+    if path.is_absolute() {
+        return path.starts_with(worktree_root.join(".gwt"));
+    }
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::Normal(first)) if first == ".gwt"
+    )
 }
 
 fn is_low_risk_worktree_file_op_segment(segment: &str, worktree_root: &Path) -> bool {
@@ -932,7 +979,7 @@ fn is_read_only_exploration_event(event: &HookEvent) -> bool {
     let Some(command) = event.command() else {
         return false;
     };
-    if has_shell_output_redirection(command) {
+    if has_file_output_redirection(command) {
         return false;
     }
     if is_read_only_json_envelope_command(command) {
@@ -942,23 +989,13 @@ fn is_read_only_exploration_event(event: &HookEvent) -> bool {
     !segments.is_empty() && segments.iter().all(|segment| is_read_only_segment(segment))
 }
 
-fn has_shell_output_redirection(command: &str) -> bool {
-    // Stderr-to-devnull, stderr-merge, and stdout-discard forms do not write
-    // the worktree; strip them before looking for real output redirection.
-    const HARMLESS_REDIRECTS: &[&str] = &[
-        "2> /dev/null",
-        "2>/dev/null",
-        "2>&1",
-        "&> /dev/null",
-        "&>/dev/null",
-        "> /dev/null",
-        ">/dev/null",
-    ];
-    let mut stripped = command.to_string();
-    for pattern in HARMLESS_REDIRECTS {
-        stripped = stripped.replace(pattern, " ");
-    }
-    stripped.contains('>') || stripped.contains(" tee ") || stripped.contains("|tee ")
+/// True when the command redirects output into a real file. Detection is
+/// structural (quote-aware, heredoc bodies masked), so a `>` inside a string
+/// literal or heredoc payload is data, not a redirection (issue #3265).
+/// Pipeline sinks like `tee` are covered by per-segment classification —
+/// `tee` is not a read-only command.
+fn has_file_output_redirection(command: &str) -> bool {
+    !super::segments::output_redirect_file_targets(command).is_empty()
 }
 
 fn is_read_only_segment(segment: &str) -> bool {
@@ -1410,6 +1447,43 @@ Coverage requirements.
         .expect("write issue links");
     }
 
+    // Issue #3265: the `.gwt/` bookkeeping allowance resolves the redirect
+    // word the hook sees, which is *before* the shell expands it. Anything
+    // that could still expand elsewhere fails closed.
+    #[test]
+    fn gwt_bookkeeping_target_accepts_only_literal_worktree_paths() {
+        let root = Path::new("/worktree");
+        for target in [
+            ".gwt/work/register-spec/envelope.json",
+            "/worktree/.gwt/work/out.json",
+        ] {
+            assert!(
+                is_worktree_gwt_bookkeeping_target(target, root),
+                "{target} is worktree-local bookkeeping"
+            );
+        }
+        for target in [
+            ".gwt/../src/lib.rs",
+            ".gwt/'..'/src/lib.rs",
+            ".gwt/\"../\"src/lib.rs",
+            ".gwt/\\../src/lib.rs",
+            ".gwt/$OUT",
+            ".gwt/${OUT}",
+            ".gwt/`id`",
+            ".gwt/*.json",
+            "~/.gwt/out.json",
+            "src/generated.rs",
+            "/elsewhere/.gwt/out.json",
+            ".gwt/skill-state/execution-control.json",
+            super::super::segments::UNRESOLVED_REDIRECT_TARGET,
+        ] {
+            assert!(
+                !is_worktree_gwt_bookkeeping_target(target, root),
+                "{target} must not count as bookkeeping"
+            );
+        }
+    }
+
     #[test]
     fn handle_with_input_ignores_empty_and_rejects_invalid_json() {
         assert_eq!(
@@ -1480,6 +1554,37 @@ Coverage requirements.
             evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
             HookOutput::Silent,
             "execution may edit production code"
+        );
+    }
+
+    // Issue #3265: plan mode requires writing `~/.claude/plans/*.md`, and
+    // gwt-discussion requires plan mode inside intake sessions — the lane
+    // guard must never block that write.
+    #[test]
+    fn lane_code_edit_guard_allows_plan_mode_plan_file_in_intake() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
+
+        let plan_path = home.path().join(".claude/plans/issue-3265-fix.md");
+        let event = HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": plan_path.to_string_lossy(),
+                "content": "# Plan",
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_lane_code_edit_guard(&event, repo.path()).expect("guard"),
+            HookOutput::Silent,
+            "intake sessions must be able to write plan-mode plan files"
         );
     }
 

@@ -816,6 +816,11 @@
       </aside>
     </div>
 
+    <!-- SPEC-2041 Phase 23 / Issue #3291: one roleless layout root owns the
+         bottom-right corner. Transient alerts and the persistent update CTA
+         mount as sibling lanes so neither fixed surface can cover the other. -->
+    <div id="operator-notice-stack" class="operator-notice-stack"></div>
+
     <script type="module" src="/app.js"></script>
   </body>
 </html>

@@ -32,24 +32,143 @@ use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
-    finalize_docker_agent_launch_config, geometry_to_pty_size, install_launch_gwt_bin_env,
-    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, launch_output_mirror,
-    mark_auto_resume_source_completed, normalize_branch_name,
+    finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
+    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
+    launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
-    same_worktree_path, save_resumed_workspace_projection, save_start_work_workspace_projection,
-    ActiveAgentSession, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
-    HookForwardTarget, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
+    save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
+    AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
+    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry,
+    WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProcessLaunch {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
     pub(crate) env: HashMap<String, String>,
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
+}
+
+fn private_launch_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
+            | gwt_agent::GWT_SESSION_ID_ENV
+            | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+    )
+}
+
+fn private_launch_env_assignment(argument: &str) -> Option<&str> {
+    let (key, _) = argument.split_once('=')?;
+    private_launch_env_key(key).then_some(key)
+}
+
+impl std::fmt::Debug for ProcessLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    if private_launch_env_key(key) {
+                        "<redacted>"
+                    } else {
+                        value.as_str()
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let redacted_args = self
+            .args
+            .iter()
+            .map(|argument| {
+                private_launch_env_assignment(argument)
+                    .map(|key| format!("{key}=<redacted>"))
+                    .unwrap_or_else(|| argument.clone())
+            })
+            .collect::<Vec<_>>();
+        formatter
+            .debug_struct("ProcessLaunch")
+            .field("command", &self.command)
+            .field("args", &redacted_args)
+            .field("env", &redacted_env)
+            .field("remove_env", &self.remove_env)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
+fn install_agent_capability_env(
+    env: &mut HashMap<String, String>,
+    issuer: Option<&AgentCapabilityIssuer>,
+    project_root: &Path,
+    session_id: &str,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<(), String> {
+    let Some(issuer) = issuer else {
+        return Ok(());
+    };
+    let runtime_kind = container_runtime.map(gwt_docker::detect::ResolvedContainerRuntime::kind);
+    let pane_websocket_url = gwt_agent::pane_websocket_url_for_launch_runtime(
+        issuer.pane_websocket_url(),
+        issuer.agent_pane_websocket_url(),
+        runtime_target,
+        runtime_kind,
+    )?;
+    let target = issuer.issue(project_root, session_id)?;
+    let forward_url = match gwt_agent::hook_forward_url_for_launch_runtime(
+        &target.url,
+        runtime_target,
+        runtime_kind,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            issuer.revoke_token(&target.token);
+            return Err(error);
+        }
+    };
+    env.insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), forward_url);
+    env.insert(
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+        target.token,
+    );
+    env.insert(
+        gwt_agent::GWT_PANE_WS_URL_ENV.to_string(),
+        pane_websocket_url,
+    );
+    Ok(())
+}
+
+fn persist_finalized_launch_session(
+    sessions_dir: &Path,
+    runtime_path: &Path,
+    session: &mut gwt_agent::Session,
+    docker_runtime_worktree: Option<&str>,
+) -> Result<(), String> {
+    if let Some(runtime_worktree) = docker_runtime_worktree {
+        let project_state_root = session
+            .project_state_root
+            .as_deref()
+            .filter(|root| !root.as_os_str().is_empty())
+            .ok_or_else(|| {
+                "Docker launch is missing the host Project State root before Session persistence"
+                    .to_string()
+            })?
+            .to_path_buf();
+        session.bind_docker_runtime(runtime_worktree, &project_state_root)?;
+    }
+
+    session
+        .save(sessions_dir)
+        .map_err(|error| error.to_string())?;
+    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+        .save(runtime_path)
+        .map_err(|error| error.to_string())
 }
 
 pub type AgentLaunchCompletion = (
@@ -155,27 +274,21 @@ impl AgentWindowPlacement {
 pub struct LaunchWizardMemoryCache {
     sessions: Vec<gwt_agent::Session>,
     agent_options: Vec<gwt::AgentOption>,
-    // SPEC-3170 FR-001: `claude_ultracode_supported()` spawns `claude --version`
-    // (a Node CLI, ~100-200ms cold) and `claude_workflows_enabled()` reads a
-    // settings file. They are stable for a session, so we resolve them once at
-    // cache load time and reuse the booleans on every wizard open instead of
-    // re-probing on the tao main event-loop thread (the measured open hitch).
+    // SPEC-3170 FR-001: Claude capability detection may read settings and run
+    // `claude --version` once per process. The wizard stores the booleans at
+    // cache load time and reuses them on every open.
     claude_ultracode_supported: bool,
     claude_workflows_enabled: bool,
 }
 
 impl LaunchWizardMemoryCache {
     pub(crate) fn load(sessions_dir: &Path) -> Self {
-        // Resolve the Claude capability probes once here (see field docs). The
-        // wizard open path then reads the cached booleans rather than spawning
-        // `claude --version` per open.
-        let claude_workflows_enabled = gwt_agent::claude_workflows_enabled();
-        let claude_ultracode_supported = gwt_agent::claude_ultracode_supported();
+        let claude_capabilities = gwt_agent::claude_capability_snapshot();
         Self {
             sessions: Self::load_sessions(sessions_dir),
             agent_options: Self::load_agent_options(),
-            claude_ultracode_supported,
-            claude_workflows_enabled,
+            claude_ultracode_supported: claude_capabilities.ultracode_supported,
+            claude_workflows_enabled: claude_capabilities.workflows_enabled,
         }
     }
 
@@ -509,11 +622,24 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
 fn detect_installed_codex_hook_discovery_mode(
     config: &gwt_agent::LaunchConfig,
 ) -> Option<gwt_skills::CodexHookDiscoveryMode> {
-    let mut command = gwt_core::process::hidden_command(&config.command);
-    command.arg("--version").envs(&config.env_vars);
+    let mut request = gwt_core::process::ProcessPlanRequest::new(&config.command).arg("--version");
     for key in &config.remove_env {
-        command.env_remove(key);
+        request = request.env_remove(key);
     }
+    for (key, value) in &config.env_vars {
+        request = request.env(key, value);
+    }
+    let mut command = match gwt_core::process::resolved_command(request) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(
+                command = %config.command,
+                error = %error,
+                "installed Codex version probe could not resolve a safe executable"
+            );
+            return None;
+        }
+    };
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -731,7 +857,12 @@ impl AppRuntime {
                 runtime_target,
                 agent_project_root,
             )) => {
+                let issued_capability_token = process_launch
+                    .env
+                    .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                    .cloned();
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
@@ -739,6 +870,7 @@ impl AppRuntime {
                     );
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
+                    self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events(
                         window_id,
                         "Project tab not found".to_string(),
@@ -750,6 +882,7 @@ impl AppRuntime {
                 // launch bursts cheap).
                 self.spawn_work_events_ingest(tab.project_root.clone(), false);
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
+                    self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
@@ -761,6 +894,16 @@ impl AppRuntime {
                 let geometry = window.geometry.clone();
                 let session_id_for_restore = session_id.clone();
 
+                if let Some(token) = issued_capability_token {
+                    if let Some(previous) = self
+                        .agent_capability_tokens
+                        .insert(window_id.clone(), token.clone())
+                    {
+                        if previous != token {
+                            self.revoke_unbound_agent_capability(Some(&previous));
+                        }
+                    }
+                }
                 self.active_agent_sessions.insert(
                     window_id.clone(),
                     ActiveAgentSession {
@@ -930,6 +1073,7 @@ impl AppRuntime {
                         events
                     }
                     Err(error) => {
+                        self.revoke_agent_capability_for_window(&window_id);
                         self.launch_error_events(window_id, error, launch_feedback_context)
                     }
                 }
@@ -1414,7 +1558,7 @@ impl AppRuntime {
 
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
-        let hook_forward_target = self.hook_forward_target.clone();
+        let agent_capability_issuer = self.agent_capability_issuer.clone();
         let profile_config_path = self.profile_config_path()?;
         if let Some(context) = workspace_resume_context {
             self.pending_workspace_resume_contexts
@@ -1433,7 +1577,7 @@ impl AppRuntime {
                 window_id,
                 config,
                 profile_config_path,
-                hook_forward_target,
+                agent_capability_issuer,
             );
         });
 
@@ -1447,7 +1591,7 @@ impl AppRuntime {
         window_id: String,
         mut config: gwt_agent::LaunchConfig,
         profile_config_path: PathBuf,
-        hook_forward_target: Option<HookForwardTarget>,
+        agent_capability_issuer: Option<AgentCapabilityIssuer>,
     ) {
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -1460,6 +1604,7 @@ impl AppRuntime {
                     window_id.clone(),
                 )
             });
+        let mut issued_capability_token = None;
         let result = (|| {
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -1471,7 +1616,8 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Starting Docker service...".to_string(),
             });
-            apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+            let container_runtime =
+                apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -1616,38 +1762,43 @@ impl AppRuntime {
                 gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
                 runtime_path.display().to_string(),
             );
-            if let Some(target) = hook_forward_target {
-                config
-                    .env_vars
-                    .insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
-                config.env_vars.insert(
-                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
-                    target.token,
-                );
-            }
+            let runtime_target = config.runtime_target;
+            install_agent_capability_env(
+                &mut config.env_vars,
+                agent_capability_issuer.as_ref(),
+                Path::new(&project_root),
+                &session_id,
+                runtime_target,
+                container_runtime.as_ref(),
+            )?;
+            issued_capability_token = config
+                .env_vars
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .cloned();
             config
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
-            let runtime_target = config.runtime_target;
-            let agent_project_root = if runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                resolve_docker_launch_plan(&worktree_path, config.docker_service.as_deref())?
-                    .container_cwd
-            } else {
+            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
+                Path::new(&project_root),
+                &mut config,
+                container_runtime.as_ref(),
+            )?;
+            let agent_project_root = docker_runtime_worktree.unwrap_or_else(|| {
                 config
                     .env_vars
                     .get("GWT_PROJECT_ROOT")
                     .cloned()
                     .unwrap_or_else(|| worktree_path.display().to_string())
-            };
+            });
 
-            session
-                .save(&sessions_dir)
-                .map_err(|error| error.to_string())?;
-            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-                .save(&runtime_path)
-                .map_err(|error| error.to_string())?;
+            persist_finalized_launch_session(
+                &sessions_dir,
+                &runtime_path,
+                &mut session,
+                (runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
+                    .then_some(agent_project_root.as_str()),
+            )?;
 
             // SPEC-3248 P8a (T-107): materialize the Execution Control Record
             // for linked-owner execution launches — SPEC and plain Issue alike
@@ -1741,6 +1892,12 @@ impl AppRuntime {
                 );
             }
             Err(error) => {
+                if let (Some(issuer), Some(token)) = (
+                    agent_capability_issuer.as_ref(),
+                    issued_capability_token.as_deref(),
+                ) {
+                    issuer.revoke_token(token);
+                }
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
                     result: Err(error),
@@ -1851,8 +2008,10 @@ impl AppRuntime {
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
+            self.revoke_agent_capability_for_window(window_id);
             return;
         };
+        self.revoke_agent_capability_for_window(window_id);
         // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
@@ -1924,6 +2083,17 @@ impl AppRuntime {
             // Cannot enumerate: fall back to "gone means it was ephemeral".
             Err(_) => !session.worktree_path.exists(),
         }
+    }
+
+    fn revoke_unbound_agent_capability(&self, token: Option<&str>) {
+        if let (Some(issuer), Some(token)) = (self.agent_capability_issuer.as_ref(), token) {
+            issuer.revoke_token(token);
+        }
+    }
+
+    fn revoke_agent_capability_for_window(&mut self, window_id: &str) {
+        let token = self.agent_capability_tokens.remove(window_id);
+        self.revoke_unbound_agent_capability(token.as_deref());
     }
 
     /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
@@ -2154,6 +2324,228 @@ impl AppRuntime {
 #[cfg(test)]
 #[path = "agent_launch_stage_tests.rs"]
 mod agent_launch_stage_tests;
+
+#[cfg(test)]
+mod docker_session_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn production_docker_session_reload_matches_finalized_process_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(&project).expect("create project");
+        std::fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/production\n",
+        )
+        .expect("write compose");
+
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&project)
+            .branch("work/docker-production")
+            .build();
+        config.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        config.command = "codex".to_string();
+        config.args = vec!["--no-alt-screen".to_string()];
+        let runtime = crate::resolved_test_docker_runtime(temp.path());
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize Docker launch")
+                .expect("Docker runtime worktree");
+
+        let mut session = gwt_agent::Session::new(
+            &project,
+            "work/docker-production",
+            gwt_agent::AgentId::Codex,
+        );
+        session.project_state_root = Some(project.clone());
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        let session_id = session.id.clone();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+
+        persist_finalized_launch_session(
+            &sessions_dir,
+            &runtime_path,
+            &mut session,
+            Some(&runtime_worktree),
+        )
+        .expect("persist finalized production launch");
+
+        let process_launch = ProcessLaunch {
+            command: config.command,
+            args: config.args,
+            env: config.env_vars,
+            remove_env: config.remove_env,
+            cwd: config.working_dir,
+        };
+        assert_eq!(process_launch.command, runtime.binary());
+        let workdir_index = process_launch
+            .args
+            .iter()
+            .position(|arg| arg == "-w")
+            .expect("compose exec -w");
+        let process_worktree = process_launch
+            .args
+            .get(workdir_index + 1)
+            .expect("compose exec worktree");
+        let reloaded = gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+            .expect("reload production Session");
+        let binding = reloaded
+            .docker_runtime_binding
+            .expect("persisted Docker binding");
+
+        assert_eq!(
+            binding.runtime_worktree_path,
+            PathBuf::from(process_worktree)
+        );
+        assert_eq!(
+            binding.project_state_scope_hash,
+            gwt_core::paths::project_scope_hash(&project)
+                .as_str()
+                .to_string()
+        );
+        assert!(runtime_path.exists(), "runtime state must be persisted");
+    }
+}
+
+#[cfg(test)]
+mod agent_endpoint_env_tests {
+    use super::*;
+
+    #[test]
+    fn launch_injects_the_runtime_specific_pane_websocket_endpoint() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut env = HashMap::new();
+
+        install_agent_capability_env(
+            &mut env,
+            Some(&issuer),
+            project.path(),
+            "session-pane-env",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        )
+        .expect("install agent launch endpoints");
+
+        assert_eq!(
+            env.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://127.0.0.1:45123/internal/hook-live")
+        );
+        assert_eq!(
+            env.get(gwt_agent::GWT_PANE_WS_URL_ENV).map(String::as_str),
+            Some("ws://127.0.0.1:45123/internal/pane-ws")
+        );
+
+        let mut docker_env = HashMap::new();
+        let docker_runtime = crate::resolved_test_docker_runtime(project.path());
+        install_agent_capability_env(
+            &mut docker_env,
+            Some(&issuer),
+            project.path(),
+            "session-pane-env-docker",
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            Some(&docker_runtime),
+        )
+        .expect("install Docker agent launch endpoints");
+
+        assert_eq!(
+            docker_env
+                .get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        assert_eq!(
+            docker_env
+                .get(gwt_agent::GWT_PANE_WS_URL_ENV)
+                .map(String::as_str),
+            Some("ws://host.docker.internal:45123/internal/pane-ws")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_contract_pins_a_stateful_wrapper_across_override_and_endpoint_consumers() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+counter="$0.count"
+count=0
+if [ -f "$counter" ]; then
+  read count < "$counter"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  printf 'Docker version 28.3.0, build test\n'
+else
+  printf 'podman version 5.4.2\n'
+fi
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+        )
+        .expect("resolve launch runtime once");
+        let bundle = crate::docker_launch::docker_bundle_mounts_for_home(temp.path());
+        let override_content = crate::docker_launch::docker_bundle_override_content_for_runtime(
+            "app",
+            &bundle,
+            runtime.kind(),
+        );
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut env = HashMap::new();
+        install_agent_capability_env(
+            &mut env,
+            Some(&issuer),
+            temp.path(),
+            "session-stateful-runtime",
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            Some(&runtime),
+        )
+        .expect("install pinned Docker endpoints");
+
+        assert!(override_content.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert_eq!(
+            env.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        assert_eq!(
+            env.get(gwt_agent::GWT_PANE_WS_URL_ENV).map(String::as_str),
+            Some("ws://host.docker.internal:45123/internal/pane-ws")
+        );
+        assert_eq!(
+            std::fs::read_to_string(wrapper.with_extension("count"))
+                .expect("read wrapper probe count")
+                .trim(),
+            "1",
+            "one launch must probe a configured runtime wrapper exactly once"
+        );
+    }
+}
 
 #[cfg(test)]
 mod fr001_capability_cache_tests {

@@ -1803,8 +1803,9 @@ pub(super) fn attach_registry_sessions_to_active_works(
 /// grouping key (canonical branch identity → canonical worktree identity →
 /// own id) and merge rows that share a key into ONE Workspace row. The
 /// newest row is the representative; agents concatenate (the identity
-/// collapse downstream dedups), numeric counts sum, and `merged_into_base`
-/// ORs. Old branchless ids keep their own key, so legacy rows never vanish
+/// collapse downstream dedups), numeric counts sum, `merged_into_base` ORs,
+/// and missing PR metadata is filled from another row in the same branch
+/// group. Old branchless ids keep their own key, so legacy rows never vanish
 /// or fuse.
 pub(super) fn assign_and_merge_workspace_groups(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
@@ -1851,6 +1852,19 @@ pub(super) fn assign_and_merge_workspace_groups(
                 let blocked_agents = target.blocked_agents + work.blocked_agents;
                 let session_agent_total = target.session_agent_total + work.session_agent_total;
                 let merged_into_base = target.merged_into_base || work.merged_into_base;
+                let (pr_number, pr_url, pr_state) = if newer {
+                    (
+                        work.pr_number.or(target.pr_number),
+                        work.pr_url.clone().or_else(|| target.pr_url.clone()),
+                        work.pr_state.clone().or_else(|| target.pr_state.clone()),
+                    )
+                } else {
+                    (
+                        target.pr_number.or(work.pr_number),
+                        target.pr_url.clone().or_else(|| work.pr_url.clone()),
+                        target.pr_state.clone().or_else(|| work.pr_state.clone()),
+                    )
+                };
                 if newer {
                     let key = target.workspace_key.clone();
                     // SPEC-3075 FR-004: a session-derived row's title/owner is
@@ -1878,6 +1892,9 @@ pub(super) fn assign_and_merge_workspace_groups(
                 target.blocked_agents = blocked_agents;
                 target.session_agent_total = session_agent_total;
                 target.merged_into_base = merged_into_base;
+                target.pr_number = pr_number;
+                target.pr_url = pr_url;
+                target.pr_state = pr_state;
                 if target.branch.is_none() {
                     // keep any branch the group knows about
                     target.branch = merged_branch_fallback(&target.agents);

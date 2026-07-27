@@ -58,8 +58,9 @@ pub fn handle_with_input(
         } else {
             String::new()
         };
+        let repair = execution_state::integrity_repair_guidance(record.status);
         return HookOutput::stop_block(format!(
-            "Execution control record failed integrity validation: it was edited outside the canonical operations. Repair it with JSON operation `execution.adopt` and a non-empty `params.reason`, then settle via `execution.complete` / `execution.blocked` with real verification evidence.{capture_note}",
+            "Execution control record failed integrity validation: it was edited outside the canonical operations. {repair}{capture_note}",
         ));
     }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
@@ -265,6 +266,45 @@ mod tests {
                 Some(expected_occurrences)
             );
         }
+    }
+
+    #[test]
+    fn tampered_terminal_record_routes_to_fresh_launch_not_adopt() {
+        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            42,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        settle(
+            dir.path(),
+            "sess-1",
+            ExecutionSettlement::Blocked {
+                reason: "temporary dependency".to_string(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        let path = crate::cli::execution_state::state_path(dir.path());
+        let tampered = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("temporary dependency", "forged dependency");
+        std::fs::write(&path, tampered).unwrap();
+
+        let HookOutput::StopBlock { reason } = handle_with_input(dir.path(), "{}", Some("sess-1"))
+        else {
+            panic!("expected StopBlock");
+        };
+        assert!(reason.contains("fresh linked-owner launch"), "{reason}");
+        assert!(reason.contains("cannot be repaired"), "{reason}");
+        assert!(
+            !reason.contains("Repair it with JSON operation `execution.adopt`"),
+            "{reason}"
+        );
     }
 
     // Intake lanes are excluded — the intake artifact gate owns them.

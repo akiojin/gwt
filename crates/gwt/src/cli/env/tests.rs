@@ -542,10 +542,17 @@ fn test_env_records_io_and_pr_side_effects() {
 #[test]
 fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
     let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _forward_url =
+        crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token =
+        crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _runtime_path =
+        crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
     let home = tempfile::tempdir().expect("home tempdir");
     let _home = crate::cli::test_support::ScopedEnvVar::set("HOME", home.path());
-    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    crate::cli::workspace::tests::seed_valid_update_target(temp.path(), "session-json");
+    let _session = crate::cli::test_support::ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-json");
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = r#"{
         "schema_version": 1,

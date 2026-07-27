@@ -222,7 +222,8 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
         let mut control_rx =
             hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL);
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-        let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path)
+            .unwrap_or_else(|_| crate::IssueMonitorPrefs::recovery_default());
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
@@ -251,8 +252,11 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                     match control {
                         Ok(DaemonFrame::Event { payload, .. }) => {
                             if let Some(control) = decode_issue_monitor_control(payload) {
-                                let should_scan = apply_issue_monitor_control(&mut monitor, control);
-                                persist_daemon_issue_monitor_state(&prefs_path, &monitor);
+                                let should_scan = apply_issue_monitor_control_with_disk_migration(
+                                    &prefs_path,
+                                    &mut monitor,
+                                    control,
+                                );
                                 publish_issue_monitor_payloads(&hub, &mut monitor);
                                 if should_scan {
                                     let gui_connected = issue_monitor_gui_connected(&hub);
@@ -391,6 +395,29 @@ fn apply_issue_monitor_control(
             true
         }
     }
+}
+
+fn apply_issue_monitor_control_with_disk_migration(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    control: IssueMonitorControl,
+) -> bool {
+    let mut applied = None;
+    let recovery_baseline = monitor.prefs();
+    let transaction =
+        crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+            monitor.rebase_daemon_driver_prefs(disk);
+            let should_scan = apply_issue_monitor_control(monitor, control.clone());
+            applied = Some(should_scan);
+            *disk = monitor.prefs();
+        });
+    if let Err(error) = transaction {
+        tracing::warn!(
+            error = %error,
+            "issue monitor control prefs transaction failed; retaining in-memory mutation"
+        );
+    }
+    applied.unwrap_or_else(|| apply_issue_monitor_control(monitor, control))
 }
 
 fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonitorControl> {
@@ -556,32 +583,24 @@ async fn scan_and_persist_issue_monitor(
     gui_connected: bool,
     prefs_path: &Path,
 ) -> crate::IssueMonitorState {
-    let monitor = scan_issue_monitor_once(scope, monitor, gui_connected).await;
-    persist_daemon_issue_monitor_state(prefs_path, &monitor);
+    let mut monitor = scan_issue_monitor_once(scope, monitor, gui_connected).await;
+    persist_daemon_issue_monitor_state(prefs_path, &mut monitor);
     monitor
 }
 
-/// Persist the daemon's issue-monitor state WITHOUT clobbering GUI-owned config.
-///
-/// The daemon loads prefs once at startup and thereafter only learns config
-/// changes it has a control frame for (`enabled` / `max_active_agents` /
-/// `priority_order` / `autonomous_mode`). `launch_profile` and
-/// `autonomous_tuning` have NO control channel — the GUI process edits them
-/// directly on disk — so the daemon's in-memory copy is authoritative-but-stale
-/// for those two fields. Writing the whole `monitor.prefs()` would overwrite a
-/// newer GUI launch-profile / tuning with the stale startup value, silently
-/// reverting the user's Issue Monitor configuration (adversarial review:
-/// launch_profile clobber). We therefore reload the on-disk prefs and preserve
-/// those two GUI-owned fields, persisting everything else (daemon-owned runtime
-/// state + control-synced config) from memory. If the reload fails, we fall back
-/// to the in-memory values rather than lose the daemon's runtime state.
-fn persist_daemon_issue_monitor_state(prefs_path: &Path, monitor: &crate::IssueMonitorState) {
-    let mut prefs = monitor.prefs();
-    if let Ok(on_disk) = crate::load_issue_monitor_prefs(prefs_path) {
-        prefs.launch_profile = on_disk.launch_profile;
-        prefs.autonomous_tuning = on_disk.autonomous_tuning;
+fn persist_daemon_issue_monitor_state(prefs_path: &Path, monitor: &mut crate::IssueMonitorState) {
+    let recovery_baseline = monitor.prefs();
+    if let Err(error) =
+        crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
+            monitor.rebase_daemon_driver_prefs(disk);
+            *disk = monitor.prefs();
+        })
+    {
+        tracing::warn!(
+            error = %error,
+            "issue monitor daemon prefs transaction failed"
+        );
     }
-    let _ = crate::save_issue_monitor_prefs(prefs_path, &prefs);
 }
 
 /// SPEC #3200 Option A: a per-process secret the daemon uses to sign autonomous
@@ -608,11 +627,7 @@ fn scan_issue_monitor_once_blocking(
     if let Ok(disk) = crate::load_issue_monitor_prefs(
         &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
     ) {
-        monitor.refresh_gui_owned_prefs(&disk);
-        // #3223 follow-up (codex P1): absorb the GUI process's in-flight
-        // launching/launched claims so max-active accounting is unified and the
-        // daemon's persist cannot drop them.
-        monitor.merge_inflight_launches_from_disk(&disk);
+        monitor.rebase_daemon_driver_prefs(&disk);
     }
     // #3223 follow-up (codex P2): expire claimed-but-never-acked launches past
     // claim_ttl_secs so a crashed launch cannot hold a slot forever.
@@ -625,26 +640,31 @@ fn scan_issue_monitor_once_blocking(
                 return monitor;
             }
         };
-    let issues = match crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
+    let loaded = match crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
         &scope.project_root,
         &owner,
         &repo,
     ) {
-        Ok(issues) => issues,
+        Ok(loaded) => loaded,
         Err(error) => {
             monitor.record_scan_error(now, format!("issue list failed: {error}"));
             return monitor;
         }
     };
     let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
-    crate::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+    crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+        &mut monitor,
+        &loaded,
+        &scope.project_root,
+        &now,
+    );
     crate::issue_monitor_worker::reconcile_issue_monitor_merges(&mut monitor, &scope.project_root);
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
     crate::issue_monitor_worker::apply_autonomous_eligibility(
         &mut monitor,
-        &issues,
+        &loaded.issues,
         &format!("{owner}/{repo}"),
         &scope.project_root,
         &now,
@@ -672,7 +692,7 @@ fn scan_issue_monitor_once_blocking(
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
     crate::issue_monitor_worker::advance_autonomous_in_flight(
         &mut monitor,
-        &issues,
+        &loaded.issues,
         &format!("{owner}/{repo}"),
         &scope.project_root,
         daemon_run_secret(),
@@ -1034,12 +1054,20 @@ fn config_error(message: impl Into<String>) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, time::Duration};
+    use std::{
+        fs::{self, OpenOptions},
+        path::Path,
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
 
+    use fs2::FileExt;
     use gwt_core::daemon::{
         ClientFrame, DaemonEndpoint, HookEnvelope, IpcHandshakeRequest, RuntimeScope,
         RuntimeTarget, DAEMON_PROTOCOL_VERSION,
     };
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -1087,6 +1115,127 @@ mod tests {
             .status()
             .expect("git remote add origin");
         assert!(status.success(), "git remote add origin must succeed");
+    }
+
+    fn commit_initial_branch(path: &Path) {
+        let output = gwt_core::process::hidden_command("git")
+            .args([
+                "-c",
+                "user.name=gwt test",
+                "-c",
+                "user.email=gwt-test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ])
+            .current_dir(path)
+            .output()
+            .expect("git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_fake_gh_issue_list(temp_root: &Path) -> std::path::PathBuf {
+        let fake_gh = temp_root.join("gh");
+        fs::write(
+            &fake_gh,
+            r#"#!/bin/sh
+if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
+  printf '%s\n' 'gh refresh failed' >&2
+  exit 1
+fi
+printf '%s\n' '[{"number":43,"title":"Live issue","body":"Live body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43"}]'
+exit 0
+"#,
+        )
+        .expect("write fake gh");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+        fake_gh
+    }
+
+    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
+        let mut paths = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        ScopedEnvVar::set("PATH", std::env::join_paths(paths).expect("join PATH"))
+    }
+
+    fn legacy_git_failure(project_root: &Path) -> String {
+        format!(
+            "Current branch is unavailable: Git error: Not a git repository: {}",
+            project_root.display()
+        )
+    }
+
+    fn legacy_failed_prefs(project_root: &Path) -> crate::IssueMonitorPrefs {
+        crate::IssueMonitorPrefs {
+            enabled: false,
+            legacy_git_launch_failure_migration_version: 0,
+            failed_issues: vec![crate::IssueMonitorFailedIssue {
+                issue_number: 43,
+                message: legacy_git_failure(project_root),
+                window_id: None,
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        }
+    }
+
+    fn write_issue_monitor_prefs_without_lock(path: &Path, prefs: &crate::IssueMonitorPrefs) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create prefs parent");
+        }
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(prefs).expect("serialize prefs"),
+        )
+        .expect("write prefs without lock");
+    }
+
+    fn issue_monitor_prefs_lock_for_test(path: &Path) -> std::fs::File {
+        let lock_path = path.with_extension("lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .expect("open issue monitor prefs lock");
+        lock.lock_exclusive()
+            .expect("hold issue monitor prefs lock");
+        lock
+    }
+
+    fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
+        crate::IssueMonitorLaunchProfile {
+            agent_id: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: None,
+            version: None,
+            session_mode: Default::default(),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+        }
+    }
+
+    fn sample_issue_monitor_issue(issue_number: u64) -> crate::IssueMonitorIssue {
+        crate::IssueMonitorIssue {
+            number: issue_number,
+            title: format!("Issue {issue_number}"),
+            labels: Vec::new(),
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+        }
     }
 
     #[test]
@@ -1516,6 +1665,40 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_control_adopts_newer_disk_migration_before_same_failure_mutation() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed GUI migration result");
+        let failure = legacy_git_failure(temp.path());
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            legacy_failed_prefs(temp.path()),
+        );
+
+        let should_scan = super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            IssueMonitorControl::LaunchFailed {
+                issue_number: 43,
+                message: failure.clone(),
+            },
+        );
+
+        assert!(should_scan);
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(
+            persisted.legacy_git_launch_failure_migration_version,
+            crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert_eq!(persisted.failed_issues.len(), 1);
+        assert_eq!(
+            persisted.failed_issues[0].message, failure,
+            "the equal marker must preserve the new post-migration failure"
+        );
+    }
+
+    #[test]
     fn issue_monitor_scan_reports_missing_origin_instead_of_generic_unavailable() {
         let temp = TempDir::new().expect("tempdir");
         init_git_repo(temp.path());
@@ -1552,6 +1735,110 @@ mod tests {
         assert_eq!(
             error,
             "Git origin remote is not a GitHub URL: https://example.com/owner/repo.git"
+        );
+    }
+
+    #[test]
+    fn daemon_live_scan_migrates_and_atomically_persists_legacy_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo.clone(),
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let legacy = legacy_failed_prefs(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &legacy).expect("seed legacy prefs");
+        let monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), legacy);
+
+        let mut monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.prefs().legacy_git_launch_failure_migration_version,
+            crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(crate::MonitorInboxState::Queued)
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(
+            persisted.legacy_git_launch_failure_migration_version,
+            crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert!(persisted.failed_issues.is_empty());
+        let scratch_prefix = format!(
+            ".{}.tmp-",
+            prefs_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("prefs filename")
+        );
+        assert!(
+            fs::read_dir(prefs_path.parent().expect("prefs parent"))
+                .expect("read prefs parent")
+                .flatten()
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&scratch_prefix)),
+            "the atomic save must leave no scratch file"
+        );
+    }
+
+    #[test]
+    fn daemon_scan_adopts_newer_disk_migration_before_remote_error() {
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo.clone(),
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed newer disk migration");
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            legacy_failed_prefs(&scope.project_root),
+        );
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        assert_eq!(
+            monitor.prefs().legacy_git_launch_failure_migration_version,
+            crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert!(
+            monitor.prefs().failed_issues.is_empty(),
+            "newer cleanup is adopted even when the later remote scan errors"
         );
     }
 
@@ -1661,7 +1948,7 @@ mod tests {
             "daemon has no profile"
         );
 
-        super::persist_daemon_issue_monitor_state(&prefs_path, &monitor);
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload");
         assert!(
@@ -1676,6 +1963,775 @@ mod tests {
             persisted.merged_issues.contains(&42),
             "daemon-owned merge completion is still persisted from memory"
         );
+    }
+
+    #[test]
+    fn daemon_persist_keeps_local_record_and_unions_latest_disk_owned_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let record = |issue_number, phase, attempts| crate::AutonomousIssueRecord {
+            issue_number,
+            phase,
+            active_launch_id: None,
+            attempts,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: None,
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
+        let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
+        let disk_only = record(99, crate::AutonomousPhase::Implementing, 3);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 4,
+                priority_order: vec![99, 42],
+                merged_issues: vec![88],
+                autonomous_mode: true,
+                autonomous_tuning: crate::issue_monitor::AutonomousTuning {
+                    max_attempts: 9,
+                    ..crate::issue_monitor::AutonomousTuning::default()
+                },
+                autonomous_records: vec![disk_same_key, disk_only.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed latest disk state");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: false,
+                max_active_agents: 1,
+                priority_order: vec![42],
+                merged_issues: vec![77],
+                autonomous_mode: false,
+                autonomous_records: vec![local_same_key.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload daemon state");
+        for prefs in [&persisted, &daemon.prefs()] {
+            assert!(prefs.enabled, "latest disk enabled flag wins");
+            assert_eq!(prefs.max_active_agents, 4);
+            assert_eq!(prefs.priority_order, vec![99, 42]);
+            assert!(prefs.autonomous_mode);
+            assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
+            assert_eq!(prefs.merged_issues, vec![77, 88], "merged state is unioned");
+            assert_eq!(
+                prefs.autonomous_records,
+                vec![local_same_key.clone(), disk_only.clone()],
+                "daemon keeps its same-key scan result and absorbs disk-only records"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_persist_waits_for_sibling_lock_and_rebases_committed_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let unrelated_failure = crate::IssueMonitorFailedIssue {
+            issue_number: 99,
+            message: "unrelated failure".to_string(),
+            window_id: None,
+        };
+        let mut stale_prefs = legacy_failed_prefs(temp.path());
+        stale_prefs.enabled = true;
+        stale_prefs.max_active_agents = 3;
+        stale_prefs.priority_order = vec![99, 43];
+        stale_prefs.autonomous_mode = true;
+        stale_prefs.failed_issues.push(unrelated_failure.clone());
+        crate::save_issue_monitor_prefs(&prefs_path, &stale_prefs)
+            .expect("seed stale daemon prefs");
+        let mut stale_monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), stale_prefs);
+        crate::scan_issue_monitor_candidates(
+            &mut stale_monitor,
+            &[
+                sample_issue_monitor_issue(43),
+                sample_issue_monitor_issue(99),
+            ],
+            "2026-07-21T00:00:00Z",
+        );
+
+        let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_path = prefs_path.clone();
+        let writer = thread::spawn(move || {
+            started_tx.send(()).expect("signal writer start");
+            super::persist_daemon_issue_monitor_state(&writer_path, &mut stale_monitor);
+            done_tx
+                .send(stale_monitor)
+                .expect("return committed monitor");
+        });
+        started_rx.recv().expect("writer started");
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the real daemon transaction writer must wait for the sibling lock"
+        );
+
+        let disk_profile = sample_issue_monitor_profile();
+        let newer_disk = crate::IssueMonitorPrefs {
+            legacy_git_launch_failure_migration_version:
+                crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+            launch_profile: Some(disk_profile.clone()),
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "tab-1::agent-43".to_string(),
+            }],
+            failed_issues: vec![unrelated_failure.clone()],
+            autonomous_tuning: crate::issue_monitor::AutonomousTuning {
+                max_attempts: 9,
+                ..crate::issue_monitor::AutonomousTuning::default()
+            },
+            ..crate::IssueMonitorPrefs::default()
+        };
+        write_issue_monitor_prefs_without_lock(&prefs_path, &newer_disk);
+        FileExt::unlock(&lock).expect("release issue monitor prefs lock");
+
+        let committed_monitor = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("daemon writer completes after unlock");
+        writer.join().expect("daemon writer thread");
+        let committed =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
+
+        for prefs in [&committed, &committed_monitor.prefs()] {
+            assert_eq!(
+                prefs.legacy_git_launch_failure_migration_version,
+                crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+            );
+            assert!(
+                !prefs
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == 43),
+                "the stale legacy failure stays removed"
+            );
+            assert_eq!(
+                prefs
+                    .failed_issues
+                    .iter()
+                    .find(|failed| failed.issue_number == 99),
+                Some(&unrelated_failure)
+            );
+            assert_eq!(prefs.launch_profile.as_ref(), Some(&disk_profile));
+            assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
+            assert!(!prefs.enabled, "latest committed disk config wins");
+            assert_eq!(prefs.max_active_agents, 1);
+            assert!(prefs.priority_order.is_empty());
+            assert!(!prefs.autonomous_mode);
+            assert_eq!(
+                prefs.launched_issues,
+                vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-43".to_string(),
+                }]
+            );
+        }
+        assert_eq!(
+            committed_monitor.launched_window_issue("tab-1::agent-43"),
+            Some(43)
+        );
+        assert!(committed_monitor.inbox_item(43).is_none());
+        assert_eq!(
+            committed_monitor
+                .inbox_item(99)
+                .and_then(|item| item.error_message.as_deref()),
+            Some("unrelated failure")
+        );
+        assert_eq!(
+            committed_monitor.status_view().last_error.as_deref(),
+            Some("issue #99: unrelated failure")
+        );
+    }
+
+    #[test]
+    fn daemon_scan_merges_disk_launch_before_newer_migration_adoption() {
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let competing_failure = crate::IssueMonitorFailedIssue {
+            issue_number: 43,
+            message: "stale competing failure".to_string(),
+            window_id: None,
+        };
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-43".to_string(),
+                }],
+                failed_issues: vec![competing_failure],
+                autonomous_records: vec![crate::AutonomousIssueRecord {
+                    issue_number: 43,
+                    phase: crate::AutonomousPhase::NeedsHuman,
+                    active_launch_id: None,
+                    attempts: 6,
+                    acceptance_snapshot: None,
+                    retry_not_before: None,
+                    last_heartbeat: None,
+                    pr_number: None,
+                    reviewed_sha: None,
+                    review_passed: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed newer disk state");
+        let monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                legacy_git_launch_failure_migration_version: 0,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+        let prefs = monitor.prefs();
+
+        assert_eq!(
+            prefs.launched_issues,
+            vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "tab-1::agent-43".to_string(),
+            }],
+            "the disk-only real launch is merged before migration adoption"
+        );
+        assert!(
+            prefs
+                .failed_issues
+                .iter()
+                .all(|failed| failed.issue_number != 43),
+            "migration adoption cannot create a launched+failed split-brain row"
+        );
+        assert!(
+            prefs
+                .autonomous_records
+                .iter()
+                .all(|record| record.issue_number != 43),
+            "a rejected failure cannot smuggle its NeedsHuman companion past a real launch"
+        );
+    }
+
+    #[test]
+    fn daemon_control_waits_for_migration_commit_then_keeps_fresh_same_failure() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let stale_prefs = legacy_failed_prefs(temp.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &stale_prefs).expect("seed legacy prefs");
+        let stale_monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), stale_prefs);
+        let fresh_failure = legacy_git_failure(temp.path());
+
+        let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_path = prefs_path.clone();
+        let writer_failure = fresh_failure.clone();
+        let writer = thread::spawn(move || {
+            let mut monitor = stale_monitor;
+            started_tx.send(()).expect("signal control start");
+            let should_scan = super::apply_issue_monitor_control_with_disk_migration(
+                &writer_path,
+                &mut monitor,
+                IssueMonitorControl::LaunchFailed {
+                    issue_number: 43,
+                    message: writer_failure,
+                },
+            );
+            done_tx
+                .send((should_scan, monitor))
+                .expect("return committed control state");
+        });
+        started_rx.recv().expect("control writer started");
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "migration adoption, control mutation, and save must share the sibling lock"
+        );
+
+        write_issue_monitor_prefs_without_lock(&prefs_path, &crate::IssueMonitorPrefs::default());
+        FileExt::unlock(&lock).expect("release issue monitor prefs lock");
+
+        let (should_scan, committed_monitor) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("control transaction completes after unlock");
+        writer.join().expect("control writer thread");
+        assert!(should_scan);
+        let committed =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
+        for prefs in [&committed, &committed_monitor.prefs()] {
+            assert_eq!(
+                prefs.legacy_git_launch_failure_migration_version,
+                crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+            );
+            assert_eq!(prefs.failed_issues.len(), 1);
+            assert_eq!(prefs.failed_issues[0].message, fresh_failure);
+        }
+        assert_eq!(
+            committed_monitor.status_view().last_error.as_deref(),
+            Some(format!("issue #43: {fresh_failure}").as_str())
+        );
+    }
+
+    #[test]
+    fn persist_daemon_state_adopts_newer_disk_migration_without_restoring_old_failure() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed newer disk migration");
+        let mut stale = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            legacy_failed_prefs(temp.path()),
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut stale);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(
+            persisted.legacy_git_launch_failure_migration_version,
+            crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert!(
+            persisted.failed_issues.is_empty(),
+            "a stale daemon cannot restore the failure removed by the GUI"
+        );
+    }
+
+    #[test]
+    fn daemon_persist_adopts_newer_marker_without_dropping_local_needs_human_failure() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed newer disk migration");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            legacy_failed_prefs(temp.path()),
+        );
+        daemon.escalate_to_needs_human(100, "local terminal failure");
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(
+            persisted
+                .failed_issues
+                .iter()
+                .all(|failed| failed.issue_number != 43),
+            "the newer marker still removes the legacy failure"
+        );
+        assert_eq!(
+            persisted
+                .failed_issues
+                .iter()
+                .find(|failed| failed.issue_number == 100)
+                .map(|failed| failed.message.as_str()),
+            Some("local terminal failure")
+        );
+        assert!(persisted.autonomous_records.iter().any(|record| {
+            record.issue_number == 100 && record.phase == crate::AutonomousPhase::NeedsHuman
+        }));
+
+        let mut restored =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        crate::scan_issue_monitor_candidates(
+            &mut restored,
+            &[sample_issue_monitor_issue(100)],
+            "2026-07-21T00:01:00Z",
+        );
+        assert_eq!(
+            restored.inbox_item(100).map(|item| item.state),
+            Some(crate::MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn daemon_persist_adopts_newer_marker_without_dropping_local_failed_window() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed newer disk migration");
+        let mut local = legacy_failed_prefs(temp.path());
+        local.failed_issues.push(crate::IssueMonitorFailedIssue {
+            issue_number: 100,
+            message: "local windowed failure".to_string(),
+            window_id: Some("window-100".to_string()),
+        });
+        let mut daemon =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), local);
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(
+            persisted
+                .failed_issues
+                .iter()
+                .all(|failed| failed.issue_number != 43),
+            "the newer marker still removes the legacy failure"
+        );
+        assert!(persisted.failed_issues.iter().any(|failed| {
+            failed.issue_number == 100
+                && failed.message == "local windowed failure"
+                && failed.window_id.as_deref() == Some("window-100")
+        }));
+    }
+
+    #[test]
+    fn daemon_persist_recovers_malformed_prefs_from_in_memory_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        fs::write(&prefs_path, b"{").expect("seed malformed prefs");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        daemon.record_merged(42);
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("recovered prefs");
+        assert!(persisted.enabled);
+        assert_eq!(persisted.merged_issues, vec![42]);
+        let quarantines = fs::read_dir(temp.path())
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("issue-monitor.json.corrupt-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(quarantines.len(), 1, "malformed source is quarantined once");
+        assert_eq!(
+            fs::read(&quarantines[0]).expect("read quarantine"),
+            b"{",
+            "quarantine preserves the malformed source bytes"
+        );
+    }
+
+    #[test]
+    fn daemon_control_recovers_malformed_prefs_before_persisting_mutation() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        fs::write(&prefs_path, b"{").expect("seed malformed prefs");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::recovery_default(),
+        );
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut daemon,
+            IssueMonitorControl::Enabled(true),
+        ));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("recovered prefs");
+        assert!(persisted.enabled);
+        assert_eq!(
+            persisted.legacy_git_launch_failure_migration_version, 0,
+            "daemon startup recovery must wait for a successful live scan"
+        );
+        let quarantine_count = fs::read_dir(temp.path())
+            .expect("read prefs directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("issue-monitor.json.corrupt-")
+            })
+            .count();
+        assert_eq!(quarantine_count, 1, "malformed source is quarantined once");
+    }
+
+    #[test]
+    fn daemon_newer_failure_adoption_keeps_needs_human_and_clears_restored_launch() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let failure = crate::IssueMonitorFailedIssue {
+            issue_number: 100,
+            message: "human review required".to_string(),
+            window_id: None,
+        };
+        let needs_human = crate::AutonomousIssueRecord {
+            issue_number: 100,
+            phase: crate::AutonomousPhase::NeedsHuman,
+            active_launch_id: None,
+            attempts: 6,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: Some("2026-07-21T00:00:00Z".to_string()),
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                failed_issues: vec![failure.clone()],
+                autonomous_records: vec![needs_human.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed newer NeedsHuman migration");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                legacy_git_launch_failure_migration_version: 0,
+                launching_issues: vec![crate::IssueMonitorLaunchingIssue {
+                    issue_number: 100,
+                    claimed_at: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        assert_eq!(
+            daemon.active_count(),
+            1,
+            "legacy launch restores an active slot"
+        );
+        assert!(
+            daemon.take_pending_launch_requests().is_empty(),
+            "the restored launch deliberately has no pending request"
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        assert_eq!(
+            daemon.active_count(),
+            0,
+            "adopted failure releases the active slot"
+        );
+        assert!(daemon.take_pending_launch_requests().is_empty());
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload adopted state");
+        assert!(persisted.launching_issues.is_empty());
+        assert_eq!(persisted.failed_issues, vec![failure]);
+        assert_eq!(persisted.autonomous_records, vec![needs_human]);
+
+        let mut restored =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        crate::scan_issue_monitor_candidates(
+            &mut restored,
+            &[sample_issue_monitor_issue(100)],
+            "2026-07-21T00:01:00Z",
+        );
+        assert_eq!(
+            restored.inbox_item(100).map(|item| item.state),
+            Some(crate::MonitorInboxState::NeedsHuman),
+            "save/load reconstructs the terminal NeedsHuman row"
+        );
+    }
+
+    #[test]
+    fn persist_daemon_state_keeps_equal_marker_new_failure_and_never_decreases_marker() {
+        let temp = TempDir::new().expect("tempdir");
+        let equal_path = temp.path().join("equal.json");
+        crate::save_issue_monitor_prefs(&equal_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed equal marker");
+        let new_failure = legacy_git_failure(temp.path());
+        let mut equal_monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: new_failure.clone(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        super::persist_daemon_issue_monitor_state(&equal_path, &mut equal_monitor);
+
+        let equal = crate::load_issue_monitor_prefs(&equal_path).expect("reload equal prefs");
+        assert_eq!(equal.failed_issues.len(), 1);
+        assert_eq!(equal.failed_issues[0].message, new_failure);
+
+        let future_path = temp.path().join("future.json");
+        crate::save_issue_monitor_prefs(&future_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed older disk marker");
+        let mut future_monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                legacy_git_launch_failure_migration_version:
+                    crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION + 1,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        super::persist_daemon_issue_monitor_state(&future_path, &mut future_monitor);
+
+        let future = crate::load_issue_monitor_prefs(&future_path).expect("reload future prefs");
+        assert_eq!(
+            future.legacy_git_launch_failure_migration_version,
+            crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION + 1,
+            "an older disk snapshot cannot decrease the daemon marker"
+        );
+    }
+
+    #[test]
+    fn daemon_persist_keeps_equal_marker_disk_only_fresh_failures() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let fresh_failure = legacy_git_failure(temp.path());
+        let disk = crate::IssueMonitorPrefs {
+            failed_issues: vec![
+                crate::IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: fresh_failure,
+                    window_id: None,
+                },
+                crate::IssueMonitorFailedIssue {
+                    issue_number: 99,
+                    message: "unrelated failure".to_string(),
+                    window_id: Some("tab-1::agent-99".to_string()),
+                },
+            ],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &disk)
+            .expect("seed equal-marker disk failures");
+        let mut stale = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut stale);
+
+        let persisted =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
+        for prefs in [&persisted, &stale.prefs()] {
+            assert_eq!(
+                prefs.legacy_git_launch_failure_migration_version,
+                crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+            );
+            assert_eq!(prefs.failed_issues, disk.failed_issues);
+        }
+    }
+
+    #[test]
+    fn daemon_control_rebase_applies_explicit_lifecycle_mutation_last() {
+        let temp = TempDir::new().expect("tempdir");
+
+        let unrelated_path = temp.path().join("unrelated.json");
+        let unrelated_failure = crate::IssueMonitorFailedIssue {
+            issue_number: 99,
+            message: "unrelated failure".to_string(),
+            window_id: Some("tab-1::agent-99".to_string()),
+        };
+        crate::save_issue_monitor_prefs(
+            &unrelated_path,
+            &crate::IssueMonitorPrefs {
+                failed_issues: vec![unrelated_failure.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed unrelated disk failure");
+        let mut launched = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        super::apply_issue_monitor_control_with_disk_migration(
+            &unrelated_path,
+            &mut launched,
+            IssueMonitorControl::Launched {
+                issue_number: 43,
+                window_id: "tab-1::agent-43".to_string(),
+            },
+        );
+        let launched_prefs =
+            crate::load_issue_monitor_prefs(&unrelated_path).expect("reload launched prefs");
+        assert_eq!(launched_prefs.failed_issues, vec![unrelated_failure]);
+        assert_eq!(
+            launched_prefs.launched_issues,
+            vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "tab-1::agent-43".to_string(),
+            }]
+        );
+        assert_eq!(launched.prefs(), launched_prefs);
+
+        let same_issue_path = temp.path().join("same-issue.json");
+        crate::save_issue_monitor_prefs(
+            &same_issue_path,
+            &crate::IssueMonitorPrefs {
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: "disk failure".to_string(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed same-Issue disk failure");
+        let mut same_issue = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        super::apply_issue_monitor_control_with_disk_migration(
+            &same_issue_path,
+            &mut same_issue,
+            IssueMonitorControl::Launched {
+                issue_number: 43,
+                window_id: "tab-1::agent-43".to_string(),
+            },
+        );
+        let same_issue_prefs =
+            crate::load_issue_monitor_prefs(&same_issue_path).expect("reload same-Issue prefs");
+        assert!(same_issue_prefs.failed_issues.is_empty());
+        assert_eq!(same_issue_prefs.launched_issues.len(), 1);
+        assert_eq!(same_issue.prefs(), same_issue_prefs);
+
+        let failure_wins_path = temp.path().join("failure-wins.json");
+        crate::save_issue_monitor_prefs(
+            &failure_wins_path,
+            &crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-43".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed disk launch");
+        let mut failed = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        super::apply_issue_monitor_control_with_disk_migration(
+            &failure_wins_path,
+            &mut failed,
+            IssueMonitorControl::LaunchFailed {
+                issue_number: 43,
+                message: "fresh failure".to_string(),
+            },
+        );
+        let failed_prefs =
+            crate::load_issue_monitor_prefs(&failure_wins_path).expect("reload failed prefs");
+        assert!(failed_prefs.launched_issues.is_empty());
+        assert_eq!(failed_prefs.failed_issues.len(), 1);
+        assert_eq!(failed_prefs.failed_issues[0].message, "fresh failure");
+        assert_eq!(failed.prefs(), failed_prefs);
     }
 
     #[tokio::test]

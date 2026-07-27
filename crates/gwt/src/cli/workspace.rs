@@ -6,10 +6,11 @@ use gwt_core::paths::gwt_projects_dir;
 use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
     load_or_synthesize_workspace_work_items, transact_workspace_state,
-    update_workspace_projection_with_journal_for_work_event_root, ClassifiedProjection,
-    PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem, WorkspaceAgentSummary,
-    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
-    WorkspaceRetentionConfig, WorkspaceStartUpdate, WorkspaceStatusCategory,
+    update_workspace_projection_with_journal_for_resolved_work_target, ClassifiedProjection,
+    PruneAction, PruneSkipReason, TrackedWorkEventPolicy, WorkEvent, WorkEventKind, WorkItem,
+    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjection,
+    WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
+    WorkspaceStatusCategory,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -332,55 +333,153 @@ pub(super) fn run<E: CliEnv>(
             current_focus,
             title_summary,
         } => {
-            let project_state_root = agent_session
+            let status_category = status
                 .as_deref()
-                .map(|session_id| {
-                    crate::agent_project_state::project_state_root_for_agent_session_or_fallback(
-                        env.repo_path(),
-                        session_id,
+                .map(parse_status_category)
+                .transpose()
+                .map_err(string_error)?;
+            let session_id = std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    string_error(
+                        "workspace.update requires ambient GWT_SESSION_ID for mutation".to_string(),
                     )
-                })
-                .unwrap_or_else(|| env.repo_path().to_path_buf());
-            let work_event_root = agent_session
+                })?;
+            if agent_session
                 .as_deref()
-                .map(|session_id| {
-                    crate::agent_project_state::work_event_root_for_agent_session_or_fallback(
-                        env.repo_path(),
-                        session_id,
-                    )
-                })
-                .unwrap_or_else(|| env.repo_path().to_path_buf());
-            if let Some(session_id) = agent_session.as_deref() {
-                crate::agent_project_state::repair_split_agent_state_if_needed(
-                    &project_state_root,
-                    env.repo_path(),
-                    session_id,
-                )
-                .map_err(core_error)?;
+                .is_some_and(|explicit| explicit != session_id)
+            {
+                return Err(string_error(
+                    "workspace.update agent Session must exactly match ambient GWT_SESSION_ID"
+                        .to_string(),
+                ));
             }
-            let update = WorkspaceProjectionUpdate {
+            let intent = crate::AgentWorkspaceUpdateIntent {
                 title,
-                status_category: status
-                    .as_deref()
-                    .map(parse_status_category)
-                    .transpose()
-                    .map_err(string_error)?,
+                status_category,
                 status_text,
-                owner,
-                next_action,
                 summary,
                 progress_summary,
-                agent_session_id: agent_session,
-                agent_current_focus: current_focus,
-                agent_title_summary: title_summary,
+                next_action,
+                owner,
+                current_focus,
+                title_summary,
             };
-            let entry = update_workspace_projection_with_journal_for_work_event_root(
-                &project_state_root,
-                &work_event_root,
+            if let Some(target) =
+                crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
+            {
+                let observation = crate::observe_agent_runtime(env.repo_path())
+                    .map_err(|error| string_error(error.to_string()))?;
+                let request = crate::AgentWorkspaceUpdateRequest {
+                    schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                    claimed_session_id: session_id,
+                    observation,
+                    intent,
+                };
+                let receipt = crate::daemon_runtime::send_workspace_update_via_agent_bridge(
+                    &target, &request,
+                )
+                .map_err(string_error)?;
+                out.push_str(&format!(
+                    "workspace updated: {}\n",
+                    receipt.journal_entry_id
+                ));
+                return Ok(0);
+            }
+            if std::env::var_os(gwt_agent::session::GWT_SESSION_RUNTIME_PATH_ENV).is_some() {
+                return Err(string_error(
+                    "managed workspace.update is missing its Host bridge capability; relaunch the Session"
+                        .to_string(),
+                ));
+            }
+            let target = crate::agent_project_state::resolve_session_work_mutation_target(
+                env.repo_path(),
+                &session_id,
+            )
+            .map_err(core_error)?;
+            let tracked_event_policy =
+                if crate::cli::execution_state::is_completed(&target.work_event_root) {
+                    TrackedWorkEventPolicy::SkipTracked
+                } else {
+                    TrackedWorkEventPolicy::Persist
+                };
+            let opens_work_settlement = tracked_event_policy == TrackedWorkEventPolicy::Persist
+                && intent.status_category
+                    == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+            tracing::debug!(
+                session_id = %target.session_id,
+                work_id = %target.work_id,
+                branch = %target.branch_identity,
+                worktree = %target.worktree_identity.display(),
+                project_state_root = %target.project_state_root.display(),
+                work_event_root = %target.work_event_root.display(),
+                "resolved Session-bound workspace.update target"
+            );
+            let update = WorkspaceProjectionUpdate {
+                title: intent.title,
+                status_category: intent.status_category,
+                status_text: intent.status_text,
+                owner: intent.owner,
+                next_action: intent.next_action,
+                summary: intent.summary,
+                progress_summary: intent.progress_summary,
+                agent_session_id: Some(target.session_id.clone()),
+                agent_current_focus: intent.current_focus,
+                agent_title_summary: intent.title_summary,
+            };
+            let persistence_target = target.persistence_target();
+            let entry = update_workspace_projection_with_journal_for_resolved_work_target(
+                &persistence_target,
                 update,
+                tracked_event_policy,
+                |_, _| {
+                    let refreshed =
+                        crate::agent_project_state::resolve_session_work_mutation_target(
+                            env.repo_path(),
+                            &session_id,
+                        )?;
+                    if refreshed != target {
+                        return Err(GwtError::Other(
+                            "Session-bound workspace target changed before commit".to_string(),
+                        ));
+                    }
+                    Ok(())
+                },
+                |event, journal_entry| {
+                    if !opens_work_settlement {
+                        return Ok(());
+                    }
+                    crate::cli::verification_record::prepare_work_event_settlement_record(
+                        &target.work_event_root,
+                        &target.session_id,
+                        event,
+                        journal_entry,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| {
+                        GwtError::Other(format!(
+                            "workspace.update could not reserve the terminal Work event settlement obligation before mutation: {error}"
+                        ))
+                    })
+                },
             )
             .map_err(|error| string_error(error.to_string()))?;
-            publish_workspace_change(&project_state_root);
+            if opens_work_settlement {
+                if let Err(error) =
+                    crate::cli::verification_record::save_work_event_settlement_record(
+                        &target.work_event_root,
+                        &target.session_id,
+                        true,
+                    )
+                {
+                    tracing::warn!(
+                        ?error,
+                        "terminal Work event persisted; retaining the write-ahead settlement receipt after refresh failure"
+                    );
+                }
+            }
+            publish_workspace_change(&target.project_state_root);
             out.push_str(&format!("workspace updated: {}\n", entry.id));
             Ok(0)
         }
@@ -1233,7 +1332,7 @@ fn string_error(error: String) -> SpecOpsError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cli::env::TestEnv;
     use gwt_core::workspace_projection::{
@@ -1245,10 +1344,31 @@ mod tests {
         value.to_string()
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::env_test_lock()
+    struct WorkspaceTestEnvGuard {
+        _forward_url: gwt_core::test_support::ScopedEnvVar,
+        _forward_token: gwt_core::test_support::ScopedEnvVar,
+        _runtime_path: gwt_core::test_support::ScopedEnvVar,
+        // Declared last so environment guards restore their values before the
+        // process-global environment lock is released.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn env_guard() -> WorkspaceTestEnvGuard {
+        let lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        WorkspaceTestEnvGuard {
+            _forward_url: gwt_core::test_support::ScopedEnvVar::unset(
+                gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            ),
+            _forward_token: gwt_core::test_support::ScopedEnvVar::unset(
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            ),
+            _runtime_path: gwt_core::test_support::ScopedEnvVar::unset(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            ),
+            _lock: lock,
+        }
     }
 
     struct ScopedHome {
@@ -1293,8 +1413,51 @@ mod tests {
         agent.current_focus = None;
         agent.title_summary = None;
         agent.worktree_path = Some(worktree_path.to_path_buf());
+        agent.branch = Some("work/20260601-0934".to_string());
         agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent.workspace_id = Some("work-session".to_string());
         agent
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) {
+        let output = gwt_core::process::run_git_logged(args, Some(cwd)).expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn initialize_session_git_layout(project_state_root: &Path, worktree_path: &Path) {
+        const BRANCH: &str = "work/20260601-0934";
+        const REMOTE: &str = "https://example.invalid/acme/workspace-update.git";
+        std::fs::create_dir_all(project_state_root).expect("project root");
+        if project_state_root == worktree_path {
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree_path);
+            run_git(&["checkout", "-b", BRANCH], worktree_path);
+            run_git(&["remote", "set-url", "origin", REMOTE], worktree_path);
+            return;
+        }
+
+        let bootstrap = project_state_root.join("bootstrap");
+        std::fs::create_dir_all(&bootstrap).expect("bootstrap");
+        crate::cli::trusted_store::init_git_repo_with_origin(&bootstrap);
+        run_git(&["checkout", "-b", BRANCH], &bootstrap);
+        let bare = project_state_root.join("gwt.git");
+        let bare_arg = bare.to_str().expect("bare path");
+        let bootstrap_arg = bootstrap.to_str().expect("bootstrap path");
+        run_git(
+            &["clone", "--bare", bootstrap_arg, bare_arg],
+            project_state_root,
+        );
+        run_git(&["remote", "set-url", "origin", REMOTE], &bare);
+        if worktree_path.exists() {
+            std::fs::remove_dir(worktree_path).expect("remove empty worktree placeholder");
+        }
+        std::fs::create_dir_all(worktree_path.parent().expect("worktree parent"))
+            .expect("worktree parent");
+        let worktree_arg = worktree_path.to_str().expect("worktree path");
+        run_git(&["worktree", "add", worktree_arg, BRANCH], &bare);
     }
 
     fn write_session_with_project_state_root(
@@ -1302,6 +1465,7 @@ mod tests {
         worktree_path: &Path,
         project_state_root: &Path,
     ) {
+        initialize_session_git_layout(project_state_root, worktree_path);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let mut session = gwt_agent::Session::new(
             worktree_path,
@@ -1311,6 +1475,53 @@ mod tests {
         session.id = session_id.to_string();
         session.project_state_root = Some(project_state_root.to_path_buf());
         session.save(&sessions_dir).expect("write session");
+
+        let mut event = WorkEvent::new(WorkEventKind::Start, "work-session", Utc::now());
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        event.agent_session_id = Some(session_id.to_string());
+        event.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260601-0934".to_string()),
+            worktree_path: Some(worktree_path.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        record_workspace_work_event(worktree_path, event).expect("save active Work fixture");
+    }
+
+    pub(crate) fn seed_valid_update_target(repo: &Path, session_id: &str) {
+        write_session_with_project_state_root(session_id, repo, repo);
+        let mut projection = WorkspaceProjection::default_for_project(repo);
+        projection.id = "work-session".to_string();
+        projection.agents.push(assigned_agent_with_window(
+            session_id,
+            "project::agent-1",
+            repo,
+        ));
+        save_workspace_projection(repo, &projection).expect("save assigned Session fixture");
+    }
+
+    fn save_completed_execution_record(worktree: &Path, session_id: &str, owner: u64) {
+        use crate::cli::execution_state::{
+            ExecutionControlRecord, ExecutionControlStatus, ExecutionOwnerKind,
+        };
+        let now = Utc::now();
+        let record = ExecutionControlRecord {
+            owner_kind: ExecutionOwnerKind::Issue,
+            owner_number: owner,
+            primary_session_id: session_id.to_string(),
+            entrypoint: "launch".to_string(),
+            bundled_required_owners: Vec::new(),
+            status: ExecutionControlStatus::Completed,
+            blocked_reason: None,
+            missing_verification: None,
+            launched_at: now,
+            settled_at: Some(now),
+            transfers: Vec::new(),
+            recoveries: Vec::new(),
+            content_hash: String::new(),
+        };
+        crate::cli::execution_state::save(worktree, &record).expect("save execution record");
     }
 
     #[test]
@@ -1572,6 +1783,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-status");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-status",
+        );
         let mut env = TestEnv::new(repo.clone());
 
         let mut out = String::new();
@@ -1584,7 +1800,7 @@ mod tests {
                 summary: Some("Align Workspace ownership before edits".to_string()),
                 progress_summary: None,
                 next_action: Some("Post Board request".to_string()),
-                owner: Some("SPEC-2359".to_string()),
+                owner: None,
                 agent_session: None,
                 current_focus: None,
                 title_summary: None,
@@ -1600,7 +1816,116 @@ mod tests {
             .expect("projection");
         assert_eq!(saved.title, "Work coordination");
         assert_eq!(saved.status_category, WorkspaceStatusCategory::Blocked);
-        assert_eq!(saved.owner.as_deref(), Some("SPEC-2359"));
+        assert_eq!(saved.owner, None);
+    }
+
+    #[test]
+    fn terminal_workspace_update_opens_work_event_settlement_obligation() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-terminal");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-terminal",
+        );
+        let mut env = TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: Some("done".to_string()),
+                status_text: Some("Final Work summary recorded".to_string()),
+                summary: Some("Implementation and focused verification complete".to_string()),
+                progress_summary: Some("Final cumulative delivery summary".to_string()),
+                next_action: Some("Commit and push the tracked Work event".to_string()),
+                owner: None,
+                agent_session: None,
+                current_focus: Some("Settling tracked Work delivery".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect("terminal workspace update");
+
+        assert_eq!(code, 0, "{out}");
+        let record = crate::cli::verification_record::load_work_event_settlement_record(&repo)
+            .expect("load settlement obligation")
+            .expect("terminal update must create a settlement obligation");
+        assert!(record.obligation_open);
+        assert_eq!(record.session_id, "session-terminal");
+        assert!(matches!(
+            record.status,
+            crate::cli::verification_record::WorkEventSettlementStatus::Blocked(
+                crate::cli::verification_record::WorkEventSettlementBlocker::PathDirty { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn terminal_workspace_update_refuses_before_mutation_when_settlement_store_is_unwritable() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-terminal-store-failure");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-terminal-store-failure",
+        );
+        let surface_paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+        ];
+        let before = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("fixture has a trusted-store path");
+        std::fs::create_dir_all(trusted_dir.parent().expect("trusted-store parent"))
+            .expect("create trusted-store parent");
+        std::fs::write(&trusted_dir, b"block trusted-store directory creation")
+            .expect("make trusted-store path unwritable");
+        let mut env = TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let error = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: Some("done".to_string()),
+                status_text: Some("must not persist".to_string()),
+                summary: Some("settlement authority is unavailable".to_string()),
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: None,
+                current_focus: None,
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect_err("unwritable settlement store must reject the terminal update");
+
+        assert!(error.to_string().contains("settlement"), "{error}");
+        let after = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "settlement authority must be reserved before any terminal Work surface mutates"
+        );
     }
 
     #[test]
@@ -1608,11 +1933,14 @@ mod tests {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
-        let _session =
-            crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
+        seed_valid_update_target(&repo, "session-progress");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-progress",
+        );
         let mut env = TestEnv::new(repo.clone());
         env.stdin = serde_json::json!({
             "schema_version": 1,
@@ -1660,6 +1988,10 @@ mod tests {
         let worktree = project_root.join("work").join("20260601-0934");
         std::fs::create_dir_all(&worktree).expect("worktree");
         write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
 
         let mut canonical = WorkspaceProjection::default_for_project(&project_root);
         canonical.agents.push(assigned_agent_with_window(
@@ -1719,6 +2051,150 @@ mod tests {
         assert!(
             !gwt_core::paths::gwt_repo_local_work_events_path(&project_root).exists(),
             "agent workspace update must not write the repo-local Work event to the Project State root"
+        );
+    }
+
+    /// Issue #3278 regression: when the agent session referenced by
+    /// `GWT_SESSION_ID` records a worktree that disagrees with the worktree the
+    /// process actually runs in, `workspace.update` must refuse to write — the
+    /// tracked Work event and its identity would be attributed to a foreign
+    /// Work. The refusal is actionable (names the session, the expected
+    /// worktree, and the actual worktree) and leaves tracked logs untouched.
+    #[test]
+    fn workspace_update_rejects_session_cwd_worktree_mismatch() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_worktree = temp.path().join("work").join("issue-session");
+        let actual_worktree = temp.path().join("work").join("issue-actual");
+        std::fs::create_dir_all(&session_worktree).expect("session worktree");
+        std::fs::create_dir_all(&actual_worktree).expect("actual worktree");
+        // The session (stale GWT_SESSION_ID) points at a different worktree
+        // than the one this process runs in.
+        write_session_with_project_state_root("session-1", &session_worktree, &session_worktree);
+        let session_events_path =
+            gwt_core::paths::gwt_repo_local_work_events_path(&session_worktree);
+        let session_events_before =
+            std::fs::read(&session_events_path).expect("seeded session Work event log");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
+
+        let mut env = TestEnv::new(actual_worktree.clone());
+        let mut out = String::new();
+        let error = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Late coordination update".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect_err("session/cwd worktree mismatch must fail closed");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("session-1"),
+            "error must name the conflicting session: {message}"
+        );
+        assert!(
+            message.contains("issue-session") && message.contains("issue-actual"),
+            "error must name both the expected and actual worktree: {message}"
+        );
+        assert!(
+            !gwt_core::paths::gwt_repo_local_work_events_path(&actual_worktree).exists(),
+            "refused update must not append a tracked Work event in the actual worktree"
+        );
+        assert_eq!(
+            std::fs::read(&session_events_path).expect("session Work event log after refusal"),
+            session_events_before,
+            "refused update must leave the session worktree event log byte-equivalent"
+        );
+    }
+
+    /// Issue #3278 regression: once the Execution Control Record for the
+    /// worktree has settled as Completed, a coordination-only
+    /// `workspace.update` (the kind a post-merge stale reminder triggers) must
+    /// not append to the git-tracked `events.jsonl` — otherwise it re-dirties an
+    /// already committed/merged worktree. The machine-local projection still
+    /// updates so the Board / titlebar stay live.
+    #[test]
+    fn workspace_update_skips_tracked_event_after_execution_completed() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
+
+        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        canonical.agents.push(assigned_agent_with_window(
+            "session-1",
+            "project::agent-1",
+            &worktree,
+        ));
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+        let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+        let events_before = std::fs::read(&events_path).expect("seeded tracked Work event log");
+
+        // The execution for this worktree already completed (final commit +
+        // push + PR merge happened before this coordination update).
+        save_completed_execution_record(&worktree, "session-1", 3278);
+
+        let mut env = TestEnv::new(worktree.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Post-merge coordination focus".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect("update workspace");
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            std::fs::read(&events_path).expect("tracked Work event log after update"),
+            events_before,
+            "completed-execution coordination update must leave tracked events.jsonl byte-equivalent"
+        );
+        let saved = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("canonical agent");
+        assert_eq!(
+            agent.current_focus.as_deref(),
+            Some("Post-merge coordination focus"),
+            "the machine-local projection must still reflect the coordination update"
         );
     }
 
@@ -1785,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_update_repairs_split_agent_title_into_canonical_root() {
+    fn workspace_update_does_not_run_split_state_repair() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -1794,6 +2270,10 @@ mod tests {
         let worktree = project_root.join("work").join("20260601-0934");
         std::fs::create_dir_all(&worktree).expect("worktree");
         write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
 
         let mut canonical = WorkspaceProjection::default_for_project(&project_root);
         canonical.agents.push(assigned_agent_with_window(
@@ -1842,13 +2322,93 @@ mod tests {
             .expect("canonical agent");
         assert_eq!(
             agent.title_summary.as_deref(),
-            Some("Split root title"),
-            "the first canonical update after the fix must recover the title written to the old split root"
+            None,
+            "mutation must not import identity from the obsolete split projection"
         );
         assert_eq!(
             agent.current_focus.as_deref(),
             Some("Continue from canonical Project State")
         );
+        let untouched_split = load_workspace_projection(&worktree)
+            .expect("load untouched split projection")
+            .expect("split projection remains present");
+        assert_eq!(
+            untouched_split
+                .latest_agent_for_session("session-1")
+                .and_then(|agent| agent.title_summary.as_deref()),
+            Some("Split root title"),
+            "workspace.update must not mutate or repair the obsolete split projection"
+        );
+    }
+
+    #[test]
+    fn workspace_update_rejects_invalid_status_before_strict_transaction_without_mutation() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        write_session_with_project_state_root("session-1", &worktree, &project_root);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
+
+        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        let canonical_agent =
+            assigned_agent_with_window("session-1", "project::agent-1", &worktree);
+        let canonical_updated_at = canonical_agent.updated_at;
+        canonical.agents.push(canonical_agent);
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+
+        let mut split = WorkspaceProjection::default_for_project(&worktree);
+        let mut split_agent =
+            assigned_agent_with_window("session-1", "project::agent-1", &worktree);
+        split_agent.title_summary = Some("must not be repaired".to_string());
+        split_agent.updated_at = canonical_updated_at + chrono::Duration::seconds(1);
+        split.agents.push(split_agent);
+        save_workspace_projection(&worktree, &split).expect("save split projection");
+
+        let paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&project_root),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_repo_local_work_events_path(&worktree),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+
+        let mut env = TestEnv::new(worktree);
+        let mut out = String::new();
+        let error = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: Some("invalid-status".to_string()),
+                status_text: None,
+                summary: None,
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: None,
+                current_focus: None,
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect_err("invalid status must fail before the strict transaction");
+
+        assert!(error.to_string().contains("unknown workspace status"));
+        let after = paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before, "invalid status must not mutate Work state");
     }
 
     #[test]

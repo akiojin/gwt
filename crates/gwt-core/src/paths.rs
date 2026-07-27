@@ -1180,6 +1180,7 @@ mod tests {
     #[test]
     fn resolve_work_notes_read_paths_prefer_home_then_repo_local() {
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(dir.path());
         let repo = dir.path().join("repo");
         init_git_repo(&repo);
 

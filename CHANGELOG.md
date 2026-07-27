@@ -1,6 +1,136 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.69.1] - 2026-07-27
+
+### Bug Fixes
+
+- Windowsエージェントのプロセス解決を共通化
+- Windowsプロセス解決のレビュー指摘を修正
+- **workspace:** Require canonical session mutation target
+- **workspace:** Work lifecycleをHost authorityへ集約する
+- **workspace:** 完了後のWork更新がevents.jsonlをdirtyに戻す問題を修正
+- **workspace:** Authority境界のレビュー指摘を解消する
+- Harden session-bound work mutation boundaries
+- **issue-monitor:** 旧 Git failure を one-shot 移行
+- **issue-monitor:** 実在 launch を migration adoption から保護
+- **issue-monitor:** Prefs migration adoption の launch 整合性を保つ
+- **issue-monitor:** GUI と daemon の migration 保存を直列化
+- **issue-monitor:** Cross-process state ownership を保持
+- **gwt:** レビュー指摘の状態損失と誤判定を防ぐ
+- **issue-monitor:** 破損復旧と終端状態の整合性を保つ
+- **workspace:** Grouped rowのPR metadataを保持する
+- **work:** Use first-parent settlement semantics
+- **pane:** Return after self-close dispatch
+- **pane:** Require self-close acceptance
+- **hooks:** Intake の read-only 複合コマンドと plan ファイル誤ブロックを解消する
+- **test:** 負荷依存のテストフレークを 5 領域で根絶する
+
+### Documentation
+
+- 古いgwtdをcheckout buildへ切り替える規則を追記
+- Checkout localのgwtd利用を必須化
+
+### Miscellaneous Tasks
+
+- **work:** Issue 3290のWorkイベント投影を補正する
+- **work:** Issue #3327 の完了状態を記録する
+- **work:** Issue #3314のPR handoff状態を同期する
+- **work:** Issue #3314の確認結果を同期する
+- **work:** Preserve Issue 3327 backfill events
+- **work:** Issue #3265 の work イベントを記録する
+- **work:** Issue #3339 の work イベントを記録する
+
+### Refactor
+
+- **gui:** 起動ブランチ resolver を共有化
+
+### Styling
+
+- **test:** Improvement テストの import を rustfmt 準拠に整形する
+
+### Testing
+
+- Windows PTYテストの出力型を修正
+- Windows PTY fixtureの実行契約を修正
+- Windows host-shellの正規化契約を更新
+- **workspace:** Cover session-bound mutation provenance
+- **workspace:** Managed bridge環境を分離する
+- **hooks:** Hook liveテストを正規URLへ合わせる
+- **app-runtime:** Shutdown順序テストを決定的にする
+- **cli:** Gwtd統合テストの起動環境を分離する
+- **build:** Lifecycle統合テストのbridge環境を分離する
+- **logging:** Launch環境のRUST_LOGを分離する
+- **logging:** Default featureで環境隔離を検証可能にする
+- **hooks:** Project State fixtureのHOME競合を防ぐ
+- **gui:** Shutdown 順序テストを決定論的にする
+- **workspace:** Remove redundant receipt assertion
+- **pane:** Serialize websocket environment fixtures
+- **agent:** Serialize path detection fixture
+- Self-close finalizer eventの待機を決定論化
+- **hooks:** Heredoc マスクの線形性テストのマージンを広げる
+
+## [9.69.0] - 2026-07-21
+
+### Bug Fixes
+
+- 改善候補の公開識別子を補完
+- **improvement:** Bound privacy worktree collection
+- **github:** Verify owner issue readback
+- **improvement:** Harden capture delivery and legacy import
+- **core:** Preserve committed coordination results
+- **core:** Bound process timeout cleanup
+- **tests:** Windowsビルドでunused importになるunix限定テスト補助をcfgで整理する
+- **tests:** Http transport testのunix限定helperをcfgで整理しWindows clippyを直す
+- **gui:** 更新CTAと通知を共有ホストで整列する
+- **workflow:** 検証済みのblocked executionを再開可能にする
+- **workflow:** Recovery履歴のrolling互換性を保つ
+- **config:** ポート保存で設定リンクと更新整合性を守る
+
+### Features
+
+- **hooks:** Verify.planで検証matrixを事前登録しrunのcoverageをgateで強制する
+- **hooks:** 実行/検証recordの正本をrepo-scoped trusted storeへ移動する
+- 改善候補のリポジトリ共通ストアを追加
+- 型付き改善候補の証拠契約を追加
+- 改善候補の型付きライフサイクルを追加
+- 改善候補の公開ペイロードを保護
+- プロセス実行に絶対期限を追加
+- Owner解決の上流通信契約を追加
+- Owner Projection基盤を追加
+- Active Owner解決と監査基盤を追加
+- Owner作成と重複調停を無人化
+- Harden unattended owner recurrence resolution
+- Bound direct owner resolution during Stop
+- 改善操作契約を無人化する
+- **hooks:** 実行integrity違反のself-improvement診断とresume E2Eを追加する
+- **hooks:** Owner write leaseで実行/intake stateのRMWを直列化する
+- **hooks:** GitHub API mutationをmethod-awareで分類しblockする
+- **github:** Artifact Operability Recordで多部構成SPEC書込の台帳を永続化する
+- **hooks:** Verify.planのderiveで変更surfaceから検証matrixを自動導出する
+- 埋め込みサーバーポートを安定化する
+
+### Miscellaneous Tasks
+
+- **work:** Include spec 3170 work event
+- **work:** Record pr check events
+
+### Performance
+
+- **launch:** Cache claude capability probes
+
+### Testing
+
+- **core:** Route process probe through hidden command
+- **gui:** Stabilize blocking task ordering
+- **improvement:** Shorten Stop deadline coverage
+- **improvement:** Bound gwtd subprocess waits
+- **improvement:** Isolate candidate store fixtures
+- **core:** Isolate board remote root home
+- **gui:** Propagate isolated home to workers
+- **hooks:** Gh release createの期待blockをP10 mutation sink分類へ更新する
+- Full検証の期限とHOME fixtureを安定化する
+
 ## [9.68.0] - 2026-07-18
 
 ### Bug Fixes

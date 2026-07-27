@@ -1,5 +1,13 @@
 //! Process execution helpers.
 
+mod windows_resolver;
+
+pub use windows_resolver::{
+    resolve_process_plan, resolve_process_plan_for_platform, ProcessPlanRequest, ProcessPlatform,
+    ProcessResolveFailure, ProcessResolveFailureKind, ResolvedProcessPlan,
+    WINDOWS_CMD_WRAPPER_EXPRESSION_ENV,
+};
+
 use std::{
     ffi::OsStr,
     process::{Command, Output},
@@ -331,6 +339,59 @@ pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
     command
+}
+
+/// Resolve a process request with the current platform rules and build a
+/// hidden `std::process::Command` from the resulting spawn plan.
+pub fn resolved_command(
+    request: ProcessPlanRequest,
+) -> std::result::Result<Command, ProcessResolveFailure> {
+    let plan = resolve_process_plan(request)?;
+    let mut command = hidden_command(&plan.program);
+    apply_resolved_std_plan(&mut command, &plan);
+    Ok(command)
+}
+
+/// Resolve a process request with the current platform rules and build a
+/// hidden `tokio::process::Command` from the same spawn plan used by the
+/// synchronous adapter.
+pub fn resolved_tokio_command(
+    request: ProcessPlanRequest,
+) -> std::result::Result<tokio::process::Command, ProcessResolveFailure> {
+    let plan = resolve_process_plan(request)?;
+    #[allow(clippy::disallowed_methods)]
+    let mut command = tokio::process::Command::new(&plan.program);
+    configure_hidden_tokio_command(&mut command);
+    apply_resolved_tokio_plan(&mut command, &plan);
+    Ok(command)
+}
+
+fn apply_resolved_std_plan(command: &mut Command, plan: &ResolvedProcessPlan) {
+    if !plan.inherit_env {
+        command.env_clear();
+    }
+    for key in &plan.remove_env {
+        command.env_remove(key);
+    }
+    command.envs(plan.env.iter().cloned());
+    command.args(&plan.args);
+    if let Some(cwd) = &plan.cwd {
+        command.current_dir(cwd);
+    }
+}
+
+fn apply_resolved_tokio_plan(command: &mut tokio::process::Command, plan: &ResolvedProcessPlan) {
+    if !plan.inherit_env {
+        command.env_clear();
+    }
+    for key in &plan.remove_env {
+        command.env_remove(key);
+    }
+    command.envs(plan.env.iter().cloned());
+    command.args(&plan.args);
+    if let Some(cwd) = &plan.cwd {
+        command.current_dir(cwd);
+    }
 }
 
 /// Apply platform-specific non-interactive process flags.

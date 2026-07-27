@@ -13,13 +13,16 @@ jobs:
       - name: Install tray + GTK dependencies (Linux)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev xvfb
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
       - name: Run tests
         run: cargo test --workspace --all-features
         timeout-minutes: 15
+      - name: Run stable server port real-binary tests (Xvfb)
+        run: xvfb-run -a cargo test -p gwt --all-features --test stable_server_port -- --ignored --test-threads=1
+        timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         run: |
           if [ -f tests/voice_eval/manifest.json ]; then
@@ -34,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install runtime deps
@@ -57,7 +60,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Cache HuggingFace model (e5-base)
@@ -82,14 +85,28 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
-      - name: Run Windows PTY regression tests
-        run: cargo test -p gwt-core terminal::pty
+      - name: Run shared Windows process resolver tests
+        run: cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity
+        timeout-minutes: 15
+      - name: Run real Claude probe caller regressions
+        run: |
+          cargo test -p gwt-core --lib real_bun_global_placeholder_fixture
+          cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture -- --test-threads=1
+          cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary -- --test-threads=1
+          cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture -- --test-threads=1
+          cargo test -p gwt --bin gwt command_prompt_agent_wrapper -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Windows PTY resolver adapter tests
+        run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run agent process resolver caller contracts
+        run: cargo test -p gwt --test agent_process_resolution_contract_test
         timeout-minutes: 15
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
@@ -100,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: oven-sh/setup-bun@v2

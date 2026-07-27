@@ -12,7 +12,7 @@
 //! - Restoring open-project windows / paused placeholders
 //!   ([`AppRuntime::restore_open_project_windows`],
 //!   [`AppRuntime::spawn_restored_agent_session`])
-//! - Late runtime wiring setters ([`AppRuntime::set_hook_forward_target`],
+//! - Late runtime wiring setters ([`AppRuntime::set_agent_capability_issuer`],
 //!   [`AppRuntime::set_server_url`], [`AppRuntime::set_usage_refresh`])
 //!
 //! Behavior-preserving move: `AppRuntime::new` and
@@ -23,8 +23,8 @@ use std::path::Path;
 use super::{
     combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees,
     same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
-    AppRuntime, HookForwardTarget, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    AgentCapabilityIssuer, AppRuntime, OutboundEvent, PendingStartupAutoResumeSession,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -573,8 +573,8 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
-        self.hook_forward_target = Some(target);
+    pub(crate) fn set_agent_capability_issuer(&mut self, issuer: AgentCapabilityIssuer) {
+        self.agent_capability_issuer = Some(issuer);
     }
 
     /// SPEC-2785 FR-E: capture the embedded server URL after the axum bind

@@ -2,11 +2,13 @@
 
 use std::{
     ffi::OsString,
+    num::NonZeroU16,
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::{debug, error, info};
 
 use crate::{
@@ -22,6 +24,25 @@ use crate::{
 
 static UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
+fn deserialize_optional_nonzero_port<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<NonZeroU16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let port = Option::<u16>::deserialize(deserializer)?;
+    Ok(port.and_then(NonZeroU16::new))
+}
+
+/// Embedded browser server settings persisted under `[server]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Last successfully bound implicit port. Zero normalizes to absent.
+    #[serde(default, deserialize_with = "deserialize_optional_nonzero_port")]
+    pub embedded_port: Option<NonZeroU16>,
+}
+
 fn resolve_config_home_dir(
     home: Option<OsString>,
     userprofile: Option<OsString>,
@@ -31,6 +52,27 @@ fn resolve_config_home_dir(
         .or_else(|| userprofile.filter(|value| !value.is_empty()))
         .map(PathBuf::from)
         .or(fallback)
+}
+
+fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::canonicalize(path).map_err(|error| ConfigError::WriteError {
+                reason: format!(
+                    "failed to resolve settings symlink {}: {error}",
+                    path.display()
+                ),
+            })
+        }
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(ConfigError::WriteError {
+            reason: format!(
+                "failed to inspect settings path {}: {error}",
+                path.display()
+            ),
+        }),
+    }
 }
 
 /// Top-level application settings.
@@ -62,6 +104,8 @@ pub struct Settings {
     pub board: BoardConfig,
     /// Provider usage display configuration (SPEC-2970).
     pub usage: UsageConfig,
+    /// Embedded browser server configuration (SPEC-3287).
+    pub server: ServerConfig,
 }
 
 impl Default for Settings {
@@ -82,6 +126,7 @@ impl Default for Settings {
             ai: AISettings::default(),
             board: BoardConfig::default(),
             usage: UsageConfig::default(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -141,6 +186,58 @@ impl Settings {
         write_atomic(path, &content)?;
 
         info!(path = %path.display(), "Settings saved");
+        Ok(())
+    }
+
+    /// Atomically merge the selected embedded-server port into a config file.
+    ///
+    /// Unlike a full typed-settings rewrite, this preserves comments, unknown
+    /// future keys, and the file's minimal shape. The typed parse still runs
+    /// first so malformed or incompatible settings remain fatal.
+    pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
+        let _guard = UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let target_path = resolve_existing_settings_target(path)?;
+        let content = match std::fs::read_to_string(&target_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    reason: error.to_string(),
+                });
+            }
+        };
+
+        toml::from_str::<Self>(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        let existing_decor = document
+            .as_table()
+            .get("server")
+            .and_then(|item| item.as_table_like())
+            .and_then(|table| table.get("embedded_port"))
+            .and_then(|item| item.as_value())
+            .map(|value| value.decor().clone());
+        if document.as_table().get("server").is_none() {
+            document["server"] = Item::Table(Table::new());
+        }
+        document["server"]["embedded_port"] = value(i64::from(port.get()));
+        if let (Some(existing_decor), Some(updated)) = (
+            existing_decor,
+            document["server"]["embedded_port"].as_value_mut(),
+        ) {
+            *updated.decor_mut() = existing_decor;
+        }
+
+        write_atomic(&target_path, &document.to_string())?;
+        info!(path = %path.display(), port = port.get(), "Embedded server port saved");
         Ok(())
     }
 
@@ -275,6 +372,80 @@ mod tests {
         assert!(path.exists());
         let loaded = Settings::load_from_path(&path).unwrap();
         assert_eq!(loaded.default_base_branch, "main");
+    }
+
+    #[test]
+    fn persist_embedded_port_is_serialized_with_global_updates() {
+        use std::{
+            sync::mpsc::{self, RecvTimeoutError},
+            thread,
+            time::Duration,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "debug = false\n").expect("write config fixture");
+
+        let updater_path = path.clone();
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let updater = thread::spawn(move || {
+            let _guard = UPDATE_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut settings = Settings::load_from_path(&updater_path).expect("load old snapshot");
+            loaded_tx.send(()).expect("signal old snapshot loaded");
+            release_rx.recv().expect("release global updater");
+            settings.debug = true;
+            settings.save(&updater_path).expect("save global update");
+        });
+        loaded_rx.recv().expect("wait for old snapshot load");
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let persistence_path = path.clone();
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).expect("signal worker ready");
+            start_rx.recv().expect("receive worker start");
+            let result = Settings::persist_embedded_port(
+                &persistence_path,
+                NonZeroU16::new(45000).expect("non-zero fixture port"),
+            );
+            done_tx.send(result).expect("send persistence result");
+        });
+
+        ready_rx.recv().expect("wait for worker readiness");
+        start_tx.send(()).expect("start persistence worker");
+        let before_release = done_rx.recv_timeout(Duration::from_millis(250));
+        release_tx.send(()).expect("release global updater");
+        updater.join().expect("join global updater");
+
+        let (completed_while_update_locked, result) = match before_release {
+            Err(RecvTimeoutError::Timeout) => done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map(|result| (false, result))
+                .expect("persistence must finish after releasing the update lock"),
+            Ok(result) => (true, result),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("persistence worker disconnected before returning a result")
+            }
+        };
+
+        result.expect("persist embedded port after lock release");
+        worker.join().expect("join persistence worker");
+        assert!(
+            !completed_while_update_locked,
+            "port persistence must wait for the shared settings update lock"
+        );
+
+        let settings = Settings::load_from_path(&path).expect("load merged settings");
+        assert!(settings.debug, "the concurrent global update must survive");
+        assert_eq!(
+            settings.server.embedded_port,
+            NonZeroU16::new(45000),
+            "the persisted port must survive the concurrent global update"
+        );
     }
 
     #[test]

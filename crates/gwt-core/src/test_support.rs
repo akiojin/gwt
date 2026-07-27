@@ -91,6 +91,87 @@ impl Drop for ScopedEnvVar {
     }
 }
 
+/// Real executable fixture for Windows-only integration tests of the Bun
+/// global Claude Code layout reported in Issue #3290.
+#[cfg(windows)]
+pub struct WindowsBunClaudeFixture {
+    pub profile: PathBuf,
+    pub bun_bin: PathBuf,
+    pub bun_exe: PathBuf,
+    pub placeholder: PathBuf,
+    pub wrapper: PathBuf,
+    pub native: PathBuf,
+}
+
+#[cfg(windows)]
+impl WindowsBunClaudeFixture {
+    /// Build the Unicode-profile fixture using the installed Node runtime as a
+    /// real PE launcher. The copied `bun.exe` executes `cli-wrapper.cjs`, so
+    /// production callers exercise resolver output through `CreateProcess`
+    /// instead of stopping at plan inspection.
+    pub fn create(root: &Path, version: &str) -> std::io::Result<Self> {
+        let node = which::which("node.exe").map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("node.exe is required for the Windows Bun fixture: {error}"),
+            )
+        })?;
+        let profile = root.join("ユーザー 太郎");
+        let bun_bin = profile.join(".bun").join("bin");
+        let package = profile
+            .join(".bun")
+            .join("install")
+            .join("global")
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        let package_bin = package.join("bin");
+        let optional_package = package
+            .parent()
+            .expect("scoped package has a parent")
+            .join("claude-code-win32-x64");
+        std::fs::create_dir_all(&bun_bin)?;
+        std::fs::create_dir_all(&package_bin)?;
+        std::fs::create_dir_all(&optional_package)?;
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@anthropic-ai/claude-code","bin":{"claude":"bin/claude.exe"}}"#,
+        )?;
+
+        let bun_exe = bun_bin.join("bun.exe");
+        std::fs::copy(&node, &bun_exe)?;
+        std::fs::copy(&node, bun_bin.join("claude.exe"))?;
+
+        let placeholder = package_bin.join("claude.exe");
+        std::fs::write(
+            &placeholder,
+            b"echo Error: native binary not installed. Run postinstall.\r\n",
+        )?;
+        let wrapper = package.join("cli-wrapper.cjs");
+        let output = serde_json::to_string(&format!("{version} (Claude Code)"))
+            .map_err(std::io::Error::other)?;
+        std::fs::write(&wrapper, format!("console.log({output});\n"))?;
+
+        let native = optional_package.join("claude.exe");
+        std::fs::copy(&node, &native)?;
+
+        Ok(Self {
+            profile,
+            bun_bin,
+            bun_exe,
+            placeholder,
+            wrapper,
+            native,
+        })
+    }
+
+    /// Remove both safe redirect targets, leaving only the text placeholder.
+    pub fn remove_safe_targets(&self) -> std::io::Result<()> {
+        std::fs::remove_file(&self.wrapper)?;
+        std::fs::remove_file(&self.native)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

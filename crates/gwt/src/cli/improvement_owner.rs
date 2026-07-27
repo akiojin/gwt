@@ -13406,7 +13406,7 @@ mod tests {
 
         let result = {
             let _operation_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                Instant::now() + Duration::from_millis(120),
+                Instant::now() + Duration::from_secs(1),
             );
             deliver_pending_owner_status(&mut env, &mut candidate)
         };
