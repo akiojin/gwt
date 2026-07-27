@@ -1175,6 +1175,7 @@ mod tests {
                 "--bare",
                 bare_repo.to_str().expect("bare repo path"),
             ])
+            .current_dir(tmp.path())
             .output()
             .expect("git init --bare");
         assert!(
@@ -1190,6 +1191,7 @@ mod tests {
                 "refs/remotes/origin/HEAD",
                 "refs/remotes/origin/develop",
             ])
+            .current_dir(tmp.path())
             .output()
             .expect("set origin HEAD");
         assert!(
