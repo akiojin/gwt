@@ -132,6 +132,7 @@ pub(super) fn run<E: CliEnv>(
             return Ok(2);
         }
     }
+    let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -283,6 +284,22 @@ pub(super) fn run<E: CliEnv>(
             0
         }
     };
+    if cmd_settles_pr_obligation && code == 0 {
+        // P11: successful PR mutations settle open PR obligations.
+        if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            crate::cli::action_obligation::settle_kinds_best_effort(
+                &worktree,
+                &session_id,
+                &[crate::cli::action_obligation::ObligationKind::Pr],
+                "pr mutation",
+            );
+        }
+    }
     Ok(code)
 }
 
