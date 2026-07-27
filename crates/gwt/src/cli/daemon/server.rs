@@ -1998,6 +1998,49 @@ exit 0
     }
 
     #[test]
+    fn daemon_persist_does_not_restore_a_launch_merged_by_the_scan() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor-prefs.json");
+        let disk = crate::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::agent-1".to_string(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &disk).expect("seed launched prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig {
+                enabled: true,
+                ..crate::IssueMonitorConfig::default()
+            },
+            disk,
+        );
+        assert_eq!(monitor.status_view().active_count, 1);
+
+        monitor.record_merged(42);
+        assert_eq!(monitor.status_view().active_count, 0);
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
+
+        assert_eq!(
+            monitor.status_view().active_count,
+            0,
+            "the persist rebase must not restore the stale disk launch"
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(persisted.merged_issues.contains(&42));
+        assert!(
+            persisted
+                .launched_issues
+                .iter()
+                .all(|launched| launched.issue_number != 42),
+            "the merged issue must not persist as both launched and merged"
+        );
+    }
+
+    #[test]
     fn scan_join_failure_fallback_preserves_prior_state_so_persist_is_safe() {
         // codex P2 (#3209): a scan-task panic (`JoinError`) must NOT collapse to a
         // fresh `IssueMonitorState::new(default)`. `scan_and_persist` saves the
