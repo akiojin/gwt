@@ -45,10 +45,20 @@ pub struct RuntimeHookEvent {
     pub occurred_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HookForwardTarget {
     pub url: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for HookForwardTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookForwardTarget")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl HookForwardTarget {
@@ -63,6 +73,32 @@ impl HookForwardTarget {
         Some(Self { url, token })
     }
 
+    pub fn from_env_strict() -> Result<Option<Self>, String> {
+        let url = std::env::var(GWT_HOOK_FORWARD_URL_ENV);
+        let token = std::env::var(GWT_HOOK_FORWARD_TOKEN_ENV);
+        match (url, token) {
+            (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => Ok(None),
+            (Ok(url), Ok(token)) => {
+                let target = Self {
+                    url: url.trim().to_string(),
+                    token: token.trim().to_string(),
+                };
+                if target.url.is_empty() || target.token.is_empty() {
+                    return Err(
+                        "agent bridge endpoint and token must both be non-empty; relaunch the Session"
+                            .to_string(),
+                    );
+                }
+                target.validate()?;
+                Ok(Some(target))
+            }
+            _ => Err(
+                "agent bridge endpoint and token must be provided together; relaunch the Session"
+                    .to_string(),
+            ),
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
         let url = Url::parse(&self.url).map_err(|err| format!("invalid hook live URL: {err}"))?;
         match url.scheme() {
@@ -72,15 +108,138 @@ impl HookForwardTarget {
             }
         }
 
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("hook live URL must not contain user credentials".to_string());
+        }
+
         let Some(host) = url.host_str() else {
             return Err("hook live URL is missing a host".to_string());
         };
-        if !is_loopback_host(host) {
-            return Err(format!("hook live URL must stay on loopback, got: {host}"));
+        if !is_allowed_hook_forward_host(host) {
+            return Err(format!(
+                "hook live URL must stay on loopback or a reserved container host bridge, got: {host}"
+            ));
+        }
+        if url.port().is_none() {
+            return Err("hook live URL must include an explicit port".to_string());
+        }
+        if url.path() != "/internal/hook-live" || url.query().is_some() || url.fragment().is_some()
+        {
+            return Err(
+                "hook live URL must use the exact /internal/hook-live path without query or fragment"
+                    .to_string(),
+            );
         }
 
         Ok(())
     }
+
+    pub fn workspace_update_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/workspace-update");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
+    pub fn work_terminalization_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/work-terminalization");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+}
+
+pub fn send_workspace_update_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceUpdateRequest,
+) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
+    let url = target.workspace_update_url()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "failed to build the Host workspace bridge client".to_string())?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| {
+            "Host workspace bridge is unavailable; the update was not retried locally and its outcome may be unknown"
+                .to_string()
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return match response.json::<crate::AgentWorkspaceUpdateError>() {
+            Ok(error) => Err(error.message),
+            Err(_) => Err(format!(
+                "Host workspace bridge rejected the update with HTTP {status}; no local fallback was attempted"
+            )),
+        };
+    }
+    let receipt = response
+        .json::<crate::AgentWorkspaceUpdateReceipt>()
+        .map_err(|_| {
+            "Host workspace bridge returned an invalid success response; no local fallback was attempted"
+                .to_string()
+        })?;
+    if receipt.schema_version != crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION {
+        return Err(
+            "Host workspace bridge returned an unsupported response schema; no local fallback was attempted"
+                .to_string(),
+        );
+    }
+    Ok(receipt)
+}
+
+pub fn send_work_terminalization_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkTerminalizationRequest,
+) -> Result<crate::AgentWorkTerminalizationReceipt, String> {
+    let url = target.work_terminalization_url()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "failed to build the Host Work terminalization bridge client".to_string())?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| {
+            "Host Work terminalization bridge is unavailable; the close was not retried locally and its outcome may be unknown"
+                .to_string()
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return match response.json::<crate::AgentWorkspaceUpdateError>() {
+            Ok(error) => Err(format!(
+                "Host Work terminalization bridge rejected the close ({:?}); no local fallback was attempted",
+                error.code
+            )),
+            Err(_) => Err(format!(
+                "Host Work terminalization bridge rejected the close with HTTP {status}; no local fallback was attempted"
+            )),
+        };
+    }
+    let receipt = response
+        .json::<crate::AgentWorkTerminalizationReceipt>()
+        .map_err(|_| {
+            "Host Work terminalization bridge returned an invalid success response; no local fallback was attempted"
+                .to_string()
+        })?;
+    if receipt.schema_version != crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION {
+        return Err(
+            "Host Work terminalization bridge returned an unsupported response schema; no local fallback was attempted"
+                .to_string(),
+        );
+    }
+    Ok(receipt)
 }
 
 pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
@@ -274,8 +433,21 @@ fn session_dir_from_runtime_path_env() -> Option<PathBuf> {
     gwt_agent::sessions_dir_from_runtime_path(&runtime_path)
 }
 
+fn is_allowed_hook_forward_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case("host.docker.internal")
+        || normalized.eq_ignore_ascii_case("host.containers.internal")
+        || is_loopback_host(normalized)
+}
+
 fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[cfg(test)]
@@ -309,6 +481,83 @@ mod tests {
         };
 
         target.validate().expect("loopback target");
+    }
+
+    #[test]
+    fn hook_forward_target_debug_redacts_bearer() {
+        let target = HookForwardTarget {
+            url: "http://127.0.0.1:8787/internal/hook-live".to_string(),
+            token: "agent-capability-secret-sentinel".to_string(),
+        };
+
+        let debug = format!("{target:?}");
+        assert!(!debug.contains("agent-capability-secret-sentinel"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn strict_agent_bridge_env_rejects_partial_pair_without_fallback() {
+        let _env_lock = env_test_lock();
+        let _url = ScopedEnvVar::set(
+            GWT_HOOK_FORWARD_URL_ENV,
+            "http://127.0.0.1:8787/internal/hook-live",
+        );
+        let _token = ScopedEnvVar::unset(GWT_HOOK_FORWARD_TOKEN_ENV);
+
+        let error = HookForwardTarget::from_env_strict()
+            .expect_err("partial agent bridge environment must fail closed");
+        assert!(error.contains("provided together"), "{error}");
+    }
+
+    #[test]
+    fn mutation_urls_accept_only_reserved_bridge_hosts_and_exact_hook_path() {
+        for host in [
+            "127.0.0.1",
+            "localhost",
+            "host.docker.internal",
+            "host.containers.internal",
+        ] {
+            let target = HookForwardTarget {
+                url: format!("http://{host}:45123/internal/hook-live"),
+                token: "secret".to_string(),
+            };
+            assert_eq!(
+                target
+                    .workspace_update_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/workspace-update")
+            );
+            assert_eq!(
+                target
+                    .work_terminalization_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/work-terminalization")
+            );
+        }
+
+        for url in [
+            "http://example.com:45123/internal/hook-live",
+            "http://127.0.0.1/internal/hook-live",
+            "http://127.0.0.1:45123/healthz",
+            "http://127.0.0.1:45123/internal/hook-live?token=forbidden",
+        ] {
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .workspace_update_url()
+            .expect_err("non-canonical bridge target must fail closed");
+            assert!(!error.contains("secret"));
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .work_terminalization_url()
+            .expect_err("non-canonical terminal bridge target must fail closed");
+            assert!(!error.contains("secret"));
+        }
     }
 
     #[test]

@@ -4,6 +4,8 @@ use std::{
     process::Stdio,
 };
 
+use reqwest::Url;
+
 use crate::{
     environment::LaunchEnvironment,
     launch::LaunchConfig,
@@ -24,13 +26,62 @@ const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
 const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
 const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 1] = ["origin/develop"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub remove_env: Vec<String>,
     pub cwd: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for PreparedProcessLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    if private_launch_env_key(key) {
+                        "<redacted>"
+                    } else {
+                        value.as_str()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let redacted_args = self
+            .args
+            .iter()
+            .map(|argument| {
+                let Some((key, _)) = argument.split_once('=') else {
+                    return argument.clone();
+                };
+                if private_launch_env_key(key) {
+                    format!("{key}=<redacted>")
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        formatter
+            .debug_struct("PreparedProcessLaunch")
+            .field("command", &self.command)
+            .field("args", &redacted_args)
+            .field("env", &redacted_env)
+            .field("remove_env", &self.remove_env)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
+fn private_launch_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        GWT_HOOK_FORWARD_TOKEN_ENV | GWT_SESSION_ID_ENV | GWT_SESSION_RUNTIME_PATH_ENV
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -42,10 +93,161 @@ pub struct PreparedAgentLaunch {
     pub used_host_package_runner_fallback: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HookForwardEnv {
     pub url: String,
     pub token: String,
+}
+
+struct PreparedLaunchFinalization<'a> {
+    used_host_package_runner_fallback: bool,
+    container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
+}
+
+impl std::fmt::Debug for HookForwardEnv {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookForwardEnv")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Translate the daemon's host-only hook endpoint for the selected launch
+/// runtime. Host launches retain the issued URL byte-for-byte.
+pub fn hook_forward_url_for_launch_runtime(
+    host_url: &str,
+    runtime_target: LaunchRuntimeTarget,
+    container_runtime_kind: Option<gwt_docker::ContainerRuntimeKind>,
+) -> Result<String, String> {
+    if runtime_target == LaunchRuntimeTarget::Host {
+        return Ok(host_url.to_string());
+    }
+
+    let bridge_host = container_runtime_kind
+        .ok_or_else(|| "container hook forwarding requires a resolved runtime kind".to_string())?
+        .host_bridge_name();
+    let mut url =
+        Url::parse(host_url).map_err(|error| format!("invalid host hook forward URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "container hook forwarding requires an HTTP(S) URL scheme, got '{}'",
+            url.scheme()
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("container hook forwarding URL must not contain user credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "host hook forward URL is missing a host".to_string())?;
+    if !is_loopback_hook_forward_host(host) {
+        return Err(format!(
+            "container hook forwarding requires a loopback host endpoint before bridge translation, got '{host}'"
+        ));
+    }
+    if url.port().is_none() {
+        return Err(
+            "container hook forwarding requires an explicit port before bridge translation"
+                .to_string(),
+        );
+    }
+    if url.path() != "/internal/hook-live" || url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "container hook forwarding URL must use the exact /internal/hook-live path without query or fragment, got '{}'",
+            url.path()
+        ));
+    }
+    url.set_host(Some(bridge_host)).map_err(|_| {
+        format!("failed to install container host bridge name '{bridge_host}' in hook URL")
+    })?;
+    Ok(url.into())
+}
+
+/// Select the pane WebSocket endpoint for the launch runtime.
+///
+/// Every managed agent uses the capability-authenticated agent listener.
+/// Host agents keep its loopback URL; container agents rewrite that URL to
+/// the runtime's reserved host bridge.
+pub fn pane_websocket_url_for_launch_runtime(
+    _browser_listener_url: &str,
+    agent_listener_url: &str,
+    runtime_target: LaunchRuntimeTarget,
+    container_runtime_kind: Option<gwt_docker::ContainerRuntimeKind>,
+) -> Result<String, String> {
+    let mut url = Url::parse(agent_listener_url)
+        .map_err(|error| format!("invalid agent pane WebSocket URL: {error}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(format!(
+            "managed pane access requires a WebSocket URL scheme, got '{}'",
+            url.scheme()
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("managed pane WebSocket URL must not contain user credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "managed pane WebSocket URL is missing a host".to_string())?;
+    if !is_loopback_hook_forward_host(host) {
+        return Err(format!(
+            "managed pane WebSocket access requires a loopback agent endpoint, got '{host}'"
+        ));
+    }
+    if url.port().is_none() {
+        return Err("managed pane WebSocket URL requires an explicit port".to_string());
+    }
+    if url.path() != "/internal/pane-ws" || url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "managed pane WebSocket URL must use the exact /internal/pane-ws path without query or fragment, got '{}'",
+            url.path()
+        ));
+    }
+    if runtime_target == LaunchRuntimeTarget::Host {
+        return Ok(url.into());
+    }
+
+    let bridge_host = container_runtime_kind
+        .ok_or_else(|| "container pane access requires a resolved runtime kind".to_string())?
+        .host_bridge_name();
+    url.set_host(Some(bridge_host)).map_err(|_| {
+        format!("failed to install container host bridge name '{bridge_host}' in pane URL")
+    })?;
+    Ok(url.into())
+}
+
+fn is_loopback_hook_forward_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn install_hook_forward_env(
+    config: &mut LaunchConfig,
+    target: Option<HookForwardEnv>,
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<(), String> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let url = hook_forward_url_for_launch_runtime(
+        &target.url,
+        config.runtime_target,
+        container_runtime.map(gwt_docker::detect::ResolvedContainerRuntime::kind),
+    )?;
+    config
+        .env_vars
+        .insert(GWT_HOOK_FORWARD_URL_ENV.to_string(), url);
+    config
+        .env_vars
+        .insert(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), target.token);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +362,7 @@ where
 
     resolve_launch_worktree(repo_path, &mut config)?;
     normalize_launch_config_working_dir(&mut config);
-    apply_docker_runtime_to_launch_config(repo_path, &mut config)?;
+    let container_runtime = apply_docker_runtime_to_launch_config(repo_path, &mut config)?;
 
     let worktree_path = normalize_child_process_path(
         &config
@@ -223,18 +425,45 @@ where
         GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
         runtime_path.display().to_string(),
     );
-    if let Some(target) = hook_forward {
-        config
-            .env_vars
-            .insert(GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
-        config
-            .env_vars
-            .insert(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), target.token);
-    }
+    install_hook_forward_env(&mut config, hook_forward, container_runtime.as_ref())?;
     config
         .env_vars
         .entry("COLORTERM".to_string())
         .or_insert_with(|| "truecolor".to_string());
+
+    finalize_and_persist_prepared_launch(
+        repo_path,
+        sessions_dir,
+        config,
+        session,
+        runtime_path,
+        worktree_path,
+        PreparedLaunchFinalization {
+            used_host_package_runner_fallback,
+            container_runtime: container_runtime.as_ref(),
+        },
+    )
+}
+
+fn finalize_and_persist_prepared_launch(
+    repo_path: &Path,
+    sessions_dir: &Path,
+    mut config: LaunchConfig,
+    mut session: Session,
+    runtime_path: PathBuf,
+    worktree_path: PathBuf,
+    finalization: PreparedLaunchFinalization<'_>,
+) -> Result<PreparedAgentLaunch, String> {
+    let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
+        repo_path,
+        &mut config,
+        finalization.container_runtime,
+    )?;
+    if let Some(runtime_worktree) = docker_runtime_worktree {
+        let project_state_root = normalize_child_process_path(repo_path);
+        session.project_state_root = Some(project_state_root.clone());
+        session.bind_docker_runtime(runtime_worktree, &project_state_root)?;
+    }
 
     session
         .save(sessions_dir)
@@ -242,8 +471,6 @@ where
     SessionRuntimeState::new(crate::AgentStatus::Running)
         .save(&runtime_path)
         .map_err(|error| error.to_string())?;
-
-    finalize_docker_agent_launch_config(repo_path, &mut config)?;
 
     Ok(PreparedAgentLaunch {
         process_launch: PreparedProcessLaunch {
@@ -256,7 +483,7 @@ where
         session,
         runtime_path,
         worktree_path,
-        used_host_package_runner_fallback,
+        used_host_package_runner_fallback: finalization.used_host_package_runner_fallback,
     })
 }
 
@@ -622,9 +849,9 @@ fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
 fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut LaunchConfig,
-) -> Result<(), String> {
+) -> Result<Option<gwt_docker::detect::ResolvedContainerRuntime>, String> {
     if config.runtime_target != LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
 
     let worktree = normalize_child_process_path(
@@ -634,12 +861,23 @@ fn apply_docker_runtime_to_launch_config(
             .unwrap_or_else(|| repo_path.to_path_buf()),
     );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
+    let runtime =
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(&docker_binary_for_launch())?;
+    ensure_docker_launch_runtime_ready_for_runtime(&runtime)?;
     let mut launch = launch;
-    let compose_override_file =
-        ensure_docker_gwt_binary_setup(&worktree, &launch.service, &launch.target_arch)?;
+    let (compose_override_file, managed_override_changed) = ensure_docker_gwt_binary_setup(
+        &worktree,
+        &launch.service,
+        &launch.target_arch,
+        runtime.kind(),
+    )?;
     launch.include_compose_override(compose_override_file);
-    ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    let lifecycle_intent = if managed_override_changed {
+        DockerLifecycleIntent::Recreate
+    } else {
+        config.docker_lifecycle_intent
+    };
+    ensure_docker_launch_service_ready(&launch, lifecycle_intent)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
@@ -649,7 +887,7 @@ fn apply_docker_runtime_to_launch_config(
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
-    Ok(())
+    Ok(Some(runtime))
 }
 
 pub fn register_codex_managed_hook_trust_in_docker(
@@ -720,13 +958,16 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-fn finalize_docker_agent_launch_config(
+fn finalize_docker_agent_launch_config_with_runtime(
     repo_path: &Path,
     config: &mut LaunchConfig,
-) -> Result<(), String> {
+    container_runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<Option<String>, String> {
     if config.runtime_target != LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
+    let container_runtime = container_runtime
+        .ok_or_else(|| "Docker launch finalization requires a resolved runtime".to_string())?;
 
     let worktree = normalize_child_process_path(
         &config
@@ -741,15 +982,20 @@ fn finalize_docker_agent_launch_config(
     };
 
     let mut args = docker_compose_command_prefix(&launch);
-    args.extend(["exec".to_string(), "-w".to_string(), launch.container_cwd]);
+    let runtime_worktree_path = launch.container_cwd;
+    args.extend([
+        "exec".to_string(),
+        "-w".to_string(),
+        runtime_worktree_path.clone(),
+    ]);
     args.extend(docker_compose_exec_env_args(&config.env_vars));
     args.push(launch.service);
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
-    config.command = docker_binary_for_launch();
+    config.command = container_runtime.binary().to_string();
     config.args = args;
-    Ok(())
+    Ok(Some(runtime_worktree_path))
 }
 
 fn resolve_host_package_runner_with_probe<F>(
@@ -830,19 +1076,44 @@ fn probe_host_package_runner(
     );
     let started_at = std::time::Instant::now();
 
-    let mut process = gwt_core::process::hidden_command(command);
+    let mut request = gwt_core::process::ProcessPlanRequest::new(command).args(&args);
+    for key in remove_env {
+        request = request.env_remove(key);
+    }
+    for (key, value) in env_vars {
+        request = request.env(key, value);
+    }
+    if let Some(cwd) = cwd {
+        request = request.current_dir(cwd);
+    }
+    let mut process = match gwt_core::process::resolved_command(request) {
+        Ok(process) => process,
+        Err(error) => {
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            tracing::warn!(
+                command,
+                error = %error,
+                "package-runner probe could not resolve a safe executable"
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = spawn_id,
+                label = %label,
+                phase = "end",
+                exit_code = Option::<i64>::None,
+                duration_ms = duration_ms,
+                success = false,
+                resolution_error = %error,
+                "process end",
+            );
+            return false;
+        }
+    };
     process
-        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for key in remove_env {
-        process.env_remove(key);
-    }
-    process.envs(env_vars);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
     let status = process.status();
     let ok = status.as_ref().is_ok_and(|status| status.success());
 
@@ -877,24 +1148,40 @@ fn command_matches_runner(command: &str, runner: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
+#[cfg(test)]
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
-    let path = std::env::var("PATH").unwrap_or_default();
     let docker_bin = std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string());
+    ensure_docker_launch_runtime_ready_with(&docker_bin, gwt_docker::launch_preflight)
+}
+
+fn ensure_docker_launch_runtime_ready_for_runtime(
+    runtime: &gwt_docker::detect::ResolvedContainerRuntime,
+) -> Result<(), String> {
+    ensure_docker_launch_runtime_ready_with(runtime.binary(), || {
+        gwt_docker::launch_preflight_for_resolved_runtime(runtime)
+    })
+}
+
+fn ensure_docker_launch_runtime_ready_with(
+    attempted_binary: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let path = std::env::var("PATH").unwrap_or_default();
     tracing::info!(
         target: "gwt::launch::preflight",
         runtime_target = "docker",
-        attempted_binary = %docker_bin,
+        attempted_binary,
         path = %path,
         "docker preflight started"
     );
-    let result = run_docker_preflight();
+    let result = preflight();
     match &result {
         Ok(()) => {
             tracing::info!(
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "ready",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 "docker preflight completed"
             );
         }
@@ -903,7 +1190,7 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "failed",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 path = %path,
                 error = %error,
                 "docker preflight failed"
@@ -911,10 +1198,6 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         }
     }
     result
-}
-
-fn run_docker_preflight() -> Result<(), String> {
-    gwt_docker::launch_preflight()
 }
 
 fn docker_bundle_mounts_for_gwt_home(gwt_home: &Path) -> DockerBundleMounts {
@@ -934,20 +1217,42 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+#[cfg(test)]
+fn docker_bundle_override_content(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    Ok(docker_bundle_override_content_for_runtime(
+        service, bundle, runtime,
+    ))
+}
+
+fn docker_bundle_override_content_for_runtime(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
+    let extra_hosts = runtime
+        .compose_extra_host()
+        .map(|mapping| format!("    extra_hosts:\n      - \"{mapping}\"\n"))
+        .unwrap_or_default();
     format!(
         concat!(
             "{header}\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",
-            "      - \"{host_gwtd}:{path}:ro\"\n"
+            "      - \"{host_gwtd}:{path}:ro\"\n",
+            "{extra_hosts}"
         ),
         header = DOCKER_GWT_OVERRIDE_HEADER,
         service = service,
         host_gwtd = host_gwtd,
         path = DOCKER_GWTD_BIN_PATH,
+        extra_hosts = extra_hosts,
     )
 }
 
@@ -955,9 +1260,10 @@ fn ensure_docker_gwt_binary_setup(
     repo_path: &Path,
     service: &str,
     target_arch: &str,
-) -> Result<PathBuf, String> {
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> Result<(PathBuf, bool), String> {
     let gwt_home = gwt_core::paths::gwt_home();
-    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, |bundle| {
+    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, runtime, |bundle| {
         eprintln!(
             "Installing Linux gwt bundle for Docker at {} and {}",
             bundle.host_gwt.display(),
@@ -994,21 +1300,30 @@ fn ensure_docker_gwt_binary_setup_for_home<F>(
     repo_path: &Path,
     service: &str,
     home: &Path,
+    container_runtime_binary: &str,
     install_bundle: F,
-) -> Result<PathBuf, String>
+) -> Result<(PathBuf, bool), String>
 where
     F: FnMut(&DockerBundleMounts) -> Result<(), String>,
 {
     let gwt_home = home.join(".gwt");
-    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, install_bundle)
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    ensure_docker_gwt_binary_setup_for_gwt_home(
+        repo_path,
+        service,
+        &gwt_home,
+        runtime,
+        install_bundle,
+    )
 }
 
 fn ensure_docker_gwt_binary_setup_for_gwt_home<F>(
     repo_path: &Path,
     service: &str,
     gwt_home: &Path,
+    runtime: gwt_docker::ContainerRuntimeKind,
     mut install_bundle: F,
-) -> Result<PathBuf, String>
+) -> Result<(PathBuf, bool), String>
 where
     F: FnMut(&DockerBundleMounts) -> Result<(), String>,
 {
@@ -1040,7 +1355,7 @@ where
     }
 
     let override_path = docker_compose_override_path(repo_path);
-    let override_content = docker_bundle_override_content(service, &bundle);
+    let override_content = docker_bundle_override_content_for_runtime(service, &bundle, runtime);
     let rewrite_override = fs::read_to_string(&override_path)
         .map(|existing| existing != override_content)
         .unwrap_or(true);
@@ -1054,7 +1369,7 @@ where
         })?;
     }
 
-    Ok(override_path)
+    Ok((override_path, rewrite_override))
 }
 
 fn docker_bundle_binary_ready(path: &Path) -> bool {
@@ -1105,9 +1420,13 @@ fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<Strin
         if key.eq_ignore_ascii_case("PATH") {
             continue;
         }
-        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
         args.push("-e".to_string());
-        args.push(format!("{key}={value}"));
+        if private_launch_env_key(key) {
+            args.push(key.to_string());
+        } else {
+            let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+            args.push(format!("{key}={value}"));
+        }
     }
     args
 }
@@ -1639,6 +1958,244 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    fn resolved_test_docker_runtime(
+        directory: &Path,
+    ) -> gwt_docker::detect::ResolvedContainerRuntime {
+        #[cfg(windows)]
+        let wrapper = directory.join("docker.cmd");
+        #[cfg(not(windows))]
+        let wrapper = directory.join("docker");
+        #[cfg(windows)]
+        fs::write(&wrapper, "@echo Docker version 28.3.0, build test\r\n")
+            .expect("write fake Docker CLI");
+        #[cfg(not(windows))]
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\n",
+        )
+        .expect("write fake Docker CLI");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&wrapper)
+                .expect("fake Docker CLI metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&wrapper, permissions).expect("chmod fake Docker CLI");
+        }
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 fake Docker CLI path"),
+        )
+        .expect("resolve fake Docker runtime")
+    }
+
+    #[test]
+    fn hook_forward_launch_runtime_preserves_host_and_maps_container_aliases() {
+        let source = "http://127.0.0.1:45123/internal/hook-live";
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(source, LaunchRuntimeTarget::Host, None,)
+                .expect("host URL"),
+            source
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                source,
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Docker),
+            )
+            .expect("Docker URL"),
+            "http://host.docker.internal:45123/internal/hook-live"
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                "https://[::1]:46000/internal/hook-live",
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Podman),
+            )
+            .expect("Podman URL"),
+            "https://host.containers.internal:46000/internal/hook-live"
+        );
+    }
+
+    #[test]
+    fn hook_forward_launch_runtime_rejects_noncanonical_container_endpoints() {
+        for source in [
+            "http://example.com:45123/internal/hook-live",
+            "http://127.0.0.1/internal/hook-live",
+            "http://127.0.0.1:45123/internal/hook-live/subpath",
+            "http://127.0.0.1:45123/internal/hook-live?generation=7",
+            "http://127.0.0.1:45123/internal/hook-live#fragment",
+            "file:///internal/hook-live",
+        ] {
+            assert!(
+                hook_forward_url_for_launch_runtime(
+                    source,
+                    LaunchRuntimeTarget::Docker,
+                    Some(gwt_docker::ContainerRuntimeKind::Docker),
+                )
+                .is_err(),
+                "container endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_selects_the_listener_for_each_runtime() {
+        let browser = "ws://127.0.0.1:46234/ws";
+        let agent = "ws://127.0.0.1:45123/internal/pane-ws";
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(browser, agent, LaunchRuntimeTarget::Host, None,)
+                .expect("host pane URL"),
+            agent
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                browser,
+                agent,
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Docker),
+            )
+            .expect("Docker pane URL"),
+            "ws://host.docker.internal:45123/internal/pane-ws"
+        );
+        assert_eq!(
+            pane_websocket_url_for_launch_runtime(
+                browser,
+                "wss://[::1]:45123/internal/pane-ws",
+                LaunchRuntimeTarget::Docker,
+                Some(gwt_docker::ContainerRuntimeKind::Podman),
+            )
+            .expect("Podman pane URL"),
+            "wss://host.containers.internal:45123/internal/pane-ws"
+        );
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_rejects_noncanonical_container_endpoints() {
+        for source in [
+            "http://127.0.0.1:45123/internal/pane-ws",
+            "ws://127.0.0.1/internal/pane-ws",
+            "ws://127.0.0.1:46234/internal/hook-live",
+            "ws://127.0.0.1:45123/internal/pane-ws?generation=7",
+            "ws://127.0.0.1:45123/internal/pane-ws#fragment",
+            "ws://example.test:45123/internal/pane-ws",
+        ] {
+            assert!(
+                pane_websocket_url_for_launch_runtime(
+                    "ws://127.0.0.1:46234/ws",
+                    source,
+                    LaunchRuntimeTarget::Docker,
+                    Some(gwt_docker::ContainerRuntimeKind::Docker),
+                )
+                .is_err(),
+                "container pane endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_websocket_launch_runtime_rejects_noncanonical_host_endpoints() {
+        for source in [
+            "http://127.0.0.1:45123/internal/pane-ws",
+            "ws://127.0.0.1/internal/pane-ws",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws?generation=7",
+            "ws://127.0.0.1:45123/internal/pane-ws#fragment",
+            "ws://example.test:45123/internal/pane-ws",
+            "ws://user@127.0.0.1:45123/internal/pane-ws",
+        ] {
+            assert!(
+                pane_websocket_url_for_launch_runtime(
+                    "ws://127.0.0.1:46234/ws",
+                    source,
+                    LaunchRuntimeTarget::Host,
+                    None,
+                )
+                .is_err(),
+                "host pane endpoint should fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_launch_env_values_stay_out_of_docker_argv_and_debug() {
+        const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
+        const SESSION_SENTINEL: &str = "session-identity-secret-sentinel";
+        const RUNTIME_SENTINEL: &str = "/private/runtime/session.json";
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        let runtime_dir = tempdir().expect("runtime tempdir");
+        let container_runtime = resolved_test_docker_runtime(runtime_dir.path());
+        install_hook_forward_env(
+            &mut config,
+            Some(HookForwardEnv {
+                url: "http://localhost:45123/internal/hook-live".to_string(),
+                token: TOKEN_SENTINEL.to_string(),
+            }),
+            Some(&container_runtime),
+        )
+        .expect("install Docker hook forwarding environment");
+        config
+            .env_vars
+            .insert(GWT_SESSION_ID_ENV.to_string(), SESSION_SENTINEL.to_string());
+        config.env_vars.insert(
+            GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+            RUNTIME_SENTINEL.to_string(),
+        );
+        config
+            .env_vars
+            .insert("TERM".to_string(), "xterm-256color".to_string());
+        assert_eq!(
+            config
+                .env_vars
+                .get(GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        let env = config.env_vars;
+        let args = docker_compose_exec_env_args(&env);
+
+        for key in [
+            GWT_HOOK_FORWARD_TOKEN_ENV,
+            GWT_SESSION_ID_ENV,
+            GWT_SESSION_RUNTIME_PATH_ENV,
+        ] {
+            assert!(args.windows(2).any(|pair| pair == ["-e", key]));
+        }
+        for private_value in [TOKEN_SENTINEL, SESSION_SENTINEL, RUNTIME_SENTINEL] {
+            assert!(!args.iter().any(|arg| arg.contains(private_value)));
+        }
+        assert!(args.iter().any(|arg| arg == "TERM=xterm-256color"));
+
+        let process_launch = PreparedProcessLaunch {
+            command: "docker".to_string(),
+            args: vec![
+                "compose".to_string(),
+                format!("{GWT_HOOK_FORWARD_TOKEN_ENV}={TOKEN_SENTINEL}"),
+                format!("{GWT_SESSION_ID_ENV}={SESSION_SENTINEL}"),
+            ],
+            env,
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+        let debug = format!("{process_launch:?}");
+        for private_value in [TOKEN_SENTINEL, SESSION_SENTINEL, RUNTIME_SENTINEL] {
+            assert!(
+                !debug.contains(private_value),
+                "private value leaked through Debug: {debug}"
+            );
+        }
+        assert!(debug.contains("<redacted>"));
+
+        let hook_forward = HookForwardEnv {
+            url: "http://127.0.0.1:45123/internal/hook-live".to_string(),
+            token: TOKEN_SENTINEL.to_string(),
+        };
+        let debug = format!("{hook_forward:?}");
+        assert!(!debug.contains(TOKEN_SENTINEL));
+        assert!(debug.contains("<redacted>"));
+    }
+
     #[test]
     fn docker_compose_exec_env_args_does_not_override_container_path() {
         let mut env = HashMap::new();
@@ -1863,6 +2420,199 @@ mod tests {
     }
 
     #[test]
+    fn docker_finalizer_returns_the_exact_compose_exec_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/final\n",
+        )
+        .expect("write compose");
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let runtime = resolved_test_docker_runtime(temp.path());
+
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize Docker launch")
+                .expect("Docker runtime worktree");
+        let workdir_index = config
+            .args
+            .iter()
+            .position(|arg| arg == "-w")
+            .expect("compose exec -w");
+
+        assert_eq!(runtime_worktree, "/workspace/final");
+        assert_eq!(config.command, runtime.binary());
+        assert_eq!(config.args.get(workdir_index + 1), Some(&runtime_worktree));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_finalizer_reuses_one_stateful_runtime_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/final\n",
+        )
+        .expect("write compose");
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+counter="$0.count"
+count=0
+if [ -f "$counter" ]; then
+  read count < "$counter"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  printf 'Docker version 28.3.0, build test\n'
+else
+  printf 'podman version 5.4.2\n'
+fi
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+        )
+        .expect("resolve launch runtime once");
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+
+        let runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize Docker launch")
+                .expect("Docker runtime worktree");
+
+        assert_eq!(runtime_worktree, "/workspace/final");
+        assert_eq!(config.command, wrapper.to_string_lossy());
+        assert_eq!(
+            fs::read_to_string(wrapper.with_extension("count"))
+                .expect("read wrapper probe count")
+                .trim(),
+            "1",
+            "agent finalization must not re-probe the pinned runtime"
+        );
+    }
+
+    #[test]
+    fn docker_prepare_persists_the_exact_process_worktree_binding() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/final\n",
+        )
+        .expect("write compose");
+
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let session = Session::from_launch_config(&project, "feature/demo", &config);
+        let session_id = session.id.clone();
+        let runtime_path = runtime_state_path(&sessions_dir, &session_id);
+        let container_runtime = resolved_test_docker_runtime(temp.path());
+
+        let prepared = finalize_and_persist_prepared_launch(
+            &project,
+            &sessions_dir,
+            config,
+            session,
+            runtime_path,
+            project.clone(),
+            PreparedLaunchFinalization {
+                used_host_package_runner_fallback: false,
+                container_runtime: Some(&container_runtime),
+            },
+        )
+        .expect("finalize and persist Docker launch");
+        let workdir_index = prepared
+            .process_launch
+            .args
+            .iter()
+            .position(|arg| arg == "-w")
+            .expect("compose exec -w");
+        let process_worktree = prepared
+            .process_launch
+            .args
+            .get(workdir_index + 1)
+            .expect("compose exec worktree");
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let reloaded = Session::load(&session_path).expect("reload persisted Session");
+        let binding = reloaded
+            .docker_runtime_binding
+            .expect("persisted Docker runtime binding");
+
+        assert_eq!(
+            binding.runtime_worktree_path,
+            PathBuf::from(process_worktree)
+        );
+        assert_eq!(
+            binding.project_state_scope_hash,
+            gwt_core::paths::project_scope_hash(&project)
+                .as_str()
+                .to_string()
+        );
+        assert_eq!(
+            reloaded.project_state_root.as_deref(),
+            Some(normalize_child_process_path(&project).as_path())
+        );
+    }
+
+    #[test]
+    fn docker_prepare_does_not_persist_session_when_finalization_fails() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project-without-compose");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&project).expect("create project");
+
+        let mut config = sample_versioned_launch_config(&project);
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        let session = Session::from_launch_config(&project, "feature/demo", &config);
+        let session_path = sessions_dir.join(format!("{}.toml", session.id));
+        let runtime_path = runtime_state_path(&sessions_dir, &session.id);
+        let container_runtime = resolved_test_docker_runtime(temp.path());
+
+        let result = finalize_and_persist_prepared_launch(
+            &project,
+            &sessions_dir,
+            config,
+            session,
+            runtime_path.clone(),
+            project.clone(),
+            PreparedLaunchFinalization {
+                used_host_package_runner_fallback: false,
+                container_runtime: Some(&container_runtime),
+            },
+        );
+
+        assert!(result.is_err(), "missing compose must fail finalization");
+        assert!(!session_path.exists(), "Session TOML must not be created");
+        assert!(
+            !runtime_path.exists(),
+            "runtime state must not precede Docker finalization"
+        );
+    }
+
+    #[test]
     fn prepare_agent_launch_exports_session_kind_from_ephemeral_flag() {
         // SPEC-3247 FR-001 / AS-1: the launch env carries GWT_SESSION_KIND,
         // derived from LaunchConfig.is_ephemeral (intake for ephemeral,
@@ -1979,7 +2729,8 @@ mod tests {
     fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
-        let content = docker_bundle_override_content("app", &bundle);
+        let content =
+            docker_bundle_override_content("app", &bundle, "docker").expect("Docker override");
 
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
@@ -2008,6 +2759,32 @@ mod tests {
             .and_then(|v| v.as_sequence())
             .expect("volumes must be a sequence");
         assert_eq!(volumes.len(), 1);
+        assert_eq!(
+            service_def
+                .get(serde_yaml::Value::String("extra_hosts".to_string()))
+                .and_then(|v| v.as_sequence())
+                .map(Vec::as_slice),
+            Some(
+                [serde_yaml::Value::String(
+                    gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST.to_string(),
+                )]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn podman_bundle_override_uses_its_reserved_alias_without_docker_mapping() {
+        let bundle = docker_bundle_mounts_for_home(Path::new("/home/example"));
+        let content =
+            docker_bundle_override_content("app", &bundle, "podman").expect("Podman override");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).expect("override YAML");
+
+        assert!(parsed["services"]["app"].get("extra_hosts").is_none());
+        assert_eq!(
+            gwt_docker::ContainerRuntimeKind::Podman.host_bridge_name(),
+            "host.containers.internal"
+        );
     }
 
     #[test]
@@ -2016,14 +2793,20 @@ mod tests {
         let home = tempdir().expect("home tempdir");
         let mut installer_calls = 0;
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
-            installer_calls += 1;
-            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
-                .expect("create bin dir");
-            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
-            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
-            Ok(())
-        })
+        ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |bundle| {
+                installer_calls += 1;
+                fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                    .expect("create bin dir");
+                fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+                fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+                Ok(())
+            },
+        )
         .expect("docker setup");
 
         let bundle = docker_bundle_mounts_for_home(home.path());
@@ -2049,20 +2832,26 @@ mod tests {
         fs::create_dir_all(&bundle.host_gwtd).expect("create gwtd placeholder dir");
         let mut installer_calls = 0;
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
-            installer_calls += 1;
-            if bundle.host_gwt.is_dir() {
-                fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
-            }
-            if bundle.host_gwtd.is_dir() {
-                fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
-            }
-            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
-                .expect("create bin dir");
-            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
-            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
-            Ok(())
-        })
+        ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |bundle| {
+                installer_calls += 1;
+                if bundle.host_gwt.is_dir() {
+                    fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
+                }
+                if bundle.host_gwtd.is_dir() {
+                    fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
+                }
+                fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                    .expect("create bin dir");
+                fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+                fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+                Ok(())
+            },
+        )
         .expect("docker setup");
 
         assert_eq!(installer_calls, 1);
@@ -2080,12 +2869,49 @@ mod tests {
         fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
         fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), "docker", |_| {
             panic!("installer should not run when both bundle binaries exist");
         })
         .expect("docker setup");
 
         assert!(docker_compose_override_path(repo.path()).is_file());
+    }
+
+    #[test]
+    fn docker_binary_setup_reports_managed_override_change_for_recreate() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+
+        let (override_path, first_changed) = ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |_| panic!("installer should not run when both bundle binaries exist"),
+        )
+        .expect("first Docker setup");
+        assert!(
+            first_changed,
+            "first managed override write requires recreate"
+        );
+        assert_eq!(override_path, docker_compose_override_path(repo.path()));
+
+        let (_, second_changed) = ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |_| panic!("installer should not run when both bundle binaries exist"),
+        )
+        .expect("second Docker setup");
+        assert!(
+            !second_changed,
+            "byte-identical managed override must not force a second recreate"
+        );
     }
 
     #[test]
@@ -2136,10 +2962,13 @@ mod tests {
                 DOCKER_GWTD_BIN_PATH.to_string(),
             ),
         ]);
+        let runtime = resolved_test_docker_runtime(temp.path());
 
-        finalize_docker_agent_launch_config(&project, &mut config).expect("finalize docker");
+        let _runtime_worktree =
+            finalize_docker_agent_launch_config_with_runtime(&project, &mut config, Some(&runtime))
+                .expect("finalize docker");
 
-        assert_eq!(config.command, docker_binary_for_launch());
+        assert_eq!(config.command, runtime.binary());
         assert!(config.args.windows(2).any(|pair| {
             pair[0] == "-f" && pair[1] == project.join("docker-compose.yml").display().to_string()
         }));
@@ -2652,5 +3481,44 @@ mod tests {
         );
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
         assert!(entries.contains(&PathBuf::from("/bin")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_runner_resolution_failure_still_emits_an_end_summary() {
+        use crate::test_capture::{CaptureLayer, CapturedEvents};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let temp = tempdir().expect("tempdir");
+        let placeholder = temp.path().join("npx.exe");
+        fs::write(&placeholder, "Error: native binary not installed\r\n")
+            .expect("write unsafe placeholder");
+        let env = HashMap::from([
+            ("PATH".to_string(), temp.path().display().to_string()),
+            ("PATHEXT".to_string(), ".EXE".to_string()),
+        ]);
+        let events = CapturedEvents::new();
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            probe_host_package_runner("npx", vec!["--version".to_string()], &env, &[], None)
+        });
+
+        assert!(!result);
+        let summaries = events
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.target == "gwt.process.summary")
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2, "expected balanced start/end events");
+        assert_eq!(
+            summaries[1].fields.get("phase").map(String::as_str),
+            Some("end")
+        );
+        assert_eq!(
+            summaries[1].fields.get("success").map(String::as_str),
+            Some("false")
+        );
+        assert!(summaries[1].fields.contains_key("resolution_error"));
     }
 }

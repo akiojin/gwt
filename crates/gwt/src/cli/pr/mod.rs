@@ -110,6 +110,14 @@ pub(super) fn run<E: CliEnv>(
             | PrCommand::Ready { .. }
     );
     if is_pr_mutation {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        if let Some(refusal) =
+            crate::cli::verification_record::work_event_settlement_refusal(&worktree)
+        {
+            out.push_str(&refusal);
+            out.push('\n');
+            return Ok(2);
+        }
         let is_ready_handoff = matches!(
             cmd,
             PrCommand::Create { draft: false, .. }
@@ -743,6 +751,109 @@ mod tests {
         .expect("run pr edit while blocked");
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+    }
+
+    #[test]
+    fn work_event_settlement_gate_blocks_pr_mutations_but_keeps_recovery_surfaces() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-pr-settlement");
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        crate::cli::execution_state::materialize_at_launch(
+            &fixture.repo,
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr-settlement",
+            "launch",
+            false,
+        )
+        .unwrap();
+        crate::cli::verification_record::save_plan(
+            &fixture.repo,
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "sess-pr-settlement".to_string(),
+                owner_number: Some(42),
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        crate::cli::verification_record::run_verification(
+            &fixture.repo,
+            "sess-pr-settlement",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        fixture.append_event("terminal-update-awaiting-delivery");
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        let blocked_commands = [
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("ready"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("draft"),
+                body: s("body"),
+                labels: vec![],
+                draft: true,
+            },
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("updated")),
+                body: Some(s("updated body")),
+                add_labels: vec![],
+            },
+            PrCommand::Ready { number: 7 },
+        ];
+        for command in blocked_commands {
+            let mut out = String::new();
+            let code = run(&mut env, command, &mut out).expect("run PR settlement gate");
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
+            assert!(out.contains("commit"), "{out}");
+            assert!(out.contains("push"), "{out}");
+        }
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "create must not reach gh"
+        );
+        assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+        assert!(env.pr_ready_call_log.is_empty(), "ready must not reach gh");
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Draft { number: 7 }, &mut out)
+            .expect("run PR draft recovery surface");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_draft_call_log, vec![7]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CommentBody {
+                number: 7,
+                body: s("Work delivery is blocked; keeping the PR in Draft."),
+            },
+            &mut out,
+        )
+        .expect("run PR blocker comment recovery surface");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_comments.len(), 1);
     }
 
     #[test]

@@ -1,5 +1,9 @@
 use super::*;
 
+const DOCKER_GWT_OVERRIDE_HEADER: &str =
+    "# Auto-generated docker-compose override for gwt bundle mounting";
+const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
+
 pub fn detect_wizard_docker_context_and_status(
     project_root: &Path,
 ) -> (
@@ -37,7 +41,8 @@ pub fn detect_wizard_docker_context_and_status(
 pub struct DockerLaunchPlan {
     pub(crate) compose_files: Vec<PathBuf>,
     pub(crate) compose_file: PathBuf,
-    pub(crate) override_file: PathBuf,
+    pub(crate) user_override_file: PathBuf,
+    pub(crate) managed_override_file: PathBuf,
     pub(crate) service: String,
     pub(crate) container_cwd: String,
 }
@@ -70,8 +75,10 @@ pub struct DevContainerLaunchDefaults {
 impl DockerLaunchPlan {
     fn compose_files_for_runtime(&self) -> Vec<PathBuf> {
         let mut compose_files = self.compose_files.clone();
-        if self.override_file.exists() {
-            compose_files.push(self.override_file.clone());
+        for override_file in [&self.user_override_file, &self.managed_override_file] {
+            if override_file.exists() && !compose_files.iter().any(|file| file == override_file) {
+                compose_files.push(override_file.clone());
+            }
         }
         compose_files
     }
@@ -80,9 +87,9 @@ impl DockerLaunchPlan {
 pub fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
+) -> Result<Option<gwt_docker::detect::ResolvedContainerRuntime>, String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
 
     let worktree = gwt_core::paths::normalize_windows_child_process_path(
@@ -92,9 +99,17 @@ pub fn apply_docker_runtime_to_launch_config(
             .unwrap_or_else(|| repo_path.to_path_buf()),
     );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
-    ensure_docker_gwt_binary_setup(&launch)?;
-    ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    let runtime =
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(&docker_binary_for_launch())?;
+    ensure_docker_launch_runtime_ready_for_runtime(&runtime)?;
+    let managed_override_changed =
+        ensure_docker_gwt_binary_setup_for_runtime(&launch, runtime.kind())?;
+    let lifecycle_intent = if managed_override_changed {
+        gwt_agent::DockerLifecycleIntent::Recreate
+    } else {
+        config.docker_lifecycle_intent
+    };
+    ensure_docker_launch_service_ready(&launch, lifecycle_intent)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
@@ -104,16 +119,51 @@ pub fn apply_docker_runtime_to_launch_config(
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
-    Ok(())
+    Ok(Some(runtime))
 }
 
-pub fn finalize_docker_agent_launch_config(
+#[cfg(test)]
+pub fn resolved_test_docker_runtime(
+    directory: &Path,
+) -> gwt_docker::detect::ResolvedContainerRuntime {
+    #[cfg(windows)]
+    let wrapper = directory.join("docker.cmd");
+    #[cfg(not(windows))]
+    let wrapper = directory.join("docker");
+    #[cfg(windows)]
+    std::fs::write(&wrapper, "@echo Docker version 28.3.0, build test\r\n")
+        .expect("write fake Docker CLI");
+    #[cfg(not(windows))]
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf 'Docker version 28.3.0, build test\\n'\n",
+    )
+    .expect("write fake Docker CLI");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("fake Docker CLI metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod fake Docker CLI");
+    }
+    gwt_docker::detect::ResolvedContainerRuntime::resolve(
+        wrapper.to_str().expect("UTF-8 fake Docker CLI path"),
+    )
+    .expect("resolve fake Docker runtime")
+}
+
+pub fn finalize_docker_agent_launch_config_with_runtime(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
+    runtime: Option<&gwt_docker::detect::ResolvedContainerRuntime>,
+) -> Result<Option<String>, String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        return Ok(());
+        return Ok(None);
     }
+    let runtime = runtime
+        .ok_or_else(|| "Docker launch finalization requires a resolved runtime".to_string())?;
 
     let worktree = gwt_core::paths::normalize_windows_child_process_path(
         &config
@@ -132,15 +182,20 @@ pub fn finalize_docker_agent_launch_config(
         args.push("-f".to_string());
         args.push(compose_file.display().to_string());
     }
-    args.extend(["exec".to_string(), "-w".to_string(), launch.container_cwd]);
+    let runtime_worktree_path = launch.container_cwd;
+    args.extend([
+        "exec".to_string(),
+        "-w".to_string(),
+        runtime_worktree_path.clone(),
+    ]);
     args.extend(docker_compose_exec_env_args(&config.env_vars));
     args.push(launch.service);
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
-    config.command = docker_binary_for_launch();
+    config.command = runtime.binary().to_string();
     config.args = args;
-    Ok(())
+    Ok(Some(runtime_worktree_path))
 }
 
 fn resolve_user_home_dir() -> Result<PathBuf, String> {
@@ -166,28 +221,101 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-pub fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+#[cfg(test)]
+pub fn docker_bundle_override_content(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    Ok(docker_bundle_override_content_for_runtime(
+        service, bundle, runtime,
+    ))
+}
+
+pub fn docker_bundle_override_content_for_runtime(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
+    let extra_hosts = runtime
+        .compose_extra_host()
+        .map(|mapping| format!("    extra_hosts:\n      - \"{mapping}\"\n"))
+        .unwrap_or_default();
     format!(
         concat!(
-            "# Auto-generated docker-compose override for gwt bundle mounting\n",
+            "{header}\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",
-            "      - \"{host_gwtd}:{path}:ro\"\n"
+            "      - \"{host_gwtd}:{path}:ro\"\n",
+            "{extra_hosts}"
         ),
+        header = DOCKER_GWT_OVERRIDE_HEADER,
         service = service,
         host_gwtd = host_gwtd,
         path = DOCKER_GWTD_BIN_PATH,
+        extra_hosts = extra_hosts,
     )
 }
 
-pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<(), String> {
+#[cfg(test)]
+fn ensure_docker_bundle_override_file(
+    override_path: &Path,
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<bool, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
+    ensure_docker_bundle_override_file_for_runtime(override_path, service, bundle, runtime)
+}
+
+fn ensure_docker_bundle_override_file_for_runtime(
+    override_path: &Path,
+    service: &str,
+    bundle: &DockerBundleMounts,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> Result<bool, String> {
     use std::fs;
 
+    let override_content = docker_bundle_override_content_for_runtime(service, bundle, runtime);
+    if let Ok(existing) = fs::read_to_string(override_path) {
+        if existing == override_content {
+            return Ok(false);
+        }
+        if !existing.starts_with(DOCKER_GWT_OVERRIDE_HEADER) {
+            return Err(format!(
+                "Refusing to overwrite non-gwt Compose override at {}; move the file or merge the gwt settings manually",
+                override_path.display()
+            ));
+        }
+    }
+    if let Some(parent) = override_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create Docker override directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(override_path, override_content).map_err(|err| {
+        format!(
+            "Failed to create managed Docker Compose override: {err}\n\
+             Manually create {} with the gwt/gwtd bundle mount and Host bridge mapping",
+            override_path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+pub fn ensure_docker_gwt_binary_setup_for_runtime(
+    launch: &DockerLaunchPlan,
+    runtime: gwt_docker::ContainerRuntimeKind,
+) -> Result<bool, String> {
     let home = resolve_user_home_dir()?;
     let bundle = docker_bundle_mounts_for_home(&home);
-    let override_path = &launch.override_file;
+    let override_path = &launch.managed_override_file;
 
     if (!bundle.host_gwt.exists() || !bundle.host_gwtd.exists()) && !override_path.exists() {
         eprintln!(
@@ -201,26 +329,7 @@ pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<(), S
         );
     }
 
-    if !override_path.exists() {
-        if let Some(parent) = override_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "Failed to create Docker override directory {}: {err}",
-                    parent.display()
-                )
-            })?;
-        }
-        let override_content = docker_bundle_override_content(&launch.service, &bundle);
-        fs::write(override_path, override_content).map_err(|err| {
-            format!(
-                "Failed to create docker-compose.override.yml: {err}\n\
-                 Manually create {} with gwt/gwtd bundle mounts",
-                override_path.display()
-            )
-        })?;
-    }
-
-    Ok(())
+    ensure_docker_bundle_override_file_for_runtime(override_path, &launch.service, &bundle, runtime)
 }
 
 fn maybe_inject_docker_sandbox_env(
@@ -270,11 +379,24 @@ pub fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<S
         if key.eq_ignore_ascii_case("PATH") {
             continue;
         }
-        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
         args.push("-e".to_string());
-        args.push(format!("{key}={value}"));
+        if private_docker_exec_env_key(key) {
+            args.push(key.to_string());
+        } else {
+            let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+            args.push(format!("{key}={value}"));
+        }
     }
     args
+}
+
+fn private_docker_exec_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
+            | gwt_agent::GWT_SESSION_ID_ENV
+            | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+    )
 }
 
 pub fn is_valid_docker_env_key(key: &str) -> bool {
@@ -609,11 +731,13 @@ pub fn resolve_docker_launch_plan(
                 service.name
             )
         })?;
+    gwt_agent::validate_docker_runtime_worktree_path(Path::new(&container_cwd))?;
 
     Ok(DockerLaunchPlan {
         compose_files,
         compose_file,
-        override_file: worktree.join("docker-compose.override.yml"),
+        user_override_file: worktree.join("docker-compose.override.yml"),
+        managed_override_file: worktree.join(DOCKER_GWT_OVERRIDE_FILE_NAME),
         service: service.name.clone(),
         container_cwd,
     })
@@ -719,6 +843,91 @@ mod docker_exec_env_tests {
     use super::*;
 
     #[test]
+    fn managed_override_uses_runtime_specific_host_bridge_contract() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+        let docker =
+            docker_bundle_override_content("app", &bundle, "docker").expect("Docker override");
+        let podman =
+            docker_bundle_override_content("app", &bundle, "podman").expect("Podman override");
+
+        assert!(docker.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert!(!podman.contains("extra_hosts"));
+        assert!(docker.contains(DOCKER_GWTD_BIN_PATH));
+        assert!(podman.contains(DOCKER_GWTD_BIN_PATH));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_override_pins_stateful_wrapper_runtime_for_one_launch_contract() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+counter="$0.count"
+count=0
+if [ -f "$counter" ]; then
+  read count < "$counter"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  printf 'Docker version 28.3.0, build test\n'
+else
+  printf 'podman version 5.4.2\n'
+fi
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let runtime = gwt_docker::detect::ResolvedContainerRuntime::resolve(
+            wrapper.to_str().expect("UTF-8 wrapper path"),
+        )
+        .expect("resolve launch runtime once");
+        let first = docker_bundle_override_content_for_runtime("app", &bundle, runtime.kind());
+        let second = docker_bundle_override_content_for_runtime("app", &bundle, runtime.kind());
+
+        assert!(first.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert!(second.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST));
+        assert_eq!(
+            std::fs::read_to_string(wrapper.with_extension("count"))
+                .expect("read wrapper probe count")
+                .trim(),
+            "1",
+            "one launch contract must resolve a stateful wrapper exactly once"
+        );
+    }
+
+    #[test]
+    fn managed_override_reports_content_change_for_container_recreate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join(DOCKER_GWT_OVERRIDE_FILE_NAME);
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+
+        assert!(
+            ensure_docker_bundle_override_file(&path, "app", &bundle, "docker")
+                .expect("first managed override write")
+        );
+        assert!(
+            !ensure_docker_bundle_override_file(&path, "app", &bundle, "docker")
+                .expect("unchanged managed override")
+        );
+        assert!(
+            ensure_docker_bundle_override_file(&path, "app", &bundle, "podman")
+                .expect("runtime contract change")
+        );
+    }
+
+    #[test]
     fn docker_compose_exec_env_args_does_not_override_container_path() {
         let mut env = HashMap::new();
         env.insert("PATH".to_string(), "/usr/local/bin".to_string());
@@ -736,5 +945,28 @@ mod docker_exec_env_tests {
                 .any(|arg| arg == "GWT_BIN_PATH=/usr/local/bin/gwtd"),
             "non-PATH env vars must still be injected: {args:?}"
         );
+    }
+
+    #[test]
+    fn docker_compose_exec_env_args_keeps_capability_values_out_of_argv() {
+        let secret = "agent-capability-secret-sentinel";
+        let env = HashMap::from([
+            (
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                secret.to_string(),
+            ),
+            (
+                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                "session-private".to_string(),
+            ),
+            ("VISIBLE_SETTING".to_string(), "visible".to_string()),
+        ]);
+
+        let args = docker_compose_exec_env_args(&env);
+        assert!(!format!("{args:?}").contains(secret));
+        assert!(!format!("{args:?}").contains("session-private"));
+        assert!(args.contains(&gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string()));
+        assert!(args.contains(&gwt_agent::GWT_SESSION_ID_ENV.to_string()));
+        assert!(args.contains(&"VISIBLE_SETTING=visible".to_string()));
     }
 }

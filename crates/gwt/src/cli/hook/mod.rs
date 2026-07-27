@@ -37,6 +37,7 @@ pub mod skill_discussion_stop_check;
 pub mod skill_plan_spec_stop_check;
 pub mod skill_register_spec_stop_check;
 pub mod state_file_stop_check;
+pub mod work_event_settlement_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
 pub mod worktree;

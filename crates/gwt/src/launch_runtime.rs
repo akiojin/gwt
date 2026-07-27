@@ -378,8 +378,10 @@ pub fn build_shell_process_launch(
     }
 
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
-    ensure_docker_gwt_binary_setup(&launch)?;
+    let runtime =
+        gwt_docker::detect::ResolvedContainerRuntime::resolve(&docker_binary_for_launch())?;
+    ensure_docker_launch_runtime_ready_for_runtime(&runtime)?;
+    crate::docker_launch::ensure_docker_gwt_binary_setup_for_runtime(&launch, runtime.kind())?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
     env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
@@ -400,7 +402,7 @@ pub fn build_shell_process_launch(
     args.push(shell_command);
 
     Ok(ProcessLaunch {
-        command: docker_binary_for_launch(),
+        command: runtime.binary().to_string(),
         args,
         env,
         remove_env: Vec::new(),
@@ -436,24 +438,24 @@ pub fn apply_windows_host_shell_wrapper(
         return Ok(());
     };
 
-    let (normalized_command, normalized_args) =
-        gwt_terminal::pty::normalize_command_for_windows_host_shell(
-            &config.command,
-            &config.args,
-            &config.env_vars,
-            &config.remove_env,
-        );
+    let normalized = gwt_terminal::pty::normalize_command_for_windows_host_shell(
+        &config.command,
+        &config.args,
+        &config.env_vars,
+        &config.remove_env,
+    )?;
+    config.env_vars = normalized.env;
     // Share the PTY path's pre-spawn backstop: if resolution still landed on a
     // non-PE placeholder stub (no cli-wrapper/native to redirect to), refuse here
     // rather than embed it into the shell expression and surface the Windows
     // 16-bit dialog from inside cmd/PowerShell.
-    if let Some(reason) = gwt_terminal::pty::reject_non_pe_executable(&normalized_command) {
+    if let Some(reason) = gwt_terminal::pty::reject_non_pe_executable(&normalized.command) {
         return Err(reason);
     }
     let (command, args) = wrap_windows_host_shell_command(
         shell,
-        &normalized_command,
-        &normalized_args,
+        &normalized.command,
+        &normalized.args,
         &mut config.env_vars,
     );
     config.command = command;
@@ -614,8 +616,16 @@ fn quote_cmd_token_if_needed(value: &str) -> String {
 }
 
 fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
-    let mut parts = Vec::with_capacity(args.len() + 2);
-    parts.push("call".to_string());
+    let requires_call = Path::new(command)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    let mut parts = Vec::with_capacity(args.len() + 1 + usize::from(requires_call));
+    if requires_call {
+        parts.push("call".to_string());
+    }
     parts.push(quote_cmd_token_if_needed(command));
     parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
     parts.join(" ")
@@ -1151,19 +1161,51 @@ fn probe_host_package_runner_with_timeout_and_hub(
         "process start",
     );
 
-    let mut process = gwt_core::process::hidden_command(command);
+    let mut request = gwt_core::process::ProcessPlanRequest::new(command).args(&args);
+    for key in remove_env {
+        request = request.env_remove(key);
+    }
+    for (key, value) in env_vars {
+        request = request.env(key, value);
+    }
+    if let Some(cwd) = cwd {
+        request = request.current_dir(cwd);
+    }
+    let mut process = match gwt_core::process::resolved_command(request) {
+        Ok(process) => process,
+        Err(error) => {
+            let message = format!("[gwt] failed to resolve package-runner probe safely: {error}");
+            push_probe_console_line(
+                hub,
+                agent_spawn_id,
+                gwt_core::process_console::ProcessStream::Stderr,
+                &message,
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = agent_spawn_id,
+                label = %agent_label,
+                phase = "end",
+                exit_code = None::<i64>,
+                success = false,
+                error = "resolution failed",
+                "process end",
+            );
+            return PackageRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                timed_out: false,
+                error: Some(error.to_string()),
+            };
+        }
+    };
     process
-        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for key in remove_env {
-        process.env_remove(key);
-    }
-    process.envs(env_vars);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
     let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -1510,24 +1552,34 @@ pub fn command_matches_runner(command: &str, runner: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
-pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+pub fn ensure_docker_launch_runtime_ready_for_runtime(
+    runtime: &gwt_docker::detect::ResolvedContainerRuntime,
+) -> Result<(), String> {
+    ensure_docker_launch_runtime_ready_with(runtime.binary(), || {
+        gwt_docker::launch_preflight_for_resolved_runtime(runtime)
+    })
+}
+
+fn ensure_docker_launch_runtime_ready_with(
+    attempted_binary: &str,
+    preflight: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let path = std::env::var("PATH").unwrap_or_default();
-    let docker_bin = std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string());
     tracing::info!(
         target: "gwt::launch::preflight",
         runtime_target = "docker",
-        attempted_binary = %docker_bin,
+        attempted_binary,
         path = %path,
         "docker preflight started"
     );
-    let result = run_docker_preflight();
+    let result = preflight();
     match &result {
         Ok(()) => {
             tracing::info!(
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "ready",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 "docker preflight completed"
             );
         }
@@ -1536,7 +1588,7 @@ pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
                 target: "gwt::launch::preflight",
                 runtime_target = "docker",
                 outcome = "failed",
-                attempted_binary = %docker_bin,
+                attempted_binary,
                 path = %path,
                 error = %error,
                 "docker preflight failed"
@@ -1544,10 +1596,6 @@ pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
         }
     }
     result
-}
-
-fn run_docker_preflight() -> Result<(), String> {
-    gwt_docker::launch_preflight()
 }
 
 pub fn install_launch_gwt_bin_env(
@@ -1949,7 +1997,11 @@ mod tests {
         let nodejs_dir = temp.path().join("nodejs");
         fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
         let node_exe = nodejs_dir.join("node.exe");
-        fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+        fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &node_exe,
+        )
+        .expect("copy real node PE fixture");
 
         let mut config = sample_versioned_launch_config();
         config.command = "claude".to_string();
@@ -1997,6 +2049,43 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn command_prompt_agent_wrapper_preserves_inner_cmd_expression_env() {
+        let temp = tempdir().expect("tempdir");
+        let bin = temp.path().join("Program Files").join("npm bin");
+        fs::create_dir_all(&bin).expect("cmd shim directory");
+        let shim = bin.join("npx.cmd");
+        fs::write(&shim, "@echo off\r\n").expect("cmd shim");
+
+        let mut config = sample_versioned_launch_config();
+        config.command = "npx".to_string();
+        config.args = vec!["a&b".to_string()];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
+        config
+            .env_vars
+            .insert("PATH".to_string(), bin.display().to_string());
+        config
+            .env_vars
+            .insert("PATHEXT".to_string(), ".CMD".to_string());
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap command prompt");
+
+        let inner = config
+            .env_vars
+            .get(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV)
+            .expect("resolver-owned inner cmd expression");
+        assert_eq!(inner, &format!("\"{}\" \"a&b\"", shim.display()));
+        let outer = config
+            .env_vars
+            .get(WINDOWS_HOST_SHELL_EXPRESSION_ENV)
+            .expect("outer host-shell expression");
+        assert!(
+            outer.contains(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV),
+            "{outer}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn command_prompt_agent_wrapper_rejects_unredirectable_placeholder_stub() {
         // A placeholder bin with NO cli-wrapper.cjs and NO *-win32-x64 native:
         // resolution cannot redirect, so the host-shell wrapper must refuse with
@@ -2034,7 +2123,7 @@ mod tests {
             Err(e) => e,
         };
         assert!(
-            err.contains("not a valid Windows executable"),
+            err.contains("native-binary placeholder without a safe wrapper"),
             "expected actionable non-PE error, got: {err}"
         );
     }
@@ -2558,6 +2647,104 @@ mod tests {
         assert_eq!(
             launch.env.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(r"E:\gwt\work\20260525-0919")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_shell_launch_pins_one_stateful_runtime_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&project).expect("project dir");
+        fs::create_dir_all(&home).expect("home dir");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
+        )
+        .expect("write compose");
+
+        let wrapper = temp.path().join("stateful-container-wrapper");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "${0}.calls"
+if [ "$1" = "--version" ]; then
+  count=0
+  if [ -f "${0}.version-count" ]; then
+    read count < "${0}.version-count"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "${0}.version-count"
+  if [ "$count" -eq 1 ]; then
+    printf 'Docker version 28.3.0, build test\n'
+  else
+    printf 'podman version 5.4.2\n'
+  fi
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = "ps" ]; then
+    printf 'app\trunning\n'
+    exit 0
+  fi
+done
+exit 0
+"#,
+        )
+        .expect("write stateful wrapper");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("chmod stateful wrapper");
+
+        let _docker_bin =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_DOCKER_BIN", wrapper.as_os_str());
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.as_os_str());
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(project.clone()),
+            branch: None,
+            base_branch: None,
+            display_name: "Docker shell".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("app".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            command_override: None,
+            command_args_override: None,
+        };
+
+        let launch =
+            build_shell_process_launch(&project, &mut config).expect("Docker shell launch");
+
+        assert_eq!(launch.command, wrapper.display().to_string());
+        assert!(
+            launch
+                .args
+                .ends_with(&["app".to_string(), "bash".to_string()]),
+            "unexpected Docker shell argv: {:?}",
+            launch.args
+        );
+        let calls = fs::read_to_string(wrapper.with_extension("calls"))
+            .expect("read runtime wrapper calls");
+        assert_eq!(
+            calls.lines().filter(|call| *call == "--version").count(),
+            1,
+            "the shell launch must resolve its stateful runtime exactly once"
+        );
+        let managed_override = fs::read_to_string(project.join("docker-compose.gwt.override.yml"))
+            .expect("read managed override");
+        assert!(
+            managed_override.contains(gwt_docker::DOCKER_HOST_GATEWAY_EXTRA_HOST),
+            "the first resolved Docker kind must stay pinned through setup"
         );
     }
 

@@ -3,13 +3,23 @@ use std::{fmt, path::Path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorState};
+use crate::{
+    scan_issue_monitor_candidates_with_provenance, IssueMonitorCandidateSource,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorScanSummary,
+    IssueMonitorState,
+};
 use gwt_github::{Cache, IssueState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
     pub event: String,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedIssueMonitorCandidates {
+    pub issues: Vec<IssueMonitorIssue>,
+    pub source: IssueMonitorCandidateSource,
 }
 
 pub fn issue_monitor_daemon_payloads(
@@ -103,30 +113,88 @@ pub fn load_open_issue_monitor_candidates_for_repo_path(
     owner: &str,
     repo: &str,
 ) -> Result<Vec<IssueMonitorIssue>, String> {
-    match load_open_issue_monitor_candidates(owner, repo) {
-        Ok(issues) => Ok(issues),
+    load_open_issue_monitor_candidates_for_repo_path_with_provenance(repo_path, owner, repo)
+        .map(|loaded| loaded.issues)
+}
+
+/// Load a complete live candidate list when available, retaining typed
+/// provenance when a live GitHub failure falls back to a cache snapshot. The
+/// existing Vec-returning API above remains a compatibility wrapper.
+pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+) -> Result<LoadedIssueMonitorCandidates, String> {
+    let live_error = match load_open_issue_monitor_candidates(owner, repo) {
+        Ok(issues) => {
+            return Ok(LoadedIssueMonitorCandidates {
+                issues,
+                source: IssueMonitorCandidateSource::Live,
+            });
+        }
+        Err(error) => error,
+    };
+    let cache_roots = [
+        crate::issue_cache::issue_cache_root_for_repo_path(repo_path),
+        Some(crate::issue_cache::issue_cache_root_for_repo_slug(
+            owner, repo,
+        )),
+    ];
+    let cache_results = cache_roots.into_iter().flatten().map(|cache_root| {
+        let result = load_cached_issue_monitor_candidates(&cache_root);
+        if let Err(error) = &result {
+            tracing::warn!(
+                "issue monitor cache fallback failed for {}: {error}",
+                cache_root.display()
+            );
+        }
+        result
+    });
+    resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)
+}
+
+fn resolve_loaded_issue_monitor_candidates<I>(
+    live_result: Result<Vec<IssueMonitorIssue>, String>,
+    cache_results: I,
+) -> Result<LoadedIssueMonitorCandidates, String>
+where
+    I: IntoIterator<Item = Result<Vec<IssueMonitorIssue>, String>>,
+{
+    match live_result {
+        Ok(issues) => Ok(LoadedIssueMonitorCandidates {
+            issues,
+            source: IssueMonitorCandidateSource::Live,
+        }),
         Err(live_error) => {
-            let cache_roots = [
-                crate::issue_cache::issue_cache_root_for_repo_path(repo_path),
-                Some(crate::issue_cache::issue_cache_root_for_repo_slug(
-                    owner, repo,
-                )),
-            ];
-            for cache_root in cache_roots.into_iter().flatten() {
-                match load_cached_issue_monitor_candidates(&cache_root) {
-                    Ok(issues) if !issues.is_empty() => return Ok(issues),
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            "issue monitor cache fallback failed for {}: {error}",
-                            cache_root.display()
-                        );
-                    }
+            for issues in cache_results.into_iter().flatten() {
+                if !issues.is_empty() {
+                    return Ok(LoadedIssueMonitorCandidates {
+                        issues,
+                        source: IssueMonitorCandidateSource::Cache,
+                    });
                 }
             }
             Err(live_error)
         }
     }
+}
+
+/// Shared loader-to-state transition. Cache snapshots still follow the normal
+/// candidate scan, but only Live provenance can unlock the one-shot historical
+/// failure migration in the canonical core transition.
+pub fn scan_loaded_issue_monitor_candidates(
+    monitor: &mut IssueMonitorState,
+    loaded: &LoadedIssueMonitorCandidates,
+    repo_path: &Path,
+    now: &str,
+) -> IssueMonitorScanSummary {
+    scan_issue_monitor_candidates_with_provenance(
+        monitor,
+        &loaded.issues,
+        loaded.source,
+        repo_path,
+        now,
+    )
 }
 
 /// Issue #3225: GitHub-derived completion probe for the claim loop — "does
@@ -863,6 +931,43 @@ mod tests {
         assert_eq!(candidates[1].title, "SPEC: Issue auto-improve monitor");
         assert_eq!(candidates[1].labels, vec!["gwt-spec"]);
         assert_eq!(candidates[1].state, IssueMonitorIssueState::Open);
+    }
+
+    #[test]
+    fn loaded_candidate_provenance_distinguishes_live_success_from_cache_fallback() {
+        let live_issue = issue(42);
+        let cached_issue = issue(43);
+
+        let live = resolve_loaded_issue_monitor_candidates(
+            Ok(vec![live_issue.clone()]),
+            [Ok(vec![cached_issue.clone()])],
+        )
+        .expect("live result");
+        assert_eq!(live.source, IssueMonitorCandidateSource::Live);
+        assert_eq!(live.issues, vec![live_issue]);
+
+        let empty_live = resolve_loaded_issue_monitor_candidates(
+            Ok(Vec::new()),
+            [Ok(vec![cached_issue.clone()])],
+        )
+        .expect("empty live result still authoritative");
+        assert_eq!(empty_live.source, IssueMonitorCandidateSource::Live);
+        assert!(empty_live.issues.is_empty());
+
+        let cache = resolve_loaded_issue_monitor_candidates(
+            Err("gh unavailable".to_string()),
+            [Ok(Vec::new()), Ok(vec![cached_issue.clone()])],
+        )
+        .expect("cache fallback");
+        assert_eq!(cache.source, IssueMonitorCandidateSource::Cache);
+        assert_eq!(cache.issues, vec![cached_issue]);
+
+        let error = resolve_loaded_issue_monitor_candidates(
+            Err("gh unavailable".to_string()),
+            [Ok(Vec::new()), Err("cache corrupt".to_string())],
+        )
+        .expect_err("no usable cache preserves live error");
+        assert_eq!(error, "gh unavailable");
     }
 
     #[test]
