@@ -383,6 +383,15 @@ pub struct LaunchFeedbackContext {
     pub(crate) client_id: ClientId,
     pub(crate) title: String,
     pub(crate) issue_monitor_issue_number: Option<u64>,
+    pub(crate) issue_monitor_delivery_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IssueMonitorLaunchDeliveryState {
+    Materializing { window_id: String },
+    LaunchedPendingAck { window_id: String },
+    Launched { window_id: String },
+    LaunchFailed { message: String },
 }
 
 #[derive(Debug, Clone)]
@@ -509,6 +518,12 @@ pub struct AppRuntime {
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
+    /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
+    /// Remember materialization and terminal ACK state by delivery id so a
+    /// replay never creates a second agent window and can re-ACK after a
+    /// transient daemon disconnect.
+    pub(crate) issue_monitor_launch_deliveries: HashMap<String, IssueMonitorLaunchDeliveryState>,
+    pub(crate) issue_monitor_materializer_id: String,
     /// SPEC-2359 W-17 (FR-398, Issue #3034): launches whose window is
     /// registered but whose agent session is not live yet, keyed by
     /// (tab, branch, working dir). A re-click in this window focuses the
@@ -650,6 +665,23 @@ enum IssueMonitorScanPolicy {
     CacheOnly,
 }
 
+#[cfg(test)]
+thread_local! {
+    static LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn reset_local_issue_monitor_fallback_commit_count() {
+    LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS.set(0);
+}
+
+#[cfg(test)]
+fn local_issue_monitor_fallback_commit_count() -> usize {
+    LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS.get()
+}
+
 fn load_mutate_and_persist_issue_monitor_state<T: Default>(
     prefs_path: &Path,
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
@@ -738,6 +770,243 @@ fn record_issue_monitor_scan_failures(
     for (issue_number, message) in launch_failures {
         monitor.record_launch_failed(issue_number, message);
     }
+}
+
+#[cfg_attr(unix, allow(dead_code))]
+fn prepare_local_issue_monitor_claim_proposals(
+    monitor: &mut gwt::IssueMonitorState,
+    loaded: &gwt::issue_monitor_worker::LoadedIssueMonitorCandidates,
+    monitor_owner: &str,
+    now: &str,
+    completed_issues: &std::collections::BTreeSet<u64>,
+) {
+    if !loaded.authorizes_remote_effects()
+        || !monitor.config.enabled
+        || !monitor.has_launch_profile()
+    {
+        return;
+    }
+    let active_cap = monitor.config.max_active.max(1);
+    if monitor.active_count() >= active_cap {
+        return;
+    }
+    monitor.prepare_claim_effects_with_probe(monitor_owner, now, active_cap, |issue_number| {
+        completed_issues.contains(&issue_number)
+    });
+}
+
+enum LocalIssueMonitorEffectOutcome {
+    Claim(
+        gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimAcquireOutcome>,
+    ),
+    Revoked(
+        gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimReleaseOutcome>,
+    ),
+    Release(
+        gwt_github::client::OwnerMutationResult<gwt_github::issue_auto_claim::ClaimReleaseOutcome>,
+    ),
+}
+
+fn begin_local_issue_monitor_effect_attempt(
+    prefs_path: &Path,
+    monitor: &mut gwt::IssueMonitorState,
+) -> Option<gwt::PendingIssueMonitorEffect> {
+    rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |latest| {
+        if let Some(effect) = latest.pending_effects().iter().find(|effect| {
+            effect.state == gwt::IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
+                        | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
+                )
+        }) {
+            return Some(effect.clone());
+        }
+        let effect = latest
+            .pending_effects()
+            .iter()
+            .find(|effect| {
+                effect.state == gwt::IssueMonitorEffectState::Prepared
+                    && matches!(
+                        effect.payload,
+                        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
+                            | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
+                    )
+            })
+            .cloned()?;
+        let key = effect.attempt_key();
+        if !latest.mark_pending_effect_attempting(&key) {
+            return None;
+        }
+        latest
+            .pending_effects()
+            .iter()
+            .find(|pending| {
+                pending.state == gwt::IssueMonitorEffectState::Attempting
+                    && pending.attempt_key() == key
+            })
+            .cloned()
+    })
+}
+
+fn commit_local_issue_monitor_effect_result(
+    prefs_path: &Path,
+    monitor: &mut gwt::IssueMonitorState,
+    effect: gwt::PendingIssueMonitorEffect,
+    outcome: LocalIssueMonitorEffectOutcome,
+    now_text: &str,
+) -> u8 {
+    use gwt_github::client::OwnerMutationError;
+    use gwt_github::issue_auto_claim::ClaimAcquireOutcome;
+
+    let key = effect.attempt_key();
+    rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |latest| {
+        if !latest.pending_effects().iter().any(|pending| {
+            pending.state == gwt::IssueMonitorEffectState::Attempting
+                && pending.attempt_key() == key
+        }) {
+            return 0_u8;
+        }
+        let current =
+            latest.effect_authority_epoch() == key.authority_epoch && latest.config.enabled;
+        match (&effect.payload, outcome) {
+            (
+                gwt::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    owner,
+                    ..
+                },
+                LocalIssueMonitorEffectOutcome::Claim(Ok(ClaimAcquireOutcome::Acquired(claim))),
+            ) => {
+                latest.complete_pending_effect(&key);
+                if current {
+                    latest.apply_confirmed_claim(
+                        *issue_number,
+                        claim.claim_id,
+                        owner,
+                        &effect.effect_id,
+                        now_text,
+                    );
+                }
+                1
+            }
+            (
+                gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. },
+                LocalIssueMonitorEffectOutcome::Claim(Ok(ClaimAcquireOutcome::Blocked(winner)))
+                | LocalIssueMonitorEffectOutcome::Claim(Ok(ClaimAcquireOutcome::Lost {
+                    winning_claim: winner,
+                    ..
+                })),
+            ) => {
+                latest.complete_pending_effect(&key);
+                if current {
+                    if let Some(issue) = latest
+                        .inbox_item(*issue_number)
+                        .map(|item| item.issue.clone())
+                    {
+                        latest.record_blocked_by_claim(issue, winner.owner, winner.expires_at);
+                    }
+                }
+                1
+            }
+            (
+                gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
+                LocalIssueMonitorEffectOutcome::Revoked(Ok(_)),
+            )
+            | (
+                gwt::IssueMonitorEffectPayload::ReleaseClaim { .. },
+                LocalIssueMonitorEffectOutcome::Release(Ok(_)),
+            ) => {
+                latest.complete_pending_effect(&key);
+                1
+            }
+            (
+                gwt::IssueMonitorEffectPayload::ReleaseClaim { .. },
+                LocalIssueMonitorEffectOutcome::Release(Err(OwnerMutationError::PreSubmit(_))),
+            ) => {
+                latest.retry_pending_effect(&key);
+                2
+            }
+            (
+                gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
+                LocalIssueMonitorEffectOutcome::Claim(Err(OwnerMutationError::PreSubmit(_))),
+            ) if current => {
+                latest.retry_pending_effect(&key);
+                2
+            }
+            (
+                gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
+                LocalIssueMonitorEffectOutcome::Claim(Err(OwnerMutationError::PreSubmit(_)))
+                | LocalIssueMonitorEffectOutcome::Revoked(Err(OwnerMutationError::PreSubmit(_))),
+            ) => {
+                latest.complete_pending_effect(&key);
+                1
+            }
+            (
+                _,
+                LocalIssueMonitorEffectOutcome::Claim(Err(
+                    OwnerMutationError::RemoteOutcomeUnknown(_),
+                ))
+                | LocalIssueMonitorEffectOutcome::Revoked(Err(
+                    OwnerMutationError::RemoteOutcomeUnknown(_),
+                ))
+                | LocalIssueMonitorEffectOutcome::Release(Err(
+                    OwnerMutationError::RemoteOutcomeUnknown(_),
+                )),
+            ) => 0,
+            _ => 0,
+        }
+    })
+}
+
+fn drive_local_issue_monitor_claim_effects_with(
+    prefs_path: &Path,
+    monitor: &mut gwt::IssueMonitorState,
+    mut execute: impl FnMut(
+        &gwt::PendingIssueMonitorEffect,
+        bool,
+        &chrono::DateTime<chrono::Utc>,
+        &str,
+    ) -> Result<LocalIssueMonitorEffectOutcome, String>,
+) -> Result<(), String> {
+    let local_deadline =
+        match gwt_core::operation_deadline::ensure_remaining("local Issue Monitor claim driver")
+            .map_err(|error| error.to_string())?
+        {
+            Some(_) => None,
+            None => Some(
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    std::time::Instant::now() + std::time::Duration::from_secs(60),
+                ),
+            ),
+        };
+    let _local_deadline = local_deadline;
+    let initial_count = monitor.pending_effects().len();
+    for _ in 0..initial_count.max(1) {
+        let Some(effect) = begin_local_issue_monitor_effect_attempt(prefs_path, monitor) else {
+            break;
+        };
+        let authority_current =
+            effect.authority_epoch == monitor.effect_authority_epoch() && monitor.config.enabled;
+        gwt_core::operation_deadline::ensure_remaining(
+            "local Issue Monitor remote effect submission",
+        )
+        .map_err(|error| error.to_string())?;
+        let now = chrono::Utc::now();
+        let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let outcome = execute(&effect, authority_current, &now, &now_text)?;
+        gwt_core::operation_deadline::ensure_remaining(
+            "local Issue Monitor remote effect result commit",
+        )
+        .map_err(|error| error.to_string())?;
+        let transition = commit_local_issue_monitor_effect_result(
+            prefs_path, monitor, effect, outcome, &now_text,
+        );
+        if transition != 1 {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) type RuntimeIssueClient = Arc<dyn gwt_github::IssueClient>;
@@ -835,6 +1104,8 @@ impl AppRuntime {
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
+            issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
@@ -1276,40 +1547,355 @@ impl AppRuntime {
         )
     }
 
+    fn claim_issue_monitor_launch_delivery(
+        &self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_window_id: &str,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let materializer_id = self.issue_monitor_materializer_id.clone();
+        let materializer_pid = std::process::id();
+        let publication = self.publish_issue_monitor_control(serde_json::json!({
+            "claim_launch_delivery": {
+                "issue_number": issue_number,
+                "delivery_id": delivery_id,
+                "materializer_id": materializer_id.clone(),
+                "materializer_pid": materializer_pid,
+                "materializer_window_id": materializer_window_id,
+            }
+        }));
+        match publication {
+            Ok(()) => {
+                let project_root = self.active_project_root().ok_or_else(|| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        "launch delivery claim committed but no active project is available for readback"
+                            .to_string(),
+                    )
+                })?;
+                let prefs = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .map_err(|error| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        format!("launch delivery claim readback failed: {error}"),
+                    )
+                })?;
+                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
+                    delivery.issue_number == issue_number
+                        && delivery.delivery_id == delivery_id
+                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
+                        && delivery.materializer_pid == Some(materializer_pid)
+                        && delivery.materializer_window_id.as_deref()
+                            == Some(materializer_window_id)
+                }))
+            }
+            Err(error) if error.allows_local_fallback() => self
+                .commit_local_issue_monitor_control(|monitor| {
+                    monitor.claim_launch_delivery(
+                        issue_number,
+                        delivery_id,
+                        &materializer_id,
+                        materializer_pid,
+                        materializer_window_id,
+                        gwt::process::is_host_process_alive,
+                    )
+                })
+                .map(|(_monitor, accepted)| accepted),
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn persist_issue_monitor_delivery_workspace(
+        &self,
+        window_id: &str,
+    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let address = self.window_lookup.get(window_id).ok_or_else(|| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "launch delivery window {window_id} is not registered"
+            ))
+        })?;
+        let tab = self.tab(&address.tab_id).ok_or_else(|| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "launch delivery project tab {} is unavailable",
+                address.tab_id
+            ))
+        })?;
+        gwt::save_workspace_state_durable(
+            &gwt::workspace_state_path(&tab.project_root),
+            &tab.workspace.persistable_state(),
+        )
+        .map_err(|error| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "launch delivery workspace persistence failed: {error}"
+            ))
+        })
+    }
+
+    fn mark_issue_monitor_launch_delivery_materialized(
+        &self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_window_id: &str,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let materializer_id = self.issue_monitor_materializer_id.clone();
+        let publication = self.publish_issue_monitor_control(serde_json::json!({
+            "launch_delivery_materialized": {
+                "issue_number": issue_number,
+                "delivery_id": delivery_id,
+                "materializer_id": materializer_id.clone(),
+                "materializer_window_id": materializer_window_id,
+            }
+        }));
+        match publication {
+            Ok(()) => {
+                let project_root = self.active_project_root().ok_or_else(|| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        "launch delivery materialization committed but no active project is available for readback"
+                            .to_string(),
+                    )
+                })?;
+                let prefs = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .map_err(|error| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        format!("launch delivery materialization readback failed: {error}"),
+                    )
+                })?;
+                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
+                    delivery.issue_number == issue_number
+                        && delivery.delivery_id == delivery_id
+                        && delivery.materialized_window_id.as_deref()
+                            == Some(materializer_window_id)
+                }))
+            }
+            Err(error) if error.allows_local_fallback() => self
+                .commit_local_issue_monitor_control(|monitor| {
+                    monitor.mark_launch_delivery_materialized(
+                        issue_number,
+                        delivery_id,
+                        &materializer_id,
+                        materializer_window_id,
+                    )
+                })
+                .map(|(_monitor, accepted)| accepted),
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn mark_issue_monitor_launch_delivery_workspace_durable(
+        &self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_window_id: &str,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let materializer_id = self.issue_monitor_materializer_id.clone();
+        let publication = self.publish_issue_monitor_control(serde_json::json!({
+            "launch_delivery_workspace_durable": {
+                "issue_number": issue_number,
+                "delivery_id": delivery_id,
+                "materializer_id": materializer_id.clone(),
+                "materializer_window_id": materializer_window_id,
+            }
+        }));
+        match publication {
+            Ok(()) => {
+                let project_root = self.active_project_root().ok_or_else(|| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        "launch delivery workspace durability committed but no active project is available for readback"
+                            .to_string(),
+                    )
+                })?;
+                let prefs = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .map_err(|error| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        format!("launch delivery workspace durability readback failed: {error}"),
+                    )
+                })?;
+                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
+                    delivery.issue_number == issue_number
+                        && delivery.delivery_id == delivery_id
+                        && delivery.workspace_durable_window_id.as_deref()
+                            == Some(materializer_window_id)
+                }))
+            }
+            Err(error) if error.allows_local_fallback() => self
+                .commit_local_issue_monitor_control(|monitor| {
+                    monitor.mark_launch_delivery_workspace_durable(
+                        issue_number,
+                        delivery_id,
+                        &materializer_id,
+                        materializer_window_id,
+                    )
+                })
+                .map(|(_monitor, accepted)| accepted),
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn issue_monitor_launch_completed_delivery_events(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        delivery_id: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(delivery_id) = delivery_id else {
+            return self.issue_monitor_launch_succeeded_delivery_events(
+                issue_number,
+                window_id,
+                None,
+            );
+        };
+        self.issue_monitor_launch_deliveries.insert(
+            delivery_id.to_string(),
+            IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
+                window_id: window_id.to_string(),
+            },
+        );
+        match self.mark_issue_monitor_launch_delivery_materialized(
+            issue_number,
+            delivery_id,
+            window_id,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Vec::new(),
+            Err(error) => {
+                return self.issue_monitor_control_error_events(
+                    None,
+                    error,
+                    "mark-launch-delivery-materialized",
+                    Some(issue_number),
+                )
+            }
+        };
+        if let Err(error) = self.persist_issue_monitor_delivery_workspace(window_id) {
+            return self.issue_monitor_control_error_events(
+                None,
+                error,
+                "persist-launch-delivery-window",
+                Some(issue_number),
+            );
+        }
+        match self.mark_issue_monitor_launch_delivery_workspace_durable(
+            issue_number,
+            delivery_id,
+            window_id,
+        ) {
+            Ok(true) => self.issue_monitor_launch_succeeded_delivery_events(
+                issue_number,
+                window_id,
+                Some(delivery_id),
+            ),
+            Ok(false) => Vec::new(),
+            Err(error) => self.issue_monitor_control_error_events(
+                None,
+                error,
+                "mark-launch-delivery-workspace-durable",
+                Some(issue_number),
+            ),
+        }
+    }
+
     pub(crate) fn issue_monitor_launch_failed_events(
         &mut self,
         issue_number: u64,
         message: &str,
+    ) -> Vec<OutboundEvent> {
+        self.issue_monitor_launch_failed_delivery_events(issue_number, message, None)
+    }
+
+    pub(crate) fn issue_monitor_launch_failed_delivery_events(
+        &mut self,
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
     ) -> Vec<OutboundEvent> {
         let message = if gwt::issue_monitor::is_git_https_auth_error(message) {
             gwt::issue_monitor::git_https_auth_setup_message(message)
         } else {
             message.to_string()
         };
+        if let Some(delivery_id) = delivery_id {
+            self.issue_monitor_launch_deliveries.insert(
+                delivery_id.to_string(),
+                IssueMonitorLaunchDeliveryState::LaunchFailed {
+                    message: message.clone(),
+                },
+            );
+        }
+        let mut launch_failed = serde_json::json!({
+            "issue_number": issue_number,
+            "message": message.clone(),
+        });
+        if let Some(delivery_id) = delivery_id {
+            launch_failed["delivery_id"] = serde_json::json!(delivery_id);
+            launch_failed["materializer_id"] =
+                serde_json::json!(self.issue_monitor_materializer_id.clone());
+        }
         let publication = self.publish_issue_monitor_control(serde_json::json!({
-            "launch_failed": {
-                "issue_number": issue_number,
-                "message": message.clone(),
-            }
+            "launch_failed": launch_failed,
         }));
-        self.issue_monitor_launch_failed_result_events(issue_number, &message, publication)
+        self.issue_monitor_launch_failed_result_events_with_delivery(
+            issue_number,
+            &message,
+            delivery_id,
+            publication,
+        )
     }
 
+    #[cfg(test)]
     fn issue_monitor_launch_failed_result_events(
         &mut self,
         issue_number: u64,
         message: &str,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_launch_failed_result_events_with_delivery(
+            issue_number,
+            message,
+            None,
+            publication,
+        )
+    }
+
+    fn issue_monitor_launch_failed_result_events_with_delivery(
+        &mut self,
+        issue_number: u64,
+        message: &str,
+        delivery_id: Option<&str>,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+    ) -> Vec<OutboundEvent> {
         let (mut events, committed) = match publication {
-            Ok(()) => (Vec::new(), true),
+            Ok(()) => (
+                Vec::new(),
+                delivery_id.is_none_or(|delivery_id| {
+                    self.issue_monitor_launch_failure_committed(issue_number, message, delivery_id)
+                }),
+            ),
             Err(error) if error.allows_local_fallback() => {
                 match self.commit_local_issue_monitor_control(|monitor| {
-                    monitor.record_launch_failed(issue_number, message.to_string());
+                    monitor.record_launch_failed_delivery(
+                        issue_number,
+                        message.to_string(),
+                        delivery_id,
+                        delivery_id.map(|_| self.issue_monitor_materializer_id.as_str()),
+                    )
                 }) {
-                    Ok((monitor, ())) => {
+                    Ok((monitor, true)) => {
                         (self.issue_monitor_snapshot_events_for(None, monitor), true)
                     }
+                    Ok((_monitor, false)) => (Vec::new(), false),
                     Err(local_error) => (
                         self.issue_monitor_control_error_events(
                             None,
@@ -1343,25 +1929,72 @@ impl AppRuntime {
                     issue_number: Some(issue_number),
                 }),
             ]);
+        } else if let Some(delivery_id) = delivery_id {
+            self.issue_monitor_launch_deliveries.remove(delivery_id);
         }
         events
     }
 
+    fn issue_monitor_launch_failure_committed(
+        &self,
+        issue_number: u64,
+        message: &str,
+        delivery_id: &str,
+    ) -> bool {
+        let Some(project_root) = self.active_project_root() else {
+            return false;
+        };
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+        ) else {
+            return false;
+        };
+        !prefs.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) && prefs
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == issue_number && failed.message == message)
+    }
+
+    #[cfg(test)]
     pub(crate) fn issue_monitor_launch_succeeded_events(
         &mut self,
         issue_number: u64,
         window_id: &str,
     ) -> Vec<OutboundEvent> {
+        self.issue_monitor_launch_succeeded_delivery_events(issue_number, window_id, None)
+    }
+
+    pub(crate) fn issue_monitor_launch_succeeded_delivery_events(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        delivery_id: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        if let Some(delivery_id) = delivery_id {
+            self.issue_monitor_launch_deliveries.insert(
+                delivery_id.to_string(),
+                IssueMonitorLaunchDeliveryState::Launched {
+                    window_id: window_id.to_string(),
+                },
+            );
+        }
         let stale_window = self.issue_monitor_failed_window_read_only(issue_number, window_id);
+        let mut launched = serde_json::json!({
+            "issue_number": issue_number,
+            "window_id": window_id,
+        });
+        if let Some(delivery_id) = delivery_id {
+            launched["delivery_id"] = serde_json::json!(delivery_id);
+        }
         let publication = self.publish_issue_monitor_control(serde_json::json!({
-            "launched": {
-                "issue_number": issue_number,
-                "window_id": window_id,
-            }
+            "launched": launched,
         }));
         self.issue_monitor_launch_succeeded_result_events_with_stale(
             issue_number,
             window_id,
+            delivery_id,
             publication,
             stale_window,
         )
@@ -1378,6 +2011,7 @@ impl AppRuntime {
         self.issue_monitor_launch_succeeded_result_events_with_stale(
             issue_number,
             window_id,
+            None,
             publication,
             stale_window,
         )
@@ -1387,6 +2021,7 @@ impl AppRuntime {
         &mut self,
         issue_number: u64,
         window_id: &str,
+        delivery_id: Option<&str>,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
         ack_stale_window: Option<String>,
     ) -> Vec<OutboundEvent> {
@@ -1404,15 +2039,24 @@ impl AppRuntime {
             Err(error) if error.allows_local_fallback() => {
                 match self.commit_local_issue_monitor_control(|monitor| {
                     let stale_window = monitor
-                        .take_failed_window(issue_number)
+                        .prefs()
+                        .failed_issues
+                        .iter()
+                        .find(|failed| failed.issue_number == issue_number)
+                        .and_then(|failed| failed.window_id.clone())
                         .filter(|stale| *stale != window_id);
-                    monitor.complete_active_launch(issue_number, window_id.clone());
-                    stale_window
+                    let accepted = monitor.complete_active_launch_delivery(
+                        issue_number,
+                        window_id.clone(),
+                        delivery_id,
+                    );
+                    (stale_window, accepted)
                 }) {
-                    Ok((monitor, committed_stale_window)) => {
+                    Ok((monitor, (committed_stale_window, true))) => {
                         stale_window = committed_stale_window;
                         self.issue_monitor_snapshot_events_for(None, monitor)
                     }
+                    Ok((_monitor, (_committed_stale_window, false))) => Vec::new(),
                     Err(local_error) => self.issue_monitor_control_error_events(
                         None,
                         local_error,
@@ -1827,7 +2471,12 @@ impl AppRuntime {
             *prefs = monitor.prefs();
             Ok((monitor, result))
         })
-        .map(|(_, committed)| committed)
+        .map(|(_, committed)| {
+            #[cfg(test)]
+            LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS
+                .set(LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS.get() + 1);
+            committed
+        })
         .map_err(|error| {
             gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(format!(
                 "local fallback control commit failed: {error}"
@@ -2150,6 +2799,8 @@ impl AppRuntime {
         let mut merge_reconciliation_error = None;
         #[cfg(not(unix))]
         let mut local_repo_identity = None;
+        #[cfg(not(unix))]
+        let mut local_claim_proposal = None;
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
             Ok((owner, repo)) => {
@@ -2186,27 +2837,23 @@ impl AppRuntime {
                             monitor.set_gui_connected(true);
                         }
                         #[cfg(not(unix))]
-                        if loaded.authorizes_remote_effects()
-                            && monitor.config.enabled
-                            && monitor.has_launch_profile()
-                        {
-                            let active_cap = monitor.config.max_active.max(1);
-                            if monitor.active_count() < active_cap {
-                                let monitor_owner =
-                                    format!("{}:{}", whoami::username(), std::process::id());
-                                monitor.prepare_claim_effects_with_probe(
-                                    &monitor_owner,
-                                    &now,
-                                    active_cap,
-                                    |issue_number| {
-                                        gwt::issue_monitor_worker::issue_completed_by_merged_pr(
-                                            &owner,
-                                            &repo,
-                                            issue_number,
-                                        )
-                                    },
-                                );
-                            }
+                        if loaded.authorizes_remote_effects() {
+                            let completed_issues = loaded
+                                .issues
+                                .iter()
+                                .filter_map(|issue| {
+                                    gwt::issue_monitor_worker::issue_completed_by_merged_pr(
+                                        &owner,
+                                        &repo,
+                                        issue.number,
+                                    )
+                                    .then_some(issue.number)
+                                })
+                                .collect();
+                            local_claim_proposal = Some((
+                                format!("{}:{}", whoami::username(), std::process::id()),
+                                completed_issues,
+                            ));
                         }
                         loaded_for_commit = Some(loaded);
                     }
@@ -2232,6 +2879,16 @@ impl AppRuntime {
                     &project_root,
                     &now,
                 );
+                #[cfg(not(unix))]
+                if let Some((monitor_owner, completed_issues)) = &local_claim_proposal {
+                    prepare_local_issue_monitor_claim_proposals(
+                        monitor,
+                        loaded,
+                        monitor_owner,
+                        &now,
+                        completed_issues,
+                    );
+                }
             }
             record_issue_monitor_scan_failures(
                 monitor,
@@ -2271,256 +2928,90 @@ impl AppRuntime {
         repo: &str,
         monitor: &mut gwt::IssueMonitorState,
     ) -> Vec<OutboundEvent> {
-        use gwt_github::client::OwnerMutationError;
         use gwt_github::issue_auto_claim::{
-            acquire_claim_mutation, release_claim_mutation, ClaimAcquireOutcome, ClaimComment,
-            ClaimStatus,
+            acquire_claim_mutation, release_claim_mutation, ClaimComment, ClaimStatus,
         };
 
-        enum Outcome {
-            Claim(gwt_github::client::OwnerMutationResult<ClaimAcquireOutcome>),
-            Revoked(
-                gwt_github::client::OwnerMutationResult<
-                    gwt_github::issue_auto_claim::ClaimReleaseOutcome,
-                >,
-            ),
-            Release(
-                gwt_github::client::OwnerMutationResult<
-                    gwt_github::issue_auto_claim::ClaimReleaseOutcome,
-                >,
-            ),
-        }
-
-        let initial_count = monitor.pending_effects().len();
-        for _ in 0..initial_count.max(1) {
-            let effect = monitor
-                .pending_effects()
-                .iter()
-                .find(|effect| {
-                    effect.state == gwt::IssueMonitorEffectState::Attempting
-                        && matches!(
-                            effect.payload,
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-                                | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
-                        )
-                })
-                .cloned()
-                .or_else(|| {
-                    rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |monitor| {
-                        let effect = monitor
-                            .pending_effects()
-                            .iter()
-                            .find(|effect| {
-                                effect.state == gwt::IssueMonitorEffectState::Prepared
-                                    && matches!(
-                                        effect.payload,
-                                        gwt::IssueMonitorEffectPayload::AcquireClaim { .. }
-                                            | gwt::IssueMonitorEffectPayload::ReleaseClaim { .. }
-                                    )
-                            })
-                            .cloned()?;
-                        let key = effect.attempt_key();
-                        monitor.mark_pending_effect_attempting(&key);
-                        monitor
-                            .pending_effects()
-                            .iter()
-                            .find(|pending| pending.attempt_key() == key)
-                            .cloned()
-                    })
-                });
-            let Some(effect) = effect else { break };
-            let key = effect.attempt_key();
-            let authority_current = effect.authority_epoch == monitor.effect_authority_epoch()
-                && monitor.config.enabled;
-            let client = match gwt_github::client::http::HttpIssueClient::from_gh_auth(owner, repo)
-            {
-                Ok(client) => client,
-                Err(error) => {
-                    monitor.record_launch_auth_required(
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    );
-                    tracing::warn!(error = %error, "local issue monitor claim auth unavailable");
-                    break;
-                }
-            };
-            let now = chrono::Utc::now();
-            let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let outcome = match &effect.payload {
-                gwt::IssueMonitorEffectPayload::AcquireClaim {
-                    issue_number,
-                    claim_id,
-                    owner,
-                    heartbeat_at,
-                    expires_at,
-                    launched_work_id,
-                } if authority_current => {
-                    let ttl = chrono::DateTime::parse_from_rfc3339(heartbeat_at)
-                        .ok()
-                        .zip(chrono::DateTime::parse_from_rfc3339(expires_at).ok())
-                        .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
-                        .filter(|ttl: &u64| *ttl > 0)
-                        .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
-                    Outcome::Claim(acquire_claim_mutation(
+        let execution = drive_local_issue_monitor_claim_effects_with(
+            prefs_path,
+            monitor,
+            |effect, authority_current, now, now_text| {
+                let client = gwt_github::client::http::HttpIssueClient::from_gh_auth(owner, repo)
+                    .map_err(|error| error.to_string())?;
+                Ok(match &effect.payload {
+                    gwt::IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number,
+                        claim_id,
+                        owner,
+                        heartbeat_at,
+                        expires_at,
+                        launched_work_id,
+                    } if authority_current => {
+                        let ttl = chrono::DateTime::parse_from_rfc3339(heartbeat_at)
+                            .ok()
+                            .zip(chrono::DateTime::parse_from_rfc3339(expires_at).ok())
+                            .and_then(|(start, end)| (end - start).num_seconds().try_into().ok())
+                            .filter(|ttl: &u64| *ttl > 0)
+                            .unwrap_or(gwt::IssueMonitorConfig::default().claim_ttl_secs);
+                        LocalIssueMonitorEffectOutcome::Claim(acquire_claim_mutation(
+                            &client,
+                            gwt_github::IssueNumber(*issue_number),
+                            ClaimComment {
+                                comment_id: None,
+                                claim_id: claim_id.clone(),
+                                owner: owner.clone(),
+                                issue_number: *issue_number,
+                                status: ClaimStatus::Active,
+                                heartbeat_at: now_text.to_string(),
+                                expires_at: (*now + chrono::Duration::seconds(ttl as i64))
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                launched_work_id: launched_work_id.clone(),
+                            },
+                            now_text,
+                        ))
+                    }
+                    gwt::IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number,
+                        claim_id,
+                        owner,
+                        ..
+                    } => LocalIssueMonitorEffectOutcome::Revoked(release_claim_mutation(
                         &client,
                         gwt_github::IssueNumber(*issue_number),
-                        ClaimComment {
-                            comment_id: None,
-                            claim_id: claim_id.clone(),
-                            owner: owner.clone(),
-                            issue_number: *issue_number,
-                            status: ClaimStatus::Active,
-                            heartbeat_at: now_text.clone(),
-                            expires_at: (now + chrono::Duration::seconds(ttl as i64))
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                            launched_work_id: launched_work_id.clone(),
-                        },
-                        &now_text,
-                    ))
-                }
-                gwt::IssueMonitorEffectPayload::AcquireClaim {
-                    issue_number,
-                    claim_id,
-                    owner,
-                    ..
-                } => Outcome::Revoked(release_claim_mutation(
-                    &client,
-                    gwt_github::IssueNumber(*issue_number),
-                    claim_id,
-                    owner,
-                )),
-                gwt::IssueMonitorEffectPayload::ReleaseClaim {
-                    issue_number,
-                    claim_id,
-                    owner,
-                } => Outcome::Release(release_claim_mutation(
-                    &client,
-                    gwt_github::IssueNumber(*issue_number),
-                    claim_id,
-                    owner,
-                )),
-                _ => break,
-            };
-
-            // 0 = unknown/failed commit, 1 = settled, 2 = retry later.
-            let transition =
-                rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |monitor| {
-                    if !monitor.pending_effects().iter().any(|pending| {
-                        pending.state == gwt::IssueMonitorEffectState::Attempting
-                            && pending.attempt_key() == key
-                    }) {
-                        return 0_u8;
-                    }
-                    let current = monitor.effect_authority_epoch() == key.authority_epoch
-                        && monitor.config.enabled;
-                    match (&effect.payload, outcome) {
-                        (
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. },
-                            Outcome::Claim(Ok(ClaimAcquireOutcome::Acquired(claim))),
-                        ) => {
-                            monitor.complete_pending_effect(&key);
-                            if current {
-                                monitor.apply_confirmed_claim(
-                                    *issue_number,
-                                    claim.claim_id,
-                                    &now_text,
-                                );
-                            }
-                            1
-                        }
-                        (
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. },
-                            Outcome::Claim(Ok(ClaimAcquireOutcome::Blocked(winner)))
-                            | Outcome::Claim(Ok(ClaimAcquireOutcome::Lost {
-                                winning_claim: winner,
-                                ..
-                            })),
-                        ) => {
-                            monitor.complete_pending_effect(&key);
-                            if current {
-                                if let Some(issue) = monitor
-                                    .inbox_item(*issue_number)
-                                    .map(|item| item.issue.clone())
-                                {
-                                    monitor.record_blocked_by_claim(
-                                        issue,
-                                        winner.owner,
-                                        winner.expires_at,
-                                    );
-                                }
-                            }
-                            1
-                        }
-                        (
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
-                            Outcome::Revoked(Ok(_)),
-                        )
-                        | (
-                            gwt::IssueMonitorEffectPayload::ReleaseClaim { .. },
-                            Outcome::Release(Ok(_)),
-                        ) => {
-                            monitor.complete_pending_effect(&key);
-                            1
-                        }
-                        (
-                            gwt::IssueMonitorEffectPayload::ReleaseClaim { .. },
-                            Outcome::Release(Err(OwnerMutationError::PreSubmit(_))),
-                        ) => {
-                            monitor.retry_pending_effect(&key);
-                            2
-                        }
-                        (
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
-                            Outcome::Claim(Err(OwnerMutationError::PreSubmit(_))),
-                        ) if current => {
-                            monitor.retry_pending_effect(&key);
-                            2
-                        }
-                        (
-                            gwt::IssueMonitorEffectPayload::AcquireClaim { .. },
-                            Outcome::Claim(Err(OwnerMutationError::PreSubmit(_)))
-                            | Outcome::Revoked(Err(OwnerMutationError::PreSubmit(_))),
-                        ) => {
-                            monitor.complete_pending_effect(&key);
-                            1
-                        }
-                        (
-                            _,
-                            Outcome::Claim(Err(OwnerMutationError::RemoteOutcomeUnknown(_)))
-                            | Outcome::Revoked(Err(OwnerMutationError::RemoteOutcomeUnknown(_)))
-                            | Outcome::Release(Err(OwnerMutationError::RemoteOutcomeUnknown(_))),
-                        ) => 0,
-                        _ => 0,
-                    }
-                });
-            if transition != 1 {
-                break;
+                        claim_id,
+                        owner,
+                    )),
+                    gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                        issue_number,
+                        claim_id,
+                        owner,
+                    } => LocalIssueMonitorEffectOutcome::Release(release_claim_mutation(
+                        &client,
+                        gwt_github::IssueNumber(*issue_number),
+                        claim_id,
+                        owner,
+                    )),
+                    _ => return Err("unsupported local Issue Monitor effect".to_string()),
+                })
+            },
+        );
+        if let Err(error) = execution {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            if error.contains("deadline") {
+                monitor.record_scan_error(now, error.clone());
+            } else {
+                monitor.record_launch_auth_required(now);
             }
+            tracing::warn!(error = %error, "local issue monitor claim execution unavailable");
         }
 
         let mut events = Vec::new();
-        let mut failures = Vec::new();
         for request in monitor.take_pending_launch_requests() {
-            let request_events = self.auto_launch_issue_monitor_request_events(
+            events.extend(self.auto_launch_issue_monitor_delivery_events(
                 request.issue_number,
                 request.linked_issue_kind,
-            );
-            if let Some(message) = request_events.iter().find_map(|event| match &event.event {
-                BackendEvent::IssueMonitorLaunchFailed {
-                    issue_number,
-                    message,
-                } if *issue_number == request.issue_number => Some(message.clone()),
-                _ => None,
-            }) {
-                failures.push((request.issue_number, message));
-            }
-            events.extend(request_events);
-        }
-        if !failures.is_empty() {
-            rebase_mutate_and_persist_issue_monitor_state(prefs_path, monitor, |monitor| {
-                for (issue_number, message) in failures {
-                    monitor.record_launch_failed(issue_number, message);
-                }
-            });
+                request.delivery_id.clone(),
+            ));
         }
         events
     }

@@ -943,9 +943,14 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or(gwt::LinkedIssueKind::Issue);
+            let delivery_id = payload
+                .get("delivery_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             Some(UserEvent::IssueMonitorLaunchRequest {
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             })
         }
         "review_dispatch" => {
@@ -1101,6 +1106,7 @@ enum UserEvent {
     IssueMonitorLaunchRequest {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
     },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
@@ -1468,7 +1474,11 @@ mod tests {
 
         let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "launch_request",
-            serde_json::json!({"issue_number": 42, "linked_issue_kind": "spec"}),
+            serde_json::json!({
+                "issue_number": 42,
+                "linked_issue_kind": "spec",
+                "delivery_id": "launch:effect-42",
+            }),
             42,
         );
         match super::daemon_broadcast_user_event(
@@ -1480,9 +1490,11 @@ mod tests {
             Some(UserEvent::IssueMonitorLaunchRequest {
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             }) => {
                 assert_eq!(issue_number, 42);
                 assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
+                assert_eq!(delivery_id.as_deref(), Some("launch:effect-42"));
             }
             other => panic!("unexpected issue monitor launch event: {other:?}"),
         }
@@ -2551,6 +2563,8 @@ mod tests {
             launch_wizard_cache,
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
+            issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_materializer_id: "main-test-materializer".to_string(),
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
@@ -7777,9 +7791,13 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             }) => {
-                let events =
-                    app.auto_launch_issue_monitor_request_events(issue_number, linked_issue_kind);
+                let events = app.auto_launch_issue_monitor_delivery_events(
+                    issue_number,
+                    linked_issue_kind,
+                    delivery_id,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorReviewDispatch { dispatch }) => {

@@ -130,22 +130,26 @@ pub fn issue_monitor_daemon_payloads(
     let mut payloads = Vec::new();
     if gui_connected {
         for request in monitor.take_pending_launch_requests() {
+            let delivery_id = request.delivery_id.clone();
             payloads.push(IssueMonitorDaemonPayload {
                 event: "launch_request".to_string(),
                 payload: serde_json::json!({
                     "issue_number": request.issue_number,
                     "branch_name": request.branch_name,
                     "linked_issue_kind": request.linked_issue_kind,
+                    "delivery_id": delivery_id,
                 }),
             });
-            payloads.push(IssueMonitorDaemonPayload {
-                event: "toast".to_string(),
-                payload: serde_json::json!({
-                    "level": "info",
-                    "message": "Issue Monitor launch requested",
-                    "issue_number": request.issue_number,
-                }),
-            });
+            if request.delivery_id.is_none() {
+                payloads.push(IssueMonitorDaemonPayload {
+                    event: "toast".to_string(),
+                    payload: serde_json::json!({
+                        "level": "info",
+                        "message": "Issue Monitor launch requested",
+                        "issue_number": request.issue_number,
+                    }),
+                });
+            }
         }
         // SPEC #3200 Option A: surface review-agent spawn requests to the GUI.
         for dispatch in monitor.take_pending_review_dispatches() {
@@ -1083,6 +1087,39 @@ mod tests {
     }
 
     #[test]
+    fn durable_launch_delivery_survives_fanout_zero_and_replays_one_stable_identity() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        let offline = issue_monitor_daemon_payloads(&mut monitor, false);
+        assert!(!offline
+            .iter()
+            .any(|payload| payload.event == "launch_request"));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+
+        let first = issue_monitor_daemon_payloads(&mut monitor, true);
+        let replay = issue_monitor_daemon_payloads(&mut monitor, true);
+        for payloads in [&first, &replay] {
+            let launch = payloads
+                .iter()
+                .find(|payload| payload.event == "launch_request")
+                .expect("durable launch request");
+            assert_eq!(launch.payload["delivery_id"], "launch:effect-42");
+        }
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+    }
+
+    #[test]
     fn payloads_emit_launch_request_before_launching_snapshot_when_gui_is_connected() {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
@@ -1275,6 +1312,9 @@ mod tests {
 
     #[test]
     fn github_remote_owner_and_repo_accepts_workspace_home_with_child_bare_repo() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         let bare_repo_path = tmp.path().join("gwt.git");
         let status = gwt_core::process::hidden_command("git")
@@ -1521,6 +1561,9 @@ exit 1
 
     #[test]
     fn resolve_default_base_branch_uses_child_bare_repo_for_workspace_home() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         let bare_repo = tmp.path().join("repo.git");
         let init = gwt_core::process::hidden_command("git")

@@ -402,6 +402,10 @@ pub struct IssueMonitorPrefs {
         deserialize_with = "deserialize_launching_issues"
     )]
     pub launching_issues: Vec<IssueMonitorLaunchingIssue>,
+    /// SPEC #3200 FR-052: launch deliveries remain durable until the GUI
+    /// returns the matching delivery id in a Launched/LaunchFailed ACK.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_launch_deliveries: Vec<PendingIssueMonitorLaunchDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -446,6 +450,7 @@ impl Default for IssueMonitorPrefs {
             launch_profile: None,
             launched_issues: Vec::new(),
             launching_issues: Vec::new(),
+            pending_launch_deliveries: Vec::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
             autonomous_mode: false,
@@ -568,6 +573,28 @@ pub struct IssueMonitorLaunchingIssue {
     pub issue_number: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingIssueMonitorLaunchDelivery {
+    pub delivery_id: String,
+    pub issue_number: u64,
+    pub branch_name: String,
+    pub linked_issue_kind: LinkedIssueKind,
+    pub claim_id: String,
+    #[serde(default)]
+    pub claim_owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_durable_window_id: Option<String>,
+    pub created_at: String,
 }
 
 /// Backward-compat: the first shipped shape was a bare id array. A parse
@@ -821,6 +848,8 @@ pub struct IssueMonitorLaunchRequest {
     pub issue_number: u64,
     pub branch_name: String,
     pub linked_issue_kind: LinkedIssueKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -906,6 +935,9 @@ pub struct IssueMonitorState {
     failed_windows: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
+    /// Durable ACK-driven deliveries. Unlike `pending_launches`, this queue is
+    /// projected non-destructively and mirrored in prefs across restart.
+    pending_launch_deliveries: VecDeque<PendingIssueMonitorLaunchDelivery>,
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
@@ -923,6 +955,13 @@ pub struct IssueMonitorState {
 enum AutonomousRecordRebasePolicy {
     DiskAuthoritative,
     LocalSameKeyAuthoritative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingLaunchDeliveryMatch {
+    Matched(usize),
+    Missing,
+    Mismatched,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -1626,6 +1665,7 @@ impl IssueMonitorState {
             failed_windows: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
+            pending_launch_deliveries: VecDeque::new(),
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
@@ -1662,6 +1702,16 @@ impl IssueMonitorState {
                     .launching_claimed_at
                     .insert(entry.issue_number, claimed_at);
             }
+        }
+        for delivery in prefs.pending_launch_deliveries {
+            if !state.active_launches.contains(&delivery.issue_number) {
+                state.active_launches.push(delivery.issue_number);
+            }
+            state
+                .launching_claimed_at
+                .entry(delivery.issue_number)
+                .or_insert_with(|| delivery.created_at.clone());
+            state.pending_launch_deliveries.push_back(delivery);
         }
         for failed in prefs.failed_issues {
             if failed.message.trim().is_empty() {
@@ -1711,6 +1761,7 @@ impl IssueMonitorState {
                     claimed_at: self.launching_claimed_at.get(issue_number).cloned(),
                 })
                 .collect(),
+            pending_launch_deliveries: self.pending_launch_deliveries.iter().cloned().collect(),
             failed_issues: self
                 .failed_issues
                 .iter()
@@ -2024,8 +2075,35 @@ impl IssueMonitorState {
         self.config.enabled = enabled;
         self.launch_auth_required = false;
         if !enabled {
+            for delivery in &self.pending_launch_deliveries {
+                let already_pending = self.pending_effects.iter().any(|effect| {
+                    matches!(
+                        &effect.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim {
+                            issue_number,
+                            claim_id,
+                            owner,
+                        } if *issue_number == delivery.issue_number
+                            && claim_id == &delivery.claim_id
+                            && owner == &delivery.claim_owner
+                    )
+                });
+                if !already_pending {
+                    self.pending_effects
+                        .push(PendingIssueMonitorEffect::prepared(
+                            format!("release:{}:{next_epoch}", delivery.delivery_id),
+                            next_epoch,
+                            IssueMonitorEffectPayload::ReleaseClaim {
+                                issue_number: delivery.issue_number,
+                                claim_id: delivery.claim_id.clone(),
+                                owner: delivery.claim_owner.clone(),
+                            },
+                        ));
+                }
+            }
             self.active_launches.clear();
             self.pending_launches.clear();
+            self.pending_launch_deliveries.clear();
         }
         Some(next_epoch)
     }
@@ -2089,6 +2167,7 @@ impl IssueMonitorState {
         self.autonomous_mode = disk.autonomous_mode;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
+        self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
@@ -2550,6 +2629,13 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
+            if self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            {
+                continue;
+            }
             match self.launching_claimed_at.get(&issue_number) {
                 Some(claimed_at) => {
                     let stale =
@@ -3243,6 +3329,7 @@ impl IssueMonitorState {
             issue_number,
             branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
             linked_issue_kind,
+            delivery_id: None,
         })
     }
 
@@ -3410,10 +3497,27 @@ impl IssueMonitorState {
 
             match acquire_claim(client, IssueNumber(issue.number), claim, now) {
                 Ok(ClaimAcquireOutcome::Acquired(claim)) => {
-                    self.record_claimed(issue, claim.claim_id);
-                    if let Some(request) = self.next_launch_request(now) {
-                        self.pending_launches.push_back(request.clone());
-                        launches.push(request);
+                    let claim_id = claim.claim_id;
+                    let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
+                    if self.apply_confirmed_claim(
+                        issue.number,
+                        claim_id,
+                        owner,
+                        &synchronous_effect_id,
+                        now,
+                    ) {
+                        if let Some(request) =
+                            self.pending_launch_deliveries.back().map(|delivery| {
+                                IssueMonitorLaunchRequest {
+                                    issue_number: delivery.issue_number,
+                                    branch_name: delivery.branch_name.clone(),
+                                    linked_issue_kind: delivery.linked_issue_kind,
+                                    delivery_id: Some(delivery.delivery_id.clone()),
+                                }
+                            })
+                        {
+                            launches.push(request);
+                        }
                     }
                 }
                 Ok(ClaimAcquireOutcome::Blocked(claim)) => {
@@ -3436,7 +3540,25 @@ impl IssueMonitorState {
     }
 
     pub fn take_pending_launch_requests(&mut self) -> Vec<IssueMonitorLaunchRequest> {
-        self.pending_launches.drain(..).collect()
+        let durable_issue_numbers = self
+            .pending_launch_deliveries
+            .iter()
+            .map(|delivery| delivery.issue_number)
+            .collect::<BTreeSet<_>>();
+        let mut requests = self
+            .pending_launches
+            .drain(..)
+            .filter(|request| !durable_issue_numbers.contains(&request.issue_number))
+            .collect::<Vec<_>>();
+        requests.extend(self.pending_launch_deliveries.iter().map(|delivery| {
+            IssueMonitorLaunchRequest {
+                issue_number: delivery.issue_number,
+                branch_name: delivery.branch_name.clone(),
+                linked_issue_kind: delivery.linked_issue_kind,
+                delivery_id: Some(delivery.delivery_id.clone()),
+            }
+        }));
+        requests
     }
 
     /// SPEC #3200 Option A: queue a review-agent spawn request (orchestration
@@ -3567,15 +3689,159 @@ impl IssueMonitorState {
         &mut self,
         issue_number: u64,
         claim_id: impl Into<String>,
+        claim_owner: impl Into<String>,
+        claim_effect_id: &str,
         now: &str,
     ) -> bool {
         let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
             return false;
         };
-        self.record_claimed(issue, claim_id);
-        if let Some(request) = self.next_launch_request(now) {
-            self.pending_launches.push_back(request);
+        let claim_id = claim_id.into();
+        let claim_owner = claim_owner.into();
+        let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
+        let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+        let delivery_id = format!("launch:{claim_effect_id}");
+        self.record_claimed(issue, claim_id.clone());
+        self.queue.retain(|queued| *queued != issue_number);
+        if !self.active_launches.contains(&issue_number) {
+            self.active_launches.push(issue_number);
         }
+        self.launching_claimed_at
+            .insert(issue_number, now.to_string());
+        self.set_inbox_state(issue_number, MonitorInboxState::Launching);
+        if !self
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.delivery_id == delivery_id)
+        {
+            self.pending_launch_deliveries
+                .push_back(PendingIssueMonitorLaunchDelivery {
+                    delivery_id,
+                    issue_number,
+                    branch_name,
+                    linked_issue_kind,
+                    claim_id,
+                    claim_owner,
+                    materializer_id: None,
+                    materializer_pid: None,
+                    materializer_window_id: None,
+                    materialized_window_id: None,
+                    workspace_durable_window_id: None,
+                    created_at: now.to_string(),
+                });
+        }
+        true
+    }
+
+    pub fn complete_active_launch_delivery(
+        &mut self,
+        issue_number: u64,
+        window_id: impl Into<String>,
+        delivery_id: Option<&str>,
+    ) -> bool {
+        let window_id = window_id.into();
+        if let Some(delivery_id) = delivery_id {
+            match self.match_pending_launch_delivery(issue_number, delivery_id) {
+                PendingLaunchDeliveryMatch::Matched(index) => {
+                    let delivery = &self.pending_launch_deliveries[index];
+                    if delivery.materialized_window_id.as_deref() != Some(window_id.as_str())
+                        || delivery.workspace_durable_window_id.as_deref()
+                            != Some(window_id.as_str())
+                    {
+                        return false;
+                    }
+                    self.pending_launch_deliveries.remove(index);
+                }
+                PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
+                    return false
+                }
+            }
+        }
+        self.complete_active_launch(issue_number, window_id);
+        true
+    }
+
+    pub fn claim_launch_delivery(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        materializer_pid: u32,
+        materializer_window_id: &str,
+        is_process_alive: impl Fn(u32) -> bool,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        if delivery.materializer_id.as_deref() == Some(materializer_id) {
+            delivery.materializer_pid = Some(materializer_pid);
+            if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
+                delivery.materialized_window_id = None;
+                delivery.workspace_durable_window_id = None;
+            }
+            delivery.materializer_window_id = Some(materializer_window_id.to_string());
+            return true;
+        }
+        if delivery
+            .materializer_pid
+            .filter(|pid| *pid > 0)
+            .is_some_and(is_process_alive)
+        {
+            return false;
+        }
+        delivery.materializer_id = Some(materializer_id.to_string());
+        delivery.materializer_pid = Some(materializer_pid);
+        delivery.materializer_window_id = Some(materializer_window_id.to_string());
+        delivery.materialized_window_id = None;
+        delivery.workspace_durable_window_id = None;
+        true
+    }
+
+    pub fn mark_launch_delivery_materialized(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        materializer_window_id: &str,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
+            return false;
+        }
+        if delivery.materialized_window_id.as_deref() == Some(materializer_window_id) {
+            return true;
+        }
+        if delivery.materializer_id.as_deref() != Some(materializer_id) {
+            return false;
+        }
+        delivery.materialized_window_id = Some(materializer_window_id.to_string());
+        true
+    }
+
+    pub fn mark_launch_delivery_workspace_durable(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        _materializer_id: &str,
+        materializer_window_id: &str,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        if delivery.materializer_window_id.as_deref() != Some(materializer_window_id)
+            || delivery.materialized_window_id.as_deref() != Some(materializer_window_id)
+        {
+            return false;
+        }
+        delivery.workspace_durable_window_id = Some(materializer_window_id.to_string());
         true
     }
 
@@ -3614,7 +3880,51 @@ impl IssueMonitorState {
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
+        let retained_deliveries = self
+            .pending_launch_deliveries
+            .iter()
+            .filter(|delivery| delivery.issue_number == issue_number)
+            .cloned()
+            .collect::<Vec<_>>();
         self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
+        for delivery in retained_deliveries {
+            if !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|pending| pending.delivery_id == delivery.delivery_id)
+            {
+                self.pending_launch_deliveries.push_back(delivery);
+            }
+        }
+    }
+
+    pub fn record_launch_failed_delivery(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+    ) -> bool {
+        if let Some(delivery_id) = delivery_id {
+            match self.match_pending_launch_delivery(issue_number, delivery_id) {
+                PendingLaunchDeliveryMatch::Matched(index) => {
+                    if materializer_id.is_none()
+                        || self.pending_launch_deliveries[index]
+                            .materializer_id
+                            .as_deref()
+                            != materializer_id
+                    {
+                        return false;
+                    }
+                    self.pending_launch_deliveries.remove(index);
+                }
+                PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
+                    return false
+                }
+            }
+        }
+        self.record_launch_failed(issue_number, message);
+        true
     }
 
     pub fn record_agent_window_failed(
@@ -3680,6 +3990,8 @@ impl IssueMonitorState {
         self.failed_windows.remove(&issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
+        self.pending_launch_deliveries
+            .retain(|pending| pending.issue_number != issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
     }
@@ -3693,6 +4005,27 @@ impl IssueMonitorState {
             item.state = state;
             item.launched_window_id = None;
             item.error_message = None;
+        }
+    }
+
+    fn match_pending_launch_delivery(
+        &self,
+        issue_number: u64,
+        delivery_id: &str,
+    ) -> PendingLaunchDeliveryMatch {
+        if let Some(index) = self.pending_launch_deliveries.iter().position(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) {
+            return PendingLaunchDeliveryMatch::Matched(index);
+        }
+        if self
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.issue_number == issue_number)
+        {
+            PendingLaunchDeliveryMatch::Mismatched
+        } else {
+            PendingLaunchDeliveryMatch::Missing
         }
     }
 
@@ -5151,6 +5484,275 @@ mod tests {
             .expect_err("completion probe failure must not become false");
 
         assert_eq!(error, "merged-pr readback failed");
+    }
+
+    #[test]
+    fn confirmed_claim_persists_and_replays_one_stable_launch_delivery() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "claim-effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            prefs.pending_launch_deliveries[0].delivery_id,
+            "launch:claim-effect-42"
+        );
+        assert_eq!(prefs.pending_launch_deliveries[0].claim_id, "claim-42");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launching)
+        );
+
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let first = restored.take_pending_launch_requests();
+        let replay = restored.take_pending_launch_requests();
+        assert_eq!(first, replay, "delivery remains replayable until ACK");
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].delivery_id.as_deref(),
+            Some("launch:claim-effect-42")
+        );
+        assert!(
+            restored
+                .expire_stale_unbound_launches("2026-07-28T01:00:00Z")
+                .is_empty(),
+            "a durable delivery is ACK-driven, not TTL-expired"
+        );
+    }
+
+    #[test]
+    fn matching_launch_ack_consumes_only_its_delivery_and_legacy_ack_consumes_none() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(43));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            43,
+            "claim-43",
+            "host/session",
+            "effect-43",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::wrong",
+            Some("launch:effect-43"),
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 2);
+
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::wrong-window",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].issue_number,
+            43
+        );
+
+        assert!(monitor.complete_active_launch_delivery(43, "tab-1::legacy-43", None));
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries.len(),
+            1,
+            "legacy ACK must not consume a new delivery"
+        );
+        assert!(monitor.claim_launch_delivery(
+            43,
+            "launch:effect-43",
+            "gui-b",
+            202,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        assert!(!monitor.record_launch_failed_delivery(
+            43,
+            "materialization failed",
+            Some("launch:effect-43"),
+            Some("gui-a"),
+        ));
+        assert!(monitor.record_launch_failed_delivery(
+            43,
+            "materialization failed",
+            Some("launch:effect-43"),
+            Some("gui-b"),
+        ));
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+    }
+
+    #[test]
+    fn launch_delivery_materializer_claim_is_single_owner_and_dead_owner_is_recoverable() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-1",
+            |pid| pid == 101,
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-b",
+            202,
+            "tab-b::agent-1",
+            |pid| pid == 101,
+        ));
+        let first = monitor.prefs().pending_launch_deliveries.remove(0);
+        assert_eq!(first.materializer_id.as_deref(), Some("gui-a"));
+        assert_eq!(
+            first.materializer_window_id.as_deref(),
+            Some("tab-a::agent-1")
+        );
+
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-b",
+            202,
+            "tab-b::agent-1",
+            |_| false,
+        ));
+        let recovered = monitor.prefs().pending_launch_deliveries.remove(0);
+        assert_eq!(recovered.materializer_id.as_deref(), Some("gui-b"));
+        assert_eq!(recovered.materializer_pid, Some(202));
+        assert_eq!(
+            recovered.materializer_window_id.as_deref(),
+            Some("tab-b::agent-1")
+        );
+    }
+
+    #[test]
+    fn disabling_monitor_compensates_durable_launch_claim_before_clearing_outbox() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id,
+                owner,
+            } if claim_id == "claim-42" && owner == "host/session"
+        )));
+    }
+
+    #[test]
+    fn autonomous_legacy_launch_failure_does_not_consume_durable_delivery() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.record_attempt(42);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert!(monitor.record_launch_failed_delivery(42, "legacy failure", None, None));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].delivery_id,
+            "launch:effect-42"
+        );
     }
 
     #[test]

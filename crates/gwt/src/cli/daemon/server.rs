@@ -1202,13 +1202,35 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    ClaimLaunchDelivery {
+        issue_number: u64,
+        delivery_id: String,
+        materializer_id: String,
+        materializer_pid: u32,
+        materializer_window_id: String,
+    },
+    LaunchDeliveryMaterialized {
+        issue_number: u64,
+        delivery_id: String,
+        materializer_id: String,
+        materializer_window_id: String,
+    },
+    LaunchDeliveryWorkspaceDurable {
+        issue_number: u64,
+        delivery_id: String,
+        materializer_id: String,
+        materializer_window_id: String,
+    },
     Launched {
         issue_number: u64,
         window_id: String,
+        delivery_id: Option<String>,
     },
     LaunchFailed {
         issue_number: u64,
         message: String,
+        delivery_id: Option<String>,
+        materializer_id: Option<String>,
     },
     AgentFailed {
         issue_number: Option<u64>,
@@ -1484,6 +1506,51 @@ fn apply_routine_issue_monitor_control(
 ) -> bool {
     match control {
         IssueMonitorControl::Enabled(_) | IssueMonitorControl::AutonomousMode(_) => false,
+        IssueMonitorControl::ClaimLaunchDelivery {
+            issue_number,
+            delivery_id,
+            materializer_id,
+            materializer_pid,
+            materializer_window_id,
+        } => {
+            let _ = monitor.claim_launch_delivery(
+                issue_number,
+                &delivery_id,
+                &materializer_id,
+                materializer_pid,
+                &materializer_window_id,
+                crate::process::is_host_process_alive,
+            );
+            false
+        }
+        IssueMonitorControl::LaunchDeliveryMaterialized {
+            issue_number,
+            delivery_id,
+            materializer_id,
+            materializer_window_id,
+        } => {
+            let _ = monitor.mark_launch_delivery_materialized(
+                issue_number,
+                &delivery_id,
+                &materializer_id,
+                &materializer_window_id,
+            );
+            false
+        }
+        IssueMonitorControl::LaunchDeliveryWorkspaceDurable {
+            issue_number,
+            delivery_id,
+            materializer_id,
+            materializer_window_id,
+        } => {
+            let _ = monitor.mark_launch_delivery_workspace_durable(
+                issue_number,
+                &delivery_id,
+                &materializer_id,
+                &materializer_window_id,
+            );
+            false
+        }
         IssueMonitorControl::ReviewVerdict {
             issue_number,
             reviewed_sha,
@@ -1508,17 +1575,21 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::Launched {
             issue_number,
             window_id,
+            delivery_id,
         } => {
-            monitor.complete_active_launch(issue_number, window_id);
-            true
+            monitor.complete_active_launch_delivery(issue_number, window_id, delivery_id.as_deref())
         }
         IssueMonitorControl::LaunchFailed {
             issue_number,
             message,
-        } => {
-            monitor.record_launch_failed(issue_number, message);
-            true
-        }
+            delivery_id,
+            materializer_id,
+        } => monitor.record_launch_failed_delivery(
+            issue_number,
+            message,
+            delivery_id.as_deref(),
+            materializer_id.as_deref(),
+        ),
         IssueMonitorControl::AgentFailed {
             issue_number,
             window_id,
@@ -1734,6 +1805,50 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
             {
                 return Some(IssueMonitorControl::MaxActiveAgents(max_active_agents));
             }
+            if let Some(claim) = payload.get("claim_launch_delivery") {
+                let issue_number = claim.get("issue_number")?.as_u64()?;
+                let delivery_id = claim.get("delivery_id")?.as_str()?.to_string();
+                let materializer_id = claim.get("materializer_id")?.as_str()?.to_string();
+                let materializer_pid =
+                    u32::try_from(claim.get("materializer_pid")?.as_u64()?).ok()?;
+                let materializer_window_id =
+                    claim.get("materializer_window_id")?.as_str()?.to_string();
+                return Some(IssueMonitorControl::ClaimLaunchDelivery {
+                    issue_number,
+                    delivery_id,
+                    materializer_id,
+                    materializer_pid,
+                    materializer_window_id,
+                });
+            }
+            if let Some(materialized) = payload.get("launch_delivery_materialized") {
+                let issue_number = materialized.get("issue_number")?.as_u64()?;
+                let delivery_id = materialized.get("delivery_id")?.as_str()?.to_string();
+                let materializer_id = materialized.get("materializer_id")?.as_str()?.to_string();
+                let materializer_window_id = materialized
+                    .get("materializer_window_id")?
+                    .as_str()?
+                    .to_string();
+                return Some(IssueMonitorControl::LaunchDeliveryMaterialized {
+                    issue_number,
+                    delivery_id,
+                    materializer_id,
+                    materializer_window_id,
+                });
+            }
+            if let Some(durable) = payload.get("launch_delivery_workspace_durable") {
+                let issue_number = durable.get("issue_number")?.as_u64()?;
+                let delivery_id = durable.get("delivery_id")?.as_str()?.to_string();
+                let materializer_id = durable.get("materializer_id")?.as_str()?.to_string();
+                let materializer_window_id =
+                    durable.get("materializer_window_id")?.as_str()?.to_string();
+                return Some(IssueMonitorControl::LaunchDeliveryWorkspaceDurable {
+                    issue_number,
+                    delivery_id,
+                    materializer_id,
+                    materializer_window_id,
+                });
+            }
             if let Some(launch_failed) = payload.get("launch_failed") {
                 let issue_number = launch_failed.get("issue_number")?.as_u64()?;
                 let message = launch_failed
@@ -1741,9 +1856,19 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("Launch failed")
                     .to_string();
+                let delivery_id = launch_failed
+                    .get("delivery_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let materializer_id = launch_failed
+                    .get("materializer_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
                 return Some(IssueMonitorControl::LaunchFailed {
                     issue_number,
                     message,
+                    delivery_id,
+                    materializer_id,
                 });
             }
             if let Some(agent_failed) = payload.get("agent_failed") {
@@ -1773,9 +1898,14 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                let delivery_id = launched
+                    .get("delivery_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
                 return Some(IssueMonitorControl::Launched {
                     issue_number,
                     window_id,
+                    delivery_id,
                 });
             }
             if let Some(window_closed) = payload.get("window_closed") {
@@ -2411,7 +2541,11 @@ fn commit_issue_monitor_effect_result(
                     }
                 }
                 (
-                    crate::IssueMonitorEffectPayload::AcquireClaim { issue_number, .. },
+                    crate::IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number,
+                        owner,
+                        ..
+                    },
                     IssueMonitorEffectOutcome::Claim(Ok(ClaimAcquireOutcome::Acquired(claim))),
                 ) => {
                     let _ = candidate.complete_pending_effect(&key);
@@ -2419,6 +2553,8 @@ fn commit_issue_monitor_effect_result(
                         let _ = candidate.apply_confirmed_claim(
                             *issue_number,
                             claim.claim_id,
+                            owner,
+                            &completed.effect.effect_id,
                             &completed.completed_at,
                         );
                     }
@@ -3726,6 +3862,8 @@ exit 0
                 IssueMonitorControl::LaunchFailed {
                     issue_number: 42,
                     message: "review launch failed".to_string(),
+                    delivery_id: None,
+                    materializer_id: None,
                 },
             ),
             super::IssueMonitorControlCommit::Committed { .. }
@@ -3755,6 +3893,8 @@ exit 0
                 IssueMonitorControl::LaunchFailed {
                     issue_number: 42,
                     message: "fresh manual launch failed before materialization".to_string(),
+                    delivery_id: None,
+                    materializer_id: None,
                 },
             ),
             super::IssueMonitorControlCommit::Committed { .. }
@@ -3801,6 +3941,8 @@ exit 0
         let accepted = super::AcceptedIssueMonitorControl::new(IssueMonitorControl::LaunchFailed {
             issue_number: 42,
             message: "review launch failed".to_string(),
+            delivery_id: None,
+            materializer_id: None,
         });
         let fail_once = prefs_path.with_extension("parent-sync-fail-once");
         fs::write(&fail_once, b"fail once").expect("seed parent sync failure trigger");
@@ -4627,6 +4769,8 @@ exit 0
             IssueMonitorControl::LaunchFailed {
                 issue_number: 43,
                 message: failure.clone(),
+                delivery_id: None,
+                materializer_id: None,
             },
         );
 
@@ -7253,6 +7397,193 @@ exit 1
     }
 
     #[test]
+    fn acquired_claim_commit_persists_launching_and_outbox_in_one_transaction() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        let effect = crate::PendingIssueMonitorEffect::prepared(
+            "claim-effect-42",
+            0,
+            crate::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-28T00:00:00Z".to_string(),
+                expires_at: "2026-07-28T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        );
+        let key = monitor
+            .prepare_pending_effect(effect.effect_id.clone(), effect.payload.clone())
+            .expect("prepare claim effect");
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let attempting = monitor.pending_effects()[0].clone();
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+
+        assert!(super::commit_issue_monitor_effect_result(
+            &prefs_path,
+            &mut monitor,
+            super::CompletedIssueMonitorEffect {
+                effect: attempting,
+                outcome: super::IssueMonitorEffectOutcome::Claim(Ok(
+                    gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                        gwt_github::issue_auto_claim::ClaimComment {
+                            comment_id: Some(gwt_github::CommentId(99)),
+                            claim_id: "claim-42".to_string(),
+                            owner: "host/session".to_string(),
+                            issue_number: 42,
+                            status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                            heartbeat_at: "2026-07-28T00:00:00Z".to_string(),
+                            expires_at: "2026-07-28T00:30:00Z".to_string(),
+                            launched_work_id: Some("work/issue-42".to_string()),
+                        },
+                    ),
+                )),
+                completed_at: "2026-07-28T00:00:01Z".to_string(),
+            },
+        ));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(persisted.pending_effects.is_empty());
+        assert_eq!(persisted.launching_issues.len(), 1);
+        assert_eq!(persisted.pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            persisted.pending_launch_deliveries[0].delivery_id,
+            "launch:claim-effect-42"
+        );
+        assert_eq!(
+            persisted.pending_launch_deliveries[0].claim_owner,
+            "host/session"
+        );
+    }
+
+    #[test]
+    fn launch_delivery_claim_control_keeps_one_live_materializer() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+        let live_pid = std::process::id();
+
+        assert!(matches!(
+            super::try_apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                super::IssueMonitorControl::ClaimLaunchDelivery {
+                    issue_number: 42,
+                    delivery_id: "launch:effect-42".to_string(),
+                    materializer_id: "gui-a".to_string(),
+                    materializer_pid: live_pid,
+                    materializer_window_id: "tab-a::agent-1".to_string(),
+                },
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(matches!(
+            super::try_apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                super::IssueMonitorControl::ClaimLaunchDelivery {
+                    issue_number: 42,
+                    delivery_id: "launch:effect-42".to_string(),
+                    materializer_id: "gui-b".to_string(),
+                    materializer_pid: live_pid,
+                    materializer_window_id: "tab-b::agent-1".to_string(),
+                },
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        let delivery = &persisted.pending_launch_deliveries[0];
+        assert_eq!(delivery.materializer_id.as_deref(), Some("gui-a"));
+        assert_eq!(
+            delivery.materializer_window_id.as_deref(),
+            Some("tab-a::agent-1")
+        );
+
+        let _ = super::try_apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            super::IssueMonitorControl::LaunchFailed {
+                issue_number: 42,
+                message: "non-owner launch failure".to_string(),
+                delivery_id: Some("launch:effect-42".to_string()),
+                materializer_id: Some("gui-b".to_string()),
+            },
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("reload rejected failure")
+                .pending_launch_deliveries
+                .len(),
+            1,
+        );
+
+        let _ = super::try_apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            super::IssueMonitorControl::Launched {
+                issue_number: 42,
+                window_id: "tab-a::agent-1".to_string(),
+                delivery_id: Some("launch:effect-42".to_string()),
+            },
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("reload premature ACK")
+                .pending_launch_deliveries
+                .len(),
+            1,
+        );
+
+        for control in [
+            super::IssueMonitorControl::LaunchDeliveryMaterialized {
+                issue_number: 42,
+                delivery_id: "launch:effect-42".to_string(),
+                materializer_id: "gui-a".to_string(),
+                materializer_window_id: "tab-a::agent-1".to_string(),
+            },
+            super::IssueMonitorControl::LaunchDeliveryWorkspaceDurable {
+                issue_number: 42,
+                delivery_id: "launch:effect-42".to_string(),
+                materializer_id: "gui-a".to_string(),
+                materializer_window_id: "tab-a::agent-1".to_string(),
+            },
+            super::IssueMonitorControl::Launched {
+                issue_number: 42,
+                window_id: "tab-a::agent-1".to_string(),
+                delivery_id: Some("launch:effect-42".to_string()),
+            },
+        ] {
+            let _ = super::try_apply_issue_monitor_control_with_disk_migration(
+                &prefs_path,
+                &mut monitor,
+                control,
+            );
+        }
+        assert!(crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload exact ACK")
+            .pending_launch_deliveries
+            .is_empty());
+    }
+
+    #[test]
     #[allow(clippy::await_holding_lock)]
     fn replayed_arm_with_advanced_head_compensates_before_settling() {
         let _env_lock = crate::env_test_lock()
@@ -8121,6 +8452,8 @@ exit 1
                 IssueMonitorControl::LaunchFailed {
                     issue_number: 43,
                     message: writer_failure,
+                    delivery_id: None,
+                    materializer_id: None,
                 },
             );
             done_tx
@@ -9493,6 +9826,7 @@ exit 1
             IssueMonitorControl::Launched {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                delivery_id: None,
             },
         );
         let launched_prefs =
@@ -9527,6 +9861,7 @@ exit 1
             IssueMonitorControl::Launched {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                delivery_id: None,
             },
         );
         let same_issue_prefs =
@@ -9554,6 +9889,8 @@ exit 1
             IssueMonitorControl::LaunchFailed {
                 issue_number: 43,
                 message: "fresh failure".to_string(),
+                delivery_id: None,
+                materializer_id: None,
             },
         );
         let failed_prefs =

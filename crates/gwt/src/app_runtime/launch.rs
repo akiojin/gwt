@@ -39,8 +39,9 @@ use super::{
     resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
     AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
-    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
+    UserEvent, WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime,
+    WorkspaceResumeContext,
 };
 
 #[derive(Clone)]
@@ -1063,12 +1064,14 @@ impl AppRuntime {
                             .as_ref()
                             .and_then(|context| context.issue_monitor_issue_number)
                         {
-                            events.extend(
-                                self.issue_monitor_launch_succeeded_events(
-                                    issue_number,
-                                    &window_id,
-                                ),
-                            );
+                            let delivery_id = launch_feedback_context
+                                .as_ref()
+                                .and_then(|context| context.issue_monitor_delivery_id.as_deref());
+                            events.extend(self.issue_monitor_launch_completed_delivery_events(
+                                issue_number,
+                                &window_id,
+                                delivery_id,
+                            ));
                         }
                         events
                     }
@@ -1464,14 +1467,18 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
         agent_kanban_target: Option<AgentKanbanLaunchTarget>,
     ) -> Result<Vec<OutboundEvent>, String> {
-        if let Some(window_id) = self.live_agent_window_for_work(
-            tab_id,
-            config.branch.as_deref(),
-            config.working_dir.as_deref(),
-        ) {
-            return Ok(
-                self.focus_existing_live_work_agent_events(&window_id, Some(placement.bounds()))
-            );
+        let durable_issue_monitor_delivery = launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_delivery_id.is_some());
+        if !durable_issue_monitor_delivery {
+            if let Some(window_id) = self.live_agent_window_for_work(
+                tab_id,
+                config.branch.as_deref(),
+                config.working_dir.as_deref(),
+            ) {
+                return Ok(self
+                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+            }
         }
         // SPEC-2359 W-17 (FR-398, Issue #3034): the live-window check above
         // only sees launches whose agent session is already live. A re-click
@@ -1485,11 +1492,15 @@ impl AppRuntime {
                     && window_lookup.contains_key(window_id.as_str())
             });
         }
-        if let Some(key) = inflight_key.as_deref() {
-            if let Some((window_id, _)) = self.inflight_launches.get(key) {
-                let window_id = window_id.clone();
-                return Ok(self
-                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+        if !durable_issue_monitor_delivery {
+            if let Some(key) = inflight_key.as_deref() {
+                if let Some((window_id, _)) = self.inflight_launches.get(key) {
+                    let window_id = window_id.clone();
+                    return Ok(self.focus_existing_live_work_agent_events(
+                        &window_id,
+                        Some(placement.bounds()),
+                    ));
+                }
             }
         }
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
@@ -1563,6 +1574,17 @@ impl AppRuntime {
         if let Some(context) = workspace_resume_context {
             self.pending_workspace_resume_contexts
                 .insert(window_id.clone(), context);
+        }
+        if let Some(delivery_id) = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_delivery_id.as_ref())
+        {
+            self.issue_monitor_launch_deliveries.insert(
+                delivery_id.clone(),
+                IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id: window_id.clone(),
+                },
+            );
         }
         if let Some(context) = launch_feedback_context {
             self.pending_launch_feedback_contexts

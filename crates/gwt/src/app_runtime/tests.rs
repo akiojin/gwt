@@ -42,13 +42,16 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
 use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
-    record_issue_monitor_scan_failures, save_start_work_workspace_projection,
-    save_workspace_launch_projection, ActiveAgentSession, AgentKanbanLaunchTarget,
-    AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
-    DispatchTarget, IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
-    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
-    OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    drive_local_issue_monitor_claim_effects_with, local_issue_monitor_fallback_commit_count,
+    prepare_local_issue_monitor_claim_proposals, rebase_mutate_and_persist_issue_monitor_state,
+    record_issue_monitor_scan_failures, reset_local_issue_monitor_fallback_commit_count,
+    save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
+    AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
+    AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, IssueMonitorProfileSaveContext,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
+    ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
+    WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -2408,6 +2411,8 @@ fn sample_runtime_with_events(
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
+        issue_monitor_launch_deliveries: HashMap::new(),
+        issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
@@ -6351,6 +6356,7 @@ No viable candidates found in PATH \
             client_id: "client-1".to_string(),
             title: "Launch failed".to_string(),
             issue_monitor_issue_number: None,
+            issue_monitor_delivery_id: None,
         }),
     );
 
@@ -6423,6 +6429,7 @@ No viable candidates found in PATH \
             client_id: "client-1".to_string(),
             title: "Launch failed".to_string(),
             issue_monitor_issue_number: None,
+            issue_monitor_delivery_id: None,
         }),
     );
 
@@ -6463,6 +6470,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         }),
     );
 
@@ -6509,6 +6517,7 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         }),
     );
 
@@ -6579,6 +6588,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -6700,6 +6710,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -17443,6 +17454,7 @@ fn app_runtime_lifecycle_ack_never_replays_local_writer() {
     let launched =
         runtime.issue_monitor_launch_succeeded_result_events(42, "tab-1::agent-1", Ok(()));
     let failed = runtime.issue_monitor_launch_failed_result_events(42, "launch failed", Ok(()));
+    let closed = runtime.issue_monitor_window_closed_result_events("tab-1::agent-1", Ok(()));
 
     assert!(launched
         .iter()
@@ -17455,6 +17467,7 @@ fn app_runtime_lifecycle_ack_never_replays_local_writer() {
         &event.event,
         BackendEvent::IssueMonitorLaunchFailed { issue_number, .. } if *issue_number == 42
     )));
+    assert!(closed.is_empty());
     assert_eq!(
         fs::read(&prefs_path).expect("reload prefs"),
         before,
@@ -17528,6 +17541,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         },
     );
 
@@ -17591,6 +17605,7 @@ fn app_runtime_agent_failed_ack_keeps_default_mode_error_window() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         },
     );
 
@@ -17646,6 +17661,7 @@ fn app_runtime_agent_failed_fallback_is_fail_closed_on_corrupt_prefs() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         },
     );
 
@@ -17916,6 +17932,315 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(persisted.priority_order, vec![99, 42]);
     assert_eq!(persisted.effect_authority_epoch, 7);
     assert_eq!(persisted.pending_effects, journal);
+}
+
+#[test]
+fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_and_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let preserved = gwt::PendingIssueMonitorEffect::prepared(
+        "disarm:99:7",
+        7,
+        gwt::IssueMonitorEffectPayload::DisarmAutoMerge {
+            issue_number: 99,
+            pr_number: 199,
+            compensates_effect_id: "arm:99:7".to_string(),
+        },
+    );
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            pending_effects: vec![preserved.clone()],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed latest disk authority");
+    let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        issues: vec![gwt::IssueMonitorIssue {
+            number: 42,
+            title: "Issue Monitor local proposal".to_string(),
+            labels: vec!["bug".to_string()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+        }],
+        source: gwt::IssueMonitorCandidateSource::Live,
+        live_error: None,
+    };
+    let now = "2026-07-28T00:00:00Z";
+    let mut stale = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+
+    rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |latest| {
+        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+            latest, &loaded, &repo, now,
+        );
+        latest.set_gui_connected(true);
+        prepare_local_issue_monitor_claim_proposals(
+            latest,
+            &loaded,
+            "windows-host/session",
+            now,
+            &std::collections::BTreeSet::new(),
+        );
+    });
+
+    let prepared = stale
+        .pending_effects()
+        .iter()
+        .find(|effect| {
+            matches!(
+                effect.payload,
+                gwt::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .expect("latest-state transaction preserves prepared claim proposal");
+    assert_eq!(prepared.state, gwt::IssueMonitorEffectState::Prepared);
+    assert!(stale
+        .pending_effects()
+        .iter()
+        .any(|effect| effect.effect_id == preserved.effect_id));
+
+    let mut bounded_remote_calls = 0;
+    let mut attempting_effect_id = None;
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + Duration::from_secs(5),
+    );
+    drive_local_issue_monitor_claim_effects_with(
+        &prefs_path,
+        &mut stale,
+        |effect, authority_current, _call_now, call_now_text| {
+            assert_eq!(effect.state, gwt::IssueMonitorEffectState::Attempting);
+            assert!(authority_current);
+            assert!(
+                gwt_core::operation_deadline::ensure_remaining("test bounded call")
+                    .expect("deadline probe")
+                    .is_some()
+            );
+            bounded_remote_calls += 1;
+            attempting_effect_id = Some(effect.effect_id.clone());
+            let claim = match &effect.payload {
+                gwt::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number,
+                    claim_id,
+                    owner,
+                    expires_at,
+                    launched_work_id,
+                    ..
+                } => gwt_github::issue_auto_claim::ClaimComment {
+                    comment_id: Some(gwt_github::CommentId(42)),
+                    claim_id: claim_id.clone(),
+                    owner: owner.clone(),
+                    issue_number: *issue_number,
+                    status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                    heartbeat_at: call_now_text.to_string(),
+                    expires_at: expires_at.clone(),
+                    launched_work_id: launched_work_id.clone(),
+                },
+                other => panic!("unexpected local effect: {other:?}"),
+            };
+            Ok(LocalIssueMonitorEffectOutcome::Claim(Ok(
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(claim),
+            )))
+        },
+    )
+    .expect("local driver completes exact claim result");
+    assert_eq!(bounded_remote_calls, 1);
+    let attempting_effect_id = attempting_effect_id.expect("attempting effect id");
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload exact result");
+    assert!(persisted
+        .pending_effects
+        .iter()
+        .any(|effect| effect.effect_id == preserved.effect_id));
+    assert!(!persisted
+        .pending_effects
+        .iter()
+        .any(|effect| effect.effect_id == attempting_effect_id));
+    assert_eq!(persisted.pending_launch_deliveries.len(), 1);
+    assert_eq!(
+        persisted.pending_launch_deliveries[0].delivery_id,
+        format!("launch:{attempting_effect_id}")
+    );
+}
+
+#[test]
+fn app_runtime_local_driver_rejects_stale_process_attempting_without_disk_fence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut stale_effect = gwt::PendingIssueMonitorEffect::prepared(
+        "claim:42:stale",
+        7,
+        gwt::IssueMonitorEffectPayload::AcquireClaim {
+            issue_number: 42,
+            claim_id: "claim-42-stale".to_string(),
+            owner: "stale/session".to_string(),
+            heartbeat_at: "2026-07-28T00:00:00Z".to_string(),
+            expires_at: "2026-07-28T00:30:00Z".to_string(),
+            launched_work_id: Some("work/issue-42".to_string()),
+        },
+    );
+    stale_effect.state = gwt::IssueMonitorEffectState::Attempting;
+    let mut stale = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![stale_effect],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            effect_authority_epoch: 8,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed revoked latest disk authority");
+    let mut remote_calls = 0;
+
+    drive_local_issue_monitor_claim_effects_with(
+        &prefs_path,
+        &mut stale,
+        |_effect, _authority_current, _now, _now_text| {
+            remote_calls += 1;
+            unreachable!("stale process-local Attempting must not cross the remote boundary")
+        },
+    )
+    .expect("revoked disk state is a clean no-op");
+
+    assert_eq!(remote_calls, 0);
+    assert!(!stale.config.enabled);
+    assert_eq!(stale.effect_authority_epoch(), 8);
+    assert!(stale.pending_effects().is_empty());
+}
+
+#[test]
+fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_invariants() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let journal = gwt::PendingIssueMonitorEffect::prepared(
+        "release:claim:99:7",
+        7,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 99,
+            claim_id: "claim-99".to_string(),
+            owner: "other/session".to_string(),
+        },
+    );
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![journal.clone()],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Issue Monitor lifecycle fallback".to_string(),
+        labels: vec!["bug".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        42,
+        "claim-42",
+        "host/session",
+        "effect-42",
+        "2026-07-28T00:00:00Z",
+    ));
+    assert!(monitor.claim_launch_delivery(
+        42,
+        "launch:effect-42",
+        "gui-a",
+        std::process::id(),
+        "tab-1::agent-1",
+        |_| false,
+    ));
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed lifecycle prefs");
+    let before = fs::read(&prefs_path).expect("read lifecycle prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_materializer_id = "gui-a".to_string();
+    reset_local_issue_monitor_fallback_commit_count();
+
+    let published = runtime.issue_monitor_launch_failed_result_events_with_delivery(
+        42,
+        "launch failed",
+        Some("launch:effect-42"),
+        Ok(()),
+    );
+    assert!(published.is_empty());
+    assert_eq!(local_issue_monitor_fallback_commit_count(), 0);
+    assert_eq!(
+        fs::read(&prefs_path).expect("reload published prefs"),
+        before
+    );
+
+    let fallback = runtime.issue_monitor_launch_failed_result_events_with_delivery(
+        42,
+        "launch failed",
+        Some("launch:effect-42"),
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "daemon not running".to_string(),
+            ),
+        ),
+    );
+    assert!(fallback.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number: 42,
+            ..
+        }
+    )));
+    assert_eq!(
+        local_issue_monitor_fallback_commit_count(),
+        1,
+        "publish failure performs exactly one latest-state fallback transaction",
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload fallback prefs");
+    assert_eq!(persisted.effect_authority_epoch, 7);
+    assert!(persisted
+        .pending_effects
+        .iter()
+        .any(|effect| effect.effect_id == journal.effect_id));
+    assert!(persisted.pending_launch_deliveries.is_empty());
+    assert!(persisted
+        .failed_issues
+        .iter()
+        .any(|failed| failed.issue_number == 42 && failed.message == "launch failed"));
 }
 
 #[test]
@@ -18481,6 +18806,7 @@ fn app_runtime_agent_failed_full_scan_migrates_then_keeps_new_same_failure() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(43),
+            issue_monitor_delivery_id: None,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -18552,6 +18878,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(43),
+            issue_monitor_delivery_id: None,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -19128,6 +19455,293 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
 }
 
 #[test]
+fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
+        .save(&sessions_dir)
+        .expect("save previous session");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3165,
+        title: "SPEC: durable delivery".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3165,
+        "claim-3165",
+        "host/session",
+        "effect-3165",
+        "2026-07-28T00:00:00Z",
+    ));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .expect("seed delivery");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let first = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+    assert!(first
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    let replay = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+    assert!(!replay
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    let agent_windows = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+    assert_eq!(agent_windows, 1);
+    let bound_window_id =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+            .expect("load bound delivery")
+            .pending_launch_deliveries[0]
+            .materializer_window_id
+            .clone()
+            .expect("bound window id");
+    let _ = runtime.issue_monitor_launch_completed_delivery_events(
+        3165,
+        &bound_window_id,
+        Some("launch:effect-3165"),
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+            .expect("reload prefs")
+            .pending_launch_deliveries
+            .is_empty()
+    );
+}
+
+#[test]
+fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
+        .save(&sessions_dir)
+        .expect("save previous session");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3165,
+        title: "SPEC: competing subscribers".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3165,
+        "claim-3165",
+        "host/session",
+        "effect-3165",
+        "2026-07-28T00:00:00Z",
+    ));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
+
+    let tab_a = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let tab_b = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime_a, _events_a) =
+        sample_runtime_with_events(temp.path(), vec![tab_a], Some("tab-1"));
+    let (mut runtime_b, _events_b) =
+        sample_runtime_with_events(temp.path(), vec![tab_b], Some("tab-1"));
+    runtime_a.issue_monitor_materializer_id = "gui-a".to_string();
+    runtime_b.issue_monitor_materializer_id = "gui-b".to_string();
+
+    let first = runtime_a.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+    let second = runtime_b.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+    let non_owner_failure = runtime_b.issue_monitor_launch_failed_delivery_events(
+        3165,
+        "non-owner validation failed",
+        Some("launch:effect-3165"),
+    );
+
+    assert!(first
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(!second
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(!non_owner_failure
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
+    let total_agent_windows = runtime_a.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .chain(runtime_b.tabs[0].workspace.persisted().windows.iter())
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+    assert_eq!(total_agent_windows, 1);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("load claimed delivery");
+    assert_eq!(
+        persisted.pending_launch_deliveries[0]
+            .materializer_id
+            .as_deref(),
+        Some("gui-a")
+    );
+}
+
+#[test]
+fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
+        .save(&sessions_dir)
+        .expect("save previous session");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3165,
+        title: "SPEC: durable delivery".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3165,
+        "claim-3165",
+        "host/session",
+        "effect-3165",
+        "2026-07-28T00:00:00Z",
+    ));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
+
+    let first_tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut first_runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![first_tab], Some("tab-1"));
+    let _ = first_runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+    let bound_window_id = gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("load bound delivery")
+        .pending_launch_deliveries[0]
+        .materializer_window_id
+        .clone()
+        .expect("bound window id");
+    assert!(first_runtime
+        .mark_issue_monitor_launch_delivery_materialized(
+            3165,
+            "launch:effect-3165",
+            &bound_window_id,
+        )
+        .expect("mark exact delivery materialized"));
+    first_runtime
+        .persist_issue_monitor_delivery_workspace(&bound_window_id)
+        .expect("persist exact delivery window");
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("load pre-ACK delivery")
+            .pending_launch_deliveries[0]
+            .workspace_durable_window_id,
+        None,
+        "simulate a crash after durable workspace save but before its prefs marker",
+    );
+
+    let restored_workspace = gwt::load_restored_workspace_state(&repo).expect("restore workspace");
+    let restored_tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(restored_workspace),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (mut restarted, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![restored_tab], Some("tab-1"));
+    restarted.issue_monitor_materializer_id = "restarted-gui".to_string();
+
+    let events = restarted.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert_eq!(
+        restarted.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1
+    );
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("reload ACKed prefs")
+        .pending_launch_deliveries
+        .is_empty());
+}
+
+#[test]
 fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     let _env_lock = env_test_lock()
         .lock()
@@ -19171,6 +19785,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_delivery_id: None,
         },
     );
 
