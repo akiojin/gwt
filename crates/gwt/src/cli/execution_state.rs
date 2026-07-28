@@ -493,6 +493,15 @@ pub fn materialize_at_launch(
     // (runs outside the lease; GC only touches sibling directories whose
     // recorded worktree is gone).
     crate::cli::trusted_store::gc_best_effort(worktree);
+    // T-275 staged core: emit the compact Phase Launch Packet (additive
+    // launch context; rejection stays off until T-276 opt-in).
+    crate::cli::launch_packet::write_best_effort(
+        worktree,
+        owner_kind.as_str(),
+        owner_number,
+        session_id,
+        entrypoint,
+    );
     Ok(())
 }
 
