@@ -2616,7 +2616,6 @@
             if (!activeRuntime) {
               return;
             }
-            activeRuntime.viewportRefreshPending = false;
             refreshTerminalViewport(windowId);
           });
           return false;
@@ -2646,7 +2645,6 @@
           if (!runtime) {
             return;
           }
-          runtime.viewportRefreshPending = false;
           refreshTerminalViewport(windowId);
         },
         markPending: markTerminalViewportRefreshPending,
@@ -2674,6 +2672,7 @@
           scheduleTerminalFocusActivation(windowId, {
             shouldPersistGeometry,
             reason: "force_refresh_retry",
+            restartRetryBudget: true,
           });
           return false;
         }
@@ -2705,6 +2704,7 @@
             scheduleTerminalFocusActivation(windowId, {
               shouldPersistGeometry,
               reason: "visibility_reveal",
+              restartRetryBudget: true,
             }),
         });
         traceUi(UI_TRACE_EVENT.terminalVisibilityReveal, {
@@ -2737,6 +2737,7 @@
             scheduleTerminalFocusActivation(windowId, {
               shouldPersistGeometry: true,
               reason: "visibility_restore",
+              restartRetryBudget: true,
             });
             continue;
           }
@@ -2746,7 +2747,11 @@
 
       function scheduleTerminalFocusActivation(
         windowId,
-        { shouldPersistGeometry = true, reason = "focus_activation" } = {},
+        {
+          shouldPersistGeometry = true,
+          reason = "focus_activation",
+          restartRetryBudget = false,
+        } = {},
       ) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
@@ -2756,6 +2761,9 @@
           runtime.pendingActivationIntent,
           { shouldPersistGeometry, reason },
         );
+        if (restartRetryBudget) {
+          runtime.activationAttempts = 0;
+        }
         if (runtime.activationFrame !== null) {
           return;
         }

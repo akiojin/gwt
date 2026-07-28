@@ -934,6 +934,31 @@ test("successful authoritative activation clears the viewport refresh settlement
 
 test("retry exhaustion preserves refresh intent for a later visibility restore", () => {
   const settle = terminalViewportReflow.resolveTerminalViewportRefreshSettlement;
+  assert.match(
+    appSource,
+    /function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?restartRetryBudget = false[\s\S]*?\} = \{\},\s*\) \{[\s\S]*?if \(restartRetryBudget\) \{\s*runtime\.activationAttempts = 0;\s*\}[\s\S]*?if \(runtime\.activationFrame !== null\) \{\s*return;/,
+    "external activation triggers must restart the bounded retry budget before a coalesced-frame early return",
+  );
+  for (const reason of [
+    "force_refresh_retry",
+    "visibility_reveal",
+    "visibility_restore",
+  ]) {
+    assert.match(
+      appSource,
+      new RegExp(
+        `scheduleTerminalFocusActivation\\(windowId,\\s*\\{[\\s\\S]*?reason:\\s*"${reason}",\\s*restartRetryBudget:\\s*true`,
+      ),
+      `${reason} must restart a previously exhausted retry budget`,
+    );
+  }
+  assert.equal(
+    (appSource.match(/restartRetryBudget:\s*true/g) || []).length,
+    3,
+    "internal retries and topmost focus must not restart the bounded retry budget",
+  );
+
+  const frameQueue = [];
   const host = {
     clientWidth: 0,
     clientHeight: 0,
@@ -945,6 +970,9 @@ test("retry exhaustion preserves refresh intent for a later visibility restore",
   const geometry = [];
   const runtime = {
     viewportRefreshPending: false,
+    activationAttempts: 0,
+    activationFrame: null,
+    pendingActivationIntent: null,
     terminal: {
       cols: 80,
       rows: 24,
@@ -960,37 +988,80 @@ test("retry exhaustion preserves refresh intent for a later visibility restore",
       },
     },
   };
-  const applySettlement = (activation, shouldPersistGeometry, hasPendingRefresh) => {
-    const settlement = settle?.({
-      activationRan: activation.ran,
-      shouldPersistGeometry,
-      hasPendingRefresh,
-    });
-    if (settlement?.shouldUpdate) {
-      runtime.viewportRefreshPending = settlement.pending;
+  const scheduleActivation = ({
+    shouldPersistGeometry,
+    reason,
+    restartRetryBudget = false,
+  }) => {
+    runtime.pendingActivationIntent =
+      terminalViewportReflow.mergeTerminalActivationIntent(
+        runtime.pendingActivationIntent,
+        { shouldPersistGeometry, reason },
+      );
+    if (restartRetryBudget) {
+      runtime.activationAttempts = 0;
     }
+    if (runtime.activationFrame !== null) {
+      return;
+    }
+    runtime.activationFrame = frameQueue.length + 1;
+    frameQueue.push(() => {
+      runtime.activationFrame = null;
+      const { intent, pendingIntent } =
+        terminalViewportReflow.takeTerminalActivationIntent(
+          runtime.pendingActivationIntent,
+        );
+      runtime.pendingActivationIntent = pendingIntent;
+      const hasPendingRefresh = runtime.viewportRefreshPending;
+      const activation = runTerminalActivationSequence({
+        runtime,
+        windowId: "retry-exhaustion",
+        shouldPersistGeometry: intent.shouldPersistGeometry,
+        hasPendingRefresh,
+        sendGeometry: (windowId, cols, rows) =>
+          geometry.push({ windowId, cols, rows }),
+      });
+      const settlement = settle?.({
+        activationRan: activation.ran,
+        shouldPersistGeometry: intent.shouldPersistGeometry,
+        hasPendingRefresh,
+      });
+      if (settlement?.shouldUpdate) {
+        runtime.viewportRefreshPending = settlement.pending;
+      }
+      if (!activation.ran) {
+        runtime.activationAttempts += 1;
+        if (runtime.activationAttempts <= 60) {
+          scheduleActivation({
+            shouldPersistGeometry: intent.shouldPersistGeometry,
+            reason: intent.reason,
+          });
+        }
+        return;
+      }
+      runtime.activationAttempts = 0;
+    });
   };
 
   // One initial frame plus HANDSHAKE_RETRY_LIMIT (60) bounded retries.
+  scheduleActivation({
+    shouldPersistGeometry: true,
+    reason: "visibility_reveal",
+    restartRetryBudget: true,
+  });
   for (let attempt = 0; attempt <= 60; attempt += 1) {
-    const hasPendingRefresh = runtime.viewportRefreshPending;
-    const activation = runTerminalActivationSequence({
-      runtime,
-      windowId: "retry-exhaustion",
-      shouldPersistGeometry: true,
-      hasPendingRefresh,
-      sendGeometry: (windowId, cols, rows) =>
-        geometry.push({ windowId, cols, rows }),
-    });
-    assert.equal(activation.ran, false);
-    applySettlement(activation, true, hasPendingRefresh);
+    assert.equal(frameQueue.length, 1);
+    frameQueue.shift()();
   }
 
   assert.equal(runtime.viewportRefreshPending, true);
+  assert.equal(runtime.activationAttempts, 61);
+  assert.equal(frameQueue.length, 0);
   assert.deepEqual(geometry, []);
 
-  // A later document visibility restore consumes the flag, then succeeds
-  // once layout has settled and clears the authoritative refresh state.
+  // A later document visibility restore owns a fresh bounded budget. Its
+  // first frame may still see unsettled layout and must queue an internal
+  // retry without resetting the attempt it just consumed.
   const pendingConsumed = rearmRefreshOnVisible({
     hasPendingRefresh: () => runtime.viewportRefreshPending,
     canRefresh: () => true,
@@ -999,23 +1070,79 @@ test("retry exhaustion preserves refresh intent for a later visibility restore",
     },
   });
   assert.equal(pendingConsumed, true);
+  scheduleActivation({
+    shouldPersistGeometry: true,
+    reason: "visibility_restore",
+    restartRetryBudget: true,
+  });
+  assert.equal(runtime.activationAttempts, 0);
+  assert.equal(frameQueue.length, 1);
+  frameQueue.shift()();
+  assert.equal(runtime.activationAttempts, 1);
+  assert.equal(runtime.viewportRefreshPending, true);
+  assert.equal(frameQueue.length, 1);
+
   host.clientWidth = 960;
   host.clientHeight = 540;
-  const restored = runTerminalActivationSequence({
-    runtime,
-    windowId: "retry-exhaustion",
-    shouldPersistGeometry: true,
-    hasPendingRefresh: true,
-    sendGeometry: (windowId, cols, rows) =>
-      geometry.push({ windowId, cols, rows }),
-  });
-  applySettlement(restored, true, true);
+  frameQueue.shift()();
 
-  assert.equal(restored.ran, true);
+  assert.equal(runtime.activationAttempts, 0);
   assert.equal(runtime.viewportRefreshPending, false);
+  assert.equal(frameQueue.length, 0);
   assert.deepEqual(geometry, [
     { windowId: "retry-exhaustion", cols: 120, rows: 36 },
   ]);
+});
+
+test("queued plain redraw cannot clear a failed authoritative activation settlement", () => {
+  const frames = [];
+  let viewportRefreshPending = false;
+  let refreshCount = 0;
+  const scheduler = createTerminalViewportRefreshScheduler({
+    schedule: (callback) => frames.push(callback),
+    canRefresh: () => true,
+    refresh: () => {
+      refreshCount += 1;
+    },
+    markPending: () => {
+      viewportRefreshPending = true;
+    },
+  });
+
+  scheduler.enqueue("queued-redraw");
+  viewportRefreshPending = true;
+  frames.shift()();
+
+  assert.equal(refreshCount, 1);
+  assert.equal(viewportRefreshPending, true);
+
+  const fallbackStart = appSource.indexOf(
+    "function scheduleTerminalViewportRefresh(",
+  );
+  const redrawStart = appSource.indexOf(
+    "function refreshTerminalViewport(",
+    fallbackStart,
+  );
+  const fallbackSource = appSource.slice(fallbackStart, redrawStart);
+  assert.doesNotMatch(
+    fallbackSource,
+    /viewportRefreshPending\s*=\s*false/,
+    "plain fallback redraw must not clear authoritative pending refresh state",
+  );
+
+  const schedulerStart = appSource.indexOf(
+    "terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({",
+  );
+  const forceRefreshStart = appSource.indexOf(
+    "function forceTerminalViewportRefresh(",
+    schedulerStart,
+  );
+  const schedulerSource = appSource.slice(schedulerStart, forceRefreshStart);
+  assert.doesNotMatch(
+    schedulerSource,
+    /viewportRefreshPending\s*=\s*false/,
+    "plain scheduler redraw must not clear authoritative pending refresh state",
+  );
 });
 
 test("pending reveal and topmost focus share one authoritative activation frame", () => {

@@ -788,6 +788,61 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
             refresh_settlement.is_match(html),
             "expected failed authoritative activation to rearm viewportRefreshPending before retry exhaustion and successful activation to clear it before the fast-path return (SPEC-2008 FR-122)",
         );
+    let retry_restart = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?restartRetryBudget\s*=\s*false[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{[\s\S]*?if \(restartRetryBudget\) \{\s*runtime\.activationAttempts = 0;\s*\}[\s\S]*?if \(runtime\.activationFrame !== null\) \{\s*return;"#,
+        )
+        .expect("valid regex");
+    assert!(
+            retry_restart.is_match(html),
+            "expected an external authoritative activation to restart the bounded retry budget before the coalesced-frame early return (SPEC-2008 FR-122)",
+        );
+    for reason in [
+        "force_refresh_retry",
+        "visibility_reveal",
+        "visibility_restore",
+    ] {
+        let external_restart = regex::Regex::new(&format!(
+                r#"(?s)scheduleTerminalFocusActivation\(windowId,\s*\{{[\s\S]*?reason:\s*"{reason}",\s*restartRetryBudget:\s*true"#
+            ))
+            .expect("valid regex");
+        assert!(
+            external_restart.is_match(html),
+            "expected {reason} to restart a previously exhausted activation retry budget (SPEC-2008 FR-122)",
+        );
+    }
+    assert_eq!(
+        html.matches("restartRetryBudget: true").count(),
+        3,
+        "internal retries and topmost focus must not restart the bounded activation retry budget",
+    );
+}
+
+#[test]
+fn embedded_web_plain_redraw_does_not_clear_authoritative_pending_refresh() {
+    let html = frontend_bundle_source();
+    let fallback_start = html
+        .find("function scheduleTerminalViewportRefresh(")
+        .expect("scheduleTerminalViewportRefresh must exist");
+    let redraw_start = html[fallback_start..]
+        .find("function refreshTerminalViewport(")
+        .map(|offset| fallback_start + offset)
+        .expect("refreshTerminalViewport must follow the scheduler");
+    assert!(
+        !html[fallback_start..redraw_start].contains("viewportRefreshPending = false"),
+        "plain fallback redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
+    );
+
+    let scheduler_start = html
+        .find("terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({")
+        .expect("terminal viewport refresh scheduler must exist");
+    let force_refresh_start = html[scheduler_start..]
+        .find("function forceTerminalViewportRefresh(")
+        .map(|offset| scheduler_start + offset)
+        .expect("forceTerminalViewportRefresh must follow the scheduler");
+    assert!(
+        !html[scheduler_start..force_refresh_start].contains("viewportRefreshPending = false"),
+        "plain scheduled redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
+    );
 }
 
 #[test]
