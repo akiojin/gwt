@@ -122,6 +122,7 @@ pub fn write_with_mirror(
     let trusted_dir = trusted_dir_for_worktree(worktree);
     if let Some(dir) = &trusted_dir {
         gwt_github::cache::write_atomic(&dir.join(file_name), bytes)?;
+        stamp_worktree_marker(dir, worktree);
     }
     match gwt_github::cache::write_atomic(mirror_path, bytes) {
         Err(err) if trusted_dir.is_some() => {
@@ -134,6 +135,85 @@ pub fn write_with_mirror(
         }
         result => result,
     }
+}
+
+/// Marker file naming the worktree a trusted directory belongs to. The
+/// directory key is a one-way hash, so GC (T-181) needs this to decide
+/// whether the worktree still exists.
+const WORKTREE_MARKER_FILE: &str = "worktree-path.txt";
+
+/// How long an orphaned trusted directory survives after its worktree
+/// disappears (T-181). Long enough for post-deletion inspection and the
+/// T-182 relaunch import; short enough that ephemeral worktrees do not
+/// accumulate forever.
+const GC_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+fn stamp_worktree_marker(trusted_dir: &Path, worktree: &Path) {
+    let marker = trusted_dir.join(WORKTREE_MARKER_FILE);
+    if marker.exists() {
+        return;
+    }
+    let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    if let Err(error) =
+        gwt_github::cache::write_atomic(&marker, canonical.to_string_lossy().as_bytes())
+    {
+        tracing::warn!(?error, "trusted store worktree marker write failed");
+    }
+}
+
+/// T-181 core: best-effort GC of sibling trusted directories whose recorded
+/// worktree no longer exists and whose newest file is older than the
+/// retention window. Marker-less directories (pre-T-181) are left alone —
+/// GC never guesses. Runs from launch materialization; failures only warn.
+pub fn gc_best_effort(current_worktree: &Path) {
+    gc_with_retention(current_worktree, GC_RETENTION);
+}
+
+fn gc_with_retention(current_worktree: &Path, retention: Duration) {
+    let Some(own_dir) = trusted_dir_for_worktree(current_worktree) else {
+        return;
+    };
+    let Some(root) = own_dir.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() || dir == own_dir {
+            continue;
+        }
+        let marker = dir.join(WORKTREE_MARKER_FILE);
+        let Ok(recorded) = fs::read_to_string(&marker) else {
+            continue;
+        };
+        if Path::new(recorded.trim()).exists() {
+            continue;
+        }
+        if newest_modification_age(&dir).is_none_or(|age| age < retention) {
+            continue;
+        }
+        if let Err(error) = fs::remove_dir_all(&dir) {
+            tracing::warn!(?error, path = %dir.display(), "trusted store GC failed");
+        } else {
+            tracing::info!(path = %dir.display(), "trusted store GC removed orphaned entry");
+        }
+    }
+}
+
+/// Age of the most recently modified file in the directory (None when the
+/// directory is unreadable or clocks misbehave — GC then keeps it).
+fn newest_modification_age(dir: &Path) -> Option<Duration> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        newest = Some(match newest {
+            Some(current) if current >= modified => current,
+            _ => modified,
+        });
+    }
+    newest?.elapsed().ok()
 }
 
 /// Bounded wait before a second concurrent writer is refused (T-149). Long
@@ -377,6 +457,73 @@ mod tests {
         assert!(!ran, "refused writer must not run its operation");
         release_tx.send(()).unwrap();
         holder.join().unwrap();
+    }
+
+    // T-181: GC removes orphaned sibling entries (marker points at a gone
+    // worktree, files older than retention) and keeps live and marker-less
+    // ones.
+    #[test]
+    fn gc_removes_only_orphaned_marked_siblings() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(dir.path());
+        write(dir.path(), "own.json", b"{}").unwrap();
+        let own_dir = trusted_dir_for_worktree(dir.path()).unwrap();
+        let root = own_dir.parent().unwrap().to_path_buf();
+
+        // Orphan: marker points at a deleted worktree.
+        let orphan = root.join("00000000deadbeef");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("execution-control.json"), "{}").unwrap();
+        std::fs::write(
+            orphan.join(WORKTREE_MARKER_FILE),
+            dir.path()
+                .join("no-such-worktree")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        // Live sibling: marker points at an existing path.
+        let live = root.join("00000000cafebabe");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("execution-control.json"), "{}").unwrap();
+        std::fs::write(
+            live.join(WORKTREE_MARKER_FILE),
+            dir.path().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        // Marker-less legacy sibling: never touched.
+        let legacy = root.join("00000000feedf00d");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("execution-control.json"), "{}").unwrap();
+
+        gc_with_retention(dir.path(), Duration::ZERO);
+        assert!(!orphan.exists(), "orphaned entry must be removed");
+        assert!(live.exists(), "live entry must survive");
+        assert!(legacy.exists(), "marker-less legacy entry must survive");
+        assert!(own_dir.exists(), "own entry must survive");
+
+        // Fresh orphans inside the retention window survive.
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("execution-control.json"), "{}").unwrap();
+        std::fs::write(
+            orphan.join(WORKTREE_MARKER_FILE),
+            dir.path()
+                .join("no-such-worktree")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        gc_with_retention(dir.path(), Duration::from_secs(3600));
+        assert!(
+            orphan.exists(),
+            "entries younger than retention must survive"
+        );
     }
 
     #[test]

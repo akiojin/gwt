@@ -28,6 +28,7 @@ pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
+pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
 mod pane;
