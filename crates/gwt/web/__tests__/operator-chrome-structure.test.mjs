@@ -4247,16 +4247,18 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   const guardIndex = renderWorkspaceBody.indexOf(
     "key: workspaceWindowsRenderKey(workspace)",
   );
-  const commitWindowKeyIndex = renderWorkspaceBody.indexOf(
-    "renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;",
-  );
   const classifyIndex = renderWorkspaceBody.indexOf(
     "classifyProjectWindowVisibility",
   );
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
-  const telemetryIndex = renderWorkspaceBody.indexOf("recomputeOperatorTelemetry();");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
   const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
+  const syncGuardIndex = workspaceRenderSyncSource.indexOf('guard("sync"');
+  const recomputeGuardIndex = workspaceRenderSyncSource.indexOf('guard("recompute"');
+  const afterSyncGuardIndex = workspaceRenderSyncSource.indexOf('guard("after_sync"');
+  const commitWindowKeyIndex = workspaceRenderSyncSource.indexOf(
+    "renderedKey = key;",
+  );
 
   assert.notEqual(
     nextViewportIndex,
@@ -4292,10 +4294,10 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
     "reconciliation and focus activation must run inside the guarded render call",
   );
   assert.ok(
-    commitWindowKeyIndex > ensureIndex &&
-      commitWindowKeyIndex > telemetryIndex &&
-      commitWindowKeyIndex > focusIndex,
-    "renderWorkspace must commit the window key only after reconciliation succeeds",
+    commitWindowKeyIndex > syncGuardIndex &&
+      commitWindowKeyIndex > recomputeGuardIndex &&
+      commitWindowKeyIndex > afterSyncGuardIndex,
+    "workspace render sync must commit the window key only after reconciliation, telemetry, and focus all succeed",
   );
 });
 

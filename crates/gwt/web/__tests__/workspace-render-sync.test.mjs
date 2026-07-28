@@ -158,7 +158,7 @@ test("recompute runs even when the sync callback itself throws", () => {
   assert.equal(result.failures[0].label, "sync");
 });
 
-test("a recompute failure is recorded but does not block the key commit", () => {
+test("a recompute failure leaves the key uncommitted until a clean retry", () => {
   const renderSync = createWorkspaceRenderSync();
 
   const first = renderSync.render(
@@ -172,10 +172,11 @@ test("a recompute failure is recorded but does not block the key commit", () => 
   assert.equal(first.failures[0].label, "recompute");
 
   const second = renderSync.render(renderArgs({}));
-  assert.equal(second.skipped, true, "a clean sync commits the key even if recompute failed");
+  assert.equal(second.skipped, false, "a failed telemetry recompute must retry the same state");
+  assert.equal(renderSync.render(renderArgs({})).skipped, true);
 });
 
-test("an afterSync failure is recorded but does not block the key commit", () => {
+test("an afterSync failure leaves the key uncommitted until a clean retry", () => {
   const renderSync = createWorkspaceRenderSync();
 
   const first = renderSync.render(
@@ -189,7 +190,8 @@ test("an afterSync failure is recorded but does not block the key commit", () =>
   assert.equal(first.failures[0].label, "after_sync");
 
   const second = renderSync.render(renderArgs({}));
-  assert.equal(second.skipped, true);
+  assert.equal(second.skipped, false, "a failed focus reconciliation must retry the same state");
+  assert.equal(renderSync.render(renderArgs({})).skipped, true);
 });
 
 test("onDegraded fires once per degraded render with the failures", () => {

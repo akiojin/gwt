@@ -41,11 +41,11 @@ export function createWorkspaceRenderSync({ onDegraded } = {}) {
     };
 
     guard("sync", null, () => sync?.(isolate));
+    guard("recompute", null, () => recompute?.());
+    guard("after_sync", null, () => afterSync?.());
     if (failures.length === 0) {
       renderedKey = key;
     }
-    guard("recompute", null, () => recompute?.());
-    guard("after_sync", null, () => afterSync?.());
     if (failures.length > 0) {
       try {
         onDegraded?.(failures);
