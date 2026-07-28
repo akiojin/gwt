@@ -3799,13 +3799,21 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
     // longer ends with a maximized-viewport sync. It now recomputes operator
     // telemetry (rail window-count badge / empty-canvas state) after mounting
-    // every window and applying its visibility transition.
+    // every window and applying its visibility transition. Issue #3365: the
+    // loop is a per-window `isolate` callback inside workspaceRenderSync so
+    // one poisoned window cannot block the others, and the telemetry
+    // recompute is the guard's `recompute` hook (guaranteed even on a failed
+    // sync).
     let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*//[^\n]*\n(?:\s*//[^\n]*\n)*\s*recomputeOperatorTelemetry\(\);",
+            r#"(?s)isolate\("ensure_window", workspace\.windows, \(windowData\) => \{(?P<body>.*?)\}\);"#,
         )
         .expect("valid regex");
     let captures = visibility_block.captures(js).expect(
         "expected the workspace.windows visibility loop that applies the visibility transition",
+    );
+    assert!(
+        js.contains("recompute: recomputeOperatorTelemetry"),
+        "expected the render guard to keep operator telemetry recompute wired after the visibility loop",
     );
     let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
     // After SPEC-2008 Phase 24 follow-up, the loop delegates to

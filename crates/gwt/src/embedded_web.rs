@@ -120,6 +120,13 @@ root_js_modules! {
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
+    // Issue #3365 — render-key lifecycle with per-window exception isolation
+    // (a failed sync retries on the next workspace_state instead of freezing
+    // the minimap / window list / telemetry behind a committed key).
+    "workspace-render-sync.js" => "createWorkspaceRenderSync",
+    // Issue #3365 — user-visible degradation notice for swallowed
+    // render/receive failures.
+    "render-degradation-banner.js" => "createRenderDegradationBanner",
     // SPEC-1939 Phase 24 — per-window terminal output batching before xterm
     // write.
     "terminal-output-buffer.js" => "createTerminalOutputBatcher",

@@ -35,6 +35,9 @@
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createLaunchPendingController } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
+      // Issue #3365 — render-key exception safety + degradation visibility.
+      import { createWorkspaceRenderSync } from "/workspace-render-sync.js";
+      import { createRenderDegradationBanner } from "/render-degradation-banner.js";
       import { createUpdateCtaController } from "/update-cta.js";
       // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
       // alongside the away-only desktop notifier in the same module.
@@ -446,7 +449,9 @@
       let improvementCandidatesRevision = 0;
       let improvementCandidatesProjectRoot = null;
       let renderedProjectTabsKey = "";
-      let renderedWorkspaceWindowsKey = "";
+      // Issue #3365: renderedWorkspaceWindowsKey moved into
+      // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
+      // never leaves a committed key behind.
       let renderedAppVersionLabel = null;
       let renderedOperatorTelemetryKey = "";
       // SPEC-3064 Phase 3 (E7): the rendered-key slots for the moved chrome
@@ -1050,6 +1055,30 @@
       // a frozen app when every click needs the socket.
       const connectionOverlay = createConnectionOverlay({ document });
 
+      // Issue #3365 — persistent notice for render/receive failures that the
+      // resilient paths below swallow (dispatcher warn-and-continue, per-window
+      // sync isolation). Console-only reporting left the user with a silently
+      // stale minimap / window list until reload.
+      const renderDegradationBanner = createRenderDegradationBanner({ document });
+
+      // Issue #3365 — owns renderedWorkspaceWindowsKey's lifecycle: the key is
+      // committed only after a fully clean per-window sync, so a degraded
+      // render retries on the next workspace_state instead of being
+      // diff-skipped into a frozen minimap / window list / telemetry.
+      const workspaceRenderSync = createWorkspaceRenderSync({
+        onDegraded: (failures) => {
+          for (const failure of failures) {
+            console.warn(
+              "[render-workspace] %s failed — continuing degraded",
+              failure.label,
+              failure.item,
+              failure.error,
+            );
+          }
+          renderDegradationBanner.report({ source: "render_workspace" });
+        },
+      });
+
       function setConnectionState(connected) {
         connectionOverlay.setConnected(connected);
         // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
@@ -1119,6 +1148,14 @@
             traceUi(kind, fields);
           },
           shouldTrace: uiTraceWiring.isTracing,
+          // Issue #3365 — a receive() failure keeps the event stream alive but
+          // must not stay console-only: surface it as a degradation notice.
+          onReceiveError: (error, eventKind) => {
+            renderDegradationBanner.report({
+              source: `receive:${eventKind || "unknown"}`,
+              error,
+            });
+          },
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
@@ -5149,112 +5186,112 @@
               applyViewport();
             }
 
-            const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);
-            if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey) {
-              // SPEC-2008 camera-focus: nothing to re-sync when the window set is
-              // unchanged — windows render at their own geometry and the camera
-              // is driven locally (frameWindow), not per-render.
-              return;
-            }
+            // SPEC-2008 camera-focus: nothing to re-sync when the window set is
+            // unchanged — windows render at their own geometry and the camera
+            // is driven locally (frameWindow), not per-render. Issue #3365: the
+            // key diff + commit live in workspaceRenderSync so an exception
+            // mid-sync leaves the key uncommitted (the next workspace_state
+            // retries instead of freezing), one poisoned window cannot block
+            // the others, and the telemetry recompute always runs.
+            let activeWindowIdSet = null;
+            workspaceRenderSync.render({
+              key: workspaceWindowsRenderKey(workspace),
+              sync: (isolate) => {
+                activeWindowIdSet = workspaceWindowIdSet(workspace);
+                const visibility = classifyProjectWindowVisibility({
+                  activeWindowIdSet,
+                  allProjectWindowIdSet: allProjectWindowIdSet(),
+                  mountedWindowIds: windowMap.keys(),
+                });
+                isolate("hide_window", visibility.hidden, (windowId) => {
+                  const element = windowMap.get(windowId);
+                  applyVisibilityTransition({
+                    element,
+                    shouldHide: true,
+                    hasTerminal: terminalMap.has(windowId),
+                    onReveal: () => activateTerminalOnReveal(windowId),
+                  });
+                });
+                isolate("remove_window", visibility.removed, (windowId) => {
+                  const element = windowMap.get(windowId);
+                  if (!element) return;
+                  const runtime = terminalMap.get(windowId);
+                  if (runtime && runtime.activationFrame !== null) {
+                    cancelAnimationFrame(runtime.activationFrame);
+                  }
+                  terminalViewportRefreshScheduler?.clear(windowId);
+                  runtime?.cleanup?.();
+                  runtime?.terminal.dispose();
+                  terminalMap.delete(windowId);
+                  decoderMap.delete(windowId);
+                  detailMap.delete(windowId);
+                  windowRuntimeStateMap.delete(windowId);
+                  agentCompletionNotifier.forgetWindow(windowId);
+                  agentAttentionToaster.forgetWindow(windowId);
+                  // SPEC #3206: dismiss this window's attention toast from the shared
+                  // alerts stack so a sticky error toast never orphans a gone window.
+                  alertsToasts.dismiss(`attention-${windowId}`);
+                  renderedWindowElementKeys.delete(windowId);
+                  renderedRuntimeStatusKeys.delete(windowId);
+                  renderedAgentKanbanBodyKeys.delete(windowId);
+                  pendingOutputMap.delete(windowId);
+                  pendingSnapshotMap.delete(windowId);
+                  terminalOutputBatcher.clear(windowId);
+                  const profileState = profileStateMap.get(windowId);
+                  if (profileState) {
+                    clearProfileSaveTimer(profileState);
+                  }
+                  fileTreeStateMap.delete(windowId);
+                  branchListStateMap.delete(windowId);
+                  profileStateMap.delete(windowId);
+                  boardStateMap.delete(windowId);
+                  logStateMap.delete(windowId);
+                  indexSearchStateMap.delete(windowId);
+                  clearKnowledgeBridgeState(windowId);
+                  workspaceOverviewSurface.deleteState(windowId);
+                  clearBranchCleanupForWindow(windowId);
+                  clearLocalGeometryEdit(geometrySyncState, windowId);
+                  element.remove();
+                  windowMap.delete(windowId);
+                });
 
-            const activeWindowIdSet = workspaceWindowIdSet(workspace);
-            const visibility = classifyProjectWindowVisibility({
-              activeWindowIdSet,
-              allProjectWindowIdSet: allProjectWindowIdSet(),
-              mountedWindowIds: windowMap.keys(),
+                // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+                // for tab-grouped terminal windows so the newly visible terminal
+                // gets fit + viewport refresh + focus on the same animation frame
+                // cycle. Without this, scrollback wheel input requires a manual
+                // OS-level resize before xterm picks up the new measurement. The
+                // transition logic lives in `terminal-viewport-reflow.js` so a
+                // behavior test (linkedom + element stub) can exercise the
+                // hidden-to-visible activation path directly.
+                isolate("ensure_window", workspace.windows, (windowData) => {
+                  ensureWindow(windowData);
+                  const element = windowMap.get(windowData.id);
+                  if (!element) return;
+                  applyVisibilityTransition({
+                    element,
+                    shouldHide: !visibleWindowData(windowData),
+                    hasTerminal: terminalMap.has(windowData.id),
+                    onReveal: () => activateTerminalOnReveal(windowData.id),
+                  });
+                });
+              },
+              // SPEC-2008 camera-focus: keep the rail window-count badge and the
+              // empty-canvas state in sync with window mounts/unmounts, not only
+              // with agent status events.
+              recompute: recomputeOperatorTelemetry,
+              afterSync: () => {
+                const topmostId = topmostWindowId(workspace);
+                if (topmostId && activeWindowIdSet?.has(topmostId)) {
+                  focusWindowLocally(topmostId);
+                  scheduleTerminalFocusActivation(topmostId, {
+                    shouldPersistGeometry: false,
+                    reason: "topmost_focus",
+                  });
+                } else {
+                  focusedId = null;
+                }
+              },
             });
-            for (const windowId of visibility.hidden) {
-              const element = windowMap.get(windowId);
-              applyVisibilityTransition({
-                element,
-                shouldHide: true,
-                hasTerminal: terminalMap.has(windowId),
-                onReveal: () => activateTerminalOnReveal(windowId),
-              });
-            }
-            for (const windowId of visibility.removed) {
-              const element = windowMap.get(windowId);
-              if (!element) continue;
-              const runtime = terminalMap.get(windowId);
-              if (runtime && runtime.activationFrame !== null) {
-                cancelAnimationFrame(runtime.activationFrame);
-              }
-              terminalViewportRefreshScheduler?.clear(windowId);
-              runtime?.cleanup?.();
-              runtime?.terminal.dispose();
-              terminalMap.delete(windowId);
-              decoderMap.delete(windowId);
-              detailMap.delete(windowId);
-              windowRuntimeStateMap.delete(windowId);
-              agentCompletionNotifier.forgetWindow(windowId);
-              agentAttentionToaster.forgetWindow(windowId);
-              // SPEC #3206: dismiss this window's attention toast from the shared
-              // alerts stack so a sticky error toast never orphans a gone window.
-              alertsToasts.dismiss(`attention-${windowId}`);
-              renderedWindowElementKeys.delete(windowId);
-              renderedRuntimeStatusKeys.delete(windowId);
-              renderedAgentKanbanBodyKeys.delete(windowId);
-              pendingOutputMap.delete(windowId);
-              pendingSnapshotMap.delete(windowId);
-              terminalOutputBatcher.clear(windowId);
-              const profileState = profileStateMap.get(windowId);
-              if (profileState) {
-                clearProfileSaveTimer(profileState);
-              }
-              fileTreeStateMap.delete(windowId);
-              branchListStateMap.delete(windowId);
-              profileStateMap.delete(windowId);
-              boardStateMap.delete(windowId);
-              logStateMap.delete(windowId);
-              indexSearchStateMap.delete(windowId);
-              clearKnowledgeBridgeState(windowId);
-              workspaceOverviewSurface.deleteState(windowId);
-              clearBranchCleanupForWindow(windowId);
-              clearLocalGeometryEdit(geometrySyncState, windowId);
-              element.remove();
-              windowMap.delete(windowId);
-            }
-
-            // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
-            // for tab-grouped terminal windows so the newly visible terminal
-            // gets fit + viewport refresh + focus on the same animation frame
-            // cycle. Without this, scrollback wheel input requires a manual
-            // OS-level resize before xterm picks up the new measurement. The
-            // transition logic lives in `terminal-viewport-reflow.js` so a
-            // behavior test (linkedom + element stub) can exercise the
-            // hidden-to-visible activation path directly.
-            for (const windowData of workspace.windows) {
-              ensureWindow(windowData);
-              const element = windowMap.get(windowData.id);
-              if (!element) continue;
-              applyVisibilityTransition({
-                element,
-                shouldHide: !visibleWindowData(windowData),
-                hasTerminal: terminalMap.has(windowData.id),
-                onReveal: () => activateTerminalOnReveal(windowData.id),
-              });
-            }
-
-            // SPEC-2008 camera-focus: keep the rail window-count badge and the
-            // empty-canvas state in sync with window mounts/unmounts, not only
-            // with agent status events.
-            recomputeOperatorTelemetry();
-
-            const topmostId = topmostWindowId(workspace);
-            if (topmostId && activeWindowIdSet.has(topmostId)) {
-              focusWindowLocally(topmostId);
-              scheduleTerminalFocusActivation(topmostId, {
-                shouldPersistGeometry: false,
-                reason: "topmost_focus",
-              });
-            } else {
-              focusedId = null;
-            }
-            // Commit only after every synchronous reconciliation step
-            // succeeds. If a renderer throws, the same workspace snapshot
-            // must remain retryable instead of being mistaken for an
-            // already-applied state.
-            renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
           },
         );
       }
