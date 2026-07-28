@@ -5242,8 +5242,9 @@ mod tests {
     }
 
     #[test]
-    fn host_package_runner_fallback_switches_custom_bunx_to_npx_when_probe_fails() {
+    fn host_package_runner_fallback_does_not_probe_or_mutate_custom_bunx() {
         let mut config = sample_custom_bunx_launch_config();
+        let original = format!("{config:?}");
         let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
@@ -5256,20 +5257,12 @@ mod tests {
             },
         );
 
-        assert!(changed, "expected custom bunx failure to switch to npx");
-        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
+        assert!(!changed, "Custom Bunx must bypass built-in fallback policy");
+        assert!(probes.is_empty(), "Custom Bunx must not be probed");
         assert_eq!(
-            probes[0],
-            ("bunx".to_string(), vec!["--version".to_string()])
-        );
-        assert_eq!(config.command, "npx");
-        assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ]
+            format!("{config:?}"),
+            original,
+            "Custom Bunx launch must remain unchanged"
         );
     }
 

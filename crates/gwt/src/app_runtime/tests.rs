@@ -13626,7 +13626,7 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
     let direct = bin.join("codex");
     fs::write(
         &direct,
-        "#!/bin/sh\nprintf 'probe\\n' >> \"$CODEX_INVOCATION_COUNTER\"\n/bin/sleep 8\necho 'runner broken' >&2\nexit 1\n",
+        "#!/bin/sh\nprintf 'probe\\n' >> \"${0%/*}/../codex-invocations.txt\"\n/bin/sleep 8\necho 'runner broken' >&2\nexit 1\n",
     )
     .expect("write broken Codex runner");
     fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
@@ -13641,10 +13641,6 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
     config.env_vars.extend([
         ("PATH".to_string(), bin.display().to_string()),
         ("HOME".to_string(), temp.path().display().to_string()),
-        (
-            "CODEX_INVOCATION_COUNTER".to_string(),
-            invocation_counter.display().to_string(),
-        ),
     ]);
     let (proxy, events) = AppEventProxy::stub();
 
@@ -13882,7 +13878,7 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
 }
 
 #[test]
-fn fresh_execution_abort_conflict_retains_work_marker_and_candidate() {
+fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candidate() {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13939,11 +13935,8 @@ fn fresh_execution_abort_conflict_retains_work_marker_and_candidate() {
         Utc::now(),
     );
     unrelated.title = Some("Unrelated writer after rejected callback".to_string());
-    assert!(
-        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
-            .is_err(),
-        "abort refusal must retain its external Prepared Work marker unchanged",
-    );
+    gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
+        .expect("prevalidation refusal must not create a partial Work transaction");
 }
 
 #[cfg(unix)]
