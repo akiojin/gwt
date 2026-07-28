@@ -1773,14 +1773,32 @@ impl AppRuntime {
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
     ) -> Vec<OutboundEvent> {
+        let mut recovery_events = Vec::new();
         if let Some(delivery_id) = delivery_id.as_deref() {
             match self
                 .issue_monitor_launch_deliveries
                 .get(delivery_id)
                 .cloned()
             {
-                Some(super::IssueMonitorLaunchDeliveryState::Materializing { .. }) => {
-                    return Vec::new();
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id,
+                    started_at,
+                }) => {
+                    let window_exists = self.tracked_window_exists(&window_id);
+                    if window_exists
+                        && started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL
+                    {
+                        return Vec::new();
+                    }
+                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                    self.pending_launch_feedback_contexts.remove(&window_id);
+                    self.inflight_launches
+                        .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+                    if window_exists {
+                        recovery_events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
                 }
                 Some(super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { window_id }) => {
                     return self.issue_monitor_launch_completed_delivery_events(
@@ -1805,22 +1823,49 @@ impl AppRuntime {
                 }
                 None => {}
             }
-            if let Some((window_id, workspace_durable)) =
+            if let Some((window_id, was_materialized, _)) =
                 self.existing_issue_monitor_delivery_window(issue_number, delivery_id)
             {
-                return if workspace_durable {
-                    self.issue_monitor_launch_succeeded_delivery_events(
-                        issue_number,
-                        &window_id,
-                        Some(delivery_id),
-                    )
+                match self.claim_issue_monitor_launch_delivery(
+                    issue_number,
+                    delivery_id,
+                    &window_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return recovery_events,
+                    Err(error) => {
+                        recovery_events.extend(self.issue_monitor_control_error_events(
+                            None,
+                            error,
+                            "reclaim-launch-delivery-window",
+                            Some(issue_number),
+                        ));
+                        return recovery_events;
+                    }
+                }
+                if !was_materialized {
+                    recovery_events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
                 } else {
-                    self.issue_monitor_launch_completed_delivery_events(
-                        issue_number,
-                        &window_id,
-                        Some(delivery_id),
-                    )
-                };
+                    let Some((window_id, materialized, workspace_durable)) =
+                        self.existing_issue_monitor_delivery_window(issue_number, delivery_id)
+                    else {
+                        return recovery_events;
+                    };
+                    return if materialized && workspace_durable {
+                        self.issue_monitor_launch_succeeded_delivery_events(
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    } else {
+                        self.issue_monitor_launch_completed_delivery_events(
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    };
+                }
             }
         }
         match self.silent_issue_monitor_launch_events(
@@ -1830,34 +1875,46 @@ impl AppRuntime {
             None,
             delivery_id.clone(),
         ) {
-            Ok(Some(events)) => events,
+            Ok(Some(events)) => {
+                recovery_events.extend(events);
+                recovery_events
+            }
             Ok(None) => {
                 if self.launch_wizard.is_some() {
-                    return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                        level: "info".to_string(),
-                        message: "Issue Monitor settings are already open".to_string(),
-                        issue_number: Some(issue_number),
-                    })];
+                    recovery_events.push(OutboundEvent::broadcast(
+                        BackendEvent::IssueMonitorToast {
+                            level: "info".to_string(),
+                            message: "Issue Monitor settings are already open".to_string(),
+                            issue_number: Some(issue_number),
+                        },
+                    ));
+                    return recovery_events;
                 }
-                self.open_issue_monitor_configure_wizard_events(
-                    "__issue_monitor__",
-                    issue_number,
-                    linked_issue_kind,
-                )
-                .into_iter()
-                .map(|mut event| {
-                    if matches!(event.target, DispatchTarget::Client(_)) {
-                        event.target = DispatchTarget::Broadcast;
-                    }
-                    event
-                })
-                .collect()
+                recovery_events.extend(
+                    self.open_issue_monitor_configure_wizard_events(
+                        "__issue_monitor__",
+                        issue_number,
+                        linked_issue_kind,
+                    )
+                    .into_iter()
+                    .map(|mut event| {
+                        if matches!(event.target, DispatchTarget::Client(_)) {
+                            event.target = DispatchTarget::Broadcast;
+                        }
+                        event
+                    })
+                    .collect::<Vec<_>>(),
+                );
+                recovery_events
             }
-            Err(error) => self.issue_monitor_launch_failed_delivery_events(
-                issue_number,
-                &error,
-                delivery_id.as_deref(),
-            ),
+            Err(error) => {
+                recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
+                    issue_number,
+                    &error,
+                    delivery_id.as_deref(),
+                ));
+                recovery_events
+            }
         }
     }
 
@@ -1865,7 +1922,7 @@ impl AppRuntime {
         &self,
         issue_number: u64,
         delivery_id: &str,
-    ) -> Option<(String, bool)> {
+    ) -> Option<(String, bool, bool)> {
         let tab_id = self.active_tab_id.as_deref()?;
         let tab = self.tab(tab_id)?;
         let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
@@ -1876,9 +1933,6 @@ impl AppRuntime {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
         })?;
         let bound_window_id = delivery.materializer_window_id.as_deref()?;
-        if delivery.materialized_window_id.as_deref() != Some(bound_window_id) {
-            return None;
-        }
         let window_id = tab
             .workspace
             .persisted()
@@ -1888,6 +1942,7 @@ impl AppRuntime {
             .find(|window_id| window_id == bound_window_id)?;
         Some((
             window_id,
+            delivery.materialized_window_id.as_deref() == Some(bound_window_id),
             delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
         ))
     }

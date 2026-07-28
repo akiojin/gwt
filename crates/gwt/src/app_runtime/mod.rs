@@ -388,11 +388,22 @@ pub struct LaunchFeedbackContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IssueMonitorLaunchDeliveryState {
-    Materializing { window_id: String },
-    LaunchedPendingAck { window_id: String },
-    Launched { window_id: String },
-    LaunchFailed { message: String },
+    Materializing {
+        window_id: String,
+        started_at: std::time::Instant,
+    },
+    LaunchedPendingAck {
+        window_id: String,
+    },
+    Launched {
+        window_id: String,
+    },
+    LaunchFailed {
+        message: String,
+    },
 }
+
+const ISSUE_MONITOR_MATERIALIZING_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct IssueLaunchWizardPrepared {
@@ -1623,15 +1634,16 @@ impl AppRuntime {
                 address.tab_id
             ))
         })?;
-        gwt::save_workspace_state_durable(
-            &gwt::workspace_state_path(&tab.project_root),
-            &tab.workspace.persistable_state(),
-        )
-        .map_err(|error| {
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                "launch delivery workspace persistence failed: {error}"
-            ))
-        })
+        self.persist_dispatcher
+            .flush_workspace_durable(
+                gwt::workspace_state_path(&tab.project_root),
+                tab.workspace.persistable_state(),
+            )
+            .map_err(|error| {
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                    format!("launch delivery workspace persistence failed: {error}"),
+                )
+            })
     }
 
     fn mark_issue_monitor_launch_delivery_materialized(
@@ -1668,6 +1680,7 @@ impl AppRuntime {
                 Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
                     delivery.issue_number == issue_number
                         && delivery.delivery_id == delivery_id
+                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
                         && delivery.materialized_window_id.as_deref()
                             == Some(materializer_window_id)
                 }))
@@ -1723,6 +1736,7 @@ impl AppRuntime {
                 Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
                     delivery.issue_number == issue_number
                         && delivery.delivery_id == delivery_id
+                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
                         && delivery.workspace_durable_window_id.as_deref()
                             == Some(materializer_window_id)
                 }))

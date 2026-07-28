@@ -1470,29 +1470,32 @@ pub fn clear_issue_monitor_authority_fence(
     prefs_path: &Path,
     expected: &IssueMonitorAuthorityFence,
 ) -> io::Result<()> {
-    match load_issue_monitor_authority_fence(prefs_path)? {
-        IssueMonitorAuthorityFenceState::Active(current) if current == *expected => {}
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "Issue Monitor authority fence identity changed before clear",
-            ));
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        match load_issue_monitor_authority_fence(prefs_path)? {
+            IssueMonitorAuthorityFenceState::Active(current) if current == *expected => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor authority fence identity changed before clear",
+                ));
+            }
         }
-    }
-    let path = issue_monitor_authority_fence_path(prefs_path);
-    fs::remove_file(&path)?;
-    #[cfg(test)]
-    if let Some(fail_once) = std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_FENCE_PARENT_SYNC_ONCE")
-    {
-        let fail_once = std::path::PathBuf::from(fail_once);
-        if fail_once.exists() {
-            fs::remove_file(fail_once)?;
-            return Err(io::Error::other(
-                "injected Issue Monitor authority fence parent sync failure",
-            ));
+        let path = issue_monitor_authority_fence_path(prefs_path);
+        fs::remove_file(&path)?;
+        #[cfg(test)]
+        if let Some(fail_once) =
+            std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_FENCE_PARENT_SYNC_ONCE")
+        {
+            let fail_once = std::path::PathBuf::from(fail_once);
+            if fail_once.exists() {
+                fs::remove_file(fail_once)?;
+                return Err(io::Error::other(
+                    "injected Issue Monitor authority fence parent sync failure",
+                ));
+            }
         }
-    }
-    sync_parent_directory(&path)
+        sync_parent_directory(&path)
+    })
 }
 
 fn with_issue_monitor_prefs_lock<T>(
@@ -2258,6 +2261,19 @@ impl IssueMonitorState {
             self.merge_older_marker_disk_failures(disk);
         }
         self.refresh_disk_owned_prefs(disk);
+        let terminal_issue_numbers = self
+            .merged_issues
+            .iter()
+            .copied()
+            .chain(
+                self.inbox
+                    .iter()
+                    .filter(|item| item.state.is_terminal())
+                    .map(|item| item.issue.number),
+            )
+            .collect::<BTreeSet<_>>();
+        self.pending_launch_deliveries
+            .retain(|delivery| !terminal_issue_numbers.contains(&delivery.issue_number));
     }
 
     /// A terminal record paired with a rejected disk failure is part of the
@@ -3505,6 +3521,7 @@ impl IssueMonitorState {
                 Ok(ClaimAcquireOutcome::Acquired(claim)) => {
                     let claim_id = claim.claim_id;
                     let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
+                    let delivery_id = format!("launch:{synchronous_effect_id}");
                     if self.apply_confirmed_claim(
                         issue.number,
                         claim_id,
@@ -3512,14 +3529,18 @@ impl IssueMonitorState {
                         &synchronous_effect_id,
                         now,
                     ) {
-                        if let Some(request) =
-                            self.pending_launch_deliveries.back().map(|delivery| {
-                                IssueMonitorLaunchRequest {
-                                    issue_number: delivery.issue_number,
-                                    branch_name: delivery.branch_name.clone(),
-                                    linked_issue_kind: delivery.linked_issue_kind,
-                                    delivery_id: Some(delivery.delivery_id.clone()),
-                                }
+                        if let Some(request) = self
+                            .pending_launch_deliveries
+                            .iter()
+                            .find(|delivery| {
+                                delivery.issue_number == issue.number
+                                    && delivery.delivery_id == delivery_id
+                            })
+                            .map(|delivery| IssueMonitorLaunchRequest {
+                                issue_number: delivery.issue_number,
+                                branch_name: delivery.branch_name.clone(),
+                                linked_issue_kind: delivery.linked_issue_kind,
+                                delivery_id: Some(delivery.delivery_id.clone()),
                             })
                         {
                             launches.push(request);
@@ -3820,11 +3841,11 @@ impl IssueMonitorState {
         if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
             return false;
         }
-        if delivery.materialized_window_id.as_deref() == Some(materializer_window_id) {
-            return true;
-        }
         if delivery.materializer_id.as_deref() != Some(materializer_id) {
             return false;
+        }
+        if delivery.materialized_window_id.as_deref() == Some(materializer_window_id) {
+            return true;
         }
         delivery.materialized_window_id = Some(materializer_window_id.to_string());
         true
@@ -3834,7 +3855,7 @@ impl IssueMonitorState {
         &mut self,
         issue_number: u64,
         delivery_id: &str,
-        _materializer_id: &str,
+        materializer_id: &str,
         materializer_window_id: &str,
     ) -> bool {
         let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
@@ -3842,7 +3863,8 @@ impl IssueMonitorState {
         }) else {
             return false;
         };
-        if delivery.materializer_window_id.as_deref() != Some(materializer_window_id)
+        if delivery.materializer_id.as_deref() != Some(materializer_id)
+            || delivery.materializer_window_id.as_deref() != Some(materializer_window_id)
             || delivery.materialized_window_id.as_deref() != Some(materializer_window_id)
         {
             return false;
@@ -3911,6 +3933,14 @@ impl IssueMonitorState {
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
     ) -> bool {
+        if delivery_id.is_none()
+            && self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+        {
+            return false;
+        }
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
@@ -5015,6 +5045,47 @@ mod tests {
     }
 
     #[test]
+    fn terminal_delivery_deletion_survives_stale_disk_rebase() {
+        for terminal_state in [
+            MonitorInboxState::Merged,
+            MonitorInboxState::Released,
+            MonitorInboxState::LaunchFailed,
+            MonitorInboxState::AgentFailed,
+            MonitorInboxState::NeedsHuman,
+        ] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.record_candidate(issue(42));
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42",
+                "host/session",
+                "effect-42",
+                "2026-07-28T00:00:00Z",
+            ));
+            let stale_disk = monitor.prefs();
+
+            monitor.clear_active_tracking(42);
+            monitor.set_inbox_state(42, terminal_state);
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+
+            monitor.rebase_daemon_driver_prefs(&stale_disk);
+
+            assert!(
+                monitor.prefs().pending_launch_deliveries.is_empty(),
+                "a stale disk outbox cannot revive a delivery deleted by local {terminal_state:?}"
+            );
+            assert!(monitor.take_pending_launch_requests().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(terminal_state)
+            );
+        }
+    }
+
+    #[test]
     fn daemon_rebase_updates_profile_and_tuning_from_disk() {
         // Issue #3222: the daemon loads prefs once at startup, so a launch
         // profile the GUI saves later stays invisible (has_launch_profile=false
@@ -5539,6 +5610,76 @@ mod tests {
     }
 
     #[test]
+    fn deduped_confirmed_claim_returns_its_exact_delivery_not_the_queue_tail() {
+        use gwt_github::{
+            issue_auto_claim::render_claim_comment, CommentId, CommentSnapshot, FakeIssueClient,
+            IssueSnapshot, IssueState, UpdatedAt,
+        };
+
+        let owner = "host/session";
+        let now = "2026-07-28T00:00:00Z";
+        let claim_id = format!("gwt-auto-improve:{owner}:42:{now}");
+        let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
+        let expected_delivery_id = format!("launch:{synchronous_effect_id}");
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(43));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            claim_id.clone(),
+            owner,
+            &synchronous_effect_id,
+            now,
+        ));
+        assert!(monitor.apply_confirmed_claim(43, "claim-43", owner, "effect-43", now,));
+        monitor
+            .active_launches
+            .retain(|issue_number| *issue_number != 42);
+        monitor.launching_claimed_at.remove(&42);
+        monitor.set_inbox_state(42, MonitorInboxState::Queued);
+        monitor.queue.push_front(42);
+
+        let client = FakeIssueClient::new();
+        let claim = ClaimComment {
+            comment_id: Some(CommentId(9)),
+            claim_id,
+            owner: owner.to_string(),
+            issue_number: 42,
+            status: ClaimStatus::Active,
+            heartbeat_at: now.to_string(),
+            expires_at: "2026-07-28T00:30:00Z".to_string(),
+            launched_work_id: Some("work/issue-42".to_string()),
+        };
+        client.seed(IssueSnapshot {
+            number: IssueNumber(42),
+            title: "Issue 42".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: vec![CommentSnapshot {
+                id: CommentId(9),
+                body: render_claim_comment(&claim),
+                updated_at: UpdatedAt::new("t1"),
+            }],
+        });
+
+        let requests = monitor.claim_next_launch_requests_with_active_cap(&client, owner, now, 2);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].issue_number, 42);
+        assert_eq!(
+            requests[0].delivery_id.as_deref(),
+            Some(expected_delivery_id.as_str())
+        );
+    }
+
+    #[test]
     fn matching_launch_ack_consumes_only_its_delivery_and_legacy_ack_consumes_none() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -5705,6 +5846,104 @@ mod tests {
     }
 
     #[test]
+    fn foreign_materializer_cannot_confirm_existing_materialized_or_durable_markers() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-42",
+            |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-a::agent-42",
+        ));
+
+        assert!(
+            !monitor.mark_launch_delivery_materialized(
+                42,
+                "launch:effect-42",
+                "gui-b",
+                "tab-a::agent-42",
+            ),
+            "an idempotent materialized marker is still bound to the exact materializer"
+        );
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-a::agent-42",
+        ));
+        assert!(
+            !monitor.mark_launch_delivery_workspace_durable(
+                42,
+                "launch:effect-42",
+                "gui-b",
+                "tab-a::agent-42",
+            ),
+            "an idempotent durable marker is still bound to the exact materializer"
+        );
+    }
+
+    #[test]
+    fn autonomous_legacy_failure_cannot_leave_one_issue_queued_and_replayable() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        let before = monitor.prefs();
+
+        assert!(
+            !monitor.record_launch_failed_delivery(42, "stale legacy failure", None, None),
+            "a legacy failure cannot mutate an exact durable delivery without its identity"
+        );
+
+        assert_eq!(monitor.prefs(), before);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-28T01:00:00Z",
+                2,
+                |_| false,
+            ),
+            0,
+            "the retained outbox remains the only launch path"
+        );
+    }
+
+    #[test]
     fn disabling_monitor_compensates_durable_launch_claim_before_clearing_outbox() {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -5753,7 +5992,7 @@ mod tests {
             "2026-07-28T00:00:00Z",
         ));
 
-        assert!(monitor.record_launch_failed_delivery(42, "legacy failure", None, None));
+        assert!(!monitor.record_launch_failed_delivery(42, "legacy failure", None, None));
         assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
         assert_eq!(
             monitor.prefs().pending_launch_deliveries[0].delivery_id,
@@ -6124,6 +6363,56 @@ mod tests {
             "failed atomic write must not leave a partial scratch file"
         );
         assert!(path.is_dir(), "failed rename leaves destination untouched");
+    }
+
+    #[test]
+    fn authority_fence_clear_waits_for_the_stable_prefs_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let fence = IssueMonitorAuthorityFence::current_process();
+        persist_issue_monitor_authority_fence(&prefs_path, &fence).expect("seed authority fence");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let clear_path = prefs_path.clone();
+        let clear_fence = fence.clone();
+
+        let (clear_thread, completed_while_locked, fence_while_locked) =
+            with_issue_monitor_prefs_lock(&prefs_path, || {
+                let clear_thread = std::thread::spawn(move || {
+                    started_tx.send(()).expect("signal clear start");
+                    let result = clear_issue_monitor_authority_fence(&clear_path, &clear_fence);
+                    done_tx.send(result).expect("signal clear completion");
+                });
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("clear thread started");
+                let completed_while_locked = done_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .ok();
+                let fence_while_locked = load_issue_monitor_authority_fence(&prefs_path)?;
+                Ok((clear_thread, completed_while_locked, fence_while_locked))
+            })
+            .expect("hold stable prefs lock");
+
+        let completed_early = completed_while_locked.is_some();
+        let completion = match completed_while_locked {
+            Some(result) => result,
+            None => done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("clear completes after lock release"),
+        };
+        clear_thread.join().expect("clear thread joins");
+
+        assert!(
+            !completed_early,
+            "fence clear must not compare/remove while another prefs transaction owns the lock"
+        );
+        assert_eq!(
+            fence_while_locked,
+            IssueMonitorAuthorityFenceState::Active(fence)
+        );
+        completion.expect("exact fence clears after lock release");
     }
 
     #[test]

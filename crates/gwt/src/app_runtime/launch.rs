@@ -1583,6 +1583,7 @@ impl AppRuntime {
                 delivery_id.clone(),
                 IssueMonitorLaunchDeliveryState::Materializing {
                     window_id: window_id.clone(),
+                    started_at: std::time::Instant::now(),
                 },
             );
         }

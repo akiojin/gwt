@@ -2762,13 +2762,6 @@ fn commit_issue_monitor_effect_result(
                     // Keep Attempting. A later executor pass starts with fresh
                     // readback and reconciles before another target mutation.
                 }
-                (_, IssueMonitorEffectOutcome::AutoMerge(AutoMergeMutationOutcome::Confirmed))
-                | (
-                    _,
-                    IssueMonitorEffectOutcome::AutoMerge(
-                        AutoMergeMutationOutcome::AlreadyTargetState,
-                    ),
-                ) => unreachable!("success outcomes handled by payload-specific arms"),
                 _ => {
                     tracing::error!(
                         effect = %completed.effect.effect_id,
@@ -5897,6 +5890,23 @@ exit 1
             .expect("a pre-registered shutdown request must remain observable");
     }
 
+    #[tokio::test]
+    async fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
+        let shutdown = DaemonShutdown::new();
+        assert!(!shutdown.requested.load(Ordering::Acquire));
+        let notified = shutdown.notify.notified();
+        assert!(!shutdown.requested.load(Ordering::Acquire));
+        // Tokio snapshots the notify_waiters generation when Notified is
+        // created, so a broadcast before its first poll remains observable.
+        shutdown.request();
+
+        let observed = tokio::time::timeout(Duration::from_millis(50), notified).await;
+
+        observed.expect(
+            "Notified must observe notify_waiters after its generation snapshot and before polling",
+        );
+    }
+
     #[test]
     fn startup_marker_epoch_exhaustion_is_recovery_blocked_and_retained() {
         let temp = TempDir::new().expect("tempdir");
@@ -7394,6 +7404,55 @@ exit 1
         assert_eq!(monitor.pending_effects(), std::slice::from_ref(&disarm));
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
         assert_eq!(persisted.pending_effects, vec![disarm]);
+    }
+
+    #[test]
+    fn auto_merge_success_mismatch_is_fail_closed_without_panicking() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let effect = crate::PendingIssueMonitorEffect {
+            effect_id: "claim:42:mismatch:7".to_string(),
+            authority_epoch: 7,
+            attempt: 1,
+            state: crate::IssueMonitorEffectState::Attempting,
+            payload: crate::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-28T00:00:00Z".to_string(),
+                expires_at: "2026-07-28T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        };
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![effect.clone()],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+
+        let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::commit_issue_monitor_effect_result(
+                &prefs_path,
+                &mut monitor,
+                super::CompletedIssueMonitorEffect {
+                    effect: effect.clone(),
+                    outcome: super::IssueMonitorEffectOutcome::AutoMerge(
+                        gwt_git::pr_status::AutoMergeMutationOutcome::Confirmed,
+                    ),
+                    completed_at: "2026-07-28T00:00:01Z".to_string(),
+                },
+            )
+        }))
+        .expect("a mismatched executor outcome must not panic the daemon worker");
+
+        assert!(!settled, "a mismatched result cannot settle the receipt");
+        assert_eq!(monitor.pending_effects(), std::slice::from_ref(&effect));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(persisted.pending_effects, vec![effect]);
     }
 
     #[test]

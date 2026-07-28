@@ -19634,6 +19634,118 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
 }
 
 #[test]
+fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
+        .save(&sessions_dir)
+        .expect("save previous session");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3165,
+        title: "SPEC: abandoned durable delivery".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3165,
+        "claim-3165",
+        "host/session",
+        "effect-3165",
+        "2026-07-28T00:00:00Z",
+    ));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .expect("seed delivery");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_monitor_launch_deliveries.insert(
+        "launch:effect-3165".to_string(),
+        super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: "tab-1::missing-materializer".to_string(),
+            started_at: Instant::now(),
+        },
+    );
+
+    let replay = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+
+    assert!(
+        replay
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "a vanished materializing window must not suppress exact delivery replay",
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1,
+    );
+
+    match runtime
+        .issue_monitor_launch_deliveries
+        .get_mut("launch:effect-3165")
+        .expect("replayed delivery is materializing")
+    {
+        super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id: _,
+            started_at,
+        } => {
+            *started_at = Instant::now() - Duration::from_secs(61);
+        }
+        state => panic!("expected materializing delivery, got {state:?}"),
+    }
+
+    let expired_replay = runtime.auto_launch_issue_monitor_delivery_events(
+        3165,
+        LinkedIssueKind::Spec,
+        Some("launch:effect-3165".to_string()),
+    );
+
+    assert!(
+        expired_replay
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "an expired materializing window must be replaced by exact delivery replay",
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1,
+    );
+}
+
+#[test]
 fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
     let _env_lock = env_test_lock()
         .lock()
@@ -19793,6 +19905,11 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         None,
         "simulate a crash after durable workspace save but before its prefs marker",
     );
+    let mut crashed_owner_prefs =
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("load crashed owner prefs");
+    crashed_owner_prefs.pending_launch_deliveries[0].materializer_pid = Some(2_000_000_000);
+    gwt::save_issue_monitor_prefs(&prefs_path, &crashed_owner_prefs)
+        .expect("mark the prior materializer process dead");
 
     let restored_workspace = gwt::load_restored_workspace_state(&repo).expect("restore workspace");
     let restored_tab = ProjectTabRuntime {
