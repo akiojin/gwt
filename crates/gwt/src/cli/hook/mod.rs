@@ -205,8 +205,6 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
 
     refresh_managed_assets_for_hook_front_door(project_root)?;
 
-    bootstrap_project_index_for_daemon_front_door(project_root)?;
-
     let scope = gwt_core::daemon::RuntimeScope::from_project_root(
         project_root,
         gwt_core::daemon::RuntimeTarget::Host,
@@ -234,35 +232,6 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
     }
 
     Ok(())
-}
-
-fn bootstrap_project_index_for_daemon_front_door(
-    project_root: &std::path::Path,
-) -> Result<(), String> {
-    bootstrap_project_index_for_daemon_front_door_with(
-        project_root,
-        crate::index_worker::automatic_background_index_disabled(),
-        crate::index_worker::bootstrap_project_index_for_path,
-    )
-}
-
-fn bootstrap_project_index_for_daemon_front_door_with<B>(
-    project_root: &std::path::Path,
-    disabled: bool,
-    bootstrap: B,
-) -> Result<(), String>
-where
-    B: FnOnce(&std::path::Path) -> Result<(), String>,
-{
-    if disabled {
-        tracing::info!(
-            target: "gwt::index",
-            project_root = %project_root.display(),
-            "automatic project index bootstrap disabled for daemon front door"
-        );
-        return Ok(());
-    }
-    bootstrap(project_root)
 }
 
 pub(crate) fn refresh_managed_assets_for_hook_front_door(
@@ -509,7 +478,7 @@ mod tests {
     // commands_for_event) lives in cli/test_support.rs.
     // -------------------------------------------------------------------
 
-    use std::{cell::Cell, fs};
+    use std::fs;
 
     use tempfile::tempdir;
 
@@ -519,23 +488,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_front_door_index_bootstrap_obeys_opt_out() {
-        let temp = tempdir().expect("tempdir");
-        let disabled_call_count = Cell::new(0);
-        bootstrap_project_index_for_daemon_front_door_with(temp.path(), true, |_project_root| {
-            disabled_call_count.set(disabled_call_count.get() + 1);
-            Ok(())
-        })
-        .expect("disabled bootstrap");
-        assert_eq!(disabled_call_count.get(), 0);
+    fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {
+        let source = include_str!("mod.rs");
+        let front_door = source
+            .split_once("pub fn prepare_daemon_front_door_for_path")
+            .expect("front-door function must exist")
+            .1
+            .split_once("pub(crate) fn refresh_managed_assets_for_hook_front_door")
+            .expect("managed-assets function must follow the front door")
+            .0;
 
-        let enabled_call_count = Cell::new(0);
-        bootstrap_project_index_for_daemon_front_door_with(temp.path(), false, |_project_root| {
-            enabled_call_count.set(enabled_call_count.get() + 1);
-            Ok(())
-        })
-        .expect("enabled bootstrap");
-        assert_eq!(enabled_call_count.get(), 1);
+        assert!(
+            !front_door.contains("bootstrap_project_index_for_"),
+            "GUI front door must not block server startup on Project Index bootstrap"
+        );
     }
 
     #[test]
