@@ -2446,6 +2446,8 @@ fn sample_runtime_with_events(
         agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
         improvement_refresh_epoch: 0,
         improvement_latest_refresh_epochs: HashMap::new(),
+        agent_backend_probe_generation: 0,
+        agent_backend_latest_probe_generations: HashMap::new(),
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
@@ -22555,6 +22557,175 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
     assert_eq!(row.branch.as_deref(), Some("work/foo"));
 }
 
+#[test]
+fn startup_orphan_intake_prune_dispatch_returns_before_inspection_finishes() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let worker = super::startup::spawn_startup_orphan_intake_prune_with(
+        vec![repo.clone()],
+        move |project_root| {
+            started_tx
+                .send(project_root.to_path_buf())
+                .expect("signal worker start");
+            release_rx.recv().expect("release worker");
+            0
+        },
+    )
+    .expect("spawn startup recovery worker");
+
+    assert_eq!(
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker started"),
+        repo
+    );
+    assert!(
+        !worker.is_finished(),
+        "startup dispatch must return while the safety inspection remains blocked"
+    );
+    release_tx.send(()).expect("release worker");
+    worker.join().expect("startup recovery worker joins");
+}
+
+#[test]
+fn planned_orphan_intake_path_is_not_queued_for_auto_resume_while_prune_is_blocked() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let planned_parent = temp.path().join("planned");
+    let retained_parent = temp.path().join("retained");
+    fs::create_dir_all(&planned_parent).expect("create planned parent");
+    fs::create_dir_all(&retained_parent).expect("create retained parent");
+    let planned_intake = planned_parent.join(".intake-race");
+    let retained_same_basename = retained_parent.join(".intake-race");
+    let manager = gwt_git::WorktreeManager::new(&repo);
+    manager
+        .create_detached("HEAD", &planned_intake)
+        .expect("create planned detached intake");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/intake-lookalike",
+            retained_same_basename
+                .to_str()
+                .expect("retained worktree path"),
+        ],
+    );
+    assert_eq!(
+        planned_intake.file_name(),
+        retained_same_basename.file_name(),
+        "the control session must share the basename so exclusion cannot use a name prefix"
+    );
+
+    let plan = crate::plan_orphan_intake_worktree_prune(&repo).expect("startup prune plan");
+    let planned_paths = plan
+        .detached_worktree_paths()
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    assert!(
+        planned_paths
+            .iter()
+            .any(|planned| same_worktree_path(planned, &planned_intake)),
+        "the plan may canonicalize a path alias but must retain the same detached worktree"
+    );
+    assert!(
+        !planned_paths
+            .iter()
+            .any(|planned| same_worktree_path(planned, &retained_same_basename)),
+        "a branch-backed worktree with the same basename is not in the detached prune plan"
+    );
+
+    let mut persisted = empty_workspace_state();
+    for (window_id, session_id) in [
+        ("planned-agent", "session-planned-intake"),
+        ("retained-agent", "session-retained-intake"),
+    ] {
+        let mut window =
+            sample_window(window_id, WindowPreset::Agent, WindowProcessStatus::Stopped);
+        window.agent_id = Some("codex".to_string());
+        window.session_id = Some(session_id.to_string());
+        persisted.windows.push(window);
+    }
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-repo".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    for (session_id, native_session_id, worktree_path, branch) in [
+        (
+            "session-planned-intake",
+            "native-planned-intake",
+            planned_intake.as_path(),
+            "work/planned-intake",
+        ),
+        (
+            "session-retained-intake",
+            "native-retained-intake",
+            retained_same_basename.as_path(),
+            "work/intake-lookalike",
+        ),
+    ] {
+        let mut session = gwt_agent::Session::new(worktree_path, branch, gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(native_session_id.to_string());
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+    }
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let worker =
+        super::startup::spawn_startup_orphan_intake_prune_with(vec![(repo, plan)], move |_job| {
+            started_tx.send(()).expect("signal prune worker start");
+            release_rx.recv().expect("release prune worker");
+            0
+        })
+        .expect("spawn blocked prune worker");
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("prune worker reached barrier");
+
+    runtime.queue_startup_auto_resume_sessions(&planned_paths);
+
+    let pending_session_ids = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+
+    release_tx.send(()).expect("release prune worker");
+    worker.join().expect("prune worker joins");
+
+    assert_eq!(
+        pending_session_ids,
+        vec!["session-retained-intake"],
+        "only the exact detached path in the prune plan must be excluded"
+    );
+}
+
 fn repo_head_branch(repo: &Path) -> Option<String> {
     let output = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -24189,17 +24360,184 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
 }
 
 #[test]
+fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let historical_worktree = temp.path().join("historical-worktree");
+    fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init", "-q", "-b", "develop"]);
+    run_git(&repo, &["config", "user.name", "Codex"]);
+    run_git(&repo, &["config", "user.email", "codex@example.com"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "seed"]);
+    run_git(&repo, &["branch", "work/historical-merged"]);
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            historical_worktree.to_str().expect("utf-8 worktree"),
+            "work/historical-merged",
+        ],
+    );
+    fs::write(historical_worktree.join("feature.txt"), "historical\n").expect("historical feature");
+    run_git(&historical_worktree, &["add", "feature.txt"]);
+    run_git(
+        &historical_worktree,
+        &["commit", "-qm", "feat: historical work"],
+    );
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "develop"],
+    );
+
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            "work-historical-merged-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Historical merged work".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/historical-merged".to_string()),
+                worktree_path: Some(historical_worktree.clone()),
+                pr_number: Some(3385),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record historical merged work");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.spawn_work_merge_status_scan(repo.clone());
+
+    wait_for_recorded_event("historical merged work status", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::WorkMergeStatus {
+                    project_root,
+                    ..
+                } if project_root == &repo
+            )
+        })
+    });
+    let event = events
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::WorkMergeStatus {
+                project_root,
+                merged_branches,
+                cleanup_ready_branches,
+                dirty_branches,
+                live_process_branches,
+            } if project_root == &repo => Some((
+                merged_branches.clone(),
+                cleanup_ready_branches.clone(),
+                dirty_branches.clone(),
+                live_process_branches.clone(),
+            )),
+            _ => None,
+        })
+        .expect("historical work merge status");
+    let _ = runtime.apply_work_merge_status(&repo, event.0, event.1, event.2, event.3);
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-historical-merged-row")
+        .expect("historical merged row");
+
+    assert!(
+        row.cleanup_candidate.is_some() || row.cleanup_blocked_reason.is_some(),
+        "a recorded merged PR with a local historical worktree must retain a Clean Up path \
+         or an explicit safety blocker: {row:?}"
+    );
+}
+
+#[test]
 fn work_branch_dirty_scan_failure_is_fail_closed() {
     let temp = tempdir().expect("tempdir");
     let missing_worktree = temp.path().join("missing-worktree");
     let target = super::WorkBranchScanTarget {
         branch: "work/missing".to_string(),
         worktree_paths: vec![missing_worktree],
+        has_merged_pr: true,
     };
 
     assert!(
         super::work_branch_has_dirty_worktree(&target),
         "an unreadable worktree must block merged and cleanup classification"
+    );
+}
+
+#[test]
+fn work_merge_scan_checks_dirty_state_only_for_actionable_branches() {
+    let readiness = gwt_git::branch::CleanupReadinessTarget {
+        target: gwt_git::branch::MergeTargetRef::new(
+            gwt_git::branch::MergeTarget::Develop,
+            "origin/develop",
+        ),
+        reason: gwt_git::branch::CleanupReadinessReason::Merged,
+    };
+
+    assert!(
+        !super::work_merge_scan_needs_dirty_check(None, false),
+        "an unready historical branch without a merged PR cannot consume a dirty verdict"
+    );
+    assert!(
+        super::work_merge_scan_needs_dirty_check(Some(&readiness), false),
+        "cleanup readiness must remain guarded by a current dirty verdict"
+    );
+    assert!(
+        super::work_merge_scan_needs_dirty_check(None, true),
+        "a recorded merged PR must remain guarded by a current dirty verdict"
+    );
+}
+
+#[test]
+fn work_branch_scan_targets_preserve_merged_pr_dirty_guard() {
+    let now = chrono::Utc::now();
+    let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Pr,
+        "work-merged-pr",
+        now,
+    );
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("origin/work/merged-pr".to_string()),
+            worktree_path: Some(PathBuf::from("/tmp/work-merged-pr")),
+            pr_number: Some(42),
+            pr_url: None,
+            pr_state: Some("MERGED".to_string()),
+        },
+    );
+    let _ = projection.apply_event(event);
+
+    let targets = super::work_branch_scan_targets(&projection);
+
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].branch, "work/merged-pr");
+    assert!(
+        targets[0].has_merged_pr,
+        "case-insensitive merged PR metadata must request a dirty-worktree guard"
     );
 }
 

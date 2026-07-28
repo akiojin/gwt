@@ -95,14 +95,16 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready_for_runtime,
-    install_launch_gwt_bin_env, prune_orphan_intake_worktrees, resolve_launch_worktree,
-    resolve_shell_launch_worktree,
+    execute_orphan_intake_worktree_prune, install_launch_gwt_bin_env,
+    plan_orphan_intake_worktree_prune, resolve_launch_worktree, resolve_shell_launch_worktree,
+    OrphanIntakePrunePlan,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+    prune_orphan_intake_worktrees, resolve_ephemeral_launch_worktree,
+    resolve_launch_worktree_request,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -1158,6 +1160,12 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
+    AgentBackendConnectionProbeComplete {
+        client_id: ClientId,
+        agent: gwt_agent::BuiltinAgentId,
+        generation: u64,
+        event: BackendEvent,
+    },
     ImprovementActionComplete {
         project_root: PathBuf,
         client_id: ClientId,
@@ -2593,6 +2601,8 @@ mod tests {
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
             improvement_refresh_epoch: 0,
             improvement_latest_refresh_epochs: HashMap::new(),
+            agent_backend_probe_generation: 0,
+            agent_backend_latest_probe_generations: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -4447,6 +4457,143 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_backend_connection_replies_through_async_dispatch() {
+        let temp = tempdir().expect("tempdir");
+        let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::TestAgentBackendConnection {
+                agent: gwt_agent::BuiltinAgentId::Codex,
+                base_url: "ws://not-http".to_string(),
+                api_key: "secret".to_string(),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "blocking agent backend probe must not reply on the frontend event loop"
+        );
+        wait_for_recorded_event("agent backend connection completion", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::AgentBackendConnectionProbeComplete {
+                        client_id,
+                        agent: gwt_agent::BuiltinAgentId::Codex,
+                        ..
+                    } if client_id == "client-1"
+                )
+            })
+        });
+        let (client_id, agent, generation, event) = events
+            .lock()
+            .expect("event log")
+            .iter()
+            .find_map(|recorded| match recorded {
+                UserEvent::AgentBackendConnectionProbeComplete {
+                    client_id,
+                    agent,
+                    generation,
+                    event,
+                } => Some((client_id.clone(), *agent, *generation, event.clone())),
+                _ => None,
+            })
+            .expect("agent backend completion");
+        let dispatched = runtime
+            .handle_agent_backend_connection_probe_complete(client_id, agent, generation, event);
+        assert!(dispatched.iter().any(|outbound| {
+            matches!(
+                &outbound.target,
+                DispatchTarget::Client(client_id) if client_id == "client-1"
+            ) && matches!(
+                &outbound.event,
+                BackendEvent::AgentBackendError {
+                    agent: gwt_agent::BuiltinAgentId::Codex,
+                    code: gwt::CustomAgentErrorCode::Probe,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_backend_connection_probe_drops_older_reverse_completion_per_client_and_agent() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let codex = gwt_agent::BuiltinAgentId::Codex;
+        let claude = gwt_agent::BuiltinAgentId::ClaudeCode;
+
+        let older_generation = runtime.register_agent_backend_connection_probe("client-1", codex);
+        let newer_generation = runtime.register_agent_backend_connection_probe("client-1", codex);
+        let other_agent_generation =
+            runtime.register_agent_backend_connection_probe("client-1", claude);
+        let other_client_generation =
+            runtime.register_agent_backend_connection_probe("client-2", codex);
+
+        let newer = runtime.handle_agent_backend_connection_probe_complete(
+            "client-1".to_string(),
+            codex,
+            newer_generation,
+            BackendEvent::BackendConnectionResult {
+                models: vec!["newer".to_string()],
+            },
+        );
+        assert_eq!(newer.len(), 1, "the newest completion is dispatched");
+        assert!(matches!(
+            &newer[0].target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            &newer[0].event,
+            BackendEvent::BackendConnectionResult { models }
+                if models.as_slice() == ["newer"]
+        ));
+
+        let older = runtime.handle_agent_backend_connection_probe_complete(
+            "client-1".to_string(),
+            codex,
+            older_generation,
+            BackendEvent::BackendConnectionResult {
+                models: vec!["older".to_string()],
+            },
+        );
+        assert!(
+            older.is_empty(),
+            "an older completion arriving after the newest result must not be dispatched"
+        );
+
+        assert_eq!(
+            runtime
+                .handle_agent_backend_connection_probe_complete(
+                    "client-1".to_string(),
+                    claude,
+                    other_agent_generation,
+                    BackendEvent::BackendConnectionResult {
+                        models: vec!["other-agent".to_string()],
+                    },
+                )
+                .len(),
+            1,
+            "a different agent has an independent generation"
+        );
+        assert_eq!(
+            runtime
+                .handle_agent_backend_connection_probe_complete(
+                    "client-2".to_string(),
+                    codex,
+                    other_client_generation,
+                    BackendEvent::BackendConnectionResult {
+                        models: vec!["other-client".to_string()],
+                    },
+                )
+                .len(),
+            1,
+            "a different client has an independent generation"
+        );
+    }
+
+    #[test]
     fn wizard_handler_helpers_cover_preparation_focus_and_error_paths() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -6029,6 +6176,33 @@ mod tests {
         }
         let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
         assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        let startup_orphan = temp.path().join(".intake-startup-orphan");
+        manager
+            .create_detached("HEAD", &startup_orphan)
+            .expect("startup orphan");
+
+        let plan = super::plan_orphan_intake_worktree_prune(&repo).expect("startup prune plan");
+
+        let launched_after_snapshot = temp.path().join(".intake-live-after-snapshot");
+        manager
+            .create_detached("HEAD", &launched_after_snapshot)
+            .expect("later intake");
+        let removed = super::execute_orphan_intake_worktree_prune(plan, 10);
+
+        assert_eq!(removed, 1);
+        assert!(!startup_orphan.exists(), "snapshotted orphan is reaped");
+        assert!(
+            launched_after_snapshot.exists(),
+            "an intake materialized after startup snapshot is never treated as orphaned"
+        );
     }
 
     #[test]
@@ -7876,6 +8050,16 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::AgentBackendConnectionProbeComplete {
+                client_id,
+                agent,
+                generation,
+                event,
+            }) => {
+                clients.dispatch(app.handle_agent_backend_connection_probe_complete(
+                    client_id, agent, generation, event,
+                ));
             }
             Event::UserEvent(UserEvent::ImprovementActionComplete {
                 project_root,

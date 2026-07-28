@@ -633,6 +633,13 @@ pub struct AppRuntime {
     /// delayed read cannot roll the UI back.
     pub(crate) improvement_refresh_epoch: u64,
     pub(crate) improvement_latest_refresh_epochs: HashMap<PathBuf, u64>,
+    /// Latest asynchronous backend connection probe per `(client, agent)`.
+    /// Completion events are accepted only when their generation still
+    /// matches this map, preventing a slower older request from rolling back
+    /// the Settings UI after a newer request has completed.
+    pub(crate) agent_backend_probe_generation: u64,
+    pub(crate) agent_backend_latest_probe_generations:
+        HashMap<(ClientId, gwt_agent::BuiltinAgentId), u64>,
 }
 
 impl ProjectTabRuntime {
@@ -882,6 +889,8 @@ impl AppRuntime {
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
             improvement_refresh_epoch: 0,
             improvement_latest_refresh_epochs: HashMap::new(),
+            agent_backend_probe_generation: 0,
+            agent_backend_latest_probe_generations: HashMap::new(),
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -913,9 +922,11 @@ impl AppRuntime {
             .collect()
     }
 
-    /// SPEC-2359 W-15 / US-84: scan the project's unclosed Workspace branches
-    /// for merge-into-base or no effective changes off the UI thread. Sends an
-    /// event even when the result is empty so stale cleanup-readiness cache
+    /// SPEC-2359 W-15 / US-84 and SPEC-3170 FR-077: publish cleanup evidence
+    /// off the UI thread. A bulk ref snapshot rejects stale historical rows
+    /// before merge/readiness checks, and worktree status is measured only for
+    /// recorded merged PRs or branches that are actually cleanup-ready. Sends
+    /// an event even when the result is empty so stale cleanup-readiness cache
     /// entries are cleared after a branch receives new changes.
     /// SPEC-2359 W-16 (FR-387): note an ingest attempt for `project_root`;
     /// returns false while the 30s throttle window is still open. Bootstrap
@@ -1025,18 +1036,53 @@ impl AppRuntime {
                 return;
             }
             let live_process_branches = work_branches_with_live_processes(&targets);
+            // One ref snapshot replaces the former per-target `rev-parse`
+            // probes. Historical Work rows routinely outlive their branches;
+            // rejecting those rows in memory prevents hundreds of short-lived
+            // Git processes from competing with the GUI and agent PTYs.
+            let tip_times = match gwt_git::refs::branch_tip_committer_times(&project_root) {
+                Ok(tip_times) => tip_times,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        project = %project_root.display(),
+                        "work merge ref snapshot failed; publishing fail-closed dirty verdicts"
+                    );
+                    proxy.send(UserEvent::WorkMergeStatus {
+                        project_root,
+                        merged_branches: HashMap::new(),
+                        cleanup_ready_branches: HashMap::new(),
+                        dirty_branches: targets
+                            .iter()
+                            .filter(|target| !target.worktree_paths.is_empty())
+                            .map(|target| target.branch.clone())
+                            .collect(),
+                        live_process_branches,
+                    });
+                    return;
+                }
+            };
+            let known_refs: HashSet<String> = tip_times.keys().cloned().collect();
             let mut merged: Vec<String> = Vec::new();
             let mut cleanup_ready_branches: HashMap<String, String> = HashMap::new();
             let mut dirty_branches = HashSet::new();
             for target in &targets {
-                if work_branch_has_dirty_worktree(target) {
-                    dirty_branches.insert(target.branch.clone());
+                let branch = target.branch.clone();
+                let readiness = gwt_git::branch::cleanup_readiness_base_target_with_known_refs(
+                    &project_root,
+                    &branch,
+                    &known_refs,
+                )
+                .ok()
+                .flatten();
+                if !work_merge_scan_needs_dirty_check(readiness.as_ref(), target.has_merged_pr) {
                     continue;
                 }
-                let branch = target.branch.clone();
-                if let Ok(Some(readiness)) =
-                    gwt_git::branch::cleanup_readiness_base_target(&project_root, &branch)
-                {
+                if work_branch_has_dirty_worktree(target) {
+                    dirty_branches.insert(branch);
+                    continue;
+                }
+                if let Some(readiness) = readiness {
                     let reason = match readiness.reason {
                         gwt_git::branch::CleanupReadinessReason::Merged => {
                             merged.push(branch.clone());
@@ -1049,11 +1095,6 @@ impl AppRuntime {
                     cleanup_ready_branches.insert(branch, reason.as_str().to_string());
                 }
             }
-            // SPEC-2359 W16-4 (FR-391): one extra spawn resolves every tip
-            // committer time — the merge-reference-time proxy for the derived
-            // Done classification (plan decision 8).
-            let tip_times =
-                gwt_git::refs::branch_tip_committer_times(&project_root).unwrap_or_default();
             let merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>> = merged
                 .into_iter()
                 .map(|branch| {
@@ -1965,6 +2006,63 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn register_agent_backend_connection_probe(
+        &mut self,
+        client_id: &str,
+        agent: gwt_agent::BuiltinAgentId,
+    ) -> u64 {
+        if self.agent_backend_probe_generation == u64::MAX {
+            self.agent_backend_probe_generation = 0;
+            self.agent_backend_latest_probe_generations.clear();
+        }
+        self.agent_backend_probe_generation += 1;
+        let generation = self.agent_backend_probe_generation;
+        self.agent_backend_latest_probe_generations
+            .insert((client_id.to_string(), agent), generation);
+        generation
+    }
+
+    fn spawn_agent_backend_connection_probe(
+        &mut self,
+        client_id: ClientId,
+        agent: gwt_agent::BuiltinAgentId,
+        base_url: String,
+        api_key: String,
+    ) {
+        let generation = self.register_agent_backend_connection_probe(&client_id, agent);
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event =
+                gwt::agent_backend_dispatch::test_connection_event(agent, &base_url, &api_key);
+            proxy.send(UserEvent::AgentBackendConnectionProbeComplete {
+                client_id,
+                agent,
+                generation,
+                event,
+            });
+        });
+    }
+
+    pub(crate) fn handle_agent_backend_connection_probe_complete(
+        &mut self,
+        client_id: ClientId,
+        agent: gwt_agent::BuiltinAgentId,
+        generation: u64,
+        event: BackendEvent,
+    ) -> Vec<OutboundEvent> {
+        let key = (client_id.clone(), agent);
+        if self
+            .agent_backend_latest_probe_generations
+            .get(&key)
+            .copied()
+            != Some(generation)
+        {
+            return Vec::new();
+        }
+        self.agent_backend_latest_probe_generations.remove(&key);
+        vec![OutboundEvent::reply(client_id, event)]
+    }
+
     pub(crate) fn handle_frontend_event(
         &mut self,
         client_id: ClientId,
@@ -2640,10 +2738,10 @@ impl AppRuntime {
                 agent,
                 base_url,
                 api_key,
-            } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::agent_backend_dispatch::test_connection_event(agent, &base_url, &api_key),
-            )],
+            } => {
+                self.spawn_agent_backend_connection_probe(client_id, agent, base_url, api_key);
+                Vec::new()
+            }
             FrontendEvent::StartMigration { tab_id } => self.start_migration_events(&tab_id),
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
@@ -3707,6 +3805,7 @@ impl AppRuntime {
 struct WorkBranchScanTarget {
     branch: String,
     worktree_paths: Vec<PathBuf>,
+    has_merged_pr: bool,
 }
 
 fn work_branch_scan_targets(
@@ -3731,7 +3830,12 @@ fn work_branch_scan_targets(
                 .or_insert_with(|| WorkBranchScanTarget {
                     branch,
                     worktree_paths: Vec::new(),
+                    has_merged_pr: false,
                 });
+            target.has_merged_pr |= container
+                .pr_state
+                .as_deref()
+                .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
             if let Some(path) = &container.worktree_path {
                 if !target
                     .worktree_paths
@@ -3774,9 +3878,14 @@ fn append_workspace_projection_scan_target(
         targets.push(WorkBranchScanTarget {
             branch: branch.clone(),
             worktree_paths: Vec::new(),
+            has_merged_pr: false,
         });
         targets.last_mut().expect("just pushed scan target")
     };
+    target.has_merged_pr |= details
+        .pr_state
+        .as_deref()
+        .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
     if let Some(path) = details.worktree_path {
         if !target
             .worktree_paths
@@ -3787,6 +3896,13 @@ fn append_workspace_projection_scan_target(
         }
     }
     targets.sort_by(|left, right| left.branch.cmp(&right.branch));
+}
+
+fn work_merge_scan_needs_dirty_check(
+    readiness: Option<&gwt_git::branch::CleanupReadinessTarget>,
+    has_merged_pr: bool,
+) -> bool {
+    readiness.is_some() || has_merged_pr
 }
 
 fn work_branch_has_dirty_worktree(target: &WorkBranchScanTarget) -> bool {

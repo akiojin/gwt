@@ -336,9 +336,10 @@ impl WorktreeManager {
             }
             // Porcelain v1: two status columns, a space, then the path (a rename
             // is `old -> new`; the new path after the arrow is what matters).
+            let status = &line[..2];
             let entry = &line[3..];
             let entry = entry.rsplit(" -> ").next().unwrap_or(entry);
-            if !is_disposable_worktree_entry(entry) && !extra_disposable(entry) {
+            if !is_disposable_worktree_entry(status, entry) && !extra_disposable(entry) {
                 return Ok(true);
             }
         }
@@ -992,14 +993,16 @@ fn path_arg_for_git(path: &Path) -> String {
 /// safe to destroy when reaping an ephemeral intake worktree. These are ONLY
 /// gwt's own PURE materialized managed assets — the regenerated, user-free
 /// skill/command dirs gwt writes into every worktree (`.claude/skills/gwt-*`,
-/// `.claude/commands/gwt-*`, `.codex/skills/gwt-*`) — plus OS cruft.
+/// `.claude/commands/gwt-*`, `.codex/skills/gwt-*`), ignored entries in gwt's
+/// `.gwt/` namespace, and OS cruft.
 ///
 /// Deliberately NOT disposable: `.claude/settings.local.json` and
 /// `.codex/hooks.json` are MERGED files — gwt preserves user hooks and unrelated
 /// top-level settings in them (see `gwt-skills` `settings_local.rs`), so a user
-/// edit could live there and must never be destroyed (codex #3236). Everything
-/// else is the user's local work and keeps the worktree: a gitignored
-/// `tasks/todo.md` / `.env`, anything under `.gwt/`, a user-authored
+/// edit could live there and must never be destroyed (codex #3236). A tracked
+/// `.gwt/` change is also durable Work evidence rather than disposable output.
+/// Everything else is the user's local work and keeps the worktree: a
+/// gitignored `tasks/todo.md` / `.env`, a user-authored
 /// `.claude/skills/<custom>` or `.claude/settings.json`, and any tracked change.
 ///
 /// NB: because launched intake worktrees legitimately receive these merged
@@ -1007,9 +1010,16 @@ fn path_arg_for_git(path: &Path) -> String {
 /// rather than reaped. Reaping launched intakes precisely (regenerate-and-diff
 /// the managed portion) is handled with the Phase 3 intake-launch lifecycle;
 /// keeping is the data-safe interim.
-fn is_disposable_worktree_entry(entry: &str) -> bool {
+fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix("./").unwrap_or(entry);
+
+    // `.gwt/` is a gwt-owned namespace and is excluded by managed worktrees.
+    // Only ignored entries are disposable: a tracked `.gwt/work/events.jsonl`
+    // modification carries durable Work history and must remain fail-closed.
+    if status == "!!" && (entry == ".gwt" || entry.starts_with(".gwt/")) {
+        return true;
+    }
 
     // gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
     // collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
@@ -1541,6 +1551,67 @@ prunable gitdir file points to non-existent location
             .find(|w| w.path.ends_with(".intake-abc123"))
             .expect("intake worktree present in list");
         assert!(entry.branch.is_none(), "intake worktree is branchless");
+    }
+
+    #[test]
+    fn ephemeral_worktree_ignores_only_gwt_generated_footprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join(".gitignore"), ".gwt/\n").unwrap();
+        gwt_core::process::run_git_logged(&["add", ".gitignore"], Some(&repo_path)).unwrap();
+        std::fs::create_dir_all(repo_path.join(".gwt/work")).unwrap();
+        std::fs::write(
+            repo_path.join(".gwt/work/events.jsonl"),
+            "{\"id\":\"base\"}\n",
+        )
+        .unwrap();
+        gwt_core::process::run_git_logged(
+            &["add", "-f", ".gwt/work/events.jsonl"],
+            Some(&repo_path),
+        )
+        .unwrap();
+        git_commit_allow_empty(&repo_path, "seed with gwt exclude");
+        git_checkout_new_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let generated = tmp.path().join(".intake-gwt-generated");
+        manager.create_detached("develop", &generated).unwrap();
+        for (relative, body) in [
+            (".gwt/session-kind.json", "{}"),
+            (".gwt/skill-state/intake-outcome.json", "{}"),
+            (".gwt/work/state.json", "{}"),
+            (".gwt/drop-files/payload.txt", "generated"),
+        ] {
+            let path = generated.join(relative);
+            std::fs::create_dir_all(path.parent().expect("generated parent")).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+
+        assert!(
+            !manager
+                .ephemeral_worktree_has_local_work(&generated)
+                .unwrap(),
+            "an ignored .gwt-only managed footprint is disposable"
+        );
+        manager.remove_force(&generated).unwrap();
+        assert!(
+            !generated.exists(),
+            "the startup reaper can remove an intake containing only ignored .gwt output"
+        );
+
+        let tracked = tmp.path().join(".intake-gwt-tracked");
+        manager.create_detached("develop", &tracked).unwrap();
+        std::fs::write(
+            tracked.join(".gwt/work/events.jsonl"),
+            "{\"id\":\"durable-change\"}\n",
+        )
+        .unwrap();
+        assert!(
+            manager.ephemeral_worktree_has_local_work(&tracked).unwrap(),
+            "a tracked .gwt Work event change is durable local work"
+        );
     }
 
     #[test]
