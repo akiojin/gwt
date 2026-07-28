@@ -2910,10 +2910,14 @@ impl AppRuntime {
         // for its caller to clean up after durably aborting the attempt.
         let profile_config_path = self.profile_config_path()?;
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        let continuation_project_root = continuation
+            .as_ref()
+            .map(|pending| pending.project_root.clone());
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        let project_root_path = tab.project_root.clone();
+        let project_root_path =
+            continuation_project_root.unwrap_or_else(|| tab.project_root.clone());
         let project_root = project_root_path.display().to_string();
         let title = config.display_name.clone();
         let purpose_title = workspace_resume_context

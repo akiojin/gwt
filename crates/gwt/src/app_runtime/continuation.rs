@@ -439,10 +439,12 @@ fn continue_work_outcome(
 
 fn reject_continue_work_workspace_commit(
     project_root: &Path,
+    work_event_root: &Path,
     operation_id: &str,
 ) -> std::io::Result<()> {
-    match gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+    match resolve_split_workspace_state_external_commit(
         project_root,
+        work_event_root,
         operation_id,
         gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
     ) {
@@ -455,6 +457,32 @@ fn reject_continue_work_workspace_commit(
         ))),
         Err(error) => Err(std::io::Error::other(error.to_string())),
     }
+}
+
+fn resolve_split_workspace_state_external_commit(
+    project_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
+    gwt_core::workspace_projection::resolve_workspace_state_external_commit_at(
+        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root),
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        operation_id,
+        decision,
+    )
+}
+
+fn split_workspace_state_external_commit_resolution(
+    project_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
+    gwt_core::workspace_projection::workspace_state_external_commit_resolution_at(
+        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root),
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        operation_id,
+    )
 }
 
 fn sanitize_handoff_value(value: &str) -> Option<String> {
@@ -666,6 +694,12 @@ fn session_matches_project_state(session: &gwt_agent::Session, project_root: &Pa
 
 fn worktree_matches_project_state(worktree_path: &Path, project_root: &Path) -> bool {
     if path_matches(worktree_path, project_root) {
+        return true;
+    }
+    if path_matches(
+        &crate::runtime_support::normalize_recent_project_path(worktree_path),
+        project_root,
+    ) {
         return true;
     }
     let Ok(project_anchor) = gwt_git::worktree::main_worktree_root(project_root) else {
@@ -2101,7 +2135,7 @@ fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool 
     {
         return false;
     }
-    gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
+    gwt_core::workspace_projection::load_workspace_work_items(&pending.worktree_path)
         .ok()
         .flatten()
         .is_some_and(|projection| {
@@ -2132,7 +2166,10 @@ fn transact_pending_continue_work_with_activation(
     live_session_ids: &HashSet<String>,
     activate: &mut dyn FnMut() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    gwt_core::workspace_projection::transact_workspace_state_with_commit(
+    gwt_core::workspace_projection::transact_workspace_state_at_with_commit(
+        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&pending.project_root),
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&pending.worktree_path),
+        &gwt_core::paths::gwt_repo_local_work_events_path(&pending.worktree_path),
         &pending.project_root,
         &pending.operation_id,
         |projection, work_items, _| {
@@ -2215,13 +2252,13 @@ fn resolve_activated_fresh_execution_commit(
         session,
         |repair| {
             repair()?;
-            let resolution =
-                gwt_core::workspace_projection::resolve_workspace_state_external_commit(
-                    project_root,
-                    operation_id,
-                    gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
-                )
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let resolution = resolve_split_workspace_state_external_commit(
+                project_root,
+                worktree_path,
+                operation_id,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             Ok(resolution
                 == gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed
                 && fresh_execution_commit_readback_matches(worktree_path, owner, session))
@@ -2335,12 +2372,11 @@ impl AppRuntime {
                         None => false,
                     };
                     if superseding_authority_is_readable {
-                        let terminal_resolution =
-                            gwt_core::workspace_projection::
-                                workspace_state_external_commit_resolution(
-                                    &candidate.project_root,
-                                    &candidate.attempt.request.operation_id,
-                                );
+                        let terminal_resolution = split_workspace_state_external_commit_resolution(
+                            &candidate.project_root,
+                            &candidate.worktree_path,
+                            &candidate.attempt.request.operation_id,
+                        );
                         let resolution_is_terminal = terminal_resolution.is_ok_and(|resolution| {
                             matches!(
                                 resolution,
@@ -2349,9 +2385,9 @@ impl AppRuntime {
                                     | gwt_core::workspace_projection::
                                         ExternalWorkspaceCommitResolution::Rejected
                             )
-                        }) || gwt_core::workspace_projection::
-                            resolve_workspace_state_external_commit(
+                        }) || resolve_split_workspace_state_external_commit(
                                 &candidate.project_root,
+                                &candidate.worktree_path,
                                 &candidate.attempt.request.operation_id,
                                 gwt_core::workspace_projection::
                                     ExternalWorkspaceCommitDecision::Reject,
@@ -2401,11 +2437,11 @@ impl AppRuntime {
                         }
                         Ok(false) => {
                             let terminal_resolution =
-                                gwt_core::workspace_projection::
-                                    workspace_state_external_commit_resolution(
-                                        &candidate.project_root,
-                                        &candidate.attempt.request.operation_id,
-                                    );
+                                split_workspace_state_external_commit_resolution(
+                                    &candidate.project_root,
+                                    &candidate.worktree_path,
+                                    &candidate.attempt.request.operation_id,
+                                );
                             if terminal_resolution.is_ok_and(|resolution| {
                                 matches!(
                                     resolution,
@@ -2556,6 +2592,7 @@ impl AppRuntime {
                         || {
                             reject_continue_work_workspace_commit(
                                 &receipt.project_root,
+                                &receipt.worktree_path,
                                 operation_id,
                             )
                         },
@@ -2571,6 +2608,7 @@ impl AppRuntime {
                         || {
                             reject_continue_work_workspace_commit(
                                 &receipt.project_root,
+                                &receipt.worktree_path,
                                 operation_id,
                             )
                         },
@@ -2588,6 +2626,7 @@ impl AppRuntime {
                         || {
                             reject_continue_work_workspace_commit(
                                 &receipt.project_root,
+                                &receipt.worktree_path,
                                 operation_id,
                             )
                         },
@@ -2601,6 +2640,7 @@ impl AppRuntime {
                         || {
                             reject_continue_work_workspace_commit(
                                 &receipt.project_root,
+                                &receipt.worktree_path,
                                 operation_id,
                             )
                         },
@@ -2921,6 +2961,7 @@ impl AppRuntime {
                 || {
                     reject_continue_work_workspace_commit(
                         &candidate.project_root,
+                        &candidate.worktree_path,
                         &candidate.attempt.request.operation_id,
                     )
                 },
@@ -2934,6 +2975,7 @@ impl AppRuntime {
                 || {
                     reject_continue_work_workspace_commit(
                         &candidate.project_root,
+                        &candidate.worktree_path,
                         &candidate.attempt.request.operation_id,
                     )
                 },
@@ -3280,16 +3322,18 @@ impl AppRuntime {
                 true,
             ));
         }
-        let project_root = tab.project_root.clone();
-        let works =
-            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&project_root)
-                .map_err(|_| {
-                    ContinueWorkFailure::failed(
-                        "work_state_unavailable",
-                        "The Work state could not be read safely.",
-                        true,
-                    )
-                })?;
+        let work_state_root = tab.project_root.clone();
+        let project_root = crate::runtime_support::normalize_recent_project_path(&work_state_root);
+        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+            &work_state_root,
+        )
+        .map_err(|_| {
+            ContinueWorkFailure::failed(
+                "work_state_unavailable",
+                "The Work state could not be read safely.",
+                true,
+            )
+        })?;
         let mut matching = works.work_items.iter().filter(|item| item.id == work_id);
         let item = matching.next().ok_or_else(|| {
             ContinueWorkFailure::failed(
@@ -3311,7 +3355,7 @@ impl AppRuntime {
             ));
         }
 
-        let (worktree_path, branch) = projection_only_continue_container(item, &project_root)?;
+        let (worktree_path, branch) = projection_only_continue_container(item, &work_state_root)?;
         let actual_branch = canonical_continue_work_branch(&worktree_path)?;
         if actual_branch != branch {
             return Err(ContinueWorkFailure::conflict(
@@ -3416,7 +3460,7 @@ impl AppRuntime {
         if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
             return Ok(None);
         }
-        let project_root = tab.project_root.clone();
+        let project_root = crate::runtime_support::normalize_recent_project_path(&tab.project_root);
         let entries = std::fs::read_dir(&self.sessions_dir).map_err(|_| {
             ContinueWorkFailure::failed(
                 "session_state_unavailable",
@@ -3940,7 +3984,13 @@ impl AppRuntime {
                     target.owner,
                     &self.sessions_dir,
                     &session_identity,
-                    || reject_continue_work_workspace_commit(&target.project_root, &operation_id),
+                    || {
+                        reject_continue_work_workspace_commit(
+                            &target.project_root,
+                            &target.worktree_path,
+                            &operation_id,
+                        )
+                    },
                 );
                 match cleanup {
                     Ok(true) => {}
@@ -3977,7 +4027,13 @@ impl AppRuntime {
                     target.owner,
                     &self.sessions_dir,
                     candidate_session_id,
-                    || reject_continue_work_workspace_commit(&target.project_root, &operation_id),
+                    || {
+                        reject_continue_work_workspace_commit(
+                            &target.project_root,
+                            &target.worktree_path,
+                            &operation_id,
+                        )
+                    },
                 );
                 match cleanup {
                     Ok(true) => {}
@@ -4137,7 +4193,13 @@ impl AppRuntime {
                     "owning Host crashed before authenticated Ready",
                     &self.sessions_dir,
                     &session_identity,
-                    || reject_continue_work_workspace_commit(&target.project_root, &operation_id),
+                    || {
+                        reject_continue_work_workspace_commit(
+                            &target.project_root,
+                            &target.worktree_path,
+                            &operation_id,
+                        )
+                    },
                 );
                 return match cleanup {
                     Ok(true) => self.continue_work_failure_events(
@@ -4243,8 +4305,9 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &exact_session_identity,
                 || {
-                    match gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                    match resolve_split_workspace_state_external_commit(
                         &target.project_root,
+                        &target.worktree_path,
                         &operation_id,
                         gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
                     ) {
@@ -4305,7 +4368,7 @@ impl AppRuntime {
                                 && record.primary_session_id == candidate_session_id
                         });
                     let work_matches = gwt_core::workspace_projection::load_workspace_work_items(
-                        &target.project_root,
+                        &target.worktree_path,
                     )
                     .ok()
                     .flatten()
@@ -5208,8 +5271,9 @@ impl AppRuntime {
             "continuation launch failed before SessionStart",
             &self.sessions_dir,
             &session_identity,
-            || match gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+            || match resolve_split_workspace_state_external_commit(
                 &pending.project_root,
+                &pending.worktree_path,
                 &pending.operation_id,
                 gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
             ) {
@@ -5415,6 +5479,7 @@ impl AppRuntime {
                 || {
                     reject_continue_work_workspace_commit(
                         &pending.project_root,
+                        &pending.worktree_path,
                         &pending.operation_id,
                     )
                 },
@@ -5428,6 +5493,7 @@ impl AppRuntime {
                 || {
                     reject_continue_work_workspace_commit(
                         &pending.project_root,
+                        &pending.worktree_path,
                         &pending.operation_id,
                     )
                 },
@@ -5605,7 +5671,14 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &pending.session_identity,
                 |activate| {
-                    gwt_core::workspace_projection::transact_workspace_state_with_commit(
+                    gwt_core::workspace_projection::transact_workspace_state_at_with_commit(
+                        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(
+                            &pending.project_root,
+                        ),
+                        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+                            &pending.worktree_path,
+                        ),
+                        &gwt_core::paths::gwt_repo_local_work_events_path(&pending.worktree_path),
                         &pending.project_root,
                         &pending.operation_id,
                         |projection, _work_items, _| {
@@ -5815,8 +5888,9 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &exact_session_identity,
                 || {
-                    gwt_core::workspace_projection::resolve_workspace_state_external_commit(
+                    resolve_split_workspace_state_external_commit(
                         &pending.project_root,
+                        &pending.worktree_path,
                         &pending.operation_id,
                         gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit,
                     )
@@ -5949,7 +6023,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let work_readback =
-            gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
+            gwt_core::workspace_projection::load_workspace_work_items(&pending.worktree_path)
                 .ok()
                 .flatten()
                 .is_some_and(|projection| {

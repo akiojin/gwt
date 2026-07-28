@@ -1840,6 +1840,36 @@ mod tests {
     }
 
     #[test]
+    fn install_launch_gwt_bin_env_host_uses_checkout_sibling_before_foreign_path_install() {
+        let mut env_vars = HashMap::from([(
+            "PATH".to_string(),
+            test_path(&["/Applications/GWT.app/Contents/MacOS", "/usr/bin"]),
+        )]);
+        let current_exe = PathBuf::from("/checkout/target/debug/gwt");
+
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install checkout gwtd");
+
+        assert_eq!(
+            env_vars
+                .get(gwt_agent::session::GWT_BIN_PATH_ENV)
+                .map(String::as_str),
+            Some("/checkout/target/debug/gwtd"),
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries.first().map(PathBuf::as_path),
+            Some(Path::new("/checkout/target/debug")),
+        );
+    }
+
+    #[test]
     fn install_launch_gwt_bin_env_host_dedups_existing_path_entry() {
         let mut env_vars = HashMap::from([(
             "PATH".to_string(),
@@ -1869,7 +1899,7 @@ mod tests {
     fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
         let original_path = test_path(&["/usr/bin", "/bin"]);
         let mut env_vars = HashMap::from([("PATH".to_string(), original_path.clone())]);
-        let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
+        let current_exe = PathBuf::from("/tmp/bunx-123-gwt/bin/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
             gwt_agent::LaunchRuntimeTarget::Host,

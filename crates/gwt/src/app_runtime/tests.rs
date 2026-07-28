@@ -9005,6 +9005,11 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
             legacy_flat_only: false,
         },
     );
+    let canonical_project_root = crate::runtime_support::normalize_recent_project_path(&repo);
+    runtime
+        .tab_mut("tab-1")
+        .expect("projection-only tab")
+        .project_root = repo.clone();
     assert!(
         !runtime
             .sessions_dir
@@ -9033,6 +9038,10 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
         .find(|pending| pending.operation_id == "projection-only-operation")
         .expect("projection-only fallback must prepare one pending continuation");
     assert_eq!(pending.work_id, work_id);
+    assert_eq!(
+        pending.project_root, canonical_project_root,
+        "a direct-pick linked-worktree tab must still use the canonical workspace home for execution authority"
+    );
     assert_eq!(
         pending.outcome,
         gwt::ContinueWorkOutcomeKind::StartedWithHandoff
@@ -16008,12 +16017,21 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    run_git(
-        &repo,
-        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    let project_root = temp.path().join("workspace");
+    let (bare_repo, _develop_worktree) =
+        init_managed_workspace_with_develop_worktree(&project_root);
+    let repo = project_root.join("work").join("issue-2359");
+    fs::create_dir_all(repo.parent().expect("worktree parent")).expect("create worktree parent");
+    let output = gwt_core::process::hidden_command("git")
+        .args(["worktree", "add", "-q", "-b", "work/issue-2359"])
+        .arg(&repo)
+        .current_dir(&bare_repo)
+        .output()
+        .expect("add issue worktree");
+    assert!(
+        output.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let predecessor_session_id = "stale-owner-session";
     let candidate_session_id = "takeover-candidate-session";
@@ -16083,6 +16101,13 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     );
     gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
         .expect("record active Work");
+    let mut current =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+    current.id = work_id.to_string();
+    current.title = "Active stale Work".to_string();
+    current.owner = Some("Issue #2359".to_string());
+    gwt_core::workspace_projection::save_workspace_projection(&project_root, &current)
+        .expect("seed canonical project current projection");
 
     let tab = sample_project_tab_with_window_at(
         "tab-1",
@@ -16098,7 +16123,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     active.session_id = candidate_session_id.to_string();
     active.branch_name = "work/issue-2359".to_string();
     active.worktree_path = repo.clone();
-    active.agent_project_root = repo.display().to_string();
+    active.agent_project_root = project_root.display().to_string();
     runtime
         .active_agent_sessions
         .insert(window_id.clone(), active);
@@ -16114,7 +16139,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     let mut candidate =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     candidate.id = candidate_session_id.to_string();
-    candidate.project_state_root = Some(repo.clone());
+    candidate.project_state_root = Some(project_root.clone());
     candidate.linked_issue_number = Some(owner.number);
     candidate
         .set_execution_binding(Some(binding.clone()))
@@ -16140,7 +16165,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
             client_id: "client-1".to_string(),
             operation_id: operation_id.to_string(),
             work_id: work_id.to_string(),
-            project_root: repo.clone(),
+            project_root: project_root.clone(),
             worktree_path: repo.clone(),
             owner,
             work_branch: "work/issue-2359".to_string(),
@@ -16230,15 +16255,18 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
             ..
         }
     )));
-    assert!(retry_events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            outcome: gwt::ContinueWorkOutcomeKind::Failed,
-            error_code: Some(code),
-            retryable: true,
-            ..
-        } if code == "continuation_reconciliation_required"
-    )));
+    assert!(
+        retry_events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                retryable: true,
+                ..
+            } if code == "continuation_reconciliation_required"
+        )),
+        "unexpected retry events: {retry_events:#?}"
+    );
     let retry_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
         .expect("read takeover retry ledger")
         .expect("takeover retry ledger");

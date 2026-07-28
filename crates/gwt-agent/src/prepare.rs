@@ -1086,6 +1086,12 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
+    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
+        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
+            return candidate;
+        }
+    }
+
     if should_prefer_path_gwt(current_exe) {
         if let Some(candidate) = lookup("gwtd").filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
@@ -6453,6 +6459,30 @@ fi
     // gwtd / gwt directly without the ${GWT_BIN_PATH:-gwtd} indirection.
 
     #[test]
+    fn public_gwt_bin_prefers_checkout_sibling_before_foreign_path_install() {
+        let current_exe = PathBuf::from("/checkout/target/debug/gwt");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(&current_exe, |_command| {
+            Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"))
+        });
+
+        assert_eq!(resolved, PathBuf::from("/checkout/target/debug/gwtd"));
+    }
+
+    #[test]
+    fn public_gwt_bin_keeps_stable_path_priority_for_bunx_temp_front_door() {
+        let current_exe = PathBuf::from(
+            r"C:\Temp\bunx-123-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwtd.exe");
+
+        let resolved =
+            resolve_public_gwt_bin_with_lookup(&current_exe, |_command| Some(stable.clone()));
+
+        assert_eq!(resolved, stable);
+    }
+
+    #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
         let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
         let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
@@ -6510,7 +6540,7 @@ fi
     fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
         let original_path = test_path(&["/usr/bin", "/bin"]);
         let mut env_vars = HashMap::from([("PATH".to_string(), original_path.clone())]);
-        let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
+        let current_exe = PathBuf::from("/tmp/bunx-123-gwt/bin/gwt");
         // Lookup returns a bare filename (Path::parent => Some(""))
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,

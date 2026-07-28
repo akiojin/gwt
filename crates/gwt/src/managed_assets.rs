@@ -259,6 +259,12 @@ pub fn resolve_public_gwt_bin_with_lookup(
         return current_exe.to_path_buf();
     }
 
+    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
+        if let Some(candidate) = sibling_daemon_binary(current_exe) {
+            return candidate;
+        }
+    }
+
     if should_prefer_path_gwt(current_exe) {
         let path_candidate = lookup(INTERNAL_DAEMON_BINARY_NAME).filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
@@ -482,6 +488,19 @@ mod tests {
         let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| None);
 
         assert_eq!(resolved, current_exe.with_file_name("gwtd.exe"));
+    }
+
+    #[test]
+    fn stable_gui_front_door_prefers_matching_daemon_sibling_over_foreign_path_install() {
+        let current_exe = Path::new("/checkout/target/debug/gwt");
+        let foreign_install = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |command| {
+            assert_eq!(command, "gwtd");
+            Some(foreign_install)
+        });
+
+        assert_eq!(resolved, current_exe.with_file_name("gwtd"));
     }
 
     #[test]
