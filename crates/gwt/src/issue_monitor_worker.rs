@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    scan_issue_monitor_candidates_with_provenance, IssueMonitorCandidateSource,
-    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorScanSummary,
-    IssueMonitorState,
+    IssueMonitorCandidateSource, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorScanSummary, IssueMonitorState,
 };
 use gwt_github::{Cache, IssueState};
 
@@ -117,9 +116,9 @@ pub fn load_open_issue_monitor_candidates_for_repo_path(
         .map(|loaded| loaded.issues)
 }
 
-/// Load a complete live candidate list when available, retaining typed
-/// provenance when a live GitHub failure falls back to a cache snapshot. The
-/// existing Vec-returning API above remains a compatibility wrapper.
+/// Load live candidates when available, retaining typed provenance for capped
+/// (therefore incomplete) live lists and cache fallbacks. The existing
+/// Vec-returning API above remains a compatibility wrapper.
 pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
     repo_path: &Path,
     owner: &str,
@@ -127,10 +126,8 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
 ) -> Result<LoadedIssueMonitorCandidates, String> {
     let live_error = match load_open_issue_monitor_candidates(owner, repo) {
         Ok(issues) => {
-            return Ok(LoadedIssueMonitorCandidates {
-                issues,
-                source: IssueMonitorCandidateSource::Live,
-            });
+            let source = live_candidate_source(issues.len());
+            return Ok(LoadedIssueMonitorCandidates { issues, source });
         }
         Err(error) => error,
     };
@@ -161,10 +158,10 @@ where
     I: IntoIterator<Item = Result<Vec<IssueMonitorIssue>, String>>,
 {
     match live_result {
-        Ok(issues) => Ok(LoadedIssueMonitorCandidates {
-            issues,
-            source: IssueMonitorCandidateSource::Live,
-        }),
+        Ok(issues) => {
+            let source = live_candidate_source(issues.len());
+            Ok(LoadedIssueMonitorCandidates { issues, source })
+        }
         Err(live_error) => {
             for issues in cache_results.into_iter().flatten() {
                 if !issues.is_empty() {
@@ -179,6 +176,17 @@ where
     }
 }
 
+fn live_candidate_source(issue_count: usize) -> IssueMonitorCandidateSource {
+    let configured_limit = gwt_git::issue::GITHUB_ISSUE_LIST_LIMIT
+        .parse::<usize>()
+        .unwrap_or(usize::MAX);
+    if issue_count < configured_limit {
+        IssueMonitorCandidateSource::Live
+    } else {
+        IssueMonitorCandidateSource::LiveIncomplete
+    }
+}
+
 /// Shared loader-to-state transition. Cache snapshots still follow the normal
 /// candidate scan, but only Live provenance can unlock the one-shot historical
 /// failure migration in the canonical core transition.
@@ -188,11 +196,25 @@ pub fn scan_loaded_issue_monitor_candidates(
     repo_path: &Path,
     now: &str,
 ) -> IssueMonitorScanSummary {
-    scan_issue_monitor_candidates_with_provenance(
+    scan_loaded_issue_monitor_candidates_for_project_tab(monitor, loaded, repo_path, None, now)
+}
+
+/// GUI-bound variant of the shared loader transition. The project tab id is
+/// optional because daemon scans have repository provenance but no GUI tab
+/// identity; they still reconcile repo-absent in-flight rows on Live input.
+pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
+    monitor: &mut IssueMonitorState,
+    loaded: &LoadedIssueMonitorCandidates,
+    repo_path: &Path,
+    expected_project_tab_id: Option<&str>,
+    now: &str,
+) -> IssueMonitorScanSummary {
+    crate::issue_monitor::scan_issue_monitor_candidates_for_project_tab_with_provenance(
         monitor,
         &loaded.issues,
         loaded.source,
         repo_path,
+        expected_project_tab_id,
         now,
     )
 }
@@ -952,6 +974,17 @@ mod tests {
         .expect("empty live result still authoritative");
         assert_eq!(empty_live.source, IssueMonitorCandidateSource::Live);
         assert!(empty_live.issues.is_empty());
+
+        let limit_sized_live = resolve_loaded_issue_monitor_candidates(
+            Ok((1..=1_000).map(issue).collect()),
+            std::iter::empty::<Result<Vec<IssueMonitorIssue>, String>>(),
+        )
+        .expect("limit-sized live result");
+        assert_eq!(
+            limit_sized_live.source,
+            IssueMonitorCandidateSource::LiveIncomplete,
+            "a capped gh list cannot prove that an absent in-flight Issue no longer exists"
+        );
 
         let cache = resolve_loaded_issue_monitor_candidates(
             Err("gh unavailable".to_string()),

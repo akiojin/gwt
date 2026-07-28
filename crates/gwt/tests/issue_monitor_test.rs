@@ -1043,6 +1043,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
             issue(43, &["bug"]),
             issue(44, &["bug"]),
             issue(45, &["auto-merge"]),
+            issue(99, &["bug"]),
         ],
         IssueMonitorCandidateSource::Live,
         repo.path(),

@@ -5378,12 +5378,18 @@ impl AppRuntime {
             composed_status,
             None,
         ));
-        if let Some(issue_number) = pending
-            .launch_feedback_context
-            .as_ref()
-            .and_then(|context| context.issue_monitor_issue_number)
-        {
-            events.extend(self.issue_monitor_launch_succeeded_events(issue_number, window_id));
+        if let Some(context) = pending.launch_feedback_context.as_ref() {
+            if let Some(issue_number) = context.issue_monitor_issue_number {
+                let project_root = context
+                    .issue_monitor_project_root
+                    .as_deref()
+                    .unwrap_or(&pending.project_root);
+                events.extend(self.issue_monitor_launch_succeeded_events(
+                    project_root,
+                    issue_number,
+                    window_id,
+                ));
+            }
         }
         events
     }

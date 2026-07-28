@@ -474,6 +474,7 @@ pub struct LaunchFeedbackContext {
     pub(crate) client_id: ClientId,
     pub(crate) title: String,
     pub(crate) issue_monitor_issue_number: Option<u64>,
+    pub(crate) issue_monitor_project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -1351,11 +1352,51 @@ impl AppRuntime {
         Vec::new()
     }
 
+    fn issue_monitor_project_root_for_window(&self, window_id: &str) -> Option<PathBuf> {
+        let address = self.window_lookup.get(window_id)?;
+        self.tab(&address.tab_id)
+            .map(|tab| tab.project_root.clone())
+    }
+
+    fn issue_monitor_tab_id_for_project_root(&self, project_root: &Path) -> Option<String> {
+        self.tabs
+            .iter()
+            .find(|tab| same_worktree_path(&tab.project_root, project_root))
+            .map(|tab| tab.id.clone())
+    }
+
+    fn issue_monitor_issue_number_for_window(
+        &self,
+        project_root: &Path,
+        window_id: &str,
+    ) -> Option<u64> {
+        self.pending_launch_feedback_contexts
+            .get(window_id)
+            .and_then(|context| context.issue_monitor_issue_number)
+            .or_else(|| {
+                let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).ok()?;
+                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+                    .launched_window_issue(window_id)
+            })
+    }
+
+    fn publish_active_issue_monitor_control(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
+        let project_root = self
+            .active_project_root()
+            .ok_or_else(|| "no active project".to_string())?;
+        self.publish_issue_monitor_control(project_root, payload)
+    }
+
     #[cfg(unix)]
-    fn publish_issue_monitor_control(&self, payload: serde_json::Value) -> Result<(), String> {
-        let Some(project_root) = self.active_project_root() else {
-            return Err("no active project".to_string());
-        };
+    fn publish_issue_monitor_control(
+        &self,
+        project_root: &Path,
+        payload: serde_json::Value,
+    ) -> Result<(), String> {
         let payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "control",
             payload,
@@ -1369,12 +1410,17 @@ impl AppRuntime {
     }
 
     #[cfg(not(unix))]
-    fn publish_issue_monitor_control(&self, _payload: serde_json::Value) -> Result<(), String> {
+    fn publish_issue_monitor_control(
+        &self,
+        _project_root: &Path,
+        _payload: serde_json::Value,
+    ) -> Result<(), String> {
         Err("Issue Monitor daemon control is unavailable on this platform".to_string())
     }
 
     pub(crate) fn issue_monitor_launch_failed_events(
         &self,
+        project_root: Option<&Path>,
         issue_number: u64,
         message: &str,
     ) -> Vec<OutboundEvent> {
@@ -1383,17 +1429,22 @@ impl AppRuntime {
         } else {
             message.to_string()
         };
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
-            "launch_failed": {
-                "issue_number": issue_number,
-                "message": message,
+        if let Some(project_root) = project_root {
+            if let Err(error) = self.publish_issue_monitor_control(
+                project_root,
+                serde_json::json!({
+                    "launch_failed": {
+                        "issue_number": issue_number,
+                        "message": message,
+                    }
+                }),
+            ) {
+                tracing::debug!(
+                    error = %error,
+                    issue_number,
+                    "issue monitor launch-failed daemon publish failed"
+                );
             }
-        })) {
-            tracing::debug!(
-                error = %error,
-                issue_number,
-                "issue monitor launch-failed daemon publish failed"
-            );
         }
         vec![
             OutboundEvent::broadcast(BackendEvent::IssueMonitorLaunchFailed {
@@ -1410,15 +1461,19 @@ impl AppRuntime {
 
     pub(crate) fn issue_monitor_launch_succeeded_events(
         &mut self,
+        project_root: &Path,
         issue_number: u64,
         window_id: &str,
     ) -> Vec<OutboundEvent> {
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
-            "launched": {
-                "issue_number": issue_number,
-                "window_id": window_id,
-            }
-        })) {
+        if let Err(error) = self.publish_issue_monitor_control(
+            project_root,
+            serde_json::json!({
+                "launched": {
+                    "issue_number": issue_number,
+                    "window_id": window_id,
+                }
+            }),
+        ) {
             tracing::debug!(
                 error = %error,
                 issue_number,
@@ -1432,8 +1487,9 @@ impl AppRuntime {
         // it is replaced rather than left on the canvas. Guard against closing the
         // freshly launched window if it happens to reuse the same id.
         let mut stale_window: Option<String> = None;
-        let mut events = self.local_issue_monitor_events_with_policy(
+        let mut events = self.local_issue_monitor_events_with_policy_for_project(
             None,
+            project_root,
             IssueMonitorScanPolicy::Observe,
             |monitor| {
                 stale_window = monitor
@@ -1450,6 +1506,7 @@ impl AppRuntime {
 
     pub(crate) fn issue_monitor_agent_failed_events(
         &mut self,
+        project_root: &Path,
         window_id: &str,
         message: &str,
     ) -> Vec<OutboundEvent> {
@@ -1470,33 +1527,41 @@ impl AppRuntime {
         if let Some(issue_number) = issue_number_hint {
             agent_failed_payload["issue_number"] = serde_json::json!(issue_number);
         }
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
-            "agent_failed": agent_failed_payload,
-        })) {
+        if let Err(error) = self.publish_issue_monitor_control(
+            project_root,
+            serde_json::json!({
+                "agent_failed": agent_failed_payload,
+            }),
+        ) {
             tracing::debug!(
                 error = %error,
                 window_id,
                 "issue monitor agent-failed daemon publish failed"
             );
         }
-        self.local_issue_monitor_agent_failed_events(window_id, message, issue_number_hint)
+        self.local_issue_monitor_agent_failed_events(
+            project_root,
+            window_id,
+            message,
+            issue_number_hint,
+        )
     }
 
     /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
     /// (a runtime status change). Best-effort refresh of the daemon's
     /// stuck-detection window for the mapped issue. No-op for non-monitor windows.
-    pub(crate) fn issue_monitor_heartbeat(&mut self, window_id: &str) {
-        let Some(issue_number) = self
-            .pending_launch_feedback_contexts
-            .get(window_id)
-            .and_then(|context| context.issue_monitor_issue_number)
-        else {
+    pub(crate) fn issue_monitor_heartbeat(&mut self, project_root: &Path, window_id: &str) {
+        let issue_number = self.issue_monitor_issue_number_for_window(project_root, window_id);
+        let Some(issue_number) = issue_number else {
             return;
         };
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
-            "heartbeat": { "issue_number": issue_number, "at": now },
-        })) {
+        if let Err(error) = self.publish_issue_monitor_control(
+            project_root,
+            serde_json::json!({
+                "heartbeat": { "issue_number": issue_number, "at": now },
+            }),
+        ) {
             tracing::debug!(
                 error = %error,
                 window_id,
@@ -1512,12 +1577,10 @@ impl AppRuntime {
     /// closes do not trigger a scan.
     pub(crate) fn issue_monitor_windows_closed_events(
         &mut self,
+        project_root: &Path,
         window_ids: &[String],
     ) -> Vec<OutboundEvent> {
         let monitor_windows: Vec<String> = {
-            let Some(project_root) = self.active_project_root() else {
-                return Vec::new();
-            };
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
             let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
                 .unwrap_or_else(|_| gwt::IssueMonitorPrefs::recovery_default());
@@ -1533,9 +1596,12 @@ impl AppRuntime {
             return Vec::new();
         }
         for window_id in &monitor_windows {
-            if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
-                "window_closed": { "window_id": window_id },
-            })) {
+            if let Err(error) = self.publish_issue_monitor_control(
+                project_root,
+                serde_json::json!({
+                    "window_closed": { "window_id": window_id },
+                }),
+            ) {
                 tracing::debug!(
                     error = %error,
                     window_id = %window_id,
@@ -1544,8 +1610,9 @@ impl AppRuntime {
             }
         }
         let requeue_windows = monitor_windows;
-        self.local_issue_monitor_events_with_policy(
+        self.local_issue_monitor_events_with_policy_for_project(
             None,
+            project_root,
             IssueMonitorScanPolicy::Observe,
             move |monitor| {
                 for window_id in &requeue_windows {
@@ -1710,7 +1777,7 @@ impl AppRuntime {
             issues.push(issue_monitor_issue_from_snapshot(snapshot));
         }
         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
-        self.issue_monitor_snapshot_events_for(client_id, monitor)
+        self.issue_monitor_snapshot_events_for(client_id, Some(project_root), monitor)
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -1719,13 +1786,30 @@ impl AppRuntime {
         policy: IssueMonitorScanPolicy,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
             monitor.record_scan_error(now, "No active project");
-            return self.issue_monitor_snapshot_events_for(client_id, monitor);
+            return self.issue_monitor_snapshot_events_for(client_id, None, monitor);
         };
+        self.local_issue_monitor_events_with_policy_for_project(
+            client_id,
+            &project_root,
+            policy,
+            apply,
+        )
+    }
 
+    fn local_issue_monitor_events_with_policy_for_project(
+        &mut self,
+        client_id: Option<&str>,
+        project_root: &Path,
+        policy: IssueMonitorScanPolicy,
+        apply: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let project_root = project_root.to_path_buf();
+        let expected_project_tab_id = self.issue_monitor_tab_id_for_project_root(&project_root);
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let (mut monitor, ()) =
             load_mutate_and_persist_issue_monitor_state(&prefs_path, |monitor| {
@@ -1747,10 +1831,11 @@ impl AppRuntime {
                     &repo,
                 ) {
                     Ok(loaded) => {
-                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                             &mut monitor,
                             &loaded,
                             &project_root,
+                            expected_project_tab_id.as_deref(),
                             &now,
                         );
                         merge_reconciliation_error =
@@ -1845,7 +1930,8 @@ impl AppRuntime {
             ));
         }
         for request in launch_requests {
-            let request_events = self.auto_launch_issue_monitor_request_events(
+            let request_events = self.auto_launch_issue_monitor_request_events_for_project(
+                &project_root,
                 request.issue_number,
                 request.linked_issue_kind,
             );
@@ -1866,10 +1952,11 @@ impl AppRuntime {
         // them into duplicate windows.
         rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
             if let Some(loaded) = &loaded_for_commit {
-                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                     monitor,
                     loaded,
                     &project_root,
+                    expected_project_tab_id.as_deref(),
                     &now,
                 );
             }
@@ -1881,7 +1968,11 @@ impl AppRuntime {
             );
         });
         let mut events = launch_events;
-        events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
+        events.extend(self.issue_monitor_snapshot_events_for(
+            client_id,
+            Some(&project_root),
+            monitor,
+        ));
         events
     }
 
@@ -1916,14 +2007,14 @@ impl AppRuntime {
 
     fn local_issue_monitor_agent_failed_events(
         &mut self,
+        project_root: &Path,
         window_id: &str,
         message: &str,
         issue_number_hint: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            return Vec::new();
-        };
+        let project_root = project_root.to_path_buf();
+        let expected_project_tab_id = self.issue_monitor_tab_id_for_project_root(&project_root);
 
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
@@ -1948,10 +2039,11 @@ impl AppRuntime {
             |monitor| {
                 match &loaded {
                     Ok(loaded) => {
-                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                             monitor,
                             loaded,
                             &project_root,
+                            expected_project_tab_id.as_deref(),
                             &now,
                         );
                     }
@@ -1984,7 +2076,7 @@ impl AppRuntime {
             .map(|number| monitor.should_autoclose_failed_window(number))
             .unwrap_or(false);
 
-        let mut events = self.issue_monitor_snapshot_events_for(None, monitor);
+        let mut events = self.issue_monitor_snapshot_events_for(None, Some(&project_root), monitor);
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message: message.to_string(),
@@ -1999,15 +2091,17 @@ impl AppRuntime {
     fn issue_monitor_snapshot_events_for(
         &self,
         client_id: Option<&str>,
+        project_root: Option<&Path>,
         monitor: gwt::IssueMonitorState,
     ) -> Vec<OutboundEvent> {
+        if project_root.is_some_and(|project_root| {
+            self.active_project_root()
+                .is_none_or(|active_root| !same_worktree_path(active_root, project_root))
+        }) {
+            return Vec::new();
+        }
         let mut status = monitor.status_view();
-        let project_root = self
-            .active_tab_id
-            .as_deref()
-            .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| tab.project_root.clone());
-        self.apply_issue_monitor_launch_profile_status(&mut status, project_root.as_deref());
+        self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
         let status_event = BackendEvent::IssueMonitorStatus { status };
         let inbox_event = BackendEvent::IssueMonitorInbox {
             items: monitor.inbox,
@@ -2548,7 +2642,8 @@ impl AppRuntime {
                         return events;
                     }
                 }
-                match self.publish_issue_monitor_control(serde_json::json!({ "enabled": enabled }))
+                match self
+                    .publish_active_issue_monitor_control(serde_json::json!({ "enabled": enabled }))
                 {
                     Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
                         monitor.set_enabled(enabled)
@@ -2565,7 +2660,7 @@ impl AppRuntime {
                 }
             }
             FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
-                match self.publish_issue_monitor_control(
+                match self.publish_active_issue_monitor_control(
                     serde_json::json!({ "autonomous_mode": enabled }),
                 ) {
                     Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
@@ -2583,7 +2678,7 @@ impl AppRuntime {
                 }
             }
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
-                match self.publish_issue_monitor_control(
+                match self.publish_active_issue_monitor_control(
                     serde_json::json!({ "max_active_agents": max_active_agents }),
                 ) {
                     Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
@@ -2602,7 +2697,7 @@ impl AppRuntime {
             }
             FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
                 let priority_order = issue_numbers;
-                match self.publish_issue_monitor_control(
+                match self.publish_active_issue_monitor_control(
                     serde_json::json!({ "priority_order": priority_order.clone() }),
                 ) {
                     Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {

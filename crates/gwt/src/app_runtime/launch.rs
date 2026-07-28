@@ -2377,6 +2377,7 @@ impl AppRuntime {
                                 .and_then(|context| context.issue_monitor_issue_number)
                             {
                                 events.extend(self.issue_monitor_launch_succeeded_events(
+                                    &project_root,
                                     issue_number,
                                     &window_id,
                                 ));
