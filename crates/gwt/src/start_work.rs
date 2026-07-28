@@ -205,10 +205,18 @@ fn run_launch_agent_git(
     repo_path: &Path,
     args: &[&str],
 ) -> std::io::Result<gwt_core::process_console::SpawnOutput> {
+    run_launch_agent_git_with_program(repo_path, args, "git")
+}
+
+fn run_launch_agent_git_with_program(
+    repo_path: &Path,
+    args: &[&str],
+    program: impl Into<std::ffi::OsString>,
+) -> std::io::Result<gwt_core::process_console::SpawnOutput> {
     gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::global(),
         gwt_core::process_console::ProcessKind::Git,
-        "git",
+        program,
         args,
         gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
             .current_dir(repo_path)
@@ -493,9 +501,6 @@ mod tests {
     fn launch_agent_base_branch_stops_hanging_git_at_operation_deadline() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let fake_git = temp.path().join("git");
         fs::write(
@@ -520,16 +525,6 @@ exit 1
         .expect("write fake git");
         fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
             .expect("make fake git executable");
-        let path = std::env::join_paths(
-            std::iter::once(temp.path().to_path_buf()).chain(
-                std::env::var_os("PATH")
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(std::env::split_paths),
-            ),
-        )
-        .expect("compose PATH");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", path);
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo path");
         let started = std::time::Instant::now();
@@ -537,10 +532,14 @@ exit 1
             started + std::time::Duration::from_millis(150),
         );
 
-        let error = crate::start_work::resolve_launch_agent_base_branch(&repo)
-            .expect_err("ambient deadline must stop the hanging launch-agent git lookup");
+        let error = super::run_launch_agent_git_with_program(
+            &repo,
+            &["rev-parse", "--is-inside-work-tree"],
+            fake_git.as_os_str(),
+        )
+        .expect_err("ambient deadline must stop the hanging launch-agent git lookup");
 
-        assert!(error.contains("deadline"), "{error}");
+        assert!(error.to_string().contains("deadline"), "{error}");
         assert!(
             started.elapsed() < std::time::Duration::from_millis(1_500),
             "hanging git outlived the deadline: {:?}",
