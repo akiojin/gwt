@@ -1867,17 +1867,35 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_uses_checkout_sibling_before_foreign_path_install() {
+        let temp = tempdir().expect("tempdir");
+        let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
+        let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
+        let current_exe = temp.path().join("checkout").join(executable_name);
+        let checkout_daemon = current_exe.with_file_name(daemon_name);
+        let foreign_daemon = temp.path().join("foreign").join(daemon_name);
+        fs::create_dir_all(current_exe.parent().expect("checkout executable parent"))
+            .expect("create checkout executable parent");
+        fs::create_dir_all(foreign_daemon.parent().expect("foreign daemon parent"))
+            .expect("create foreign daemon parent");
+        fs::write(&current_exe, b"gwt").expect("write checkout executable");
+        fs::write(&checkout_daemon, b"gwtd").expect("write checkout daemon");
+        fs::write(&foreign_daemon, b"foreign gwtd").expect("write foreign daemon");
         let mut env_vars = HashMap::from([(
             "PATH".to_string(),
-            test_path(&["/Applications/GWT.app/Contents/MacOS", "/usr/bin"]),
+            std::env::join_paths([
+                foreign_daemon.parent().expect("foreign daemon directory"),
+                Path::new("/usr/bin"),
+            ])
+            .expect("join test PATH entries")
+            .to_string_lossy()
+            .into_owned(),
         )]);
-        let current_exe = PathBuf::from("/checkout/target/debug/gwt");
 
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
             gwt_agent::LaunchRuntimeTarget::Host,
             &current_exe,
-            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+            |_command| Some(foreign_daemon),
         )
         .expect("install checkout gwtd");
 
@@ -1885,13 +1903,13 @@ mod tests {
             env_vars
                 .get(gwt_agent::session::GWT_BIN_PATH_ENV)
                 .map(String::as_str),
-            Some("/checkout/target/debug/gwtd"),
+            checkout_daemon.to_str(),
         );
         let entries: Vec<PathBuf> =
             std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
         assert_eq!(
             entries.first().map(PathBuf::as_path),
-            Some(Path::new("/checkout/target/debug")),
+            checkout_daemon.parent(),
         );
     }
 
