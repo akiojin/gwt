@@ -6255,6 +6255,96 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ephemeral_launch_worktree_fetches_origin_for_remote_base_ref() {
+        // #3374: an intake worktree must be based on the FRESH origin state,
+        // not the remote-tracking ref as of the last fetch. Advance origin
+        // develop after the clone; the resolved intake worktree must contain
+        // the new commit.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let origin = init_git_clone_with_origin(&repo);
+
+        // Advance origin: new commit in the seed repo, pushed to the bare
+        // origin. The clone's remote-tracking origin/develop stays stale.
+        let seed = temp.path().join("seed");
+        fs::write(seed.join("fresh.txt"), "fresh\n").expect("write fresh file");
+        for args in [
+            vec!["add", "fresh.txt"],
+            vec!["commit", "-qm", "advance develop"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&seed)
+                .status()
+                .expect("git seed advance");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+        let status = gwt_core::process::hidden_command("git")
+            .arg("push")
+            .arg("-q")
+            .arg(&origin)
+            .arg("develop:develop")
+            .current_dir(&seed)
+            .status()
+            .expect("git push origin");
+        assert!(status.success(), "git push to origin failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("origin/develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("ephemeral intake worktree resolves");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(
+            intake_dir.join("fresh.txt").exists(),
+            "intake worktree is based on the fetched origin tip, not the stale remote-tracking ref"
+        );
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_falls_back_to_head_without_origin_remote() {
+        // #3374: a repo with no origin remote cannot fetch; an `origin/*` base
+        // must fall back to HEAD instead of failing the intake launch.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        for args in [
+            vec!["init", "-q", "-b", "develop"],
+            vec!["config", "user.name", "Codex Test"],
+            vec!["config", "user.email", "codex@example.com"],
+            vec!["commit", "-qm", "init", "--allow-empty"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&repo)
+                .status()
+                .expect("git local repo setup");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("origin/develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("intake in a remote-less repo falls back to HEAD");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(
+            intake_dir.exists(),
+            "intake worktree materialized from HEAD"
+        );
+    }
+
+    #[test]
     fn resolve_launch_worktree_helpers_cover_short_circuits_existing_and_remote_creation() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

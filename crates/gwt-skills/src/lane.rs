@@ -55,6 +55,11 @@ pub struct LanePolicyFlags {
     /// Distribute only the curation skill subset (P4). `false` today (all
     /// skills go to every lane).
     pub reduced_skill_set: bool,
+    /// Overwrite tracked copies of gwt-managed skill/command assets with the
+    /// embedded bundle at materialization (#3374). `true` only for ephemeral
+    /// intake worktrees, where a tracked copy inherited from the base ref can
+    /// be months older than the running binary and the worktree is disposable.
+    pub embedded_assets_override_tracked: bool,
 }
 
 /// A declarative profile for one lane. Adding a lane = adding a profile.
@@ -82,6 +87,7 @@ pub const EXECUTION_PROFILE: LaneProfile = LaneProfile {
         completion_gate: false,
         sessionstart_onboarding: false,
         reduced_skill_set: false,
+        embedded_assets_override_tracked: false,
     },
 };
 
@@ -107,6 +113,9 @@ pub const INTAKE_PROFILE: LaneProfile = LaneProfile {
         sessionstart_onboarding: true,
         // SPEC-3248 P4: intake surfaces only curation skills.
         reduced_skill_set: true,
+        // #3374: an ephemeral intake worktree surfaces the embedded bundle
+        // even where the project tracks gwt skills (the gwt repo itself).
+        embedded_assets_override_tracked: true,
     },
 };
 
@@ -277,6 +286,7 @@ mod tests {
                     completion_gate: false,
                     sessionstart_onboarding: false,
                     reduced_skill_set: false,
+                    embedded_assets_override_tracked: false,
                 },
             }
         );
@@ -296,6 +306,8 @@ mod tests {
                     completion_gate: true,
                     sessionstart_onboarding: true,
                     reduced_skill_set: true,
+                    // #3374: intake worktrees are refreshed from the bundle.
+                    embedded_assets_override_tracked: true,
                 },
             }
         );
