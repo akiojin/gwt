@@ -4,10 +4,9 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::repo_browser::{
@@ -74,15 +73,15 @@ pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
     docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_runtime, package_runner_version_spec,
-    resolve_docker_launch_plan, resolve_docker_shell_command, strip_package_runner_args,
+    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
+    resolve_docker_shell_command,
 };
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action,
-    resolved_test_docker_runtime, DockerLaunchServiceAction, PackageRunnerProgram,
+    mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
+    resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
@@ -92,17 +91,16 @@ pub(crate) use embedded_server::{
     AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
-pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
-    build_shell_process_launch, ensure_docker_launch_runtime_ready_for_runtime,
-    install_launch_gwt_bin_env, prune_orphan_intake_worktrees, resolve_launch_worktree,
-    resolve_shell_launch_worktree,
-};
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
     resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+};
+pub(crate) use launch_runtime::{
+    apply_windows_host_shell_wrapper, build_shell_process_launch,
+    ensure_docker_launch_runtime_ready_for_runtime, install_launch_gwt_bin_env,
+    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -5196,26 +5194,25 @@ mod tests {
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
         config.remove_env = vec!["SECRET".to_string()];
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
         assert!(changed, "expected bunx failure to switch to npx");
+        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
+        assert_eq!(
+            probes[0],
+            ("bunx".to_string(), vec!["--version".to_string()])
+        );
         assert_eq!(config.command, "npx");
         assert_eq!(
             config.args,
@@ -5247,25 +5244,24 @@ mod tests {
     #[test]
     fn host_package_runner_fallback_switches_custom_bunx_to_npx_when_probe_fails() {
         let mut config = sample_custom_bunx_launch_config();
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, _remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
         assert!(changed, "expected custom bunx failure to switch to npx");
+        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
+        assert_eq!(
+            probes[0],
+            ("bunx".to_string(), vec!["--version".to_string()])
+        );
         assert_eq!(config.command, "npx");
         assert_eq!(
             config.args,
@@ -5278,19 +5274,29 @@ mod tests {
     }
 
     #[test]
-    fn host_package_runner_fallback_ignores_direct_installed_command() {
+    fn host_runner_health_compatibility_preserves_healthy_direct_command() {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
             .version("installed")
             .build();
+        #[cfg(not(windows))]
+        {
+            config.command = "/opt/gwt-test/claude".to_string();
+        }
+        #[cfg(windows)]
+        {
+            config.command = "C:/gwt-test/claude.exe".to_string();
+        }
         let original_command = config.command.clone();
         let original_args = config.args.clone();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |_command, _args, _env, _remove_env, _cwd| {
-                panic!("installed command should not probe bunx");
+            |command, args, _env, _remove_env, _cwd| {
+                assert_eq!(command, original_command);
+                assert_eq!(args, vec!["--version".to_string()]);
+                true
             },
         );
 

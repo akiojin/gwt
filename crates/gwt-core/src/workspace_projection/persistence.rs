@@ -485,6 +485,14 @@ pub fn transact_workspace_state<T>(
     )
 }
 
+/// Recover an interrupted Workspace state transaction without synthesizing or
+/// mutating Workspace state when no transaction is pending.
+pub fn recover_pending_workspace_state_transaction(repo_path: &Path) -> Result<()> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || Ok(()))
+}
+
 /// Stage one Workspace/Work transition under a durable external operation id,
 /// run an idempotent external logical commit, then publish the transition.
 ///
@@ -2575,6 +2583,54 @@ pub fn resolve_workspace_state_external_commit(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
         operation_id,
         decision,
+    )
+}
+
+/// Read the terminal decision for one external Workspace transaction without
+/// resolving or publishing it.
+///
+/// A still-discoverable transaction marker is reported as `Busy`, even when a
+/// terminal receipt was written before a crash, because publication may still
+/// need an authorized recovery pass. This function never creates locks,
+/// receipts, or projection files.
+pub fn workspace_state_external_commit_resolution(
+    repo_path: &Path,
+    operation_id: &str,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    workspace_state_external_commit_resolution_at(
+        &gwt_workspace_projection_path_for_repo_path(repo_path),
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        operation_id,
+    )
+}
+
+pub fn workspace_state_external_commit_resolution_at(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation_id: &str,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    validate_external_workspace_operation_id(operation_id)?;
+    let base_lock_targets = vec![
+        current_path.with_file_name("works.json"),
+        work_items_path.to_path_buf(),
+    ];
+    let mut marker_paths = vec![
+        pending_workspace_state_transaction_path(current_path),
+        pending_workspace_state_transaction_path_for_work_items(work_items_path),
+    ];
+    marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
+        &base_lock_targets,
+    )?);
+    marker_paths.sort();
+    marker_paths.dedup();
+    if find_pending_workspace_state_transaction(&marker_paths)?.is_some() {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    }
+    Ok(
+        load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
+            .map_or(ExternalWorkspaceCommitResolution::Missing, |receipt| {
+                receipt.resolution
+            }),
     )
 }
 

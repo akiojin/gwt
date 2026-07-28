@@ -1647,6 +1647,93 @@ fn workspace_state_transaction_recovers_partial_commit_exactly_once() {
     );
 }
 
+#[test]
+fn pending_workspace_state_transaction_can_be_recovered_without_a_followup_mutation() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home);
+    let repo = temp.path().join("repo");
+    init_test_git_repo(&repo);
+    let current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let events = gwt_workspace_work_events_path_for_repo_path(&repo);
+    let now = Utc.with_ymd_and_hms(2026, 7, 27, 10, 30, 0).unwrap();
+
+    let mut initial = WorkspaceProjection::default_for_project(&repo);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-recovery-only".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(repo.clone()),
+        branch: Some("work/recovery-only".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    save_workspace_work_items_projection_to_path(&works, &WorkItemsProjection::empty(now))
+        .expect("save initial works");
+
+    let mut recovered_current = initial;
+    assert!(recovered_current.assign_agent(
+        "session-recovery-only",
+        "work-recovery-only",
+        None,
+        None,
+        now,
+    ));
+    let mut event = WorkEvent::new(WorkEventKind::Start, "work-recovery-only", now);
+    event.id = "event-recovery-only".to_string();
+    event.agent_session_id = Some("session-recovery-only".to_string());
+    let mut recovered_works = WorkItemsProjection::empty(now);
+    recovered_works.apply_event(event.clone());
+    let pending = PendingWorkspaceStateTransaction {
+        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        transaction_id: Some("transaction-recovery-only".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some(workspace_state_file_fingerprint(&current).unwrap()),
+        work_items_precondition: Some(workspace_state_file_fingerprint(&works).unwrap()),
+        projection: recovered_current,
+        work_items: Some(recovered_works),
+        events_path: Some(events.clone()),
+        events: vec![event],
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: None,
+    };
+    write_pending_transaction_markers(&pending);
+
+    recover_pending_workspace_state_transaction(&repo)
+        .expect("recover pending transaction without another mutation");
+
+    let saved_current = load_workspace_projection_from_path(&current)
+        .expect("load recovered current")
+        .expect("recovered current");
+    assert_eq!(
+        workspace_assignment_for_session(&saved_current, "session-recovery-only"),
+        WorkspaceSessionAssignment::Assigned("work-recovery-only".to_string()),
+    );
+    let saved_works = load_workspace_work_items_from_path(&works)
+        .expect("load recovered works")
+        .expect("recovered works");
+    assert!(saved_works
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-recovery-only"));
+    assert!(pending_workspace_state_transaction_paths(&pending)
+        .iter()
+        .all(|path| !path.exists()));
+}
+
 fn write_pending_transaction_markers(transaction: &PendingWorkspaceStateTransaction) {
     let bytes = serde_json::to_vec_pretty(transaction).unwrap();
     for marker_path in pending_workspace_state_transaction_paths(transaction) {

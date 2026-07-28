@@ -146,6 +146,81 @@ impl SessionExecutionBinding {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 }
 
+/// Exact, non-secret identity of one durable producing Session incarnation.
+///
+/// This allowlist is the single canonical field set used by destructive
+/// Session cleanup CAS operations. Mutable runtime state, bearer material,
+/// provider conversation ids, process ids, and activity timestamps are
+/// intentionally excluded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionExecutionIdentity {
+    pub session_id: String,
+    pub worktree_path: PathBuf,
+    pub project_state_root: Option<PathBuf>,
+    pub repo_hash: Option<String>,
+    pub branch: String,
+    pub agent_id: AgentId,
+    pub linked_issue_number: Option<u64>,
+    pub execution_binding: SessionExecutionBinding,
+}
+
+impl SessionExecutionIdentity {
+    /// Capture the canonical identity fields against an explicit binding.
+    ///
+    /// Launch preparation uses this before the binding is persisted, while
+    /// recovery uses [`Self::from_session`] after loading the durable Session.
+    pub fn for_binding(
+        session: &Session,
+        binding: &SessionExecutionBinding,
+    ) -> Result<Self, String> {
+        validate_session_execution_binding(session, binding)?;
+        Ok(Self {
+            session_id: session.id.clone(),
+            worktree_path: session.worktree_path.clone(),
+            project_state_root: session.project_state_root.clone(),
+            repo_hash: session.repo_hash.clone(),
+            branch: session.branch.clone(),
+            agent_id: session.agent_id.clone(),
+            linked_issue_number: session.linked_issue_number,
+            execution_binding: binding.clone(),
+        })
+    }
+
+    pub fn from_session(session: &Session) -> Result<Option<Self>, String> {
+        session
+            .execution_binding
+            .as_ref()
+            .map(|binding| Self::for_binding(session, binding))
+            .transpose()
+    }
+}
+
+/// Exact classification of one durable Session path without following a
+/// directory entry before deciding whether it exists.
+///
+/// A dangling symlink is [`SessionPathState::Error`], not
+/// [`SessionPathState::Missing`]: `symlink_metadata` proves that an entry is
+/// present, and any subsequent load failure must retain that evidence.
+#[derive(Debug)]
+pub enum SessionPathState {
+    Missing,
+    Present(Box<Session>),
+    Error(io::Error),
+}
+
+/// Inspect one Session path while preserving present-but-unreadable entries.
+#[must_use]
+pub fn inspect_session_path(path: &Path) -> SessionPathState {
+    match fs::symlink_metadata(path) {
+        Ok(_) => match Session::load(path) {
+            Ok(session) => SessionPathState::Present(Box::new(session)),
+            Err(error) => SessionPathState::Error(error),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => SessionPathState::Missing,
+        Err(error) => SessionPathState::Error(error),
+    }
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -536,6 +611,129 @@ impl Session {
         })
     }
 
+    /// Create this Session only while its durable path is genuinely absent.
+    ///
+    /// A present or unreadable same-id entry is never replaced. Prepared
+    /// execution launches use this as their materialization commit point.
+    pub fn save_if_absent(&self, dir: &Path) -> std::io::Result<bool> {
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let content = serialize_session_toml(self)?;
+        with_session_lock(dir, &self.id, || {
+            let path = session_file_path(dir, &self.id);
+            match inspect_session_path(&path) {
+                SessionPathState::Missing => {
+                    write_session_toml_atomic(&path, &content)?;
+                    Ok(true)
+                }
+                SessionPathState::Present(_) => Ok(false),
+                SessionPathState::Error(error) => Err(error),
+            }
+        })
+    }
+
+    /// Persist mutable Session fields only while the durable producing
+    /// incarnation still has the exact expected non-secret identity.
+    ///
+    /// Missing, unbound, invalid, or replaced entries fail closed without
+    /// recreating or rewriting the path.
+    pub fn save_if_execution_identity_matches(
+        &self,
+        dir: &Path,
+        expected: &SessionExecutionIdentity,
+    ) -> std::io::Result<bool> {
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.id != expected.session_id
+            || expected.execution_binding.session_id != expected.session_id
+            || SessionExecutionIdentity::from_session(self)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(expected)
+        {
+            return Ok(false);
+        }
+        let content = serialize_session_toml(self)?;
+        with_session_lock(dir, &self.id, || {
+            let path = session_file_path(dir, &self.id);
+            let durable = match inspect_session_path(&path) {
+                SessionPathState::Present(session) => session,
+                SessionPathState::Missing => return Ok(false),
+                SessionPathState::Error(error) => return Err(error),
+            };
+            if SessionExecutionIdentity::from_session(&durable)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(expected)
+            {
+                return Ok(false);
+            }
+            write_session_toml_atomic(&path, &content)?;
+            Ok(true)
+        })
+    }
+
+    /// Persist this Session only when the durable value still equals the
+    /// caller's complete pre-mutation snapshot.
+    ///
+    /// This is the migration CAS for legacy unbound Sessions, which cannot
+    /// yet carry a [`SessionExecutionIdentity`]. Comparing every canonical
+    /// field prevents a stale clone from overwriting concurrent runtime or
+    /// ownership updates while adding the first execution binding.
+    pub fn save_if_unchanged(&self, dir: &Path, expected: &Session) -> std::io::Result<bool> {
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.id != expected.id {
+            return Ok(false);
+        }
+        let content = serialize_session_toml(self)?;
+        let expected_content = serialize_session_toml(expected)?;
+        with_session_lock(dir, &self.id, || {
+            let path = session_file_path(dir, &self.id);
+            let durable = match inspect_session_path(&path) {
+                SessionPathState::Present(session) => session,
+                SessionPathState::Missing => return Ok(false),
+                SessionPathState::Error(error) => return Err(error),
+            };
+            if serialize_session_toml(&durable)? != expected_content {
+                return Ok(false);
+            }
+            write_session_toml_atomic(&path, &content)?;
+            Ok(true)
+        })
+    }
+
+    /// Create this Session when absent, or replace one exact pre-mutation
+    /// snapshot. Any same-id value with different durable contents is
+    /// retained byte-identically.
+    pub fn save_if_absent_or_unchanged(
+        &self,
+        dir: &Path,
+        expected: &Session,
+    ) -> std::io::Result<bool> {
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.id != expected.id {
+            return Ok(false);
+        }
+        let content = serialize_session_toml(self)?;
+        let expected_content = serialize_session_toml(expected)?;
+        with_session_lock(dir, &self.id, || {
+            let path = session_file_path(dir, &self.id);
+            match inspect_session_path(&path) {
+                SessionPathState::Missing => {}
+                SessionPathState::Present(session)
+                    if serialize_session_toml(&session)? == expected_content => {}
+                SessionPathState::Present(_) => return Ok(false),
+                SessionPathState::Error(error) => return Err(error),
+            }
+            write_session_toml_atomic(&path, &content)?;
+            Ok(true)
+        })
+    }
+
     /// Deserialize a session from a TOML file verbatim. SPEC-1921 FR-066:
     /// `load` must not silently rewrite `launch_args`. Callers that need
     /// legacy migration applied should use [`Session::load_and_migrate`].
@@ -720,34 +918,32 @@ where
     }
 }
 
-/// Hold the per-Session lease while reading one exact durable Session and
-/// running an already-authorized operation.
+/// Hold the per-Session lease while classifying its durable path and running
+/// one operation without releasing the lease after a `Missing` observation.
 ///
-/// This is an exclusive, bounded lease because capability rotation and
-/// Session persistence use the same lock file. Callers combining this with an
-/// owner ledger lease must acquire the owner lease first and must not persist
-/// the same Session from `operation`.
-pub fn with_session_lease<T, F>(
+/// Callers combining this with an owner ledger lease must acquire the owner
+/// lease first and must not persist the same Session from `operation`.
+pub fn with_session_path_lease<T, F>(
     sessions_dir: &Path,
     session_id: &str,
     operation: F,
 ) -> io::Result<T>
 where
-    F: FnOnce(&Session) -> io::Result<T>,
+    F: FnOnce(SessionPathState) -> io::Result<T>,
 {
-    with_session_lease_wait(sessions_dir, session_id, SESSION_LEASE_WAIT, operation)
+    with_session_path_lease_wait(sessions_dir, session_id, SESSION_LEASE_WAIT, operation)
 }
 
-/// [`with_session_lease`] with an explicit wait bound for retry-aware callers
-/// and deterministic contention tests.
-pub fn with_session_lease_wait<T, F>(
+/// [`with_session_path_lease`] with an explicit wait bound for retry-aware
+/// callers and deterministic contention tests.
+pub fn with_session_path_lease_wait<T, F>(
     sessions_dir: &Path,
     session_id: &str,
     wait: Duration,
     operation: F,
 ) -> io::Result<T>
 where
-    F: FnOnce(&Session) -> io::Result<T>,
+    F: FnOnce(SessionPathState) -> io::Result<T>,
 {
     let _thread_guard = SessionLeaseThreadGuard::enter()?;
     validate_session_id_path_component(session_id)
@@ -780,11 +976,10 @@ where
             Err(error) => return Err(error),
         }
     }
-    let session = Session::load(&session_file_path(sessions_dir, session_id));
-    let result = match session {
-        Ok(session) => operation(&session),
-        Err(error) => Err(error),
-    };
+    let result = operation(inspect_session_path(&session_file_path(
+        sessions_dir,
+        session_id,
+    )));
     match lock_file.unlock() {
         Ok(()) => result,
         Err(unlock_error) => match result {
@@ -792,6 +987,45 @@ where
             Err(operation_error) => Err(operation_error),
         },
     }
+}
+
+/// Hold the per-Session lease while reading one exact durable Session and
+/// running an already-authorized operation.
+///
+/// This is an exclusive, bounded lease because capability rotation and
+/// Session persistence use the same lock file. Callers combining this with an
+/// owner ledger lease must acquire the owner lease first and must not persist
+/// the same Session from `operation`.
+pub fn with_session_lease<T, F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    operation: F,
+) -> io::Result<T>
+where
+    F: FnOnce(&Session) -> io::Result<T>,
+{
+    with_session_lease_wait(sessions_dir, session_id, SESSION_LEASE_WAIT, operation)
+}
+
+/// [`with_session_lease`] with an explicit wait bound for retry-aware callers
+/// and deterministic contention tests.
+pub fn with_session_lease_wait<T, F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    wait: Duration,
+    operation: F,
+) -> io::Result<T>
+where
+    F: FnOnce(&Session) -> io::Result<T>,
+{
+    with_session_path_lease_wait(sessions_dir, session_id, wait, |state| match state {
+        SessionPathState::Present(session) => operation(&session),
+        SessionPathState::Missing => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Session not found: {session_id}"),
+        )),
+        SessionPathState::Error(error) => Err(error),
+    })
 }
 
 fn write_session_toml_atomic(path: &Path, content: &str) -> io::Result<()> {
@@ -912,49 +1146,129 @@ where
 /// so an interrupted cleanup remains retryable and can never delete a
 /// replacement Session that reused the same public id with different
 /// authority.
-pub fn remove_session_if_execution_binding_matches(
+pub fn remove_session_if_execution_identity_matches(
     sessions_dir: &Path,
     session_id: &str,
-    expected: &SessionExecutionBinding,
+    expected: &SessionExecutionIdentity,
 ) -> io::Result<bool> {
+    remove_session_if_execution_identity_matches_with(sessions_dir, session_id, expected, || Ok(()))
+}
+
+/// Run the caller's cleanup commit and remove its candidate Session while the
+/// same per-session lock protects the exact binding and Agent identity.
+///
+/// This closes the validator-to-cleanup race: a concurrent [`Session::save`]
+/// cannot replace the Session after validation but before the durable cleanup
+/// callback and unlink.
+pub fn remove_session_if_execution_identity_matches_with<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected: &SessionExecutionIdentity,
+    before_remove: F,
+) -> io::Result<bool>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    remove_session_if_execution_identity_matches_or_missing_inner(
+        sessions_dir,
+        session_id,
+        expected,
+        false,
+        before_remove,
+    )
+}
+
+/// Commit cleanup when the candidate is either still the exact Session or
+/// was never materialized. Any existing non-matching Session fails closed.
+pub fn remove_session_if_execution_identity_matches_or_missing_with<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected: &SessionExecutionIdentity,
+    before_remove: F,
+) -> io::Result<bool>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    remove_session_if_execution_identity_matches_or_missing_inner(
+        sessions_dir,
+        session_id,
+        expected,
+        true,
+        before_remove,
+    )
+}
+
+fn remove_session_if_execution_identity_matches_or_missing_inner<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected: &SessionExecutionIdentity,
+    commit_if_missing: bool,
+    before_remove: F,
+) -> io::Result<bool>
+where
+    F: FnOnce() -> io::Result<()>,
+{
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    if expected.session_id != session_id {
+    if expected.session_id != session_id
+        || expected.execution_binding.session_id != expected.session_id
+    {
         return Ok(false);
     }
     with_session_lock(sessions_dir, session_id, || {
         let path = session_file_path(sessions_dir, session_id);
-        let session = match Session::load(&path) {
-            Ok(session) => session,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
+        let session = match inspect_session_path(&path) {
+            SessionPathState::Present(session) => session,
+            SessionPathState::Missing => {
+                if commit_if_missing {
+                    before_remove()?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            SessionPathState::Error(error) => return Err(error),
         };
-        if session.id != session_id || session.execution_binding.as_ref() != Some(expected) {
+        let actual_identity = match SessionExecutionIdentity::from_session(&session) {
+            Ok(Some(identity)) => identity,
+            Ok(None) | Err(_) => return Ok(false),
+        };
+        if &actual_identity != expected {
             return Ok(false);
         }
+        before_remove()?;
 
         let runtime_root = sessions_dir.join("runtime");
-        if runtime_root.exists() {
-            for entry in fs::read_dir(&runtime_root)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_dir()
-                    || entry
-                        .file_name()
-                        .to_str()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .is_none()
-                {
-                    continue;
-                }
-                let runtime_path = entry.path().join(format!("{session_id}.json"));
-                match fs::remove_file(runtime_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
+        match fs::symlink_metadata(&runtime_root) {
+            Ok(_) => {
+                for entry in fs::read_dir(&runtime_root)? {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_dir()
+                        || entry
+                            .file_name()
+                            .to_str()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .is_none()
+                    {
+                        continue;
+                    }
+                    let runtime_path = entry.path().join(format!("{session_id}.json"));
+                    match fs::remove_file(runtime_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        fs::remove_file(path)?;
+        fs::remove_file(&path)?;
+        #[cfg(unix)]
+        File::open(
+            path.parent()
+                .ok_or_else(|| io::Error::other("Session path has no parent directory"))?,
+        )?
+        .sync_all()?;
         Ok(true)
     })
 }
@@ -1377,6 +1691,121 @@ display_name = "Codex"
     }
 
     #[test]
+    fn save_if_absent_retains_existing_same_id_session_byte_identically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let candidate = session_with_execution_owner();
+        let mut replacement = candidate.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.save(dir.path()).expect("save replacement");
+        let path = dir.path().join(format!("{}.toml", candidate.id));
+        let before = fs::read(&path).expect("read replacement bytes");
+
+        assert!(
+            !candidate
+                .save_if_absent(dir.path())
+                .expect("classify present Session"),
+            "a present same-id Session must reject create-if-absent"
+        );
+        assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
+    fn save_if_execution_identity_matches_updates_exact_and_rejects_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut candidate = session_with_execution_owner();
+        let binding = test_session_execution_binding(&candidate);
+        candidate
+            .set_execution_binding(Some(binding))
+            .expect("bind candidate");
+        candidate.save(dir.path()).expect("save exact candidate");
+        let identity = SessionExecutionIdentity::from_session(&candidate)
+            .expect("derive identity")
+            .expect("bound identity");
+
+        candidate.display_name = "Updated display".to_string();
+        assert!(candidate
+            .save_if_execution_identity_matches(dir.path(), &identity)
+            .expect("save exact mutable update"));
+        assert_eq!(
+            Session::load(&dir.path().join(format!("{}.toml", candidate.id)))
+                .expect("reload exact update")
+                .display_name,
+            "Updated display"
+        );
+
+        let mut replacement = candidate.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.save(dir.path()).expect("save replacement");
+        let path = dir.path().join(format!("{}.toml", candidate.id));
+        let before = fs::read(&path).expect("read replacement bytes");
+        candidate.display_name = "Must not persist".to_string();
+
+        assert!(!candidate
+            .save_if_execution_identity_matches(dir.path(), &identity)
+            .expect("reject replacement"));
+        assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
+    fn save_if_unchanged_migrates_exact_unbound_session_and_rejects_stale_clone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = session_with_execution_owner();
+        original.save(dir.path()).expect("save unbound Session");
+
+        let mut migrated = original.clone();
+        migrated
+            .set_execution_binding(Some(test_session_execution_binding(&migrated)))
+            .expect("bind migrated Session");
+        assert!(migrated
+            .save_if_unchanged(dir.path(), &original)
+            .expect("migrate exact Session"));
+
+        original.save(dir.path()).expect("restore unbound Session");
+        let mut replacement = original.clone();
+        replacement.display_name = "Concurrent replacement".to_string();
+        replacement.save(dir.path()).expect("save replacement");
+        let path = dir.path().join(format!("{}.toml", original.id));
+        let before = fs::read(&path).expect("read replacement bytes");
+
+        assert!(!migrated
+            .save_if_unchanged(dir.path(), &original)
+            .expect("reject stale clone"));
+        assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
+    fn save_if_absent_or_unchanged_creates_or_migrates_without_replacing_same_id_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = session_with_execution_owner();
+        let mut migrated = original.clone();
+        migrated
+            .set_execution_binding(Some(test_session_execution_binding(&migrated)))
+            .expect("bind migrated Session");
+
+        assert!(migrated
+            .save_if_absent_or_unchanged(dir.path(), &original)
+            .expect("create missing Session"));
+        fs::remove_file(dir.path().join(format!("{}.toml", original.id)))
+            .expect("remove created Session");
+        original
+            .save(dir.path())
+            .expect("save exact unbound Session");
+        assert!(migrated
+            .save_if_absent_or_unchanged(dir.path(), &original)
+            .expect("migrate exact Session"));
+
+        let mut replacement = original.clone();
+        replacement.agent_id = AgentId::Custom("replacement".to_string());
+        replacement.save(dir.path()).expect("save replacement");
+        let path = dir.path().join(format!("{}.toml", original.id));
+        let before = fs::read(&path).expect("read replacement bytes");
+        assert!(!migrated
+            .save_if_absent_or_unchanged(dir.path(), &original)
+            .expect("reject replacement"));
+        assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
     fn session_execution_binding_new_and_legacy_sessions_default_to_none() {
         let session = Session::new("/host/worktree", "work/legacy", AgentId::Codex);
         assert!(session.execution_binding.is_none());
@@ -1472,6 +1901,9 @@ display_name = "Codex"
         session
             .set_execution_binding(Some(binding.clone()))
             .expect("bind Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("canonical Session identity")
+            .expect("bound Session identity");
         session.save(dir.path()).expect("save bound Session");
         let current_runtime = runtime_state_path(dir.path(), &session.id);
         let foreign_runtime = runtime_state_path_for_pid(dir.path(), 424_242, &session.id);
@@ -1482,10 +1914,10 @@ display_name = "Codex"
             .save(&foreign_runtime)
             .expect("save foreign runtime");
 
-        let mut mismatched = binding.clone();
-        mismatched.identity.binding_id = "foreign-binding".to_string();
+        let mut mismatched = identity.clone();
+        mismatched.execution_binding.identity.binding_id = "foreign-binding".to_string();
         assert!(
-            !remove_session_if_execution_binding_matches(dir.path(), &session.id, &mismatched)
+            !remove_session_if_execution_identity_matches(dir.path(), &session.id, &mismatched,)
                 .expect("mismatched cleanup"),
             "a stale or foreign cleanup must be a zero-write refusal",
         );
@@ -1494,7 +1926,7 @@ display_name = "Codex"
         assert!(foreign_runtime.exists());
 
         assert!(
-            remove_session_if_execution_binding_matches(dir.path(), &session.id, &binding)
+            remove_session_if_execution_identity_matches(dir.path(), &session.id, &identity,)
                 .expect("exact cleanup"),
             "the exact uncommitted Session must be removed",
         );
@@ -1502,10 +1934,313 @@ display_name = "Codex"
         assert!(!current_runtime.exists());
         assert!(!foreign_runtime.exists());
         assert!(
-            !remove_session_if_execution_binding_matches(dir.path(), &session.id, &binding)
+            !remove_session_if_execution_identity_matches(dir.path(), &session.id, &identity,)
                 .expect("idempotent missing cleanup"),
             "repeat cleanup must be an idempotent no-op",
         );
+    }
+
+    #[test]
+    fn prepared_session_cleanup_retains_same_binding_with_different_agent_identity() {
+        for (case_name, expected_agent, replacement_agent) in [
+            (
+                "codex-to-custom",
+                AgentId::Codex,
+                AgentId::Custom("review-bot".to_string()),
+            ),
+            (
+                "custom-to-custom",
+                AgentId::Custom("review-bot".to_string()),
+                AgentId::Custom("release-bot".to_string()),
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut session = session_with_execution_owner();
+            session.agent_id = expected_agent.clone();
+            let binding = test_session_execution_binding(&session);
+            session
+                .set_execution_binding(Some(binding.clone()))
+                .expect("bind Session");
+            let identity = SessionExecutionIdentity::from_session(&session)
+                .expect("canonical Session identity")
+                .expect("bound Session identity");
+            session.save(dir.path()).expect("save bound Session");
+
+            let mut replacement = session.clone();
+            replacement.agent_id = replacement_agent;
+            replacement
+                .save(dir.path())
+                .expect("replace Session behind the validator");
+            let replacement_path = dir.path().join(format!("{}.toml", session.id));
+            let replacement_before = fs::read(&replacement_path).expect("read replacement before");
+
+            assert!(
+                !remove_session_if_execution_identity_matches(dir.path(), &session.id, &identity,)
+                    .expect("agent-mismatched cleanup"),
+                "{case_name}: same binding must not authenticate a different Agent",
+            );
+            assert_eq!(
+                fs::read(&replacement_path).expect("read retained replacement"),
+                replacement_before,
+                "{case_name}: replacement must be retained byte-identically",
+            );
+
+            session
+                .save(dir.path())
+                .expect("restore exact Agent Session");
+            assert!(
+                remove_session_if_execution_identity_matches(dir.path(), &session.id, &identity,)
+                    .expect("exact Agent cleanup"),
+                "{case_name}: matching Agent and binding must be removed",
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_session_cleanup_requires_every_stable_non_secret_session_anchor() {
+        let mut original = session_with_execution_owner();
+        original.project_state_root = Some(PathBuf::from("/host/project-state"));
+        let binding = test_session_execution_binding(&original);
+        original
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Session");
+        let identity = SessionExecutionIdentity::from_session(&original)
+            .expect("canonical Session identity")
+            .expect("bound Session identity");
+
+        for (case_name, replacement) in [
+            ("worktree-path", {
+                let mut replacement = original.clone();
+                replacement.worktree_path = PathBuf::from("/host/replacement-worktree");
+                replacement
+            }),
+            ("project-state-root", {
+                let mut replacement = original.clone();
+                replacement.project_state_root = Some(PathBuf::from("/host/foreign-state"));
+                replacement
+            }),
+            ("branch", {
+                let mut replacement = original.clone();
+                replacement.branch = "work/foreign".to_string();
+                replacement
+            }),
+            ("repository-hash", {
+                let mut replacement = original.clone();
+                replacement.repo_hash = Some("foreign-repository".to_string());
+                replacement
+            }),
+            ("linked-owner", {
+                let mut replacement = original.clone();
+                replacement.linked_issue_number = Some(9999);
+                replacement
+            }),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            original.save(dir.path()).expect("save exact Session");
+            replacement
+                .save(dir.path())
+                .expect("replace Session behind validator");
+            let replacement_path = dir.path().join(format!("{}.toml", original.id));
+            let replacement_before = fs::read(&replacement_path).expect("read replacement");
+
+            assert!(
+                !remove_session_if_execution_identity_matches(dir.path(), &original.id, &identity,)
+                    .expect("anchor-mismatched cleanup"),
+                "{case_name}: a stable Session anchor mismatch must fail closed",
+            );
+            assert_eq!(
+                fs::read(&replacement_path).expect("read retained replacement"),
+                replacement_before,
+                "{case_name}: replacement must remain byte-identical",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_session_cleanup_retains_session_when_runtime_root_is_dangling() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("canonical Session identity")
+            .expect("bound Session identity");
+        session.save(dir.path()).expect("save Session");
+        let session_path = dir.path().join(format!("{}.toml", session.id));
+        let session_before = fs::read(&session_path).expect("read Session before cleanup");
+        symlink(
+            dir.path().join("missing-runtime-root"),
+            dir.path().join("runtime"),
+        )
+        .expect("create dangling runtime root");
+
+        assert!(
+            remove_session_if_execution_identity_matches(dir.path(), &session.id, &identity,)
+                .is_err(),
+            "a dangling runtime entry must be an I/O failure, never an empty runtime root",
+        );
+        assert_eq!(
+            fs::read(&session_path).expect("read retained Session"),
+            session_before,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_session_cleanup_does_not_commit_for_dangling_main_session_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding))
+            .expect("bind Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("canonical Session identity")
+            .expect("bound Session identity");
+        session.save(dir.path()).expect("save Session");
+        let session_path = dir.path().join(format!("{}.toml", session.id));
+        fs::remove_file(&session_path).expect("remove materialized Session");
+        let missing_target = dir.path().join("missing-session-target");
+        symlink(&missing_target, &session_path).expect("create dangling Session entry");
+        let callback_ran = std::cell::Cell::new(false);
+
+        let error = remove_session_if_execution_identity_matches_or_missing_with(
+            dir.path(),
+            &session.id,
+            &identity,
+            || {
+                callback_ran.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("a dangling Session entry must remain an unreadable present candidate");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            !callback_ran.get(),
+            "owner/Work cleanup must not commit for an unreadable Session entry",
+        );
+        assert!(fs::symlink_metadata(&session_path)
+            .expect("dangling Session entry must remain")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&session_path).unwrap(), missing_target);
+
+        fs::remove_file(&session_path).expect("remove dangling Session entry");
+        assert!(
+            remove_session_if_execution_identity_matches_or_missing_with(
+                dir.path(),
+                &session.id,
+                &identity,
+                || {
+                    callback_ran.set(true);
+                    Ok(())
+                },
+            )
+            .expect("truly missing candidate cleanup"),
+            "a genuinely absent Session keeps the materialization-never-happened path",
+        );
+        assert!(callback_ran.get());
+    }
+
+    #[test]
+    fn session_path_lease_reports_true_missing_without_releasing_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = "missing-path-lease";
+        let observed =
+            with_session_path_lease_wait(dir.path(), session_id, Duration::from_secs(1), |state| {
+                Ok(matches!(state, SessionPathState::Missing))
+            })
+            .expect("inspect a genuinely missing Session under its lease");
+
+        assert!(observed);
+    }
+
+    #[test]
+    fn prepared_session_cleanup_runs_commit_only_for_exact_identity_and_retains_on_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_execution_owner();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind Session");
+        let identity = SessionExecutionIdentity::from_session(&session)
+            .expect("canonical Session identity")
+            .expect("bound Session identity");
+        session.save(dir.path()).expect("save Session");
+        let path = dir.path().join(format!("{}.toml", session.id));
+        let before = fs::read(&path).expect("read Session before");
+        let callback_ran = std::cell::Cell::new(false);
+
+        let result = remove_session_if_execution_identity_matches_with(
+            dir.path(),
+            &session.id,
+            &identity,
+            || {
+                callback_ran.set(true);
+                Err(io::Error::other("simulated cleanup commit failure"))
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(callback_ran.get());
+        assert_eq!(fs::read(&path).expect("read retained Session"), before);
+
+        let mut foreign_identity = identity.clone();
+        foreign_identity.agent_id = AgentId::Custom("review-bot".to_string());
+        callback_ran.set(false);
+        assert!(!remove_session_if_execution_identity_matches_with(
+            dir.path(),
+            &session.id,
+            &foreign_identity,
+            || {
+                callback_ran.set(true);
+                Ok(())
+            },
+        )
+        .expect("foreign Agent refusal"));
+        assert!(!callback_ran.get());
+        assert_eq!(fs::read(&path).expect("read retained Session"), before);
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = remove_session_if_execution_identity_matches_with(
+                dir.path(),
+                &session.id,
+                &identity,
+                || -> io::Result<()> { panic!("simulated cleanup callback panic") },
+            );
+        }));
+        assert!(panic_result.is_err());
+        assert_eq!(
+            fs::read(&path).expect("read Session retained after callback panic"),
+            before,
+        );
+        assert!(
+            remove_session_if_execution_identity_matches(dir.path(), &session.id, &identity,)
+                .expect("cleanup after callback panic"),
+            "callback unwind must release the Session lock without deleting the candidate",
+        );
+        callback_ran.set(false);
+        assert!(
+            remove_session_if_execution_identity_matches_or_missing_with(
+                dir.path(),
+                &session.id,
+                &identity,
+                || {
+                    callback_ran.set(true);
+                    Ok(())
+                },
+            )
+            .expect("commit cleanup for never-materialized candidate"),
+        );
+        assert!(callback_ran.get());
     }
 
     #[test]

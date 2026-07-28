@@ -1708,6 +1708,42 @@ fn revalidate_verification_caller_authority(
     Ok(())
 }
 
+/// Authenticate the ambient caller against the exact durable Session for the
+/// current generation, when this worktree has generation authority.
+///
+/// Legacy flat ECRs and unmanaged worktrees intentionally remain outside this
+/// gate. Callers receive only a boolean-free success/error result so no
+/// Session or binding identity can leak into diagnostics.
+pub(crate) fn authenticate_current_generation_caller(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> io::Result<()> {
+    snapshot_current_generation_caller_binding(worktree, session_id).map(|_| ())
+}
+
+/// Capture the exact durable Session capability epoch authenticated for the
+/// current generation. PR mutations keep this snapshot across local payload
+/// reads and lease it again immediately around external dispatch.
+pub(crate) fn snapshot_current_generation_caller_binding(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    let (_, current_binding) =
+        current_execution_context(worktree).map_err(|_| verification_caller_authority_error())?;
+    if current_binding.is_none() {
+        return Ok(None);
+    }
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(verification_caller_authority_error)?;
+    let authority = snapshot_verification_caller_authority(worktree, session_id)?;
+    if authority.execution_binding != current_binding {
+        return Err(verification_caller_authority_error());
+    }
+    Ok(authority.session_binding)
+}
+
 /// Resolve the current linked owner and its exact generation identity from
 /// the authoritative ECR/ledger pair. A flat legacy ECR intentionally
 /// returns an owner with no binding.
@@ -2449,6 +2485,12 @@ pub(crate) mod tests {
     // the old matrix bind itself to the newer run fingerprint.
     #[test]
     fn derived_plan_rejects_worktree_drift_before_run() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let commands = vec!["git --version".to_string()];

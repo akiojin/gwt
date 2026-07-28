@@ -133,6 +133,7 @@ use knowledge::KnowledgeRefreshTask;
 pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSearchRequest};
 #[cfg(test)]
 use launch::{
+    codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     maybe_register_codex_managed_hook_trust_for_launch,
@@ -206,6 +207,9 @@ pub(crate) struct PendingContinueWork {
     pub(crate) project_root: PathBuf,
     pub(crate) worktree_path: PathBuf,
     pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) work_branch: String,
+    pub(crate) work_agent_id: gwt_agent::AgentId,
+    pub(crate) work_agent_session_id: Option<String>,
     pub(crate) execution: PendingContinueWorkExecution,
     pub(crate) binding: gwt_agent::SessionExecutionBinding,
     pub(crate) readiness_nonce: String,
@@ -231,6 +235,7 @@ pub(crate) struct PendingFreshExecutionLaunch {
     pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
     pub(crate) request: gwt::cli::execution_state::SuccessorRequest,
     pub(crate) binding: gwt_agent::SessionExecutionBinding,
+    pub(crate) session_identity: gwt_agent::SessionExecutionIdentity,
     pub(crate) readiness_nonce: String,
     pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
     pub(crate) base_branch: Option<String>,

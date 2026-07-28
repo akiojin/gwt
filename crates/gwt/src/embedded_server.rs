@@ -2874,7 +2874,6 @@ async fn client_session_with_scope(
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
-                        let text_len = text.len();
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
@@ -2891,7 +2890,6 @@ async fn client_session_with_scope(
                                             &state,
                                             &client_id,
                                             &input_seq,
-                                            text_len,
                                             event,
                                         );
                                     }
@@ -3047,7 +3045,6 @@ fn handle_frontend_message(
     state: &ServerState,
     client_id: &str,
     input_seq: &AtomicU64,
-    text_len: usize,
     event: FrontendEvent,
 ) {
     let (id, data) = match event {
@@ -3062,28 +3059,24 @@ fn handle_frontend_message(
     };
 
     let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let data_len = data.len();
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_recv",
         client_id = %client_id,
         seq,
         window_id = %id,
-        data_len,
-        text_len,
         "terminal_input received over WebSocket"
     );
 
     let pty_handle = match state.pty_writers.read() {
         Ok(guard) => guard.get(&id).cloned(),
-        Err(error) => {
+        Err(_error) => {
             tracing::warn!(
                 target: "gwt_input_trace",
                 stage = "fast_path_lock_poisoned",
                 client_id = %client_id,
                 seq,
                 window_id = %id,
-                error = %error,
                 "pty_writers read lock poisoned; falling back to event loop"
             );
             None
@@ -3100,21 +3093,18 @@ fn handle_frontend_message(
                     client_id = %client_id,
                     seq,
                     window_id = %id,
-                    data_len,
                     write_us = write_started.elapsed().as_micros() as u64,
                     "terminal_input written to PTY via WS fast-path"
                 );
                 return;
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "fast_path_write_err",
                     client_id = %client_id,
                     seq,
                     window_id = %id,
-                    data_len,
-                    error = %error,
                     "fast-path PTY write failed; forwarding to event loop for error handling"
                 );
             }
@@ -3126,7 +3116,6 @@ fn handle_frontend_message(
             client_id = %client_id,
             seq,
             window_id = %id,
-            data_len,
             "pty_writers registry miss; falling back to event loop"
         );
     }
@@ -3144,7 +3133,6 @@ fn handle_frontend_message(
         client_id = %client_id,
         seq,
         window_id = %id,
-        data_len,
         ok = true,
         "terminal_input forwarded to event loop proxy (fallback)"
     );
@@ -5632,7 +5620,6 @@ mod tests {
             &state,
             "client-1",
             &AtomicU64::new(0),
-            32,
             FrontendEvent::FrontendReady,
         );
 
@@ -5654,7 +5641,6 @@ mod tests {
             &state,
             "client-1",
             &AtomicU64::new(0),
-            48,
             FrontendEvent::TerminalInput {
                 id: "tab-1::shell-1".to_string(),
                 data: "ls\n".to_string(),

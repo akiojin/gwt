@@ -3651,7 +3651,6 @@
             console.debug("[gwt_input_trace:onData:dropped]", {
               seq: inputTraceSeq,
               windowId,
-              dataLen: data.length,
               reason: gate.reason,
               wsState,
             });
@@ -3660,7 +3659,6 @@
           console.debug("[gwt_input_trace:onData]", {
             seq: inputTraceSeq,
             windowId,
-            dataLen: data.length,
             wsState,
           });
           send({ kind: "terminal_input", id: windowId, data });

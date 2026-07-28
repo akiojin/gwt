@@ -28,14 +28,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use gwt_agent::resolve_host_runner_health_checked;
+
 use super::continuation::{
+    clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
+    durable_launch_recovery_exists, durable_launch_recovery_session_identity,
     pending_execution_activation_status, pending_fresh_execution_activation_status,
+    persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
+    DurableLaunchRecoveryKind,
 };
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
-    apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
-    apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
-    finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
+    apply_docker_runtime_to_launch_config, apply_windows_host_shell_wrapper, combined_window_id,
+    detect_shell_program, finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
     install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
     launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
@@ -46,6 +51,32 @@ use super::{
     PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset, WindowProcessStatus,
     WindowRuntime, WorkspaceResumeContext,
 };
+
+#[cfg(test)]
+type FinalizedSessionPostSaveHook = Box<dyn FnOnce() -> std::io::Result<()> + 'static>;
+
+#[cfg(test)]
+thread_local! {
+    static FINALIZED_SESSION_POST_SAVE_HOOK:
+        std::cell::RefCell<Option<FinalizedSessionPostSaveHook>> =
+            std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_finalized_session_post_save_hook_for_test(hook: FinalizedSessionPostSaveHook) {
+    FINALIZED_SESSION_POST_SAVE_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+fn invoke_finalized_session_post_save_hook() -> std::io::Result<()> {
+    FINALIZED_SESSION_POST_SAVE_HOOK
+        .with(|slot| slot.borrow_mut().take().map_or(Ok(()), |hook| hook()))
+}
+
+#[cfg(not(test))]
+fn invoke_finalized_session_post_save_hook() -> std::io::Result<()> {
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct ProcessLaunch {
@@ -82,6 +113,7 @@ fn pending_fresh_execution_launch_from_session(
     resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
     readiness_nonce: &str,
+    expected_agent_id: &gwt_agent::AgentId,
 ) -> Result<PendingFreshExecutionLaunch, String> {
     let session_path = sessions_dir.join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&session_path).map_err(|error| {
@@ -90,7 +122,10 @@ fn pending_fresh_execution_launch_from_session(
             session_path.display()
         )
     })?;
-    if session.id != session_id || !same_worktree_path(&session.worktree_path, worktree_path) {
+    if session.id != session_id
+        || &session.agent_id != expected_agent_id
+        || !same_worktree_path(&session.worktree_path, worktree_path)
+    {
         return Err(
             "fresh linked-owner launch Session does not match its materialized worktree"
                 .to_string(),
@@ -168,6 +203,16 @@ fn pending_fresh_execution_launch_from_session(
         .ok_or_else(|| {
             "fresh linked-owner launch canonical Project State root is missing".to_string()
         })?;
+    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|error| format!("fresh linked-owner Session identity is invalid: {error}"))?
+        .ok_or_else(|| "fresh linked-owner Session identity is missing".to_string())?;
+    if durable_launch_recovery_session_identity(sessions_dir, session_id)?
+        != Some(session_identity.clone())
+    {
+        return Err(
+            "fresh linked-owner Session no longer matches its durable launch identity".to_string(),
+        );
+    }
     Ok(PendingFreshExecutionLaunch {
         operation_id: attempt.request.operation_id.clone(),
         project_root,
@@ -175,6 +220,7 @@ fn pending_fresh_execution_launch_from_session(
         owner,
         request: attempt.request,
         binding,
+        session_identity,
         readiness_nonce: readiness_nonce.to_string(),
         predecessor_binding,
         base_branch,
@@ -189,13 +235,17 @@ fn rollback_materialized_fresh_execution_launch(
     session_id: &str,
     worktree_path: &Path,
     reason: &str,
+    expected_agent_id: &gwt_agent::AgentId,
 ) -> Result<(), String> {
     let session_path = sessions_dir.join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&session_path).map_err(|error| error.to_string())?;
     let binding = session.execution_binding.clone().ok_or_else(|| {
         "fresh linked-owner rollback cannot prove the candidate Session binding".to_string()
     })?;
+    let session_identity = durable_launch_recovery_session_identity(sessions_dir, session_id)?
+        .ok_or_else(|| "fresh linked-owner rollback identity is missing".to_string())?;
     if session.id != session_id
+        || &session.agent_id != expected_agent_id
         || binding.session_id != session_id
         || !same_worktree_path(&session.worktree_path, worktree_path)
     {
@@ -231,16 +281,196 @@ fn rollback_materialized_fresh_execution_launch(
             "fresh linked-owner rollback candidate binding is no longer Prepared".to_string(),
         );
     }
-    gwt::cli::execution_state::abort_successor(worktree_path, owner, &attempt.request, reason)
-        .map_err(|error| error.to_string())?;
-    match gwt_agent::remove_session_if_execution_binding_matches(sessions_dir, session_id, &binding)
-    {
-        Ok(true) => Ok(()),
+    match gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+        worktree_path,
+        owner,
+        &attempt.request,
+        reason,
+        sessions_dir,
+        &session_identity,
+        || Ok(()),
+    ) {
+        Ok(true) => clear_durable_launch_recovery(sessions_dir, session_id),
         Ok(false) => Err(
             "fresh linked-owner rollback retained a Session whose binding no longer matches"
                 .to_string(),
         ),
         Err(error) => Err(error.to_string()),
+    }
+}
+
+#[derive(Clone)]
+struct MaterializedGenesisLaunch {
+    worktree_path: PathBuf,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    session_id: String,
+    binding: gwt_agent::SessionExecutionBinding,
+    session_identity: gwt_agent::SessionExecutionIdentity,
+}
+
+fn materialized_genesis_launch_from_session(
+    sessions_dir: &Path,
+    session_id: &str,
+    worktree_path: &Path,
+    project_state_root: &Path,
+    branch: &str,
+    linked_issue_number: Option<u64>,
+    expected_agent_id: &gwt_agent::AgentId,
+) -> Result<Option<MaterializedGenesisLaunch>, String> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    match std::fs::symlink_metadata(&session_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    }
+    let session = gwt_agent::Session::load(&session_path).map_err(|error| {
+        format!(
+            "materialized genesis Session could not be read at {}: {error}",
+            session_path.display()
+        )
+    })?;
+    let Some(binding) = session.execution_binding.clone() else {
+        return Ok(None);
+    };
+    if session.id != session_id
+        || &session.agent_id != expected_agent_id
+        || binding.session_id != session_id
+        || !same_worktree_path(&session.worktree_path, worktree_path)
+        || session.linked_issue_number != Some(binding.owner_number)
+        || linked_issue_number != Some(binding.owner_number)
+    {
+        return Err(
+            "materialized genesis Session no longer matches its launch identity".to_string(),
+        );
+    }
+    let owner_kind = match binding.owner_kind.as_str() {
+        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => return Err("materialized genesis owner kind is not canonical".to_string()),
+    };
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: owner_kind,
+        number: binding.owner_number,
+    };
+    if gwt::cli::execution_state::current_execution_binding(worktree_path, owner)
+        .map_err(|error| error.to_string())?
+        != Some(binding.identity.clone())
+    {
+        return Err(
+            "materialized genesis Session is not the current execution generation".to_string(),
+        );
+    }
+    let ledger = gwt::cli::execution_state::load_generation_ledger(worktree_path, owner)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "materialized genesis generation ledger is missing".to_string())?;
+    if ledger.generations.len() != 1
+        || ledger.current_effective_status()
+            != Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    {
+        return Ok(None);
+    }
+    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|error| format!("materialized genesis identity is invalid: {error}"))?
+        .ok_or_else(|| "materialized genesis identity is missing".to_string())?;
+    let mut expected_session =
+        gwt_agent::Session::new(worktree_path, branch, expected_agent_id.clone());
+    expected_session.id = session_id.to_string();
+    expected_session.project_state_root = Some(project_state_root.to_path_buf());
+    expected_session.repo_hash = Some(binding.repo_hash.clone());
+    expected_session.linked_issue_number = linked_issue_number;
+    let expected_session_identity =
+        gwt_agent::SessionExecutionIdentity::for_binding(&expected_session, &binding)?;
+    if session_identity != expected_session_identity {
+        return Err("materialized genesis durable Session identity changed".to_string());
+    }
+    if let Ok(Some(receipt_identity)) =
+        durable_launch_recovery_session_identity(sessions_dir, session_id)
+    {
+        if receipt_identity != expected_session_identity {
+            return Err("materialized genesis recovery identity changed".to_string());
+        }
+    }
+    Ok(Some(MaterializedGenesisLaunch {
+        worktree_path: worktree_path.to_path_buf(),
+        owner,
+        session_id: session_id.to_string(),
+        binding,
+        session_identity,
+    }))
+}
+
+fn terminalize_materialized_genesis_launch(
+    sessions_dir: &Path,
+    genesis: Option<&MaterializedGenesisLaunch>,
+    reason: &str,
+) -> Result<(), String> {
+    let Some(genesis) = genesis else {
+        return Ok(());
+    };
+    let removed = gwt::cli::execution_state::block_genesis_and_remove_exact_session(
+        &genesis.worktree_path,
+        genesis.owner,
+        &genesis.session_id,
+        &genesis.binding.identity,
+        reason,
+        sessions_dir,
+        &genesis.session_identity,
+        || Ok(()),
+    )
+    .map_err(|error| error.to_string())?;
+    if !removed {
+        return Err("terminal genesis Session identity changed before exact cleanup".to_string());
+    }
+    clear_durable_launch_recovery(sessions_dir, &genesis.session_id)
+}
+
+fn terminalized_genesis_failure_detail(
+    sessions_dir: &Path,
+    genesis: Option<&MaterializedGenesisLaunch>,
+    reason: &str,
+    detail: impl Into<String>,
+) -> String {
+    let detail = detail.into();
+    let Some(genesis) = genesis else {
+        return detail;
+    };
+    match terminalize_materialized_genesis_launch(sessions_dir, Some(genesis), reason) {
+        Ok(()) => format!("{detail}; genesis authority was terminalized"),
+        Err(error) => format!(
+            "{detail}; failed genesis terminalization retained exact evidence for retry: {error}"
+        ),
+    }
+}
+
+fn persist_genesis_session_binding_with<F>(
+    sessions_dir: &Path,
+    session: &mut gwt_agent::Session,
+    genesis: &MaterializedGenesisLaunch,
+    persist: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&gwt_agent::Session) -> std::io::Result<bool>,
+{
+    match persist(session) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let _ = session.set_execution_binding(None);
+            Err(terminalized_genesis_failure_detail(
+                sessions_dir,
+                Some(genesis),
+                "genesis Session binding persistence conflict",
+                "failed to persist the genesis Session binding: same-id Session changed",
+            ))
+        }
+        Err(error) => {
+            let _ = session.set_execution_binding(None);
+            Err(terminalized_genesis_failure_detail(
+                sessions_dir,
+                Some(genesis),
+                "genesis Session binding persistence failed",
+                format!("failed to persist the genesis Session binding: {error}"),
+            ))
+        }
     }
 }
 
@@ -466,11 +696,20 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                         .to_string(),
                 );
             }
-            session.save(sessions_dir).map_err(|error| {
-                format!(
-                    "failed to persist the Prepared continuation Session binding before capability issuance: {error}"
-                )
-            })?;
+            match session.save_if_absent(sessions_dir) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(
+                        "Prepared continuation Session already exists; reconcile the operation before retrying"
+                            .to_string(),
+                    )
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "failed to create the Prepared continuation Session binding before capability issuance: {error}"
+                    ))
+                }
+            }
             let endpoints = preflight_agent_capability_endpoints(
                 issuer,
                 project_root,
@@ -567,10 +806,34 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 entrypoint: execution_entrypoint.to_string(),
                 requested_at: chrono::Utc::now(),
             };
-            gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
-                worktree, owner, &request,
-            )
-            .map_err(|error| error.to_string())?;
+            persist_durable_launch_recovery(
+                sessions_dir,
+                DurableLaunchRecoveryKind::FreshSuccessor {
+                    operation_id: request.operation_id.clone(),
+                },
+                &session.id,
+                project_root,
+                worktree,
+                owner,
+                None,
+                None,
+            )?;
+            if let Err(error) =
+                gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+                    worktree, owner, &request,
+                )
+            {
+                if gwt::cli::execution_state::continuation_attempt_for_operation(
+                    worktree,
+                    owner,
+                    &request.operation_id,
+                )
+                .is_ok_and(|attempt| attempt.is_none())
+                {
+                    let _ = clear_durable_launch_recovery(sessions_dir, &session.id);
+                }
+                return Err(error.to_string());
+            }
             let abort_prepared = |reason: &str| {
                 gwt::cli::execution_state::abort_successor(worktree, owner, &request, reason)
                     .map(|_| ())
@@ -582,6 +845,9 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 Ok(identity) => identity,
                 Err(error) => {
                     let abort = abort_prepared("fresh launch binding derivation failed");
+                    if abort.is_ok() {
+                        let _ = clear_durable_launch_recovery(sessions_dir, &session.id);
+                    }
                     return Err(match abort {
                         Ok(()) => error.to_string(),
                         Err(abort_error) => format!(
@@ -599,8 +865,40 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 identity,
                 capability_generation: 1,
             };
+            let session_identity =
+                gwt_agent::SessionExecutionIdentity::for_binding(session, &binding)?;
+            let unbound_session_snapshot = session.clone();
+            if let Err(error) = persist_durable_launch_recovery_with_identity(
+                sessions_dir,
+                DurableLaunchRecoveryKind::FreshSuccessor {
+                    operation_id: request.operation_id.clone(),
+                },
+                &session.id,
+                project_root,
+                worktree,
+                owner,
+                Some(&binding),
+                Some(&session.agent_id),
+                Some(&session_identity),
+            ) {
+                let abort = abort_prepared("fresh launch recovery binding persistence failed");
+                if abort.is_ok() {
+                    let _ = clear_durable_launch_recovery(sessions_dir, &session.id);
+                }
+                return Err(match abort {
+                    Ok(()) => format!(
+                        "failed to persist exact fresh launch recovery binding: {error}"
+                    ),
+                    Err(abort_error) => format!(
+                        "failed to persist exact fresh launch recovery binding: {error}; failed to abort fresh launch successor: {abort_error}"
+                    ),
+                });
+            }
             if let Err(error) = session.set_execution_binding(Some(binding.clone())) {
                 let abort = abort_prepared("fresh launch Session binding failed");
+                if abort.is_ok() {
+                    let _ = clear_durable_launch_recovery(sessions_dir, &session.id);
+                }
                 return Err(match abort {
                     Ok(()) => error,
                     Err(abort_error) => {
@@ -608,15 +906,39 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     }
                 });
             }
-            if let Err(error) = session.save(sessions_dir) {
-                let _ = session.set_execution_binding(None);
-                let abort = abort_prepared("fresh launch Session persistence failed");
-                return Err(match abort {
-                    Ok(()) => format!("failed to persist fresh launch Session binding: {error}"),
-                    Err(abort_error) => format!(
-                        "failed to persist fresh launch Session binding: {error}; failed to abort fresh launch successor: {abort_error}"
-                    ),
+            let save_result = session
+                .save_if_absent_or_unchanged(sessions_dir, &unbound_session_snapshot)
+                .and_then(|saved| {
+                    if saved {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "same-id Session already exists",
+                        ))
+                    }
                 });
+            if let Err(error) = save_result {
+                let _ = session.set_execution_binding(None);
+                let cleanup = gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+                    worktree,
+                    owner,
+                    &request,
+                    "fresh launch Session persistence failed",
+                    sessions_dir,
+                    &session_identity,
+                    || Ok(()),
+                );
+                if cleanup.as_ref().is_ok_and(|removed| *removed) {
+                    let _ = clear_durable_launch_recovery(sessions_dir, &session.id);
+                }
+                return Err(format!(
+                    "failed to persist fresh launch Session binding: {error}; exact rollback: {}",
+                    cleanup
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "retained replacement".to_string())
+                ));
             }
             if let Err(error) = issue_preflighted_agent_capability_env(
                 env,
@@ -626,29 +948,25 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 AgentCapabilityLaunchAuthority::Prepared(&binding),
                 endpoints,
             ) {
-                let abort = abort_prepared("fresh launch capability issuance failed");
-                let cleanup = match abort.as_ref() {
-                    Ok(()) => gwt_agent::remove_session_if_execution_binding_matches(
-                        sessions_dir,
-                        &session.id,
-                        &binding,
-                    )
-                    .map_err(|cleanup_error| cleanup_error.to_string())
-                    .and_then(|removed| {
-                        removed.then_some(()).ok_or_else(|| {
-                            "candidate Session binding changed before cleanup".to_string()
-                        })
-                    }),
-                    Err(_) => Err(
-                        "candidate retained because the durable abort did not commit".to_string(),
-                    ),
-                };
-                return Err(match (cleanup, abort) {
-                    (Ok(()), Ok(())) => error,
-                    (cleanup, abort) => format!(
-                        "{error}; fresh launch rollback retained exact evidence (Session: {}; successor: {})",
-                        cleanup.err().unwrap_or_else(|| "ok".to_string()),
-                        abort.err().unwrap_or_else(|| "ok".to_string()),
+                let cleanup = gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+                    worktree,
+                    owner,
+                    &request,
+                    "fresh launch capability issuance failed",
+                    sessions_dir,
+                    &session_identity,
+                    || Ok(()),
+                );
+                return Err(match cleanup {
+                    Ok(true) => {
+                        let _ = clear_durable_launch_recovery(sessions_dir, &session.id);
+                        error
+                    }
+                    Ok(false) => {
+                        format!("{error}; fresh launch rollback retained a replacement Session")
+                    }
+                    Err(cleanup_error) => format!(
+                        "{error}; fresh launch rollback retained exact evidence: {cleanup_error}"
                     ),
                 });
             }
@@ -659,6 +977,23 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             return Ok(());
         }
 
+        let repo_hash = session
+            .repo_hash
+            .clone()
+            .filter(|repo_hash| !repo_hash.trim().is_empty())
+            .ok_or_else(|| {
+                "producing Session is missing its canonical repository hash".to_string()
+            })?;
+        persist_durable_launch_recovery(
+            sessions_dir,
+            DurableLaunchRecoveryKind::Genesis,
+            &session.id,
+            project_root,
+            worktree,
+            owner,
+            None,
+            None,
+        )?;
         gwt::cli::execution_state::materialize_at_launch(
             worktree,
             owner.kind,
@@ -679,13 +1014,6 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             .ok_or_else(|| {
                 "execution generation materialization did not publish a current binding".to_string()
             })?;
-        let repo_hash = session
-            .repo_hash
-            .clone()
-            .filter(|repo_hash| !repo_hash.trim().is_empty())
-            .ok_or_else(|| {
-                "producing Session is missing its canonical repository hash".to_string()
-            })?;
         let binding = gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
             session_id: session.id.clone(),
@@ -695,13 +1023,68 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             identity,
             capability_generation: 1,
         };
-        session.set_execution_binding(Some(binding.clone()))?;
-        if let Err(error) = session.save(sessions_dir) {
-            let _ = session.set_execution_binding(None);
-            return Err(format!(
-            "failed to persist the producing Session binding after its execution generation was materialized: {error}; transactional recovery is required before retry"
-        ));
+        let session_identity = gwt_agent::SessionExecutionIdentity::for_binding(session, &binding)?;
+        let unbound_session_snapshot = session.clone();
+        let genesis_session_id = session.id.clone();
+        let terminalize_genesis = |reason: &str| {
+            gwt::cli::execution_state::block_uncommitted_genesis_launch(
+                worktree,
+                owner,
+                &genesis_session_id,
+                &binding.identity,
+                reason,
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        };
+        if let Err(error) = persist_durable_launch_recovery_with_identity(
+            sessions_dir,
+            DurableLaunchRecoveryKind::Genesis,
+            &session.id,
+            project_root,
+            worktree,
+            owner,
+            Some(&binding),
+            Some(&session.agent_id),
+            Some(&session_identity),
+        ) {
+            let terminalized = terminalize_genesis("genesis recovery binding persistence failed");
+            if terminalized.is_ok() {
+                let _ = clear_durable_launch_recovery(sessions_dir, &genesis_session_id);
+            }
+            return Err(match terminalized {
+                Ok(()) => {
+                    format!("failed to persist exact genesis recovery binding: {error}")
+                }
+                Err(terminal_error) => format!(
+                    "failed to persist exact genesis recovery binding: {error}; failed to terminalize the generation: {terminal_error}"
+                ),
+            });
         }
+        if let Err(error) = session.set_execution_binding(Some(binding.clone())) {
+            let terminalized = terminalize_genesis("genesis Session binding validation failed");
+            if terminalized.is_ok() {
+                let _ = clear_durable_launch_recovery(sessions_dir, &genesis_session_id);
+            }
+            return Err(match terminalized {
+                Ok(()) => format!(
+                    "genesis Session binding validation failed and the generation was terminally Blocked: {error}"
+                ),
+                Err(terminal_error) => format!(
+                    "genesis Session binding validation failed: {error}; failed to terminalize the generation: {terminal_error}"
+                ),
+            });
+        }
+        let genesis = MaterializedGenesisLaunch {
+            worktree_path: worktree.to_path_buf(),
+            owner,
+            session_id: genesis_session_id.clone(),
+            binding: binding.clone(),
+            session_identity: session_identity.clone(),
+        };
+        persist_genesis_session_binding_with(sessions_dir, session, &genesis, |session| {
+            session.save_if_absent_or_unchanged(sessions_dir, &unbound_session_snapshot)
+        })?;
 
         match issue_preflighted_agent_capability_env(
             env,
@@ -713,18 +1096,51 @@ impl FinalizedAgentCapabilityLaunch<'_> {
         ) {
             Ok(()) => Ok(()),
             Err(error) => {
-                let rollback_result = session.set_execution_binding(None).and_then(|()| {
-                    session
-                        .save(sessions_dir)
-                        .map_err(|error| error.to_string())
-                });
-                match rollback_result {
-                    Ok(()) => Err(error),
-                    Err(rollback_error) => Err(format!(
-                        "{error}; failed to roll back Session execution binding: {rollback_error}"
+                let cleanup = gwt::cli::execution_state::block_genesis_and_remove_exact_session(
+                    worktree,
+                    owner,
+                    &genesis_session_id,
+                    &binding.identity,
+                    "genesis capability issuance failed",
+                    sessions_dir,
+                    &session_identity,
+                    || Ok(()),
+                );
+                if cleanup.as_ref().is_ok_and(|removed| *removed) {
+                    let _ = session.set_execution_binding(None);
+                }
+                match cleanup {
+                    Ok(true) => {
+                        let _ = clear_durable_launch_recovery(sessions_dir, &genesis_session_id);
+                        Err(error)
+                    }
+                    Ok(false) => Err(format!(
+                        "{error}; genesis failure retained a replacement Session"
+                    )),
+                    Err(cleanup_error) => Err(format!(
+                        "{error}; genesis failure retained exact recovery evidence: {cleanup_error}"
                     )),
                 }
             }
+        }
+    }
+}
+
+fn interrupt_exact_running_session_after_persistence_error(
+    sessions_dir: &Path,
+    session: &mut gwt_agent::Session,
+    running_snapshot: &gwt_agent::Session,
+    context: &str,
+    error: impl std::fmt::Display,
+) -> String {
+    session.update_status(gwt_agent::AgentStatus::Interrupted);
+    match session.save_if_unchanged(sessions_dir, running_snapshot) {
+        Ok(true) => format!("{context}; Session was marked Interrupted: {error}"),
+        Ok(false) => {
+            format!("{context} and no exact Running Session remained: {error}")
+        }
+        Err(interruption_error) => {
+            format!("{context} and Session interruption failed: {error}; {interruption_error}")
         }
     }
 }
@@ -748,12 +1164,71 @@ fn persist_finalized_launch_session(
         session.bind_docker_runtime(runtime_worktree, &project_state_root)?;
     }
 
-    session
-        .save(sessions_dir)
-        .map_err(|error| error.to_string())?;
-    gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-        .save(runtime_path)
-        .map_err(|error| error.to_string())
+    let saved_identity = gwt_agent::SessionExecutionIdentity::from_session(session)?;
+    let running_snapshot = session.clone();
+    let save_result = if let Some(expected) = saved_identity.as_ref() {
+        session.save_if_execution_identity_matches(sessions_dir, expected)
+    } else {
+        session.save_if_absent_or_unchanged(sessions_dir, session)
+    };
+    match save_result {
+        Ok(true) => {
+            if let Err(error) = invoke_finalized_session_post_save_hook() {
+                return Err(interrupt_exact_running_session_after_persistence_error(
+                    sessions_dir,
+                    session,
+                    &running_snapshot,
+                    "failed to durably confirm launch Session",
+                    error,
+                ));
+            }
+        }
+        Ok(false) if saved_identity.is_some() => {
+            return Err(
+                "bound Session identity changed before final launch persistence".to_string(),
+            )
+        }
+        Ok(false) => {
+            return Err("unbound Session changed before final launch persistence".to_string())
+        }
+        Err(error) => {
+            // Atomic replace followed by parent-directory fsync has an
+            // unknown outcome: the intended Running TOML may already be
+            // visible even though persistence returned Err. Transition only
+            // that exact intended snapshot to Interrupted; a concurrent
+            // same-id replacement remains byte-identical.
+            return Err(interrupt_exact_running_session_after_persistence_error(
+                sessions_dir,
+                session,
+                &running_snapshot,
+                "failed to durably persist launch Session",
+                error,
+            ));
+        }
+    }
+    if let Err(error) =
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running).save(runtime_path)
+    {
+        let running_snapshot = session.clone();
+        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        let rollback = if let Some(expected) = saved_identity.as_ref() {
+            session.save_if_execution_identity_matches(sessions_dir, expected)
+        } else {
+            session.save_if_unchanged(sessions_dir, &running_snapshot)
+        };
+        return Err(match rollback {
+            Ok(true) => format!(
+                "failed to persist launch runtime state; Session was marked Interrupted: {error}"
+            ),
+            Ok(false) => format!(
+                "failed to persist launch runtime state and Session changed before interruption: {error}"
+            ),
+            Err(rollback_error) => format!(
+                "failed to persist launch runtime state and Session interruption failed: {error}; {rollback_error}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub type AgentLaunchCompletion = (
@@ -888,6 +1363,7 @@ struct AgentWindowSpawnOptions {
 
 #[derive(Debug, Clone)]
 pub struct LaunchWizardMemoryCache {
+    sessions_dir: PathBuf,
     sessions: Vec<gwt_agent::Session>,
     agent_options: Vec<gwt::AgentOption>,
     // SPEC-3170 FR-001: Claude capability detection may read settings and run
@@ -901,6 +1377,7 @@ impl LaunchWizardMemoryCache {
     pub(crate) fn load(sessions_dir: &Path) -> Self {
         let claude_capabilities = gwt_agent::claude_capability_snapshot();
         Self {
+            sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
             agent_options: Self::load_agent_options(),
             claude_ultracode_supported: claude_capabilities.ultracode_supported,
@@ -924,6 +1401,7 @@ impl LaunchWizardMemoryCache {
         claude_workflows_enabled: bool,
     ) -> Self {
         Self {
+            sessions_dir: sessions_dir.to_path_buf(),
             sessions: Self::load_sessions(sessions_dir),
             agent_options,
             claude_ultracode_supported,
@@ -942,6 +1420,7 @@ impl LaunchWizardMemoryCache {
                 (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
             })
             .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+            .filter(|session| !durable_launch_recovery_exists(sessions_dir, &session.id))
             .collect()
     }
 
@@ -976,11 +1455,16 @@ impl LaunchWizardMemoryCache {
         repo_path: &Path,
         branch_name: &str,
     ) -> Vec<gwt::QuickStartEntry> {
-        gwt::launch_wizard::quick_start_entries_from_sessions(
-            repo_path,
-            branch_name,
-            &self.sessions,
-        )
+        let sessions = self.visible_sessions();
+        gwt::launch_wizard::quick_start_entries_from_sessions(repo_path, branch_name, &sessions)
+    }
+
+    fn visible_sessions(&self) -> Vec<gwt_agent::Session> {
+        self.sessions
+            .iter()
+            .filter(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id))
+            .cloned()
+            .collect()
     }
 
     fn latest_resumable_branch_session(
@@ -1003,27 +1487,37 @@ impl LaunchWizardMemoryCache {
     /// observe session TOMLs the hook CLI wrote out-of-process after launch,
     /// without ever blocking the main UI thread on disk I/O.
     fn replace_sessions(&mut self, sessions: Vec<gwt_agent::Session>) {
-        self.sessions = sessions;
+        self.sessions = sessions
+            .into_iter()
+            .filter(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id))
+            .collect();
     }
 
-    fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
+    pub(super) fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
+        if durable_launch_recovery_exists(&self.sessions_dir, session_id) {
+            return None;
+        }
         self.sessions
             .iter()
             .find(|session| session.id == session_id)
     }
 
     pub(super) fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
-        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
+        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.visible_sessions())
     }
 
     pub(super) fn previous_profiles(&self, repo_path: &Path) -> gwt::LaunchWizardPreviousProfiles {
         gwt::launch_wizard::previous_launch_profiles_for_repo_from_sessions(
             repo_path,
-            &self.sessions,
+            &self.visible_sessions(),
         )
     }
 
     fn record_session(&mut self, session: gwt_agent::Session) {
+        if durable_launch_recovery_exists(&self.sessions_dir, &session.id) {
+            self.forget_session(&session.id);
+            return;
+        }
         if let Some(existing) = self
             .sessions
             .iter_mut()
@@ -1043,6 +1537,10 @@ impl LaunchWizardMemoryCache {
         {
             session.update_status(gwt_agent::AgentStatus::Stopped);
         }
+    }
+
+    pub(super) fn forget_session(&mut self, session_id: &str) {
+        self.sessions.retain(|session| session.id != session_id);
     }
 }
 
@@ -1186,8 +1684,9 @@ fn update_issue_branch_link_with_cache_dir(
         .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
 
-fn codex_hook_discovery_mode_for_launch_config(
+pub(super) fn codex_hook_discovery_mode_for_launch_config(
     config: &gwt_agent::LaunchConfig,
+    health_report: Option<&gwt_agent::HostRunnerHealthReport>,
 ) -> gwt_skills::CodexHookDiscoveryMode {
     if config.agent_id != gwt_agent::AgentId::Codex {
         return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
@@ -1200,7 +1699,16 @@ fn codex_hook_discovery_mode_for_launch_config(
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
         return gwt_skills::CodexHookDiscoveryMode::Both;
     }
-    detect_installed_codex_hook_discovery_mode(config)
+    let Some(report) = health_report else {
+        return gwt_skills::CodexHookDiscoveryMode::Both;
+    };
+    if report.switched_to_fallback {
+        return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
+    }
+    report
+        .version_output
+        .as_deref()
+        .and_then(codex_hook_discovery_mode_from_codex_version_output)
         .unwrap_or(gwt_skills::CodexHookDiscoveryMode::Both)
 }
 
@@ -1238,38 +1746,6 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
     } else {
         gwt_skills::CodexHookDiscoveryMode::WorkspaceHome
     })
-}
-
-fn detect_installed_codex_hook_discovery_mode(
-    config: &gwt_agent::LaunchConfig,
-) -> Option<gwt_skills::CodexHookDiscoveryMode> {
-    let mut request = gwt_core::process::ProcessPlanRequest::new(&config.command).arg("--version");
-    for key in &config.remove_env {
-        request = request.env_remove(key);
-    }
-    for (key, value) in &config.env_vars {
-        request = request.env(key, value);
-    }
-    let mut command = match gwt_core::process::resolved_command(request) {
-        Ok(command) => command,
-        Err(error) => {
-            tracing::warn!(
-                command = %config.command,
-                error = %error,
-                "installed Codex version probe could not resolve a safe executable"
-            );
-            return None;
-        }
-    };
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push(' ');
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    codex_hook_discovery_mode_from_codex_version_output(&text)
 }
 
 pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
@@ -1380,8 +1856,9 @@ impl AppRuntime {
     /// the main thread ever performing the session-directory scan.
     pub(crate) fn apply_refreshed_launch_wizard_sessions(
         &mut self,
-        sessions: Vec<gwt_agent::Session>,
+        mut sessions: Vec<gwt_agent::Session>,
     ) {
+        sessions.retain(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id));
         self.launch_wizard_cache.replace_sessions(sessions);
     }
 
@@ -1510,6 +1987,7 @@ impl AppRuntime {
                         workspace_resume_context.clone(),
                         launch_feedback_context.clone(),
                         readiness_nonce,
+                        &agent_id,
                     ) {
                         Ok(pending) => Some(pending),
                         Err(error) => {
@@ -1521,6 +1999,7 @@ impl AppRuntime {
                                 &session_id,
                                 &worktree_path,
                                 "fresh launch readiness reconstruction failed",
+                                &agent_id,
                             );
                             let error = match rollback {
                                 Ok(()) => error,
@@ -1541,6 +2020,43 @@ impl AppRuntime {
                     None
                 };
                 let is_fresh_execution_launch = pending_fresh_execution.is_some();
+                let project_state_root = self
+                    .window_lookup
+                    .get(&window_id)
+                    .and_then(|address| self.tab(&address.tab_id))
+                    .map(|tab| tab.project_root.clone())
+                    .unwrap_or_else(|| PathBuf::from(&agent_project_root));
+                let materialized_genesis = if launch_disposition
+                    == AgentLaunchDisposition::WorkProducing
+                    && !is_continue_work
+                    && !is_fresh_execution_launch
+                {
+                    match materialized_genesis_launch_from_session(
+                        &self.sessions_dir,
+                        &session_id,
+                        &worktree_path,
+                        &project_state_root,
+                        &branch_name,
+                        linked_issue_number,
+                        &agent_id,
+                    ) {
+                        Ok(genesis) => genesis,
+                        Err(error) => {
+                            self.revoke_unbound_agent_capability(
+                                issued_capability_token.as_deref(),
+                            );
+                            return self.launch_error_events(
+                                window_id,
+                                format!(
+                                    "materialized genesis launch authority could not be authenticated: {error}"
+                                ),
+                                launch_feedback_context,
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
                 if let Some(pending) = pending_fresh_execution {
                     let operation_id = pending.operation_id.clone();
                     self.pending_fresh_execution_launches
@@ -1557,17 +2073,29 @@ impl AppRuntime {
                 }
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
+                    let detail = terminalized_genesis_failure_detail(
+                        &self.sessions_dir,
+                        materialized_genesis.as_ref(),
+                        "genesis launch window disappeared before PTY spawn",
+                        "Window not found",
+                    );
                     return self.launch_error_events_with_continue_work(
                         window_id,
-                        "Window not found".to_string(),
+                        detail,
                         launch_feedback_context.clone(),
                     );
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
                     self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
+                    let detail = terminalized_genesis_failure_detail(
+                        &self.sessions_dir,
+                        materialized_genesis.as_ref(),
+                        "genesis launch project disappeared before PTY spawn",
+                        "Project tab not found",
+                    );
                     return self.launch_error_events_with_continue_work(
                         window_id,
-                        "Project tab not found".to_string(),
+                        detail,
                         launch_feedback_context.clone(),
                     );
                 };
@@ -1577,9 +2105,15 @@ impl AppRuntime {
                 self.spawn_work_events_ingest(tab.project_root.clone(), false);
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
                     self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
+                    let detail = terminalized_genesis_failure_detail(
+                        &self.sessions_dir,
+                        materialized_genesis.as_ref(),
+                        "genesis launch pane disappeared before PTY spawn",
+                        "Window not found",
+                    );
                     return self.launch_error_events_with_continue_work(
                         window_id,
-                        "Window not found".to_string(),
+                        detail,
                         launch_feedback_context.clone(),
                     );
                 };
@@ -1687,6 +2221,7 @@ impl AppRuntime {
                             }
                         }
                         let mut workspace_projection_updated = false;
+                        let mut workspace_projection_error = None;
                         let live_session_ids: std::collections::HashSet<String> = self
                             .active_agent_sessions
                             .values()
@@ -1710,6 +2245,7 @@ impl AppRuntime {
                                         workspace_projection_updated = true;
                                     }
                                     Err(error) => {
+                                        workspace_projection_error = Some(error.to_string());
                                         tracing::warn!(
                                             project_root = %project_root.display(),
                                             branch = %active_session.branch_name,
@@ -1731,6 +2267,7 @@ impl AppRuntime {
                                         workspace_projection_updated = true;
                                     }
                                     Err(error) => {
+                                        workspace_projection_error = Some(error.to_string());
                                         tracing::warn!(
                                             project_root = %project_root.display(),
                                             branch = %active_session.branch_name,
@@ -1739,6 +2276,58 @@ impl AppRuntime {
                                         );
                                     }
                                 }
+                            }
+                        }
+                        if let Some(genesis) = materialized_genesis
+                            .as_ref()
+                            .filter(|_| !workspace_projection_updated)
+                        {
+                            let detail = workspace_projection_error.unwrap_or_else(|| {
+                                "genesis launch did not publish its Work projection".to_string()
+                            });
+                            let rollback = self.rollback_materialized_genesis_after_registration(
+                                &window_id,
+                                &project_root,
+                                genesis,
+                                "genesis Work publication failed before launch readiness",
+                            );
+                            let detail = match rollback {
+                                Ok(()) => detail,
+                                Err(error) => format!(
+                                    "{detail}; failed genesis recovery retained exact evidence for retry: {error}"
+                                ),
+                            };
+                            return self.launch_error_events_with_continue_work(
+                                window_id,
+                                detail,
+                                launch_feedback_context,
+                            );
+                        }
+                        if let Some(genesis) = materialized_genesis.as_ref() {
+                            if let Err(error) = clear_durable_launch_recovery(
+                                &self.sessions_dir,
+                                &genesis.session_id,
+                            ) {
+                                let mut detail = format!(
+                                    "genesis launch readiness could not be committed: {error}"
+                                );
+                                if let Err(rollback_error) = self
+                                    .rollback_materialized_genesis_after_registration(
+                                        &window_id,
+                                        &project_root,
+                                        genesis,
+                                        "genesis recovery receipt could not be settled",
+                                    )
+                                {
+                                    detail = format!(
+                                        "{detail}; failed genesis recovery retained exact evidence for retry: {rollback_error}"
+                                    );
+                                }
+                                return self.launch_error_events_with_continue_work(
+                                    window_id,
+                                    detail,
+                                    launch_feedback_context,
+                                );
                             }
                         }
                         let _ = self.persist();
@@ -1782,7 +2371,22 @@ impl AppRuntime {
                         events
                     }
                     Err(error) => {
-                        self.revoke_agent_capability_for_window(&window_id);
+                        let error = if let Some(genesis) = materialized_genesis.as_ref() {
+                            match self.rollback_materialized_genesis_after_registration(
+                                &window_id,
+                                &project_root,
+                                genesis,
+                                "genesis PTY spawn failed before launch readiness",
+                            ) {
+                                Ok(()) => error,
+                                Err(rollback_error) => format!(
+                                    "{error}; failed genesis recovery retained exact evidence for retry: {rollback_error}"
+                                ),
+                            }
+                        } else {
+                            self.revoke_agent_capability_for_window(&window_id);
+                            error
+                        };
                         self.launch_error_events_with_continue_work(
                             window_id,
                             error,
@@ -1812,19 +2416,17 @@ impl AppRuntime {
         // pending receipt intact for the correlated retry path.
         if let Some(pending) = self.pending_continue_work.get(&window_id) {
             match pending_execution_activation_status(pending) {
-                Some(true) => {
+                Some(true) | Some(false) => {
                     return self.continue_work_launch_failed_events(&window_id, &detail);
                 }
-                Some(false) => {}
                 None => return Vec::new(),
             }
         }
         if let Some(pending) = self.pending_fresh_execution_launches.get(&window_id) {
             match pending_fresh_execution_activation_status(pending) {
-                Some(true) => {
+                Some(true) | Some(false) => {
                     return self.fresh_execution_launch_failed_events(&window_id, &detail);
                 }
-                Some(false) => {}
                 None => return Vec::new(),
             }
         }
@@ -2466,7 +3068,20 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
-            let codex_hook_discovery_mode = codex_hook_discovery_mode_for_launch_config(&config);
+            let runner_health_report = (config.runtime_target
+                == gwt_agent::LaunchRuntimeTarget::Host)
+                .then(|| resolve_host_runner_health_checked(&mut config))
+                .transpose()?;
+            if let Some(report) = &runner_health_report {
+                for message in &report.messages {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: message.clone(),
+                    });
+                }
+            }
+            let codex_hook_discovery_mode =
+                codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
             // SPEC-3247 FR-002: select lane-specific coordination guidance from
             // the launch's ephemeral intake flag (same source as the
             // GWT_SESSION_KIND env export in prepare.rs), so an intake session
@@ -2518,15 +3133,6 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
-                let fallback_report = apply_host_package_runner_fallback_checked(&mut config)?;
-                for message in fallback_report.messages {
-                    proxy.send(UserEvent::LaunchProgress {
-                        window_id: window_id.clone(),
-                        message,
-                    });
-                }
-            }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
             // launch argv BEFORE the Windows host shell wrapper rewrites it
@@ -2568,15 +3174,6 @@ impl AppRuntime {
             let prepared_continuation = match &config.execution_intent {
                 gwt_agent::ExecutionLaunchIntent::Automatic => None,
                 gwt_agent::ExecutionLaunchIntent::PreparedContinuation(binding) => {
-                    if sessions_dir
-                        .join(format!("{}.toml", binding.session_id))
-                        .exists()
-                    {
-                        return Err(
-                            "Prepared continuation Session already exists; reconcile the operation before retrying"
-                                .to_string(),
-                        );
-                    }
                     session.id = binding.session_id.clone();
                     session.set_execution_binding(Some(binding.clone()))?;
                     Some(binding.clone())
@@ -2683,17 +3280,41 @@ impl AppRuntime {
                 && config
                     .env_vars
                     .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+            let materialized_genesis_install = producing_owner
+                .filter(|_| !is_fresh_execution_install)
+                .zip(session.execution_binding.clone())
+                .map(|(owner, binding)| {
+                    let session_identity =
+                        gwt_agent::SessionExecutionIdentity::for_binding(&session, &binding)?;
+                    Ok::<_, String>(MaterializedGenesisLaunch {
+                        worktree_path: worktree_path.clone(),
+                        owner,
+                        session_id: session_id.clone(),
+                        binding,
+                        session_identity,
+                    })
+                })
+                .transpose()?;
             if let Err(error) =
                 persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)
             {
-                let rollback = is_fresh_execution_install.then(|| {
-                    rollback_materialized_fresh_execution_launch(
+                let rollback = if is_fresh_execution_install {
+                    Some(rollback_materialized_fresh_execution_launch(
                         &sessions_dir,
                         &session_id,
                         &worktree_path,
                         "fresh launch final Session persistence failed",
-                    )
-                });
+                        &session.agent_id,
+                    ))
+                } else {
+                    materialized_genesis_install.as_ref().map(|genesis| {
+                        terminalize_materialized_genesis_launch(
+                            &sessions_dir,
+                            Some(genesis),
+                            "genesis final Session persistence failed",
+                        )
+                    })
+                };
                 return Err(match rollback {
                     None | Some(Ok(())) => error,
                     Some(Err(rollback_error)) => format!(
@@ -2940,6 +3561,88 @@ impl AppRuntime {
             gwt_agent::AgentStatus::Stopped,
         );
         self.launch_wizard_cache.mark_stopped(&session.session_id);
+    }
+
+    fn rollback_materialized_genesis_after_registration(
+        &mut self,
+        window_id: &str,
+        project_root: &Path,
+        genesis: &MaterializedGenesisLaunch,
+        reason: &str,
+    ) -> Result<(), String> {
+        let active = self
+            .active_agent_sessions
+            .get(window_id)
+            .filter(|active| active.session_id == genesis.session_id)
+            .cloned()
+            .ok_or_else(|| {
+                "failed genesis runtime registry no longer matches its Session".to_string()
+            })?;
+        let removed = gwt::cli::execution_state::block_genesis_and_remove_exact_session(
+            &genesis.worktree_path,
+            genesis.owner,
+            &genesis.session_id,
+            &genesis.binding.identity,
+            reason,
+            &self.sessions_dir,
+            &genesis.session_identity,
+            || {
+                compensate_terminalized_genesis_workspace_projection(
+                    project_root,
+                    &genesis.worktree_path,
+                    genesis.owner,
+                    &genesis.session_id,
+                    Some(&genesis.binding),
+                    Some(&active.branch_name),
+                )
+                .map_err(std::io::Error::other)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if !removed {
+            return Err("failed genesis Session changed before exact rollback".to_string());
+        }
+        self.stop_window_runtime_without_session_projection(window_id);
+        self.discard_failed_genesis_active_session(window_id, &genesis.session_id)
+            .ok_or_else(|| {
+                "failed genesis runtime registry changed during exact cleanup".to_string()
+            })?;
+        self.launch_wizard_cache.forget_session(&genesis.session_id);
+        clear_durable_launch_recovery(&self.sessions_dir, &genesis.session_id)
+    }
+
+    fn discard_failed_genesis_active_session(
+        &mut self,
+        window_id: &str,
+        expected_session_id: &str,
+    ) -> Option<ActiveAgentSession> {
+        if self
+            .active_agent_sessions
+            .get(window_id)
+            .is_none_or(|session| session.session_id != expected_session_id)
+        {
+            return None;
+        }
+        self.clear_agent_window_startup_restore(window_id);
+        self.inspection_agent_windows.remove(window_id);
+        self.recoverable_agent_error_windows.remove(window_id);
+        self.window_hook_states.remove(window_id);
+        let session = self.active_agent_sessions.remove(window_id);
+        self.revoke_agent_capability_for_window(window_id);
+        if let Some(session) = session.as_ref() {
+            let _ = gwt_agent::persist_session_status(
+                &self.sessions_dir,
+                &session.session_id,
+                gwt_agent::AgentStatus::Stopped,
+            );
+            self.launch_wizard_cache.mark_stopped(&session.session_id);
+            if let Some(address) = self.window_lookup.get(window_id).cloned() {
+                if let Some(tab) = self.tab_mut(&address.tab_id) {
+                    let _ = tab.workspace.set_session_id(&address.raw_id, None);
+                }
+            }
+        }
+        session
     }
 
     /// SPEC-3214 (codex #3235 review): whether a stopped session is an
@@ -3195,6 +3898,10 @@ impl AppRuntime {
         let path = self
             .sessions_dir
             .join(format!("{}.toml", session.session_id));
+        if durable_launch_recovery_exists(&self.sessions_dir, &session.session_id) {
+            self.launch_wizard_cache.forget_session(&session.session_id);
+            return;
+        }
         match gwt_agent::Session::load_and_migrate(&path) {
             Ok(session) => self.launch_wizard_cache.record_session(session),
             Err(error) => tracing::warn!(
@@ -3426,6 +4133,166 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
+    fn finalized_bound_session_persistence_retains_same_id_replacement() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "prepared-candidate");
+        let mut candidate = gwt_agent::Session::new(
+            temp.path().join("worktree"),
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        candidate.id = "prepared-candidate".to_string();
+        candidate.project_state_root = Some(temp.path().join("project"));
+        candidate.repo_hash = Some("repo-hash".to_string());
+        candidate.linked_issue_number = Some(2359);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: candidate.id.clone(),
+            repo_hash: "repo-hash".to_string(),
+            owner_kind: "spec".to_string(),
+            owner_number: 2359,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation".to_string(),
+                binding_id: "binding".to_string(),
+                ledger_head_hash: "ledger-head".to_string(),
+            },
+            capability_generation: 1,
+        };
+        candidate
+            .set_execution_binding(Some(binding))
+            .expect("bind candidate");
+        candidate.save(&sessions_dir).expect("save exact candidate");
+
+        let session_path = sessions_dir.join("prepared-candidate.toml");
+        let mut replacement = candidate.clone();
+        replacement.agent_id = gwt_agent::AgentId::Custom("replacement".to_string());
+        replacement
+            .save(&sessions_dir)
+            .expect("save same-id replacement");
+        let replacement_before =
+            std::fs::read(&session_path).expect("read replacement Session bytes");
+
+        let error =
+            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
+                .expect_err("final persistence must reject a same-id replacement");
+
+        assert!(
+            error.contains("changed"),
+            "replacement conflict should be actionable: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&session_path).expect("read retained replacement"),
+            replacement_before,
+            "final persistence must retain the replacement byte-identically"
+        );
+        assert!(
+            !runtime_path.exists(),
+            "runtime state must not publish after Session CAS rejection"
+        );
+    }
+
+    #[test]
+    fn finalized_unbound_session_persistence_retains_same_id_replacement() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let mut candidate = gwt_agent::Session::new(
+            temp.path().join("worktree"),
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        candidate.id = "unbound-candidate".to_string();
+        candidate.project_state_root = Some(temp.path().join("project"));
+        let mut replacement = candidate.clone();
+        replacement.agent_id = gwt_agent::AgentId::Custom("replacement".to_string());
+        replacement
+            .save(&sessions_dir)
+            .expect("save same-id replacement");
+        let session_path = sessions_dir.join("unbound-candidate.toml");
+        let replacement_before =
+            std::fs::read(&session_path).expect("read replacement Session bytes");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &candidate.id);
+
+        let error =
+            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
+                .expect_err("final persistence must reject an unbound same-id replacement");
+
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(
+            std::fs::read(&session_path).expect("read retained replacement"),
+            replacement_before
+        );
+        assert!(!runtime_path.exists());
+    }
+
+    #[test]
+    fn finalized_session_sidecar_failure_marks_durable_session_interrupted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create Sessions directory");
+        let runtime_root = sessions_dir.join("runtime");
+        std::fs::write(&runtime_root, b"not-a-directory").expect("block runtime directory");
+        let mut candidate = gwt_agent::Session::new(
+            temp.path().join("worktree"),
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        candidate.id = "sidecar-failure-candidate".to_string();
+        candidate.project_state_root = Some(temp.path().join("project"));
+        candidate.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = runtime_root.join(format!("{}.json", candidate.id));
+
+        let error =
+            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
+                .expect_err("blocked runtime root must fail final persistence");
+
+        assert!(error.contains("marked Interrupted"), "{error}");
+        assert_eq!(
+            gwt_agent::Session::load(&sessions_dir.join("sidecar-failure-candidate.toml"))
+                .expect("load interrupted Session")
+                .status,
+            gwt_agent::AgentStatus::Interrupted
+        );
+    }
+
+    #[test]
+    fn finalized_session_unknown_save_outcome_marks_visible_running_session_interrupted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let mut candidate = gwt_agent::Session::new(
+            temp.path().join("worktree"),
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        candidate.id = "unknown-save-outcome-candidate".to_string();
+        candidate.project_state_root = Some(temp.path().join("project"));
+        candidate.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &candidate.id);
+        set_finalized_session_post_save_hook_for_test(Box::new(|| {
+            Err(std::io::Error::other(
+                "simulated parent-directory fsync failure after rename",
+            ))
+        }));
+
+        let error =
+            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
+                .expect_err("unknown Session save outcome must fail launch persistence");
+
+        assert!(error.contains("marked Interrupted"), "{error}");
+        assert_eq!(
+            gwt_agent::Session::load(&sessions_dir.join("unknown-save-outcome-candidate.toml"))
+                .expect("load recovered Session")
+                .status,
+            gwt_agent::AgentStatus::Interrupted,
+            "a launch that was never returned to the spawner must not remain Running"
+        );
+        assert!(
+            !runtime_path.exists(),
+            "runtime state must not publish after an unknown Session save outcome"
+        );
+    }
+
+    #[test]
     fn producing_launch_persists_exact_binding_before_issuing_bound_capability() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -3574,9 +4441,6 @@ mod agent_endpoint_env_tests {
         continuation
             .set_execution_binding(Some(binding.clone()))
             .expect("bind Prepared continuation Session");
-        continuation
-            .save(&predecessor.sessions_dir)
-            .expect("persist Prepared continuation Session");
 
         let mut env = HashMap::new();
         FinalizedAgentCapabilityLaunch {
@@ -3623,6 +4487,131 @@ mod agent_endpoint_env_tests {
                 &planned_identity,
             )
             .expect("read Prepared authority")
+        );
+    }
+
+    #[test]
+    fn prepared_capability_issuance_retains_same_id_replacement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        gwt::cli::execution_state::settle(
+            &predecessor.project,
+            &predecessor.session.id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor");
+
+        let continuation_session_id = uuid::Uuid::new_v4().to_string();
+        let request = gwt::cli::execution_state::SuccessorRequest {
+            operation_id: "prepared-replacement-operation".to_string(),
+            principal_id: "host-test-principal".to_string(),
+            work_id: Some("work-prepared-replacement".to_string()),
+            source: "continue-work".to_string(),
+            session_binding_id: uuid::Uuid::new_v4().to_string(),
+            initial_session_id: continuation_session_id.clone(),
+            entrypoint: "resume".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        gwt::cli::execution_state::prepare_successor(
+            &predecessor.project,
+            predecessor.owner,
+            &request,
+        )
+        .expect("prepare successor");
+        let planned_identity = gwt::cli::execution_state::prepared_successor_execution_binding(
+            &predecessor.project,
+            predecessor.owner,
+            &request,
+        )
+        .expect("derive future binding");
+        let mut candidate = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        candidate.id = continuation_session_id;
+        candidate.project_state_root = Some(predecessor.project.clone());
+        candidate.linked_issue_number = Some(predecessor.owner.number);
+        candidate.update_status(gwt_agent::AgentStatus::Running);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: candidate.id.clone(),
+            repo_hash: candidate
+                .repo_hash
+                .clone()
+                .expect("candidate repository hash"),
+            owner_kind: predecessor.owner.kind.as_str().to_string(),
+            owner_number: predecessor.owner.number,
+            identity: planned_identity,
+            capability_generation: 1,
+        };
+        candidate
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind candidate");
+
+        let session_path = predecessor
+            .sessions_dir
+            .join(format!("{}.toml", candidate.id));
+        let mut replacement = candidate.clone();
+        replacement.agent_id = gwt_agent::AgentId::Custom("replacement".to_string());
+        replacement
+            .save(&predecessor.sessions_dir)
+            .expect("save same-id replacement");
+        let replacement_before =
+            std::fs::read(&session_path).expect("read replacement Session bytes");
+        let mut env = HashMap::new();
+
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut candidate,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: None,
+            prepared_continuation: Some(&binding),
+            execution_entrypoint: "resume",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("capability issuance must reject a same-id replacement");
+
+        assert!(
+            error.contains("already exists"),
+            "replacement conflict should be actionable: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&session_path).expect("read retained replacement"),
+            replacement_before,
+            "capability issuance must retain the replacement byte-identically"
+        );
+        assert!(
+            !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "no capability may be issued after Session create-if-absent rejection"
         );
     }
 
@@ -4040,7 +5029,7 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
-    fn session_binding_io_failure_reports_the_materialized_generation_recovery_boundary() {
+    fn genesis_session_binding_io_failure_fails_closed_without_unverified_terminalization() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4054,11 +5043,14 @@ mod agent_endpoint_env_tests {
             "ws://127.0.0.1:46234/ws",
             "ws://127.0.0.1:45123/internal/pane-ws",
         );
-        let saved_sessions_dir = home.path().join("sessions-before-io-failure");
-        std::fs::rename(&launch.sessions_dir, &saved_sessions_dir)
-            .expect("move Session directory before injected failure");
-        std::fs::write(&launch.sessions_dir, "not-a-directory")
-            .expect("block Session directory recreation");
+        let session_path = launch
+            .sessions_dir
+            .join(format!("{}.toml", launch.session.id));
+        let saved_session_path = home.path().join("session-before-io-failure.toml");
+        let session_before = std::fs::read(&session_path).expect("read Session before failure");
+        std::fs::rename(&session_path, &saved_session_path)
+            .expect("move Session file before injected failure");
+        std::fs::create_dir(&session_path).expect("block atomic Session replacement");
         let mut env = HashMap::new();
         let result = FinalizedAgentCapabilityLaunch {
             issuer: Some(&issuer),
@@ -4073,18 +5065,21 @@ mod agent_endpoint_env_tests {
             container_runtime: None,
         }
         .install(&mut env);
-        std::fs::remove_file(&launch.sessions_dir).expect("remove injected Session path blocker");
-        std::fs::rename(&saved_sessions_dir, &launch.sessions_dir)
-            .expect("restore Session directory after injected failure");
+        std::fs::remove_dir(&session_path).expect("remove injected Session path blocker");
+        std::fs::rename(&saved_session_path, &session_path)
+            .expect("restore Session file after injected failure");
         let error = result.expect_err("Session binding persistence must fail");
 
-        assert!(error.contains("execution generation was materialized"));
-        assert!(error.contains("transactional recovery"));
-        assert!(
-            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
-                .expect("read materialized generation")
-                .is_some(),
-            "the current ledger API has no safe genesis rollback seam yet"
+        assert!(error.contains("Session binding"), "{error}");
+        assert!(error.contains("terminal"), "{error}");
+        let failed_ledger =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read failed genesis ledger")
+                .expect("failed genesis ledger remains as audit evidence");
+        assert_eq!(
+            failed_ledger.current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+            "unreadable Session identity must retain authority for exact reconciliation"
         );
         let persisted = gwt_agent::Session::load(
             &launch
@@ -4093,9 +5088,290 @@ mod agent_endpoint_env_tests {
         )
         .expect("reload pre-binding Session");
         assert!(persisted.execution_binding.is_none());
+        assert_eq!(
+            std::fs::read(&session_path).expect("read restored Session"),
+            session_before,
+            "the failed write must retain the pre-binding Session byte-identically",
+        );
+        assert!(durable_launch_recovery_exists(
+            &launch.sessions_dir,
+            &launch.session.id,
+        ));
+        assert!(
+            gwt_core::workspace_projection::load_workspace_work_items(&launch.project)
+                .expect("read absent Work projection")
+                .is_none(),
+            "pre-readiness failure must not publish Work",
+        );
         assert!(
             !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
             "binding persistence failure must precede bearer issuance"
+        );
+
+        let ledger_before_retry = failed_ledger;
+        let receipt_path = launch
+            .sessions_dir
+            .join("execution-launch-recovery")
+            .join(format!("{}.json", launch.session.id));
+        let receipt_before_retry =
+            std::fs::read(&receipt_path).expect("read exact recovery receipt");
+        let retry_error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect_err("unreconciled Active authority must reject a blind retry");
+        assert!(retry_error.contains("Continue work"), "{retry_error}");
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read authority after retry")
+                .expect("authority after retry"),
+            ledger_before_retry,
+        );
+        assert_eq!(
+            std::fs::read(&session_path).expect("read Session after retry"),
+            session_before,
+        );
+        assert_eq!(
+            std::fs::read(&receipt_path).expect("read receipt after retry"),
+            receipt_before_retry,
+        );
+    }
+
+    #[test]
+    fn genesis_session_persistence_unknown_outcome_cleans_exact_durable_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+
+        persist_durable_launch_recovery(
+            &launch.sessions_dir,
+            DurableLaunchRecoveryKind::Genesis,
+            &launch.session.id,
+            &launch.project,
+            &launch.project,
+            launch.owner,
+            None,
+            None,
+        )
+        .expect("persist genesis recovery receipt");
+        gwt::cli::execution_state::materialize_at_launch(
+            &launch.project,
+            launch.owner.kind,
+            launch.owner.number,
+            &launch.session.id,
+            "$gwt-execute #2359",
+            false,
+        )
+        .expect("materialize genesis authority");
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &launch.project,
+            launch.owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize genesis generation ledger");
+        let identity =
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read genesis authority")
+                .expect("genesis binding");
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: launch.session.id.clone(),
+            repo_hash: launch
+                .session
+                .repo_hash
+                .clone()
+                .expect("fixture repository hash"),
+            owner_kind: launch.owner.kind.as_str().to_string(),
+            owner_number: launch.owner.number,
+            identity,
+            capability_generation: 1,
+        };
+        launch
+            .session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind genesis Session");
+        let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&launch.session)
+            .unwrap()
+            .unwrap();
+        let genesis = MaterializedGenesisLaunch {
+            worktree_path: launch.project.clone(),
+            owner: launch.owner,
+            session_id: launch.session.id.clone(),
+            binding,
+            session_identity,
+        };
+        let sessions_dir = launch.sessions_dir.clone();
+        persist_durable_launch_recovery(
+            &sessions_dir,
+            DurableLaunchRecoveryKind::Genesis,
+            &genesis.session_id,
+            &genesis.worktree_path,
+            &genesis.worktree_path,
+            genesis.owner,
+            Some(&genesis.binding),
+            Some(&genesis.session_identity.agent_id),
+        )
+        .expect("bind genesis recovery receipt to the exact Session");
+
+        let error = persist_genesis_session_binding_with(
+            &sessions_dir,
+            &mut launch.session,
+            &genesis,
+            |session| {
+                session.save(&sessions_dir)?;
+                Err::<bool, _>(std::io::Error::other(
+                    "simulated response loss after durable Session replacement",
+                ))
+            },
+        )
+        .expect_err("unknown persistence outcome must fail the launch");
+
+        assert!(error.contains("simulated response loss"), "{error}");
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner,)
+                .expect("read terminalized genesis")
+                .expect("genesis ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        );
+        assert!(
+            !sessions_dir
+                .join(format!("{}.toml", genesis.session_id))
+                .exists(),
+            "an exact Session that may have committed before Err must be removed"
+        );
+        assert!(
+            !crate::app_runtime::continuation::durable_launch_recovery_exists(
+                &sessions_dir,
+                &genesis.session_id,
+            ),
+            "the receipt may clear only after exact Session cleanup"
+        );
+    }
+
+    #[test]
+    fn genesis_terminalization_rejects_same_binding_agent_replacement_without_authority_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+        gwt::cli::execution_state::materialize_at_launch(
+            &launch.project,
+            launch.owner.kind,
+            launch.owner.number,
+            &launch.session.id,
+            "$gwt-execute #2359",
+            false,
+        )
+        .expect("materialize genesis authority");
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &launch.project,
+            launch.owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize genesis ledger");
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: launch.session.id.clone(),
+            repo_hash: launch
+                .session
+                .repo_hash
+                .clone()
+                .expect("fixture repository hash"),
+            owner_kind: launch.owner.kind.as_str().to_string(),
+            owner_number: launch.owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(
+                &launch.project,
+                launch.owner,
+            )
+            .expect("read genesis authority")
+            .expect("genesis binding"),
+            capability_generation: 1,
+        };
+        launch
+            .session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind genesis Session");
+        launch
+            .session
+            .save(&launch.sessions_dir)
+            .expect("save exact genesis Session");
+        let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&launch.session)
+            .unwrap()
+            .unwrap();
+        let genesis = MaterializedGenesisLaunch {
+            worktree_path: launch.project.clone(),
+            owner: launch.owner,
+            session_id: launch.session.id.clone(),
+            binding,
+            session_identity,
+        };
+        let session_path = launch
+            .sessions_dir
+            .join(format!("{}.toml", genesis.session_id));
+        let mut replacement = launch.session.clone();
+        replacement.agent_id = gwt_agent::AgentId::Custom("review-bot".to_string());
+        replacement
+            .save(&launch.sessions_dir)
+            .expect("replace genesis Session Agent");
+        let replacement_before = std::fs::read(&session_path).expect("read replacement Session");
+        let ledger_before =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read authority before")
+                .expect("authority before");
+
+        let error = terminalize_materialized_genesis_launch(
+            &launch.sessions_dir,
+            Some(&genesis),
+            "simulated launch rollback",
+        )
+        .expect_err("replacement Agent must fail closed");
+
+        assert!(error.contains("identity changed"), "{error}");
+        assert_eq!(
+            std::fs::read(&session_path).expect("read retained replacement Session"),
+            replacement_before,
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read authority after")
+                .expect("authority after"),
+            ledger_before,
+        );
+
+        launch
+            .session
+            .save(&launch.sessions_dir)
+            .expect("restore exact genesis Session");
+        terminalize_materialized_genesis_launch(
+            &launch.sessions_dir,
+            Some(&genesis),
+            "simulated exact launch rollback",
+        )
+        .expect("exact genesis cleanup");
+        assert!(!session_path.exists());
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read terminal authority")
+                .expect("terminal authority")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
         );
     }
 

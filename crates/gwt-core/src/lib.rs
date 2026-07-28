@@ -18,6 +18,7 @@ pub mod paths;
 pub mod process;
 pub mod process_console;
 pub mod process_executor;
+pub mod process_tree;
 mod release_contract;
 pub mod release_notes;
 pub mod repo_hash;

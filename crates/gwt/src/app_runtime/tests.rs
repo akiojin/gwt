@@ -41,23 +41,158 @@ use gwt_terminal::Pane;
 use tracing::{field::Visit, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
-use super::continuation::ActiveOwnerLiveness;
+#[cfg(unix)]
+use super::continuation::set_durable_launch_recovery_directory_sync_test_hook;
+use super::continuation::{
+    clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
+    durable_launch_recovery_exists, persist_durable_launch_recovery,
+    set_fresh_execution_pre_work_commit_hook_for_test, set_missing_session_cleanup_hook_for_test,
+    ActiveOwnerLiveness, DurableLaunchRecoveryKind,
+};
 use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
-    save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchDisposition, AppEventProxy,
-    AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
-    DispatchTarget, KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
-    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch,
-    ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
-    WorkspaceResumeContext,
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    save_workspace_launch_projection, ActiveAgentSession, AgentKanbanLaunchTarget,
+    AgentLaunchCompletion, AgentLaunchDisposition, AppEventProxy, AppRuntime,
+    AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome, DispatchTarget,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, PendingContinueWork,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
+    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
     AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
     UploadedAttachment,
 };
+
+#[test]
+fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
+    for (source_name, source) in [
+        ("embedded_server.rs", include_str!("../embedded_server.rs")),
+        ("app_runtime/pty_io.rs", include_str!("pty_io.rs")),
+    ] {
+        for (index, tail) in source
+            .split("target: \"gwt_input_trace\"")
+            .skip(1)
+            .enumerate()
+        {
+            let marker = tail.split_once(");").map_or(tail, |(marker, _)| marker);
+            for forbidden in ["data_len,", "text_len,", "chunk_len", "error ="] {
+                assert!(
+                    !marker.contains(forbidden),
+                    "{source_name} gwt_input_trace marker #{index} contains forbidden field {forbidden}: {marker}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn backend_gwt_input_trace_markers_use_stage_local_exact_allowlists() {
+    let expected = HashMap::from([
+        (
+            "app_runtime/pty_io.rs",
+            HashMap::from([
+                (
+                    "event_loop_runtime_missing",
+                    vec!["outcome", "stage", "window_id"],
+                ),
+                (
+                    "pty_write",
+                    vec!["lock_wait_us", "ok", "stage", "window_id", "write_us"],
+                ),
+                (
+                    "pane_lock_failed",
+                    vec!["lock_wait_us", "outcome", "stage", "window_id"],
+                ),
+                ("registry_lock_poisoned", vec!["stage", "window_id"]),
+                (
+                    "registry_write_poisoned",
+                    vec!["outcome", "stage", "window_id"],
+                ),
+                (
+                    "registry_deregister_poisoned",
+                    vec!["outcome", "stage", "window_id"],
+                ),
+                (
+                    "reader_pane_lock",
+                    vec!["lock_wait_us", "parse_us", "stage", "window_id"],
+                ),
+            ]),
+        ),
+        (
+            "embedded_server.rs",
+            HashMap::from([
+                ("ws_recv", vec!["client_id", "seq", "stage", "window_id"]),
+                (
+                    "fast_path_lock_poisoned",
+                    vec!["client_id", "seq", "stage", "window_id"],
+                ),
+                (
+                    "fast_path_write",
+                    vec!["client_id", "seq", "stage", "window_id", "write_us"],
+                ),
+                (
+                    "fast_path_write_err",
+                    vec!["client_id", "seq", "stage", "window_id"],
+                ),
+                (
+                    "fast_path_miss",
+                    vec!["client_id", "seq", "stage", "window_id"],
+                ),
+                (
+                    "ws_dispatch",
+                    vec!["client_id", "ok", "seq", "stage", "window_id"],
+                ),
+            ]),
+        ),
+    ]);
+    for (source_name, source) in [
+        ("embedded_server.rs", include_str!("../embedded_server.rs")),
+        ("app_runtime/pty_io.rs", include_str!("pty_io.rs")),
+    ] {
+        let mut actual = HashMap::new();
+        for tail in source.split("target: \"gwt_input_trace\"").skip(1) {
+            let marker = tail.split_once(");").map_or(tail, |(marker, _)| marker);
+            let stage = marker
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("stage = \"")
+                        .and_then(|line| line.strip_suffix("\","))
+                })
+                .expect("gwt_input_trace marker must declare one literal stage");
+            let mut fields = marker
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('"') {
+                        return None;
+                    }
+                    let field = line
+                        .split_once(" =")
+                        .map_or_else(|| line.strip_suffix(','), |(field, _)| Some(field))?;
+                    (!field.is_empty()
+                        && field
+                            .chars()
+                            .all(|character| character == '_' || character.is_ascii_alphanumeric()))
+                    .then_some(field)
+                })
+                .collect::<Vec<_>>();
+            fields.sort_unstable();
+            assert!(
+                actual.insert(stage, fields).is_none(),
+                "{source_name} repeats gwt_input_trace stage {stage}",
+            );
+        }
+        assert_eq!(
+            actual,
+            expected[source_name],
+            "{source_name} gwt_input_trace fields changed without an explicit stage-local allowlist update",
+        );
+    }
+}
 
 #[test]
 fn process_launch_debug_redacts_agent_capability_and_session_identity() {
@@ -819,6 +954,28 @@ exit 0
         fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
         fake_gh
     }
+}
+
+fn write_fake_agent_command(temp_root: &Path, command: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let fake_agent = temp_root.join(format!("{command}.cmd"));
+        fs::write(&fake_agent, "@echo off\r\nexit /b 0\r\n").expect("write fake agent");
+        fake_agent
+    }
+    #[cfg(not(windows))]
+    {
+        let fake_agent = temp_root.join(command);
+        fs::write(&fake_agent, "#!/bin/sh\nexit 0\n").expect("write fake agent");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_agent, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake agent");
+        fake_agent
+    }
+}
+
+fn write_fake_codex(temp_root: &Path) -> PathBuf {
+    write_fake_agent_command(temp_root, "codex")
 }
 
 fn write_fake_git_recorder(temp_root: &Path) -> PathBuf {
@@ -6836,6 +6993,1135 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
 }
 
 #[test]
+fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-pty-failure";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.clone());
+    session.linked_issue_number = Some(owner.number);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind genesis Session");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save genesis Session");
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist exact genesis recovery receipt");
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command: "/definitely/missing/gwt-agent".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(repo.clone()),
+            },
+            session_id.to_string(),
+            "work/issue-2359".to_string(),
+            "Codex".to_string(),
+            repo.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(owner.number),
+            Some("origin/develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
+            repo.display().to_string(),
+        )),
+    );
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, status, .. }
+                if id == &window_id && *status == WindowProcessStatus::Error
+        )
+    }));
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read failed genesis ledger")
+        .expect("failed genesis ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "PTY spawn failure must never leave a ghost Active generation",
+    );
+    assert!(
+        !runtime.active_agent_sessions.contains_key(&window_id),
+        "a failed genesis pane must not remain a process-local Active owner",
+    );
+    assert!(
+        !runtime
+            .sessions_dir
+            .join(format!("{session_id}.toml"))
+            .exists(),
+        "the exact failed genesis Session must be removed",
+    );
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read WorkItems after failed genesis");
+    assert!(
+        work_items.is_none_or(|items| items.work_items.is_empty()),
+        "a pre-readiness genesis failure must not synthesize a Paused ghost Work",
+    );
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "genesis-pty-retry".to_string(),
+        principal_id: "gwt-host-launch".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "genesis-pty-retry-binding".to_string(),
+        initial_session_id: "genesis-pty-retry-session".to_string(),
+        entrypoint: "$gwt-execute #2359".to_string(),
+        requested_at: Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(&repo, owner, &request)
+        .expect("terminal genesis must permit a fresh successor retry");
+}
+
+#[test]
+fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-receipt-cleanup");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-receipt-cleanup-failure";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.clone());
+    session.linked_issue_number = Some(owner.number);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind genesis Session");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save genesis Session");
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist exact genesis recovery receipt");
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+    let receipt_path = runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{session_id}.json"));
+    fs::remove_file(&receipt_path).expect("remove receipt file");
+    fs::create_dir(&receipt_path).expect("create receipt cleanup blocker");
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        WorkspaceResumeContext {
+            title: Some("Genesis receipt rollback".to_string()),
+            owner: Some("Issue #2359".to_string()),
+            summary: None,
+            next_action: None,
+        },
+    );
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(repo.clone()),
+            },
+            session_id.to_string(),
+            "work/issue-2359".to_string(),
+            "Codex".to_string(),
+            repo.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(owner.number),
+            Some("origin/develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            AgentLaunchDisposition::WorkProducing,
+            repo.display().to_string(),
+        )),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("read compensated Workspace")
+        .expect("compensated Workspace projection");
+    assert!(projection.latest_agent_for_session(session_id).is_none());
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read compensated WorkItems")
+        .expect("compensated WorkItems projection");
+    assert_eq!(work_items.work_items.len(), 1);
+    assert!(
+        work_items.work_items[0].is_terminal() && work_items.work_items[0].discarded,
+        "the published Work must be discarded when readiness cannot commit",
+    );
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read terminal genesis ledger")
+            .expect("terminal genesis ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+    );
+    assert!(
+        receipt_path.is_dir(),
+        "the injected cleanup blocker must remain"
+    );
+    assert!(
+        runtime
+            .launch_wizard_cache
+            .quick_start_entries(&repo, "work/issue-2359")
+            .iter()
+            .all(|entry| entry.session_id != session_id),
+        "an exact failed genesis Session must disappear from Quick Start even when durable cleanup remains pending",
+    );
+}
+
+#[test]
+fn ordinary_blocked_transition_is_not_genesis_failure_compensation_authority() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-ordinary-blocked-genesis-receipt");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "ordinary-blocked-session";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize generation ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read binding")
+        .expect("current binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let context = WorkspaceResumeContext {
+        title: Some("Ordinary blocked Work".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: None,
+        next_action: None,
+    };
+    let mut session = sample_active_agent_session("tab-1", "window-ordinary-blocked");
+    session.session_id = session_id.to_string();
+    session.branch_name = "work/issue-2359".to_string();
+    session.worktree_path = repo.clone();
+    session.agent_project_root = repo.display().to_string();
+    save_workspace_launch_projection(
+        &repo,
+        &session,
+        Some("develop"),
+        Some(owner.number),
+        Some(&context),
+        WorkspaceLaunchProjectionKind::StartWork,
+        &HashSet::from([session.session_id.clone()]),
+    )
+    .expect("publish Work");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "ordinary agent blocker".to_string(),
+                missing_verification: Some("ordinary verification gap".to_string()),
+            },
+        )
+        .expect("settle ordinary blocker"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+
+    assert!(
+        compensate_terminalized_genesis_workspace_projection(
+            &repo,
+            &repo,
+            owner,
+            session_id,
+            Some(&binding),
+            Some(&session.branch_name),
+        )
+        .is_err(),
+        "ordinary execution.blocked must not authorize failed-genesis Work compensation",
+    );
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read WorkItems")
+        .expect("WorkItems");
+    assert_eq!(work_items.work_items.len(), 1);
+    assert!(!work_items.work_items[0].discarded);
+}
+
+#[test]
+fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-resume-compensation");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let failed_session_id = "genesis-failed-resume";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        failed_session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: failed_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let context = WorkspaceResumeContext {
+        title: Some("Existing Work".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: Some("Keep this Work after a failed resume".to_string()),
+        next_action: Some("Continue from the prior conversation".to_string()),
+    };
+    let mut prior = sample_active_agent_session("tab-1", "window-prior");
+    prior.session_id = "prior-session".to_string();
+    prior.branch_name = "work/issue-2359".to_string();
+    prior.worktree_path = repo.clone();
+    prior.agent_project_root = repo.display().to_string();
+    save_workspace_launch_projection(
+        &repo,
+        &prior,
+        Some("develop"),
+        Some(owner.number),
+        Some(&context),
+        WorkspaceLaunchProjectionKind::StartWork,
+        &HashSet::from([prior.session_id.clone()]),
+    )
+    .expect("publish existing Work");
+    let existing = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read existing WorkItems")
+        .expect("existing WorkItems")
+        .work_items
+        .into_iter()
+        .next()
+        .expect("existing Work");
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        &existing.id,
+        Some(&existing.title),
+        existing.summary.as_deref(),
+        existing.owner.as_deref(),
+        &existing.board_refs,
+        existing.execution_containers.first().cloned(),
+        Some(&prior.session_id),
+        Utc::now(),
+    )
+    .expect("pause prior Session");
+    gwt_core::workspace_projection::mark_workspace_agent_stopped(&repo, &prior.session_id, None)
+        .expect("remove prior Session");
+
+    let mut failed = prior.clone();
+    failed.window_id = "window-failed".to_string();
+    failed.session_id = failed_session_id.to_string();
+    save_resumed_workspace_projection(
+        &repo,
+        &failed,
+        None,
+        Some(owner.number),
+        &context,
+        &HashSet::from([failed.session_id.clone()]),
+    )
+    .expect("publish failed resume attempt");
+    gwt::cli::execution_state::block_uncommitted_genesis_launch(
+        &repo,
+        owner,
+        failed_session_id,
+        &binding.identity,
+        "test failed resume compensation",
+    )
+    .expect("terminalize failed genesis");
+    let successor = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "genesis-late-cleanup-successor".to_string(),
+        principal_id: "gwt-host-launch".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "genesis-late-cleanup-binding".to_string(),
+        initial_session_id: "genesis-late-cleanup-session".to_string(),
+        entrypoint: "$gwt-execute #2359".to_string(),
+        requested_at: Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+        &repo, owner, &successor,
+    )
+    .expect("prepare successor before late genesis cleanup");
+    gwt::cli::execution_state::activate_successor(&repo, owner, &successor)
+        .expect("activate successor before late genesis cleanup");
+    assert_ne!(
+        gwt::cli::execution_state::current_execution_binding(&repo, owner)
+            .expect("read successor binding"),
+        Some(binding.identity.clone()),
+        "the genesis generation must be historical before compensation",
+    );
+
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        failed_session_id,
+        Some(&binding),
+        Some(&failed.branch_name),
+    )
+    .expect("compensate failed resume without deleting existing Work");
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        failed_session_id,
+        Some(&binding),
+        Some(&failed.branch_name),
+    )
+    .expect("retry after Pause and exact agent cleanup");
+
+    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("read compensated Workspace")
+        .expect("compensated Workspace");
+    assert!(projection
+        .latest_agent_for_session(failed_session_id)
+        .is_none());
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read compensated WorkItems")
+        .expect("compensated WorkItems");
+    assert_eq!(work_items.work_items.len(), 1);
+    let retained = &work_items.work_items[0];
+    assert_eq!(retained.id, existing.id);
+    assert!(
+        !retained.discarded,
+        "a resumed Work must never be discarded"
+    );
+    assert_eq!(
+        retained.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+    );
+    assert!(retained.events.iter().any(|event| {
+        event.kind == gwt_core::workspace_projection::WorkEventKind::Resume
+            && event.agent_session_id.as_deref() == Some(failed_session_id)
+    }));
+    assert!(retained.events.iter().any(|event| {
+        event.kind == gwt_core::workspace_projection::WorkEventKind::Pause
+            && event.agent_session_id.as_deref() == Some(failed_session_id)
+    }));
+}
+
+#[test]
+fn terminalized_genesis_compensation_retries_after_discard_before_agent_cleanup() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-discard-retry");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-discard-response-loss";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let context = WorkspaceResumeContext {
+        title: Some("New failed Work".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: None,
+        next_action: None,
+    };
+    let mut session = sample_active_agent_session("tab-1", "window-discard-retry");
+    session.session_id = session_id.to_string();
+    session.branch_name = "work/issue-2359".to_string();
+    session.worktree_path = repo.clone();
+    session.agent_project_root = repo.display().to_string();
+    save_workspace_launch_projection(
+        &repo,
+        &session,
+        Some("develop"),
+        Some(owner.number),
+        Some(&context),
+        WorkspaceLaunchProjectionKind::StartWork,
+        &HashSet::from([session.session_id.clone()]),
+    )
+    .expect("publish failed new Work");
+    let published_projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("read published Workspace")
+        .expect("published Workspace");
+    gwt::cli::execution_state::block_uncommitted_genesis_launch(
+        &repo,
+        owner,
+        session_id,
+        &binding.identity,
+        "test discard response loss",
+    )
+    .expect("terminalize failed genesis");
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        session_id,
+        Some(&binding),
+        Some(&session.branch_name),
+    )
+    .expect("discard new Work");
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &published_projection)
+        .expect("restore pre-agent-cleanup projection after simulated response loss");
+
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        session_id,
+        Some(&binding),
+        Some(&session.branch_name),
+    )
+    .expect("retry exact agent cleanup after durable Discard");
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        session_id,
+        Some(&binding),
+        Some(&session.branch_name),
+    )
+    .expect("retry after Discard and exact agent cleanup");
+
+    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("read retried Workspace")
+        .expect("retried Workspace");
+    assert!(projection.latest_agent_for_session(session_id).is_none());
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read retried WorkItems")
+        .expect("retried WorkItems");
+    assert_eq!(work_items.work_items.len(), 1);
+    assert!(work_items.work_items[0].discarded);
+    assert_eq!(
+        work_items.work_items[0]
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == gwt_core::workspace_projection::WorkEventKind::Discard
+            })
+            .count(),
+        1,
+        "retry must not append a duplicate Discard event",
+    );
+}
+
+#[test]
+fn terminalized_genesis_compensation_does_not_synthesize_state_for_unrelated_work() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-no-target");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-without-work-target";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "unrelated-work",
+        Utc::now(),
+    );
+    unrelated.agent_session_id = Some("unrelated-session".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, unrelated)
+        .expect("persist unrelated Work without current projection");
+    assert!(
+        gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read absent current projection")
+            .is_none(),
+    );
+    gwt::cli::execution_state::block_uncommitted_genesis_launch(
+        &repo,
+        owner,
+        session_id,
+        &binding.identity,
+        "test no-target compensation",
+    )
+    .expect("terminalize failed genesis");
+
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        session_id,
+        Some(&binding),
+        None,
+    )
+    .expect("leave unrelated Work untouched");
+
+    assert!(
+        gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read current projection after no-target compensation")
+            .is_none(),
+        "no-target compensation must not synthesize a current projection",
+    );
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read unrelated WorkItems")
+        .expect("unrelated WorkItems");
+    assert_eq!(work_items.work_items.len(), 1);
+    assert_eq!(work_items.work_items[0].id, "unrelated-work");
+    assert!(!work_items.work_items[0].discarded);
+}
+
+#[test]
+fn startup_genesis_receipt_imports_flat_authority_and_terminalizes_crash_window() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-flat-crash-window";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize flat genesis authority");
+    assert!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read absent genesis ledger")
+            .is_none()
+    );
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        None,
+        None,
+    )
+    .expect("persist genesis crash receipt");
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read recovered genesis ledger")
+        .expect("recovered genesis ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+    );
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-dangling-session");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-dangling-session";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.clone());
+    session.linked_issue_number = Some(owner.number);
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind genesis Session");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save genesis Session");
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist genesis receipt");
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    fs::remove_file(&session_path).expect("remove Session before dangling entry");
+    let dangling_target = runtime.sessions_dir.join("missing-session-target");
+    symlink(&dangling_target, &session_path).expect("create dangling Session entry");
+    let receipt_path = runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{session_id}.json"));
+    let receipt_before = fs::read(&receipt_path).expect("read recovery receipt");
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+    ]);
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(fs::symlink_metadata(&session_path)
+        .expect("dangling Session entry must remain")
+        .file_type()
+        .is_symlink(),);
+    assert_eq!(fs::read_link(&session_path).unwrap(), dangling_target);
+    assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+
+    fs::remove_file(&session_path).expect("restore genuinely missing genesis Session");
+    let sessions_dir = runtime.sessions_dir.clone();
+    let replacement_repo = repo.clone();
+    set_missing_session_cleanup_hook_for_test(Box::new(move |observed_session_id| {
+        assert_eq!(observed_session_id, session_id);
+        let mut replacement = gwt_agent::Session::new(
+            &replacement_repo,
+            "work/replacement",
+            gwt_agent::AgentId::Codex,
+        );
+        replacement.id = observed_session_id.to_string();
+        replacement
+            .save(&sessions_dir)
+            .expect("materialize same-id genesis Session after Missing observation");
+    }));
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        session_path.exists(),
+        "replacement genesis Session must remain"
+    );
+    assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+
+    fs::remove_file(&session_path).expect("restore true Missing genesis state");
+    runtime.reconcile_durable_fresh_execution_launches();
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read terminalized genesis ledger")
+            .expect("terminalized genesis ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+    );
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+}
+
+#[test]
+fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-ledger-first-restart");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-ledger-first-restart";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.clone());
+    session.linked_issue_number = Some(owner.number);
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind genesis Session");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save genesis Session");
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist genesis receipt");
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut replacement = session.clone();
+    replacement.agent_id = gwt_agent::AgentId::Custom("review-bot".to_string());
+    replacement
+        .save(&runtime.sessions_dir)
+        .expect("replace genesis Session Agent");
+    let replacement_before = fs::read(&session_path).expect("read replacement Session");
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+    ]);
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert_eq!(
+        fs::read(&session_path).expect("read retained replacement Session"),
+        replacement_before,
+    );
+    assert!(durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("restore exact genesis Session");
+    gwt::cli::execution_state::block_uncommitted_genesis_launch(
+        &repo,
+        owner,
+        session_id,
+        &binding.identity,
+        "simulated launch failure",
+    )
+    .expect("commit terminal ledger event");
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+        .expect("trusted worktree directory");
+    fs::remove_file(trusted_dir.join("execution-control.json"))
+        .expect("remove committed projection");
+    fs::remove_file(trusted_dir.join("execution-generation-pointer.json"))
+        .expect("remove committed pointer");
+    assert!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner).is_err(),
+        "fixture must reproduce the ledger-first unreadable strict view",
+    );
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read repaired authority")
+            .expect("repaired ledger")
+            .current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+    );
+    assert!(!runtime
+        .sessions_dir
+        .join(format!("{session_id}.toml"))
+        .exists());
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+}
+
+#[test]
 fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
     let _env_guard = env_test_lock()
         .lock()
@@ -6976,6 +8262,9 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
             project_root: repo.clone(),
             worktree_path: repo.clone(),
             owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: Some("predecessor-session".to_string()),
             execution: PendingContinueWorkExecution::Successor(request),
             binding,
             readiness_nonce: "continue-ready-1".to_string(),
@@ -6990,6 +8279,96 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
             predecessor_binding,
         },
     );
+
+    let candidate_path = runtime
+        .sessions_dir
+        .join(format!("{candidate_session_id}.toml"));
+    let mut replacement = candidate_session.clone();
+    replacement.branch = "work/replacement-race".to_string();
+    replacement
+        .save(&runtime.sessions_dir)
+        .expect("replace candidate after launch validation");
+    let replacement_before = fs::read(&candidate_path).expect("read replacement before callback");
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
+    let work_items_before = fs::read(&work_items_path).expect("read Work projection before race");
+    let work_events_before = fs::read(&work_events_path).expect("read Work events before race");
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+
+    let rejected = runtime.handle_launch_complete(
+        window_id.clone(),
+        Err("candidate replacement race".to_string()),
+    );
+
+    assert!(rejected.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+            retryable: true,
+            ..
+        }
+    )));
+    assert!(runtime.pending_continue_work.contains_key(&window_id));
+    assert_eq!(
+        fs::read(&candidate_path).expect("read retained replacement"),
+        replacement_before,
+    );
+    assert_eq!(
+        fs::read(&work_items_path).expect("read Work projection after race"),
+        work_items_before,
+    );
+    assert_eq!(
+        fs::read(&work_events_path).expect("read Work events after race"),
+        work_events_before,
+    );
+    assert_optional_files_unchanged(&authority_before);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        fs::remove_file(&candidate_path).expect("remove branch-replacement candidate");
+        let missing_target = runtime.sessions_dir.join("missing-live-continue-candidate");
+        symlink(&missing_target, &candidate_path).expect("create dangling live Continue candidate");
+
+        let dangling = runtime.handle_launch_complete(
+            window_id.clone(),
+            Err("dangling candidate replacement race".to_string()),
+        );
+
+        assert!(
+            dangling.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                    error_code: Some(code),
+                    retryable: true,
+                    ..
+                } if code == "continuation_reconciliation_required"
+            )),
+            "dangling candidate outcome: {dangling:?}"
+        );
+        assert!(runtime.pending_continue_work.contains_key(&window_id));
+        assert!(fs::symlink_metadata(&candidate_path)
+            .expect("dangling Continue Session must remain")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
+        assert_eq!(
+            fs::read(&work_items_path).expect("read Work projection after dangling race"),
+            work_items_before,
+        );
+        assert_eq!(
+            fs::read(&work_events_path).expect("read Work events after dangling race"),
+            work_events_before,
+        );
+        assert_optional_files_unchanged(&authority_before);
+        fs::remove_file(&candidate_path).expect("remove dangling Continue candidate");
+    }
+    candidate_session
+        .save(&runtime.sessions_dir)
+        .expect("restore exact candidate after race");
 
     let events = runtime
         .handle_launch_complete(window_id.clone(), Err("candidate spawn failed".to_string()));
@@ -7112,6 +8491,9 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
             project_root: repo.clone(),
             worktree_path: repo.clone(),
             owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: None,
             execution: PendingContinueWorkExecution::Successor(request),
             binding: gwt_agent::SessionExecutionBinding {
                 schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -7141,15 +8523,18 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
     assert!(runtime.pending_continue_work.contains_key(&window_id));
 
     let events = runtime.handle_continue_work_ready_timeout(&window_id, "current-operation");
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            operation_id,
-            outcome: gwt::ContinueWorkOutcomeKind::Failed,
-            error_code: Some(code),
-            ..
-        } if operation_id == "current-operation" && code == "launch_failed"
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                operation_id,
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                ..
+            } if operation_id == "current-operation" && code == "launch_failed"
+        )),
+        "unexpected timeout events: {events:#?}"
+    );
     assert!(!runtime.pending_continue_work.contains_key(&window_id));
 }
 
@@ -7177,6 +8562,9 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
             project_root: repo.clone(),
             worktree_path: repo,
             owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: None,
             execution: PendingContinueWorkExecution::Successor(
                 gwt::cli::execution_state::SuccessorRequest {
                     operation_id: "first-operation".to_string(),
@@ -7406,6 +8794,1853 @@ fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_co
     );
 }
 
+#[derive(Clone, Copy)]
+struct ProjectionOnlyContinueFixture {
+    work_owner: Option<&'static str>,
+    owner_number: u64,
+    owner_kind: gwt::cli::execution_state::ExecutionOwnerKind,
+    agent_id: Option<&'static str>,
+    cross_worktree: bool,
+    missing_container: bool,
+    conflicting_owner: bool,
+    conflicting_container: bool,
+    conflicting_branch_only: bool,
+    conflicting_agent: bool,
+    legacy_flat_only: bool,
+}
+
+fn projection_only_continue_runtime(
+    temp_root: &Path,
+    case_name: &str,
+    fixture: ProjectionOnlyContinueFixture,
+) -> (
+    AppRuntime,
+    PathBuf,
+    gwt::cli::execution_state::ExecutionOwnerKey,
+    String,
+) {
+    let project_root = temp_root.join(case_name);
+    fs::create_dir_all(&project_root).expect("create projection-only repo");
+    init_repo_with_initial_commit(&project_root);
+    let repo = if fixture.cross_worktree {
+        let worktree = temp_root.join(format!("{case_name}-worktree"));
+        let output = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q", "-b", "work/issue-2359"])
+            .arg(&worktree)
+            .current_dir(&project_root)
+            .output()
+            .expect("add projection-only target worktree");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        worktree
+    } else {
+        project_root.clone()
+    };
+    if !fixture.cross_worktree {
+        run_git(&repo, &["branch", "-M", "work/issue-2359"]);
+    }
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: fixture.owner_kind,
+        number: fixture.owner_number,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        "historical-session",
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize projection-only predecessor");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "historical-session",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle projection-only predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    if !fixture.legacy_flat_only {
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+        )
+        .expect("import projection-only predecessor");
+    }
+
+    let work_id = format!("work-{case_name}");
+    let now = chrono::Utc::now();
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        &work_id,
+        now,
+    );
+    start.title = Some("Historical Work without a local Session".to_string());
+    start.owner = fixture.work_owner.map(str::to_string);
+    start.agent_session_id = Some("historical-session".to_string());
+    start.agent_id = fixture.agent_id.map(str::to_string);
+    start.display_name = fixture.agent_id.map(str::to_string);
+    start.execution_container = (!fixture.missing_container).then(|| {
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }
+    });
+    gwt_core::workspace_projection::record_workspace_work_event(&project_root, start)
+        .expect("record projection-only Work");
+    if fixture.conflicting_owner {
+        let mut update = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            &work_id,
+            now + chrono::Duration::microseconds(1),
+        );
+        update.owner = Some("SPEC #3248".to_string());
+        gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
+            .expect("record conflicting owner");
+    }
+    if fixture.conflicting_agent {
+        let mut update = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            &work_id,
+            now,
+        );
+        update.agent_session_id = Some("conflicting-session".to_string());
+        update.agent_id = Some("Claude Code".to_string());
+        update.display_name = Some("Claude Code".to_string());
+        gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
+            .expect("record conflicting agent");
+    }
+    if fixture.conflicting_container {
+        let foreign = temp_root.join(format!("{case_name}-foreign"));
+        fs::create_dir_all(&foreign).expect("create conflicting container");
+        init_repo(&foreign);
+        let mut update = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            &work_id,
+            now + chrono::Duration::milliseconds(1),
+        );
+        update.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                // The folded projection treats a matching branch as the same
+                // container. The continuation resolver must still inspect the
+                // append-only event history and reject the conflicting path.
+                branch: Some("work/issue-2359".to_string()),
+                worktree_path: Some(foreign),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
+            .expect("record conflicting container");
+    }
+    if fixture.conflicting_branch_only {
+        let mut update = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            &work_id,
+            now + chrono::Duration::milliseconds(1),
+        );
+        update.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/other-owner".to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
+            .expect("record branch-only conflict");
+    }
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &project_root,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            &work_id,
+            now + chrono::Duration::milliseconds(2),
+        ),
+    )
+    .expect("settle projection-only Work");
+
+    let tab = sample_project_tab("tab-1", "Repo", project_root, ProjectKind::Git, &[]);
+    let runtime = sample_runtime(
+        &temp_root.join(format!("{case_name}-runtime")),
+        vec![tab],
+        Some("tab-1"),
+    );
+    (runtime, repo, owner, work_id)
+}
+
+#[test]
+fn continue_work_without_durable_session_starts_projection_only_handoff() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-success",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: true,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    assert!(
+        !runtime
+            .sessions_dir
+            .join("historical-session.toml")
+            .exists(),
+        "fixture must not provide durable Session metadata"
+    );
+
+    let events = runtime.continue_work_events(
+        "client-projection-only",
+        "projection-only-operation".to_string(),
+        work_id.clone(),
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            error_code: Some(code),
+            ..
+        } if code == "session_metadata_missing"
+    )));
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "projection-only-operation")
+        .expect("projection-only fallback must prepare one pending continuation");
+    assert_eq!(pending.work_id, work_id);
+    assert_eq!(
+        pending.outcome,
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+    assert!(matches!(
+        &pending.execution,
+        PendingContinueWorkExecution::Successor(request)
+            if request.source == "continue-work:handoff"
+                && request.initial_session_id == pending.binding.session_id
+    ));
+    let persisted = runtime.tab("tab-1").expect("tab").workspace.persisted();
+    let windows = &persisted.windows;
+    assert_eq!(
+        windows.len(),
+        1,
+        "fallback must materialize one candidate pane"
+    );
+    assert_eq!(windows[0].agent_id.as_deref(), Some("codex"));
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read projection-only ledger")
+        .expect("projection-only ledger");
+    assert_eq!(ledger.continuation_attempts.len(), 1);
+}
+
+#[test]
+fn projection_only_continue_uses_spec_generation_authority_without_issue_cache() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, _repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-spec-authority",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("3248"),
+            owner_number: 3248,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+
+    runtime.continue_work_events(
+        "client-projection-spec",
+        "projection-spec-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "projection-spec-operation")
+        .expect("SPEC authority must prepare projection-only continuation");
+    assert_eq!(pending.owner, owner);
+    assert_eq!(
+        pending.outcome,
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+}
+
+#[test]
+fn projection_only_continue_uses_spec_legacy_flat_authority_without_issue_cache() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, _repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-spec-legacy-flat-authority",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("SPEC #3248"),
+            owner_number: 3248,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: true,
+        },
+    );
+
+    runtime.continue_work_events(
+        "client-projection-spec-legacy-flat",
+        "projection-spec-legacy-flat-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "projection-spec-legacy-flat-operation")
+        .expect("legacy flat SPEC authority must prepare continuation");
+    assert_eq!(pending.owner, owner);
+    assert_eq!(
+        pending.outcome,
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+}
+
+#[test]
+fn projection_only_continue_matches_canonical_branch_for_durable_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-canonical-branch",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let mut branch_alias = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Update,
+        &work_id,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    );
+    branch_alias.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("origin/work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    gwt_core::workspace_projection::record_workspace_work_event(&project_root, branch_alias)
+        .expect("record canonical branch alias");
+    let mut durable = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    durable.id = "historical-session".to_string();
+    durable.display_name = "Durable branch alias settings".to_string();
+    durable.project_state_root = Some(project_root);
+    durable.linked_issue_number = Some(owner.number);
+    durable
+        .save(&runtime.sessions_dir)
+        .expect("save canonical-branch durable Session");
+
+    runtime.continue_work_events(
+        "client-projection-canonical-branch",
+        "projection-canonical-branch-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    let _pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "projection-canonical-branch-operation")
+        .expect("canonical branch alias must use the durable Session");
+    let window = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .first()
+        .expect("candidate window");
+    assert_eq!(window.agent_id.as_deref(), Some("codex"));
+    assert_eq!(window.title, "Durable branch alias settings");
+}
+
+#[test]
+fn continue_work_prefers_exact_custom_durable_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_agent = write_fake_agent_command(temp.path(), "review-bot");
+    let _path = prepend_tool_parent_to_path(&fake_agent);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-custom-durable",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("review-bot"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let mut durable = gwt_agent::Session::new(
+        &repo,
+        "work/issue-2359",
+        gwt_agent::AgentId::Custom("review-bot".to_string()),
+    );
+    durable.id = "historical-session".to_string();
+    durable.display_name = "Exact custom durable settings".to_string();
+    durable.project_state_root = Some(project_root);
+    durable.linked_issue_number = Some(owner.number);
+    durable
+        .save(&runtime.sessions_dir)
+        .expect("save exact custom durable Session");
+
+    let events = runtime.continue_work_events(
+        "client-custom-durable",
+        "custom-durable-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            error_code: Some(code),
+            ..
+        } if code == "agent_identity_unsupported"
+    )));
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "custom-durable-operation")
+        .expect("exact custom durable Session must be preferred");
+    assert_eq!(
+        pending.work_agent_session_id.as_deref(),
+        Some("historical-session")
+    );
+    assert_eq!(
+        pending.work_agent_id,
+        gwt_agent::AgentId::Custom("review-bot".to_string())
+    );
+}
+
+#[test]
+fn continue_work_durable_session_requires_same_work_ref_agent() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-ref-agent-mismatch",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Claude Code"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let mut latest = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Update,
+        &work_id,
+        chrono::Utc::now() + chrono::Duration::seconds(2),
+    );
+    latest.agent_session_id = Some("latest-codex-session".to_string());
+    latest.agent_id = Some("Codex".to_string());
+    latest.display_name = Some("Codex".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&project_root, latest)
+        .expect("record latest Codex Work ref");
+    let mut mismatched =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    mismatched.id = "historical-session".to_string();
+    mismatched.display_name = "Mismatched durable settings".to_string();
+    mismatched.project_state_root = Some(project_root);
+    mismatched.linked_issue_number = Some(owner.number);
+    mismatched
+        .save(&runtime.sessions_dir)
+        .expect("save ref-mismatched durable Session");
+
+    runtime.continue_work_events(
+        "client-ref-agent-mismatch",
+        "ref-agent-mismatch-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "ref-agent-mismatch-operation")
+        .expect("latest projection agent must still provide handoff fallback");
+    assert_eq!(pending.work_agent_session_id, None);
+    assert_eq!(
+        pending.outcome,
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+}
+
+#[test]
+fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_sessions_without_mutation(
+) {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let fake_custom = write_fake_agent_command(temp.path(), "review-bot");
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let _custom_path = prepend_tool_parent_to_path(&fake_custom);
+
+    for (case_name, agent_id) in [
+        ("missing-work-agent-codex", gwt_agent::AgentId::Codex),
+        (
+            "missing-work-agent-custom",
+            gwt_agent::AgentId::Custom("review-bot".to_string()),
+        ),
+    ] {
+        let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+            temp.path(),
+            case_name,
+            ProjectionOnlyContinueFixture {
+                work_owner: Some("Issue #2359"),
+                owner_number: 2359,
+                owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                agent_id: None,
+                cross_worktree: false,
+                missing_container: false,
+                conflicting_owner: false,
+                conflicting_container: false,
+                conflicting_branch_only: false,
+                conflicting_agent: false,
+                legacy_flat_only: false,
+            },
+        );
+        let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+        let mut durable = gwt_agent::Session::new(&repo, "work/issue-2359", agent_id.clone());
+        durable.id = "historical-session".to_string();
+        durable.project_state_root = Some(project_root.clone());
+        durable.linked_issue_number = Some(owner.number);
+        durable
+            .save(&runtime.sessions_dir)
+            .expect("save durable Session without authenticated Work Agent identity");
+        let session_path = runtime.sessions_dir.join("historical-session.toml");
+        let session_before = fs::read(&session_path).expect("read Session before");
+        let work_items_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
+        let work_items_before = fs::read(&work_items_path).expect("read Work projection before");
+        let work_events_before = fs::read(&work_events_path).expect("read Work events before");
+        let ledger_before = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read authority before")
+            .expect("authority ledger before");
+        let authority_before =
+            snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+
+        let events = runtime.continue_work_events(
+            "client-missing-work-agent",
+            format!("operation-{case_name}"),
+            work_id,
+            canvas_bounds(),
+        );
+
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                    error_code: Some(code),
+                    retryable: false,
+                    ..
+                } if code == "agent_identity_missing"
+            )),
+            "{case_name}: {events:#?}"
+        );
+        assert!(runtime.pending_continue_work.is_empty(), "{case_name}");
+        assert_eq!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .persisted()
+                .windows
+                .len(),
+            0,
+            "{case_name} must not materialize a pane",
+        );
+        assert_eq!(
+            fs::read(&session_path).expect("read Session after"),
+            session_before
+        );
+        assert_eq!(
+            fs::read(&work_items_path).expect("read Work projection after"),
+            work_items_before,
+        );
+        assert_eq!(
+            fs::read(&work_events_path).expect("read Work events after"),
+            work_events_before,
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+                .expect("read authority after")
+                .expect("authority ledger after"),
+            ledger_before,
+        );
+        assert_optional_files_unchanged(&authority_before);
+    }
+}
+
+#[test]
+fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-actual-branch-divergence",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    run_git(&repo, &["branch", "-M", "work/divergent-current"]);
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
+    let work_items_before = fs::read(&work_items_path).expect("read Work projection before");
+    let work_events_before = fs::read(&work_events_path).expect("read Work events before");
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+    let workspace_before =
+        serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted())
+            .expect("serialize Workspace before");
+
+    let events = runtime.continue_work_events(
+        "client-branch-divergence",
+        "operation-branch-divergence".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                retryable: true,
+                ..
+            }
+        )),
+        "actual branch divergence must conflict: {events:#?}"
+    );
+    assert!(runtime.pending_continue_work.is_empty());
+    assert_eq!(
+        serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted())
+            .expect("serialize Workspace after"),
+        workspace_before,
+    );
+    assert_eq!(
+        fs::read(&work_items_path).expect("read Work projection after"),
+        work_items_before
+    );
+    assert_eq!(
+        fs::read(&work_events_path).expect("read Work events after"),
+        work_events_before
+    );
+    assert_optional_files_unchanged(&authority_before);
+}
+
+#[test]
+fn continue_work_shell_ref_cannot_authenticate_agent_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-shell-ref",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some(gwt_core::workspace_projection::SHELL_WORK_AGENT_ID),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let mut injected = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    injected.id = "historical-session".to_string();
+    injected.project_state_root = Some(project_root);
+    injected.linked_issue_number = Some(owner.number);
+    injected
+        .save(&runtime.sessions_dir)
+        .expect("save Session behind Shell ref");
+
+    let events = runtime.continue_work_events(
+        "client-shell-ref",
+        "shell-ref-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    assert!(runtime.pending_continue_work.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            error_code: Some(code),
+            retryable: false,
+            ..
+        } if code == "agent_identity_missing"
+    )));
+}
+
+#[test]
+fn projection_only_continue_ignores_noncanonical_projected_session_path() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-noncanonical-session-path",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let mut injected_agent = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Update,
+        &work_id,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    );
+    injected_agent.agent_session_id = Some("../outside".to_string());
+    injected_agent.agent_id = Some("Codex".to_string());
+    injected_agent.display_name = Some("Codex".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&project_root, injected_agent)
+        .expect("record noncanonical projected Session id");
+    let sessions_parent = runtime.sessions_dir.parent().expect("Sessions parent");
+    let mut outside = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    outside.id = "outside".to_string();
+    outside.display_name = "Injected outside Session settings".to_string();
+    outside.project_state_root = Some(project_root);
+    outside.linked_issue_number = Some(owner.number);
+    outside
+        .save(sessions_parent)
+        .expect("save outside Session-shaped file");
+
+    runtime.continue_work_events(
+        "client-projection-noncanonical-session",
+        "projection-noncanonical-session-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    let window = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .first()
+        .expect("projection fallback candidate");
+    assert_ne!(window.title, "Injected outside Session settings");
+    assert_eq!(window.agent_id.as_deref(), Some("codex"));
+}
+
+#[test]
+fn projection_only_continue_reconciles_prepared_spec_candidate_without_work_state() {
+    projection_only_continue_prepared_spec_recovery_case(false);
+}
+
+#[test]
+fn durable_continue_recovery_rejects_correlated_session_on_divergent_branch_without_mutation() {
+    projection_only_continue_prepared_spec_recovery_case(true);
+}
+
+fn projection_only_continue_prepared_spec_recovery_case(divergent_candidate_branch: bool) {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let case_name = "projection-only-prepared-spec-recovery";
+    let operation_id = "projection-prepared-spec-recovery-operation";
+    let runtime_root = temp.path().join(format!("{case_name}-runtime"));
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        case_name,
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("SPEC #3248"),
+            owner_number: 3248,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+
+    runtime.continue_work_events(
+        "client-projection-prepared-spec",
+        operation_id.to_string(),
+        work_id.clone(),
+        canvas_bounds(),
+    );
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == operation_id)
+        .expect("projection fallback must prepare candidate");
+    let candidate_branch = if divergent_candidate_branch {
+        "work/divergent-candidate"
+    } else {
+        "work/issue-2359"
+    };
+    let mut candidate = gwt_agent::Session::new(&repo, candidate_branch, gwt_agent::AgentId::Codex);
+    candidate.id = pending.binding.session_id.clone();
+    candidate.project_state_root = Some(project_root.clone());
+    candidate.linked_issue_number = Some(owner.number);
+    candidate
+        .set_execution_binding(Some(pending.binding.clone()))
+        .expect("bind Prepared candidate Session");
+    candidate
+        .save(&runtime.sessions_dir)
+        .expect("save Prepared candidate Session");
+    let mut predecessor =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    predecessor.id = pending.predecessor_session_id.clone();
+    predecessor.project_state_root = Some(project_root.clone());
+    predecessor.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
+    predecessor.linked_issue_number = Some(owner.number);
+    predecessor
+        .save(&runtime.sessions_dir)
+        .expect("save independently authenticated predecessor Session");
+    assert!(runtime
+        .sessions_dir
+        .join(format!("{}.toml", pending.binding.session_id))
+        .exists());
+    assert_eq!(pending.owner, owner);
+    drop(runtime);
+
+    fs::write(
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+        b"{not-json",
+    )
+    .expect("corrupt Work projection for recovery path");
+    fs::write(
+        gwt_core::paths::gwt_repo_local_work_events_path(&project_root),
+        b"{not-json\n",
+    )
+    .expect("corrupt Work events for recovery path");
+    let tab = sample_project_tab("tab-retry", "Repo", project_root, ProjectKind::Git, &[]);
+    let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-retry"));
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
+    let work_items_before = fs::read(&work_items_path).expect("read corrupt Work projection");
+    let work_events_before = fs::read(&work_events_path).expect("read corrupt Work events");
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+    let session_paths = fs::read_dir(&restarted.sessions_dir)
+        .expect("read recovery Sessions")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("toml"))
+        .collect::<Vec<_>>();
+    let sessions_before = snapshot_optional_files(&session_paths);
+    let workspace_before = serde_json::to_vec(
+        restarted
+            .tab("tab-retry")
+            .expect("retry tab")
+            .workspace
+            .persisted(),
+    )
+    .expect("serialize recovery Workspace before");
+
+    let events = restarted.continue_work_events(
+        "client-projection-prepared-spec-retry",
+        operation_id.to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    if divergent_candidate_branch {
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                    retryable: true,
+                    ..
+                }
+            )),
+            "divergent correlated Session must conflict: {events:#?}"
+        );
+        assert!(restarted.pending_continue_work.is_empty());
+        assert_eq!(
+            serde_json::to_vec(
+                restarted
+                    .tab("tab-retry")
+                    .expect("retry tab")
+                    .workspace
+                    .persisted(),
+            )
+            .expect("serialize recovery Workspace after"),
+            workspace_before,
+            "divergent branch must not materialize a pane",
+        );
+        assert_eq!(
+            fs::read(&work_items_path).expect("read Work projection after"),
+            work_items_before
+        );
+        assert_eq!(
+            fs::read(&work_events_path).expect("read Work events after"),
+            work_events_before
+        );
+        assert_optional_files_unchanged(&authority_before);
+        assert_optional_files_unchanged(&sessions_before);
+        return;
+    }
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                error_code: Some(code),
+                retryable: true,
+                ..
+            } if code == "continuation_reconciliation_required"
+        )),
+        "retry must find the exact Prepared Spec attempt: {events:?}"
+    );
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            error_code: Some(code),
+            ..
+        } if code == "work_state_unavailable"
+    )));
+    assert!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id,)
+            .expect("read Prepared attempt")
+            .is_some()
+    );
+}
+
+#[test]
+fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_root = temp.path().join("active-project");
+    let foreign = temp.path().join("foreign-project");
+    fs::create_dir_all(&project_root).expect("create active project");
+    fs::create_dir_all(&foreign).expect("create foreign project");
+    init_repo(&project_root);
+    init_repo(&foreign);
+    run_git(
+        &project_root,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let predecessor_session_id = "foreign-predecessor";
+    let candidate_session_id = "foreign-candidate";
+    let work_id = "work-foreign-recovery";
+    let operation_id = "foreign-recovery-operation";
+    gwt::cli::execution_state::materialize_at_launch(
+        &foreign,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize foreign predecessor");
+    gwt::cli::execution_state::settle(
+        &foreign,
+        predecessor_session_id,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    )
+    .expect("settle foreign predecessor");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &foreign,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import foreign predecessor");
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "foreign-candidate-binding".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: chrono::Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_successor(&foreign, owner, &request)
+        .expect("prepare foreign continuation");
+    let foreign_authority_before = current_generation_authority_artifacts(&foreign)
+        .into_iter()
+        .map(|path| {
+            let bytes =
+                fs::read(&path).expect("read foreign authority artifact before Continue work");
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+
+    let now = chrono::Utc::now();
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    start.title = Some("Active project Work".to_string());
+    start.owner = Some("Issue #2359".to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(project_root.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&project_root, start)
+        .expect("record active Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &project_root,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("settle active Work");
+
+    let tab = sample_project_tab(
+        "tab-foreign",
+        "Active",
+        project_root.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(&temp.path().join("runtime"), vec![tab], Some("tab-foreign"));
+    let mut forged =
+        gwt_agent::Session::new(&foreign, "work/issue-2359", gwt_agent::AgentId::Codex);
+    forged.id = predecessor_session_id.to_string();
+    forged.project_state_root = Some(project_root);
+    forged.linked_issue_number = Some(owner.number);
+    forged
+        .save(&runtime.sessions_dir)
+        .expect("save foreign Session with matching project root");
+
+    let events = runtime.continue_work_events(
+        "client-foreign-recovery",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                error_code: Some(code),
+                retryable: false,
+                ..
+            } if code == "agent_identity_missing"
+        )),
+        "foreign durable authority must not replace the active Work failure: {events:?}"
+    );
+    let attempt = gwt::cli::execution_state::continuation_attempt_for_operation(
+        &foreign,
+        owner,
+        operation_id,
+    )
+    .expect("read foreign attempt")
+    .expect("foreign attempt");
+    assert_eq!(
+        attempt.status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        "foreign attempt must remain Prepared"
+    );
+    for (path, before) in foreign_authority_before {
+        assert_eq!(
+            fs::read(&path).expect("read foreign authority artifact after Continue work"),
+            before,
+            "foreign authority artifact must remain byte-identical: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn projection_only_continue_ignores_durable_session_with_conflicting_owner() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-conflicting-session-owner",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let mut stale = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    stale.id = "historical-session".to_string();
+    stale.project_state_root = Some(repo.clone());
+    stale.linked_issue_number = Some(3248);
+    stale
+        .save(&runtime.sessions_dir)
+        .expect("save conflicting durable Session");
+
+    runtime.continue_work_events(
+        "client-projection-conflicting-session",
+        "projection-conflicting-session-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "projection-conflicting-session-operation")
+        .expect("conflicting Session must not block authenticated projection fallback");
+    assert_eq!(pending.owner, owner);
+    assert_eq!(
+        pending.outcome,
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+    assert!(matches!(
+        &pending.execution,
+        PendingContinueWorkExecution::Successor(request)
+            if request.source == "continue-work:handoff"
+    ));
+}
+
+#[test]
+fn projection_only_continue_authenticates_container_before_using_durable_session() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-session-hidden-container-conflict",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: true,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let mut durable = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    durable.id = "historical-session".to_string();
+    durable.project_state_root = Some(repo.clone());
+    durable.linked_issue_number = Some(owner.number);
+    durable
+        .save(&runtime.sessions_dir)
+        .expect("save matching durable Session");
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read ledger before")
+        .expect("ledger before");
+
+    let events = runtime.continue_work_events(
+        "client-projection-container-first",
+        "projection-container-first-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::Failed,
+            error_code: Some(code),
+            ..
+        } if code == "execution_container_ambiguous"
+    )));
+    assert!(runtime.pending_continue_work.is_empty());
+    assert_eq!(
+        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+            .expect("read ledger after")
+            .expect("ledger after"),
+        before_ledger
+    );
+    assert!(
+        runtime
+            .sessions_dir
+            .join("historical-session.toml")
+            .exists(),
+        "rejection must not mutate the pre-existing durable Session"
+    );
+}
+
+#[test]
+fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_state() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-spawn-failure",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
+    let before_work_items = fs::read(&work_items_path).expect("read Work projection before");
+    let before_work_events = fs::read(&work_events_path).expect("read Work events before");
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read ledger before")
+        .expect("ledger before");
+
+    runtime.continue_work_events(
+        "client-projection-spawn-failure",
+        "projection-spawn-failure-operation".to_string(),
+        work_id,
+        canvas_bounds(),
+    );
+    let window_id = runtime
+        .pending_continue_work
+        .iter()
+        .find(|(_, pending)| pending.operation_id == "projection-spawn-failure-operation")
+        .map(|(window_id, _)| window_id.clone())
+        .expect("projection fallback must prepare candidate");
+
+    let events = runtime.handle_launch_complete(
+        window_id,
+        Err("simulated projection-only spawn failure".to_string()),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                ..
+            } if code == "launch_failed"
+        )),
+        "unexpected spawn failure events: {events:#?}"
+    );
+    assert!(runtime.pending_continue_work.is_empty());
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "aborted candidate pane must be removed"
+    );
+    assert_eq!(
+        fs::read(&work_items_path).expect("read Work projection after"),
+        before_work_items
+    );
+    assert_eq!(
+        fs::read(&work_events_path).expect("read Work events after"),
+        before_work_events
+    );
+    assert!(
+        fs::read_dir(&runtime.sessions_dir)
+            .expect("read Sessions after")
+            .filter_map(Result::ok)
+            .all(|entry| entry.path().extension().and_then(|value| value.to_str()) != Some("toml")),
+        "aborted candidate must leave no Session TOML"
+    );
+    let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read ledger after")
+        .expect("ledger after");
+    assert_eq!(after_ledger.generations, before_ledger.generations);
+    assert_eq!(
+        after_ledger.current_generation_id,
+        before_ledger.current_generation_id
+    );
+    assert!(after_ledger.continuation_attempts.iter().any(|attempt| {
+        attempt.request.operation_id == "projection-spawn-failure-operation"
+            && attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+    }));
+}
+
+#[test]
+fn projection_only_continue_owner_change_before_activation_aborts_without_committing() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let operation_id = "projection-owner-toctou-operation";
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-owner-toctou",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    runtime.continue_work_events(
+        "client-projection-owner-toctou",
+        operation_id.to_string(),
+        work_id.clone(),
+        canvas_bounds(),
+    );
+    let (window_id, pending) = runtime
+        .pending_continue_work
+        .iter()
+        .find(|(_, pending)| pending.operation_id == operation_id)
+        .map(|(window_id, pending)| (window_id.clone(), pending.clone()))
+        .expect("prepare projection continuation");
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read predecessor ledger")
+        .expect("predecessor ledger");
+    let mut candidate = gwt_agent::Session::new(
+        &pending.worktree_path,
+        pending.work_branch.clone(),
+        pending.work_agent_id.clone(),
+    );
+    candidate.id = pending.binding.session_id.clone();
+    candidate.project_state_root = Some(pending.project_root.clone());
+    candidate.repo_hash = Some(pending.binding.repo_hash.clone());
+    candidate.linked_issue_number = Some(owner.number);
+    candidate
+        .set_execution_binding(Some(pending.binding.clone()))
+        .expect("bind candidate Session");
+    candidate
+        .save(&runtime.sessions_dir)
+        .expect("save candidate Session");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = pending.binding.session_id.clone();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = project_root.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue_prepared(&repo, &pending.binding.session_id, pending.binding.clone())
+        .expect("issue Prepared capability");
+    runtime.agent_capability_issuer = Some(issuer);
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), capability.token);
+
+    let mut owner_change = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Update,
+        &work_id,
+        chrono::Utc::now() + chrono::Duration::seconds(1),
+    );
+    owner_change.owner = Some("SPEC #3248".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&project_root, owner_change)
+        .expect("change Work owner before activation");
+    let work_before_finalize = fs::read(gwt_core::paths::gwt_repo_local_work_events_path(
+        &project_root,
+    ))
+    .expect("read Work events before finalization");
+
+    let events = runtime
+        .finalize_continue_work_session_start(&window_id, Some(pending.readiness_nonce.as_str()));
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                ..
+            } if code == "launch_failed"
+        )),
+        "changed owner must reject activation: {events:?}"
+    );
+    assert!(!runtime.pending_continue_work.contains_key(&window_id));
+    assert!(!runtime
+        .sessions_dir
+        .join(format!("{}.toml", pending.binding.session_id))
+        .exists());
+    assert_eq!(
+        fs::read(gwt_core::paths::gwt_repo_local_work_events_path(
+            &project_root
+        ))
+        .expect("read Work events after rejection"),
+        work_before_finalize,
+        "rejected activation must not overwrite the changed Work authority",
+    );
+    let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read rejected ledger")
+        .expect("rejected ledger");
+    assert_eq!(after_ledger.generations, before_ledger.generations);
+    assert_eq!(
+        after_ledger.current_generation_id,
+        before_ledger.current_generation_id
+    );
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id,)
+            .expect("read rejected attempt")
+            .expect("rejected attempt")
+            .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+    );
+}
+
+fn assert_projection_only_continue_rejection(
+    case_name: &str,
+    fixture: ProjectionOnlyContinueFixture,
+    expected_code: &str,
+) {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, repo, owner, work_id) =
+        projection_only_continue_runtime(temp.path(), case_name, fixture);
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
+    let before_work_items = fs::read(&work_items_path).expect("read Work projection before");
+    let before_work_events = fs::read(&work_events_path).expect("read Work events before");
+    let before_workspace =
+        serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted())
+            .expect("serialize Workspace before");
+    let before_sessions = fs::read_dir(&runtime.sessions_dir)
+        .expect("read Sessions before")
+        .map(|entry| entry.expect("Session entry").file_name())
+        .collect::<Vec<_>>();
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read ledger before")
+        .expect("ledger before");
+
+    let events = runtime.continue_work_events(
+        "client-invalid-projection",
+        format!("operation-{case_name}"),
+        work_id,
+        canvas_bounds(),
+    );
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                ..
+            } if code == expected_code
+        )),
+        "{case_name} must fail with {expected_code}"
+    );
+    assert!(runtime.pending_continue_work.is_empty(), "{case_name}");
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "{case_name} must not create a pane"
+    );
+    let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read unchanged ledger")
+        .expect("unchanged ledger");
+    assert_eq!(after_ledger, before_ledger, "{case_name} ledger changed");
+    assert_eq!(
+        fs::read(&work_items_path).expect("read Work projection after"),
+        before_work_items,
+        "{case_name} Work projection changed"
+    );
+    assert_eq!(
+        fs::read(&work_events_path).expect("read Work events after"),
+        before_work_events,
+        "{case_name} Work event log changed"
+    );
+    assert_eq!(
+        serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted(),)
+            .expect("serialize Workspace after"),
+        before_workspace,
+        "{case_name} Workspace changed"
+    );
+    assert_eq!(
+        fs::read_dir(&runtime.sessions_dir)
+            .expect("read Sessions after")
+            .map(|entry| entry.expect("Session entry").file_name())
+            .collect::<Vec<_>>(),
+        before_sessions,
+        "{case_name} Session files changed"
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_missing_owner_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-missing-owner",
+        ProjectionOnlyContinueFixture {
+            work_owner: None,
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_owner_missing",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_missing_agent_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-missing-agent",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: None,
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "agent_identity_missing",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_missing_container_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-missing-container",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: true,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_container_missing",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_conflicting_owner_history_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-conflicting-owner",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: true,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_owner_ambiguous",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_multi_owner_text_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-multi-owner-text",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359 / SPEC #3248"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_owner_ambiguous",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_conflicting_container_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-conflicting-container",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: true,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_container_ambiguous",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_branch_only_container_conflict_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-branch-only-conflict",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: true,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_container_ambiguous",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_explicit_owner_kind_mismatch_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-owner-kind-conflict",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+        "execution_owner_ambiguous",
+    );
+}
+
+#[test]
+fn projection_only_continue_rejects_conflicting_agent_without_mutation() {
+    assert_projection_only_continue_rejection(
+        "projection-only-conflicting-agent",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: true,
+            legacy_flat_only: false,
+        },
+        "agent_identity_ambiguous",
+    );
+}
+
 #[test]
 fn continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners() {
     let temp = tempdir().expect("tempdir");
@@ -7469,6 +10704,10 @@ fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
     let session_id = "legacy-live-session";
     let work_id = "work-legacy-live";
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
@@ -7494,6 +10733,8 @@ fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
     start.title = Some("Legacy live Work".to_string());
     start.owner = Some("Issue #2359".to_string());
     start.agent_session_id = Some(session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
     start.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
             branch: Some("work/issue-2359".to_string()),
@@ -7682,6 +10923,9 @@ fn continue_work_readiness_nonce_mismatch_aborts_candidate_before_commit() {
             project_root: repo.clone(),
             worktree_path: repo.clone(),
             owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: None,
             execution: PendingContinueWorkExecution::Successor(request),
             binding,
             readiness_nonce: "expected-readiness".to_string(),
@@ -7728,6 +10972,10 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
     let predecessor_session_id = "crash-predecessor";
     let candidate_session_id = "crash-candidate";
     let work_id = "work-crash-recovery";
@@ -7785,6 +11033,8 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
     start.title = Some("Crash recovery Work".to_string());
     start.owner = Some("Issue #2359".to_string());
     start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
     start.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
             branch: Some("work/issue-2359".to_string()),
@@ -7841,11 +11091,24 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
     candidate.linked_issue_number = Some(owner.number);
     candidate.status = gwt_agent::AgentStatus::Stopped;
     candidate
-        .set_execution_binding(Some(binding))
+        .set_execution_binding(Some(binding.clone()))
         .expect("bind candidate");
+    let exact_candidate = candidate.clone();
+    let replacement = candidate
+        .execution_binding
+        .as_mut()
+        .expect("candidate execution binding");
+    replacement.identity.ledger_head_hash =
+        "replacement-ledger-head-with-same-public-ids".to_string();
+    replacement.capability_generation += 1;
     candidate
         .save(&runtime.sessions_dir)
-        .expect("save stopped crash candidate");
+        .expect("save stopped replacement candidate");
+    let candidate_path = runtime
+        .sessions_dir
+        .join(format!("{candidate_session_id}.toml"));
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
     let events = runtime.continue_work_events(
         "client-retry",
@@ -7858,21 +11121,22 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         events.iter().any(|event| matches!(
             &event.event,
             BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                error_code: Some(code),
-                retryable: false,
+                outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                retryable: true,
                 ..
-            } if code == "continuation_aborted"
+            }
         )),
-        "aborted retry outcome: {events:?}"
+        "replacement binding must be retained for explicit reconciliation: {events:?}"
     );
+    assert!(candidate_path.exists());
+    assert_optional_files_unchanged(&authority_before);
     let attempt =
         gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
             .expect("read crash attempt")
             .expect("crash attempt");
     assert_eq!(
         attempt.status,
-        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
     );
     let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
         .expect("read crash recovery ledger")
@@ -7882,10 +11146,30 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         ledger.current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Completed)
     );
-    assert!(!runtime
-        .sessions_dir
-        .join(format!("{candidate_session_id}.toml"))
-        .exists());
+    fs::remove_file(&candidate_path).expect("remove replacement candidate fixture");
+    exact_candidate
+        .save(&runtime.sessions_dir)
+        .expect("restore exact candidate fixture");
+
+    let reconciled = runtime.continue_work_events(
+        "client-retry-exact",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+    assert!(
+        reconciled.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                retryable: false,
+                ..
+            } if code == "continuation_aborted"
+        )),
+        "exact candidate must finish aborted cleanup: {reconciled:?}"
+    );
+    assert!(!candidate_path.exists());
     let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .expect("load Work")
         .expect("Work")
@@ -7909,6 +11193,10 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
 
     let predecessor_session_id = "aborted-predecessor";
     let candidate_session_id = "aborted-candidate";
@@ -7972,6 +11260,8 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
     start.title = Some("Aborted recovery Work".to_string());
     start.owner = Some("Issue #2359".to_string());
     start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
     start.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
             branch: Some("work/issue-2359".to_string()),
@@ -8049,6 +11339,98 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         .save(&runtime.sessions_dir)
         .expect("save predecessor Session");
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let candidate_path = runtime
+            .sessions_dir
+            .join(format!("{candidate_session_id}.toml"));
+        let missing_target = runtime.sessions_dir.join("missing-aborted-candidate");
+        symlink(&missing_target, &candidate_path)
+            .expect("create dangling Aborted candidate Session");
+        let authority_before =
+            snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+        let work_before = snapshot_optional_files(&[
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+        ]);
+
+        let retained = runtime.continue_work_events(
+            "client-retry-dangling",
+            operation_id.to_string(),
+            work_id.to_string(),
+            canvas_bounds(),
+        );
+
+        assert!(
+            retained.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                    retryable: true,
+                    ..
+                }
+            )),
+            "dangling Aborted candidate must remain an ambiguous present Session: {retained:?}",
+        );
+        assert!(fs::symlink_metadata(&candidate_path)
+            .expect("dangling candidate entry must remain")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
+        assert_optional_files_unchanged(&authority_before);
+        assert_optional_files_unchanged(&work_before);
+        fs::remove_file(&candidate_path).expect("restore genuinely missing candidate state");
+    }
+
+    let candidate_path = runtime
+        .sessions_dir
+        .join(format!("{candidate_session_id}.toml"));
+    let authority_before =
+        snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+    ]);
+    let sessions_dir = runtime.sessions_dir.clone();
+    let replacement_repo = repo.clone();
+    set_missing_session_cleanup_hook_for_test(Box::new(move |observed_session_id| {
+        assert_eq!(observed_session_id, candidate_session_id);
+        let mut replacement = gwt_agent::Session::new(
+            &replacement_repo,
+            "work/replacement",
+            gwt_agent::AgentId::Codex,
+        );
+        replacement.id = observed_session_id.to_string();
+        replacement
+            .save(&sessions_dir)
+            .expect("materialize same-id Aborted candidate after Missing observation");
+    }));
+
+    let raced = runtime.continue_work_events(
+        "client-retry-materialized",
+        operation_id.to_string(),
+        work_id.to_string(),
+        canvas_bounds(),
+    );
+
+    assert!(
+        raced.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                retryable: true,
+                ..
+            }
+        )),
+        "same-id materialization must retain reconciliation evidence: {raced:?}",
+    );
+    assert!(candidate_path.exists(), "replacement candidate must remain");
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+    fs::remove_file(&candidate_path).expect("restore true Missing state for successful cleanup");
+
     let events = runtime.continue_work_events(
         "client-retry",
         operation_id.to_string(),
@@ -8084,6 +11466,319 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
 
 #[test]
 fn continue_work_retry_repairs_activated_generation_before_work_publish() {
+    continue_work_activated_successor_recovery_case(1, false, false, false, false, false, false);
+}
+
+#[test]
+fn continue_work_activated_successor_rejects_non_initial_capability_without_mutation() {
+    continue_work_activated_successor_recovery_case(2, false, false, false, false, false, false);
+}
+
+#[test]
+fn continue_work_activated_successor_revalidates_candidate_after_repair_before_work_publish() {
+    continue_work_activated_successor_recovery_case(1, true, false, false, false, false, false);
+}
+
+#[test]
+fn continue_work_activated_successor_leases_candidate_through_work_publish() {
+    continue_work_activated_successor_recovery_case(1, false, true, false, false, false, false);
+}
+
+#[test]
+fn continue_work_activated_takeover_rejects_non_initial_capability_without_mutation() {
+    continue_work_activated_successor_recovery_case(2, false, false, true, false, false, false);
+}
+
+#[test]
+fn continue_work_activated_successor_rejects_candidate_agent_substitution_without_mutation() {
+    continue_work_activated_successor_recovery_case(1, false, false, false, true, false, false);
+}
+
+#[test]
+fn continue_work_activated_takeover_rejects_candidate_agent_substitution_without_mutation() {
+    continue_work_activated_successor_recovery_case(1, false, false, true, true, false, false);
+}
+
+#[test]
+fn continue_work_activated_successor_rejects_live_agent_substitution_without_mutation() {
+    continue_work_activated_successor_recovery_case(1, false, false, false, false, true, false);
+}
+
+#[test]
+fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_mutation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+
+    for (same_generation_takeover, already_aborted) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let case_name = format!(
+            "{}-{}",
+            if same_generation_takeover {
+                "takeover"
+            } else {
+                "successor"
+            },
+            if already_aborted {
+                "aborted"
+            } else {
+                "prepared"
+            }
+        );
+        let repo = temp.path().join(format!("cleanup-agent-{case_name}"));
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        run_git(
+            &repo,
+            &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+        );
+        let predecessor_session_id = format!("cleanup-predecessor-{case_name}");
+        let candidate_session_id = format!("cleanup-candidate-{case_name}");
+        let operation_id = format!("cleanup-operation-{case_name}");
+        let work_id = format!("cleanup-work-{case_name}");
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 2359,
+        };
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            &predecessor_session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize cleanup predecessor");
+        if !same_generation_takeover {
+            gwt::cli::execution_state::settle(
+                &repo,
+                &predecessor_session_id,
+                gwt::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle cleanup predecessor");
+        }
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            if same_generation_takeover {
+                gwt::cli::execution_state::LegacyActiveDisposition::Live
+            } else {
+                gwt::cli::execution_state::LegacyActiveDisposition::Unknown
+            },
+        )
+        .expect("import cleanup predecessor");
+        let now = chrono::Utc::now();
+        let planned = if same_generation_takeover {
+            let request = gwt::cli::execution_state::GenerationTakeoverRequest {
+                operation_id: operation_id.clone(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: Some(work_id.clone()),
+                source: Some("continue-work:resume".to_string()),
+                from_session_id: predecessor_session_id.clone(),
+                to_session_id: candidate_session_id.clone(),
+                reason: "continue-work-stale-takeover: cleanup test".to_string(),
+                requested_at: now,
+            };
+            gwt::cli::execution_state::prepare_generation_takeover(&repo, owner, &request)
+                .expect("prepare cleanup takeover");
+            let planned =
+                gwt::cli::execution_state::prepared_generation_takeover_execution_binding(
+                    &repo, owner, &request,
+                )
+                .expect("derive cleanup takeover binding");
+            if already_aborted {
+                gwt::cli::execution_state::abort_generation_takeover(
+                    &repo,
+                    owner,
+                    &request,
+                    "fixture abort",
+                )
+                .expect("abort cleanup takeover");
+            }
+            planned
+        } else {
+            let request = gwt::cli::execution_state::SuccessorRequest {
+                operation_id: operation_id.clone(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: Some(work_id.clone()),
+                source: "continue-work:resume".to_string(),
+                session_binding_id: format!("cleanup-binding-{case_name}"),
+                initial_session_id: candidate_session_id.clone(),
+                entrypoint: "gwt-execute".to_string(),
+                requested_at: now,
+            };
+            gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+                .expect("prepare cleanup successor");
+            let planned = gwt::cli::execution_state::prepared_successor_execution_binding(
+                &repo, owner, &request,
+            )
+            .expect("derive cleanup successor binding");
+            if already_aborted {
+                gwt::cli::execution_state::abort_successor(&repo, owner, &request, "fixture abort")
+                    .expect("abort cleanup successor");
+            }
+            planned
+        };
+
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            &work_id,
+            now,
+        );
+        start.title = Some("Cleanup authority Work".to_string());
+        start.owner = Some("Issue #2359".to_string());
+        start.agent_session_id = Some(predecessor_session_id.clone());
+        start.agent_id = Some("Codex".to_string());
+        start.display_name = Some("Codex".to_string());
+        start.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-2359".to_string()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+            .expect("record cleanup Work");
+        if !same_generation_takeover {
+            gwt_core::workspace_projection::record_workspace_work_event(
+                &repo,
+                gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Done,
+                    &work_id,
+                    now + chrono::Duration::seconds(1),
+                ),
+            )
+            .expect("settle cleanup Work");
+        }
+
+        let runtime_root = temp.path().join(format!("cleanup-runtime-{case_name}"));
+        let tab = sample_project_tab_with_window_at(
+            "tab-cleanup",
+            "shell-cleanup",
+            repo.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-cleanup"));
+        let mut predecessor =
+            gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+        predecessor.id = predecessor_session_id.clone();
+        predecessor.project_state_root = Some(repo.clone());
+        predecessor.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
+        predecessor.linked_issue_number = Some(owner.number);
+        predecessor
+            .save(&runtime.sessions_dir)
+            .expect("save cleanup predecessor Session");
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: candidate_session_id.clone(),
+            repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: planned,
+            capability_generation: 1,
+        };
+        let mut replacement = gwt_agent::Session::new(
+            &repo,
+            "work/issue-2359",
+            gwt_agent::AgentId::Custom("review-bot".to_string()),
+        );
+        replacement.id = candidate_session_id.clone();
+        replacement.project_state_root = Some(repo.clone());
+        replacement.repo_hash = Some(binding.repo_hash.clone());
+        replacement.linked_issue_number = Some(owner.number);
+        replacement.status = gwt_agent::AgentStatus::Stopped;
+        replacement
+            .set_execution_binding(Some(binding))
+            .expect("bind cleanup replacement Session");
+        replacement
+            .save(&runtime.sessions_dir)
+            .expect("save cleanup replacement Session");
+
+        let candidate_path = runtime
+            .sessions_dir
+            .join(format!("{candidate_session_id}.toml"));
+        let candidate_before = fs::read(&candidate_path).expect("read replacement before retry");
+        let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+        let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
+        let work_items_before = fs::read(&work_items_path).expect("read Work projection before");
+        let work_events_before = fs::read(&work_events_path).expect("read Work events before");
+        let authority_before =
+            snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
+        let workspace_before = serde_json::to_vec(
+            runtime
+                .tab("tab-cleanup")
+                .expect("cleanup tab")
+                .workspace
+                .persisted(),
+        )
+        .expect("serialize cleanup Workspace before");
+
+        let events =
+            runtime.continue_work_events("client-cleanup", operation_id, work_id, canvas_bounds());
+
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                    retryable: true,
+                    ..
+                }
+            )),
+            "{case_name} replacement must conflict: {events:#?}"
+        );
+        assert_eq!(
+            fs::read(&candidate_path).expect("read retained cleanup replacement"),
+            candidate_before,
+            "{case_name} replacement must be retained byte-identically",
+        );
+        assert_eq!(
+            fs::read(&work_items_path).expect("read Work projection after"),
+            work_items_before,
+            "{case_name} must not mutate Work projection",
+        );
+        assert_eq!(
+            fs::read(&work_events_path).expect("read Work events after"),
+            work_events_before,
+            "{case_name} must not mutate Work events",
+        );
+        assert_optional_files_unchanged(&authority_before);
+        assert_eq!(
+            serde_json::to_vec(
+                runtime
+                    .tab("tab-cleanup")
+                    .expect("cleanup tab after")
+                    .workspace
+                    .persisted(),
+            )
+            .expect("serialize cleanup Workspace after"),
+            workspace_before,
+            "{case_name} must not materialize a pane",
+        );
+        assert!(runtime.pending_continue_work.is_empty(), "{case_name}");
+    }
+}
+
+#[test]
+fn continue_work_activated_candidate_only_fallback_rejects_agent_substitution_without_mutation() {
+    continue_work_activated_successor_recovery_case(1, false, false, false, true, false, true);
+}
+
+fn continue_work_activated_successor_recovery_case(
+    capability_generation: u64,
+    mutate_candidate_after_repair: bool,
+    mutate_candidate_before_work_commit: bool,
+    same_generation_takeover: bool,
+    substitute_candidate_agent: bool,
+    substitute_live_agent: bool,
+    candidate_only_durable_fallback: bool,
+) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -8092,11 +11787,23 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
 
     let predecessor_session_id = "response-loss-predecessor";
     let candidate_session_id = "response-loss-candidate";
-    let work_id = "work-response-loss";
-    let operation_id = "continue-response-loss-operation";
+    let work_id = if same_generation_takeover {
+        "work-takeover-response-loss"
+    } else {
+        "work-response-loss"
+    };
+    let operation_id = if same_generation_takeover {
+        "continue-takeover-response-loss-operation"
+    } else {
+        "continue-response-loss-operation"
+    };
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 2359,
@@ -8110,40 +11817,67 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
         false,
     )
     .expect("materialize predecessor");
-    assert!(matches!(
-        gwt::cli::execution_state::settle(
-            &repo,
-            predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Completed,
-        )
-        .expect("settle predecessor"),
-        gwt::cli::execution_state::SettleResult::Settled(_)
-    ));
+    if !same_generation_takeover {
+        assert!(matches!(
+            gwt::cli::execution_state::settle(
+                &repo,
+                predecessor_session_id,
+                gwt::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle predecessor"),
+            gwt::cli::execution_state::SettleResult::Settled(_)
+        ));
+    }
     gwt::cli::execution_state::ensure_generation_ledger(
         &repo,
         owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+        if same_generation_takeover {
+            gwt::cli::execution_state::LegacyActiveDisposition::Live
+        } else {
+            gwt::cli::execution_state::LegacyActiveDisposition::Unknown
+        },
     )
     .expect("import predecessor");
     let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
         .expect("read predecessor binding")
         .expect("predecessor binding");
     let now = chrono::Utc::now();
-    let request = gwt::cli::execution_state::SuccessorRequest {
-        operation_id: operation_id.to_string(),
-        principal_id: "gwt-host-continuation".to_string(),
-        work_id: Some(work_id.to_string()),
-        source: "continue-work:resume".to_string(),
-        session_binding_id: "response-loss-binding".to_string(),
-        initial_session_id: candidate_session_id.to_string(),
-        entrypoint: "gwt-execute".to_string(),
-        requested_at: now,
+    let (execution, planned) = if same_generation_takeover {
+        let request = gwt::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: operation_id.to_string(),
+            principal_id: "gwt-host-continuation".to_string(),
+            work_id: Some(work_id.to_string()),
+            source: Some("continue-work:resume".to_string()),
+            from_session_id: predecessor_session_id.to_string(),
+            to_session_id: candidate_session_id.to_string(),
+            reason: "continue-work-stale-takeover: test owner is stale".to_string(),
+            requested_at: now,
+        };
+        gwt::cli::execution_state::prepare_generation_takeover(&repo, owner, &request)
+            .expect("prepare takeover");
+        let planned = gwt::cli::execution_state::prepared_generation_takeover_execution_binding(
+            &repo, owner, &request,
+        )
+        .expect("derive takeover binding");
+        (PendingContinueWorkExecution::Takeover(request), planned)
+    } else {
+        let request = gwt::cli::execution_state::SuccessorRequest {
+            operation_id: operation_id.to_string(),
+            principal_id: "gwt-host-continuation".to_string(),
+            work_id: Some(work_id.to_string()),
+            source: "continue-work:resume".to_string(),
+            session_binding_id: "response-loss-binding".to_string(),
+            initial_session_id: candidate_session_id.to_string(),
+            entrypoint: "gwt-execute".to_string(),
+            requested_at: now,
+        };
+        gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+            .expect("prepare successor");
+        let planned =
+            gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+                .expect("derive successor binding");
+        (PendingContinueWorkExecution::Successor(request), planned)
     };
-    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
-        .expect("prepare successor");
-    let planned =
-        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
-            .expect("derive successor binding");
 
     let mut current =
         gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo.clone());
@@ -8159,6 +11893,8 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
     start.title = Some("Response-loss Work".to_string());
     start.owner = Some("Issue #2359".to_string());
     start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
     start.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
             branch: Some("work/issue-2359".to_string()),
@@ -8169,15 +11905,17 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
         },
     );
     gwt_core::workspace_projection::record_workspace_work_event(&repo, start).expect("record Work");
-    gwt_core::workspace_projection::record_workspace_work_event(
-        &repo,
-        gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Done,
-            work_id,
-            now + chrono::Duration::seconds(1),
-        ),
-    )
-    .expect("settle Work");
+    if !same_generation_takeover {
+        gwt_core::workspace_projection::record_workspace_work_event(
+            &repo,
+            gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Done,
+                work_id,
+                now + chrono::Duration::seconds(1),
+            ),
+        )
+        .expect("settle Work");
+    }
 
     let runtime_root = temp.path().join(".gwt");
     let runtime = sample_runtime(&runtime_root, Vec::new(), None);
@@ -8198,10 +11936,14 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
         owner_kind: owner.kind.as_str().to_string(),
         owner_number: owner.number,
         identity: planned.clone(),
-        capability_generation: 1,
+        capability_generation,
     };
-    let mut candidate =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    let candidate_agent_id = if substitute_candidate_agent {
+        gwt_agent::AgentId::Custom("review-bot".to_string())
+    } else {
+        gwt_agent::AgentId::Codex
+    };
+    let mut candidate = gwt_agent::Session::new(&repo, "work/issue-2359", candidate_agent_id);
     candidate.id = candidate_session_id.to_string();
     candidate.project_state_root = Some(repo.clone());
     candidate.repo_hash = Some(candidate_binding.repo_hash.clone());
@@ -8212,7 +11954,6 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
     candidate
         .save(&runtime.sessions_dir)
         .expect("save candidate Session");
-
     let mut active = sample_active_agent_session("tab-1", "tab-1::candidate");
     active.session_id = candidate_session_id.to_string();
     active.branch_name = "work/issue-2359".to_string();
@@ -8253,36 +11994,224 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
             Ok(((), vec![event]))
         },
         || {
-            gwt::cli::execution_state::activate_successor(&repo, owner, &request)
-                .expect("activate durable successor");
+            match &execution {
+                PendingContinueWorkExecution::Successor(request) => {
+                    gwt::cli::execution_state::activate_successor(&repo, owner, request)
+                        .expect("activate durable successor");
+                }
+                PendingContinueWorkExecution::Takeover(request) => {
+                    gwt::cli::execution_state::activate_generation_takeover(&repo, owner, request)
+                        .expect("activate durable takeover");
+                }
+            }
             Err(gwt_core::error::GwtError::Other(
                 "simulated response loss after generation activation".to_string(),
             ))
         },
     );
     assert!(transaction.is_err());
-    assert_eq!(
-        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
+    if same_generation_takeover {
+        assert_eq!(
+            gwt::cli::execution_state::generation_takeover_attempt_for_operation(
+                &repo,
+                owner,
+                operation_id,
+            )
+            .expect("read takeover attempt")
+            .expect("takeover attempt")
+            .status,
+            gwt::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
+        );
+    } else {
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &repo,
+                owner,
+                operation_id,
+            )
             .expect("read attempt")
             .expect("attempt")
             .status,
-        gwt::cli::execution_state::ContinuationAttemptStatus::Activated
-    );
+            gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+        );
+    }
 
+    if candidate_only_durable_fallback {
+        fs::remove_file(
+            runtime
+                .sessions_dir
+                .join(format!("{predecessor_session_id}.toml")),
+        )
+        .expect("remove predecessor Session before candidate-only recovery");
+        fs::write(
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            b"{not-json",
+        )
+        .expect("corrupt Work projection before candidate-only recovery");
+        fs::write(
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+            b"{not-json\n",
+        )
+        .expect("corrupt Work events before candidate-only recovery");
+    }
+
+    let candidate_path = runtime
+        .sessions_dir
+        .join(format!("{candidate_session_id}.toml"));
+    let (retry_window_id, retry_preset, retry_status) = if substitute_live_agent {
+        (
+            "candidate",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        )
+    } else {
+        (
+            "shell-retry",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )
+    };
     let tab = sample_project_tab_with_window_at(
         "tab-retry",
-        "shell-retry",
+        retry_window_id,
         repo.clone(),
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
+        retry_preset,
+        retry_status,
     );
     let mut restarted_runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-retry"));
+    if substitute_live_agent {
+        let window_id = combined_window_id("tab-retry", retry_window_id);
+        let mut substituted = sample_active_agent_session("tab-retry", &window_id);
+        substituted.session_id = candidate_session_id.to_string();
+        substituted.agent_id = "review-bot".to_string();
+        substituted.display_name = "Review Bot".to_string();
+        substituted.branch_name = "work/issue-2359".to_string();
+        substituted.worktree_path = repo.clone();
+        substituted.agent_project_root = repo.display().to_string();
+        restarted_runtime
+            .active_agent_sessions
+            .insert(window_id, substituted);
+    }
+    let project_root = repo.clone();
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+    let work_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&project_root);
+    let work_items_before = fs::read(&work_items_path).expect("read Work projection before retry");
+    let work_events_before = fs::read(&work_events_path).expect("read Work events before retry");
+    let authority_paths = exact_continue_authority_artifacts(&repo, owner);
+    let authority_before = snapshot_optional_files(&authority_paths);
+    let session_before = fs::read(&candidate_path).expect("read candidate Session before retry");
+    let workspace_before = serde_json::to_vec(
+        restarted_runtime
+            .tab("tab-retry")
+            .expect("retry tab")
+            .workspace
+            .persisted(),
+    )
+    .expect("serialize retry Workspace before");
+    let replacement_bytes = std::rc::Rc::new(std::cell::RefCell::new(None));
+    if mutate_candidate_after_repair {
+        let candidate_path = candidate_path.clone();
+        let replacement_bytes_for_hook = std::rc::Rc::clone(&replacement_bytes);
+        super::continuation::set_durable_continue_work_post_repair_hook_for_test(Box::new(
+            move || {
+                let mut replacement =
+                    gwt_agent::Session::load(&candidate_path).expect("load race replacement");
+                replacement
+                    .execution_binding
+                    .as_mut()
+                    .expect("race replacement binding")
+                    .capability_generation += 1;
+                replacement
+                    .save(
+                        candidate_path
+                            .parent()
+                            .expect("candidate Session directory"),
+                    )
+                    .expect("save race replacement");
+                *replacement_bytes_for_hook.borrow_mut() =
+                    Some(fs::read(&candidate_path).expect("read race replacement bytes"));
+            },
+        ));
+    }
+    if mutate_candidate_before_work_commit {
+        let candidate_path = candidate_path.clone();
+        let replacement_bytes_for_hook = std::rc::Rc::clone(&replacement_bytes);
+        super::continuation::set_durable_continue_work_pre_work_commit_hook_for_test(Box::new(
+            move || {
+                let mut replacement =
+                    gwt_agent::Session::load(&candidate_path).expect("load late race replacement");
+                replacement
+                    .execution_binding
+                    .as_mut()
+                    .expect("late race replacement binding")
+                    .capability_generation += 1;
+                replacement
+                    .save(
+                        candidate_path
+                            .parent()
+                            .expect("candidate Session directory"),
+                    )
+                    .expect("save late race replacement");
+                *replacement_bytes_for_hook.borrow_mut() =
+                    Some(fs::read(&candidate_path).expect("read late race replacement bytes"));
+            },
+        ));
+    }
     let events = restarted_runtime.continue_work_events(
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
         canvas_bounds(),
     );
+    if capability_generation != 1
+        || mutate_candidate_after_repair
+        || mutate_candidate_before_work_commit
+        || substitute_candidate_agent
+        || substitute_live_agent
+        || candidate_only_durable_fallback
+    {
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                    retryable: true,
+                    ..
+                }
+            )),
+            "exact candidate mismatch must conflict: {events:#?}"
+        );
+        assert!(restarted_runtime.pending_continue_work.is_empty());
+        assert_eq!(
+            serde_json::to_vec(
+                restarted_runtime
+                    .tab("tab-retry")
+                    .expect("retry tab")
+                    .workspace
+                    .persisted(),
+            )
+            .expect("serialize retry Workspace after"),
+            workspace_before,
+            "candidate mismatch must not materialize a pane",
+        );
+        assert_eq!(
+            fs::read(&work_items_path).expect("read Work projection after retry"),
+            work_items_before,
+        );
+        assert_eq!(
+            fs::read(&work_events_path).expect("read Work events after retry"),
+            work_events_before,
+        );
+        assert_optional_files_unchanged(&authority_before);
+        let expected_session = replacement_bytes.borrow().clone().unwrap_or(session_before);
+        assert_eq!(
+            fs::read(&candidate_path).expect("read retained candidate Session"),
+            expected_session,
+            "the exact replacement Session must be retained unchanged",
+        );
+        return;
+    }
     assert!(events.iter().all(|event| !matches!(
         &event.event,
         BackendEvent::ContinueWorkOutcome {
@@ -8290,14 +12219,17 @@ fn continue_work_retry_repairs_activated_generation_before_work_publish() {
             ..
         }
     )));
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            error_code: Some(code),
-            retryable: true,
-            ..
-        } if code == "continuation_reconciliation_required"
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                error_code: Some(code),
+                retryable: true,
+                ..
+            } if code == "continuation_reconciliation_required"
+        )),
+        "unexpected retry outcome: {events:#?}"
+    );
     let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .expect("load repaired Work")
         .expect("repaired Work")
@@ -8342,6 +12274,10 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
 
     let predecessor_session_id = "predecessor-session";
     let candidate_session_id = "candidate-session";
@@ -8418,6 +12354,8 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     start.title = Some("Continue selected Work".to_string());
     start.owner = Some("Issue #2359".to_string());
     start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
     start.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
             branch: Some("work/issue-2359".to_string()),
@@ -8491,6 +12429,9 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
             project_root: repo.clone(),
             worktree_path: repo.clone(),
             owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: Some(predecessor_session_id.to_string()),
             execution: PendingContinueWorkExecution::Successor(request),
             binding: binding.clone(),
             readiness_nonce: readiness_nonce.to_string(),
@@ -8892,6 +12833,22 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
     candidate
         .save(&runtime.sessions_dir)
         .expect("save fresh Session");
+    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+        .unwrap()
+        .unwrap();
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: operation_id.to_string(),
+        },
+        candidate_session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist fresh launch receipt");
     let mut active = sample_active_agent_session("tab-1", &window_id);
     active.session_id = candidate_session_id.to_string();
     active.branch_name = "work/issue-2359".to_string();
@@ -8921,6 +12878,7 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
             owner,
             request,
             binding: binding.clone(),
+            session_identity,
             readiness_nonce: readiness_nonce.to_string(),
             predecessor_binding: predecessor_binding.clone(),
             base_branch: Some("origin/develop".to_string()),
@@ -8949,6 +12907,10 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
     assert!(!runtime
         .pending_fresh_execution_launches
         .contains_key(&window_id));
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        candidate_session_id,
+    ));
     assert!(
         issuer.active_token_is_current(&capability.token, &binding),
         "fresh capability was not promoted; events={events:?}; attempt={:?}; current={:?}",
@@ -8988,6 +12950,96 @@ struct PendingFreshExecutionFixture {
     binding: gwt_agent::SessionExecutionBinding,
     issuer: crate::embedded_server::AgentCapabilityIssuer,
     token: String,
+}
+
+fn replace_current_generation_authority_with_owner(
+    worktree: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+) {
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(worktree)
+        .expect("trusted worktree directory");
+    for path in [
+        trusted_dir.join("execution-control.json"),
+        trusted_dir.join("execution-generation-pointer.json"),
+        worktree.join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
+        worktree.join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove superseded authority artifact: {error}"),
+        }
+    }
+    gwt::cli::execution_state::materialize_at_launch(
+        worktree,
+        owner.kind,
+        owner.number,
+        session_id,
+        &format!("$gwt-execute #{}", owner.number),
+        false,
+    )
+    .expect("materialize superseding owner");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        worktree,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize superseding owner ledger");
+}
+
+fn current_generation_authority_artifacts(worktree: &Path) -> Vec<PathBuf> {
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(worktree)
+        .expect("trusted worktree directory");
+    vec![
+        trusted_dir.join("execution-control.json"),
+        trusted_dir.join("execution-generation-pointer.json"),
+        worktree.join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
+        worktree.join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+    ]
+}
+
+fn exact_continue_authority_artifacts(
+    worktree: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+) -> Vec<PathBuf> {
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(worktree)
+        .expect("trusted worktree directory");
+    let mut paths = current_generation_authority_artifacts(worktree);
+    paths.push(
+        trusted_dir
+            .parent()
+            .expect("trusted repository directory")
+            .join("execution-owners")
+            .join(format!("owner-{}", owner.number))
+            .join("generation-ledger.json"),
+    );
+    paths
+}
+
+fn snapshot_optional_files(paths: &[PathBuf]) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = match fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("read snapshot {}: {error}", path.display()),
+            };
+            (path.clone(), bytes)
+        })
+        .collect()
+}
+
+fn assert_optional_files_unchanged(snapshot: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, expected) in snapshot {
+        let actual = match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read snapshot readback {}: {error}", path.display()),
+        };
+        assert_eq!(actual, *expected, "unexpected mutation: {}", path.display());
+    }
 }
 
 fn pending_fresh_execution_fixture(
@@ -9078,6 +13130,23 @@ fn pending_fresh_execution_fixture(
     candidate
         .save(&runtime.sessions_dir)
         .expect("save candidate Session");
+    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&candidate)
+        .unwrap()
+        .unwrap();
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: operation_id.to_string(),
+        },
+        &candidate_session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist fresh-launch recovery receipt");
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     let mut active = sample_active_agent_session("tab-1", &window_id);
     active.session_id = candidate_session_id.clone();
     active.branch_name = "work/issue-2359".to_string();
@@ -9108,6 +13177,7 @@ fn pending_fresh_execution_fixture(
             owner,
             request,
             binding: binding.clone(),
+            session_identity,
             readiness_nonce: format!("readiness-{operation_id}"),
             predecessor_binding: predecessor_binding.clone(),
             base_branch: Some("origin/develop".to_string()),
@@ -9130,7 +13200,28 @@ fn pending_fresh_execution_fixture(
     }
 }
 
+fn replace_fresh_candidate_session_incarnation(sessions_dir: &Path, session_id: &str) {
+    gwt_agent::update_session(sessions_dir, session_id, |session| {
+        let mut replacement = session
+            .execution_binding
+            .clone()
+            .expect("replacement Session binding");
+        replacement.capability_generation += 1;
+        session
+            .set_execution_binding(Some(replacement))
+            .map_err(std::io::Error::other)
+    })
+    .expect("replace candidate Session incarnation before Work commit");
+}
+
 fn assert_pending_fresh_execution_was_rolled_back(fixture: &PendingFreshExecutionFixture) {
+    assert!(
+        !durable_launch_recovery_exists(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id,
+        ),
+        "an exactly rolled-back launch must remove its durable recovery receipt",
+    );
     assert!(!fixture
         .runtime
         .pending_fresh_execution_launches
@@ -9144,6 +13235,14 @@ fn assert_pending_fresh_execution_was_rolled_back(fixture: &PendingFreshExecutio
         .sessions_dir
         .join(format!("{}.toml", fixture.candidate_session_id))
         .exists());
+    assert!(
+        fixture
+            .runtime
+            .launch_wizard_cache
+            .session_by_id(&fixture.candidate_session_id)
+            .is_none(),
+        "an exactly rolled-back launch must evict its candidate Session from the in-memory cache",
+    );
     assert!(!fixture
         .issuer
         .prepared_token_is_current(&fixture.token, &fixture.binding));
@@ -9221,6 +13320,10 @@ fn leave_fresh_execution_activated_before_projection_commit(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).is_err(),
         "the fixture must expose an Activated ledger with an incomplete projection/pointer"
     );
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
 }
 
 #[test]
@@ -9241,6 +13344,55 @@ fn fresh_execution_ready_timeout_aborts_candidate_and_preserves_blocked_predeces
 }
 
 #[test]
+fn fresh_execution_session_replacement_before_work_commit_preserves_predecessor_authority() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture =
+        pending_fresh_execution_fixture(temp.path(), "fresh-session-replacement-before-commit");
+    let sessions_dir = fixture.runtime.sessions_dir.clone();
+    let session_id = fixture.candidate_session_id.clone();
+    set_fresh_execution_pre_work_commit_hook_for_test(Box::new(move || {
+        replace_fresh_candidate_session_incarnation(&sessions_dir, &session_id);
+    }));
+
+    let readiness_nonce = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get(&fixture.window_id)
+        .expect("pending fresh launch")
+        .readiness_nonce
+        .clone();
+    let events = fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+
+    assert!(
+        events.is_empty(),
+        "a replaced Session must not complete the fresh launch"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read authority after Session replacement"),
+        Some(fixture.predecessor_binding.clone()),
+        "Session replacement must fence generation and Work publication"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read continuation attempt")
+        .expect("continuation attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+}
+
+#[test]
 fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
         .lock()
@@ -9256,11 +13408,14 @@ fn fresh_execution_wrong_session_start_nonce_aborts_candidate_and_preserves_bloc
 
     let events = fixture.runtime.handle_runtime_hook_event(session_start);
 
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalStatus { detail: Some(detail), .. }
-            if detail.contains("readiness nonce did not match")
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                if detail.contains("readiness nonce did not match")
+        )),
+        "unexpected nonce failure events: {events:#?}"
+    );
     assert_pending_fresh_execution_was_rolled_back(&fixture);
 }
 
@@ -9280,6 +13435,262 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
 
     assert!(!events.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_host_launch_persists_and_dispatches_checked_latest_runner_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-runner-fallback");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&bin).expect("create bin");
+    init_repo(&repo);
+    let direct = bin.join("codex");
+    fs::write(
+        &direct,
+        "#!/bin/sh\necho 'vendor binary missing' >&2\nexit 1\n",
+    )
+    .expect("write broken direct runner");
+    fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
+        .expect("chmod broken direct runner");
+    let bunx = bin.join("bunx");
+    fs::write(
+        &bunx,
+        "#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 1\nprintf 'bunx 1.2.3\\n'\n",
+    )
+    .expect("write healthy bunx version fixture");
+    fs::set_permissions(&bunx, fs::Permissions::from_mode(0o755))
+        .expect("chmod bunx availability fixture");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .branch("work/issue-2359")
+        .session_mode(gwt_agent::SessionMode::Continue)
+        .model("gpt-5.6-codex")
+        .skip_permissions(true)
+        .build();
+    config.command = direct.display().to_string();
+    config
+        .env_vars
+        .insert("PATH".to_string(), bin.display().to_string());
+    config
+        .env_vars
+        .insert("HOME".to_string(), temp.path().display().to_string());
+    let original_args = config.args.clone();
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::agent-runner-fallback".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        Some(issuer),
+    );
+
+    let recorded = events.lock().expect("event log");
+    let completion = recorded
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete {
+                result: Ok(completion),
+                ..
+            } => Some(completion),
+            _ => None,
+        })
+        .expect("successful LaunchComplete event");
+    assert_eq!(completion.0.command, bunx.display().to_string());
+    let package_index = completion
+        .0
+        .args
+        .iter()
+        .position(|arg| arg == "@openai/codex@latest")
+        .expect("latest Codex package prefix");
+    assert_eq!(
+        &completion.0.args[package_index + 1..],
+        original_args.as_slice()
+    );
+    let persisted = gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", completion.1)))
+        .expect("persisted fallback Session");
+    assert_eq!(persisted.launch_command, bunx.display().to_string());
+    assert_eq!(persisted.launch_args, completion.0.args);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispatch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-runner-failure");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&bin).expect("create bin");
+    init_repo(&repo);
+    let direct = bin.join("openclaw");
+    fs::write(&direct, "#!/bin/sh\necho 'runner broken' >&2\nexit 1\n")
+        .expect("write broken direct runner");
+    fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
+        .expect("chmod broken direct runner");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::OpenClaw)
+        .working_dir(&repo)
+        .branch("work/issue-2359")
+        .session_mode(gwt_agent::SessionMode::Continue)
+        .build();
+    config.command = direct.display().to_string();
+    config
+        .env_vars
+        .insert("PATH".to_string(), bin.display().to_string());
+    config
+        .env_vars
+        .insert("HOME".to_string(), temp.path().display().to_string());
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::agent-runner-failure".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        Some(issuer),
+    );
+
+    let recorded = events.lock().expect("event log");
+    let error = recorded
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete {
+                result: Err(error), ..
+            } => Some(error),
+            _ => None,
+        })
+        .expect("failed LaunchComplete event");
+    assert!(error.contains("OpenClaw"), "{error}");
+    assert!(error.contains("exit status 1"), "{error}");
+    assert!(recorded
+        .iter()
+        .all(|event| !matches!(event, UserEvent::LaunchComplete { result: Ok(_), .. })));
+    let persisted_sessions = fs::read_dir(&sessions_dir)
+        .expect("read sessions dir")
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .collect::<Vec<_>>();
+    assert!(
+        persisted_sessions.is_empty(),
+        "runner-health failure must precede Session persistence: {persisted_sessions:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mutation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-codex-health-order");
+    let bin = temp.path().join("bin");
+    let invocation_counter = temp.path().join("codex-invocations.txt");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&bin).expect("create bin");
+    init_repo(&repo);
+    let direct = bin.join("codex");
+    fs::write(
+        &direct,
+        "#!/bin/sh\nprintf 'probe\\n' >> \"$CODEX_INVOCATION_COUNTER\"\n/bin/sleep 8\necho 'runner broken' >&2\nexit 1\n",
+    )
+    .expect("write broken Codex runner");
+    fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
+        .expect("chmod broken Codex runner");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .branch("work/issue-2359")
+        .build();
+    config.command = direct.display().to_string();
+    config.env_vars.extend([
+        ("PATH".to_string(), bin.display().to_string()),
+        ("HOME".to_string(), temp.path().display().to_string()),
+        (
+            "CODEX_INVOCATION_COUNTER".to_string(),
+            invocation_counter.display().to_string(),
+        ),
+    ]);
+    let (proxy, events) = AppEventProxy::stub();
+
+    let started = std::time::Instant::now();
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::agent-codex-health-order".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        None,
+    );
+    let elapsed = started.elapsed();
+
+    let recorded = events.lock().expect("event log");
+    assert!(recorded
+        .iter()
+        .any(|event| matches!(event, UserEvent::LaunchComplete { result: Err(_), .. })));
+    assert_eq!(
+        fs::read_to_string(&invocation_counter)
+            .expect("Codex invocation counter")
+            .lines()
+            .count(),
+        1,
+        "canonical health must be the only Codex version invocation",
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(4) && elapsed < std::time::Duration::from_secs(7),
+        "production launch must use the canonical five-second deadline once: {elapsed:?}",
+    );
+    assert!(
+        !repo.join(gwt_skills::LANE_FILE_RELATIVE).exists(),
+        "runner health must fail before lane materialization",
+    );
+    assert!(
+        !repo.join(".codex").exists(),
+        "runner health must fail before managed Codex asset mutation",
+    );
+    assert!(
+        fs::read_dir(&sessions_dir)
+            .expect("read sessions dir")
+            .flatten()
+            .all(|entry| entry.path().extension().and_then(|ext| ext.to_str()) != Some("toml")),
+        "runner health must fail before Session persistence",
+    );
 }
 
 #[test]
@@ -9364,10 +13775,114 @@ fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
         persisted_candidates.is_empty(),
         "a launch that never returned its Session id must not leave an undiscoverable candidate: {persisted_candidates:?}"
     );
+    let recovery_receipts = fs::read_dir(sessions_dir.join("execution-launch-recovery"))
+        .map(|entries| entries.flatten().collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert!(
+        recovery_receipts.is_empty(),
+        "preflight failure must not publish a pending launch receipt: {recovery_receipts:?}",
+    );
 }
 
 #[test]
-fn fresh_execution_callback_failure_rejects_work_marker_and_retains_unaborted_candidate() {
+fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-final-persist");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    fs::write(sessions_dir.join("runtime"), "not-a-directory")
+        .expect("block runtime sidecar directory creation");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .branch("work/issue-2359")
+        .linked_issue_number(owner.number)
+        .extra_arg("$gwt-execute #2359")
+        .build();
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45155/internal/hook-live",
+        "ws://127.0.0.1:46255/ws",
+        "ws://127.0.0.1:45155/internal/pane-ws",
+    );
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::agent-genesis-final-persist".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        Some(issuer),
+    );
+
+    let error = events
+        .lock()
+        .expect("event log")
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete {
+                result: Err(error), ..
+            } => Some(error.clone()),
+            _ => None,
+        })
+        .expect("failed LaunchComplete event");
+    assert!(
+        error.contains("runtime") || error.contains("directory"),
+        "{error}"
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read failed genesis ledger")
+        .expect("failed genesis ledger");
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+    );
+    let persisted_sessions = fs::read_dir(&sessions_dir)
+        .expect("read sessions dir")
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_sessions.len(),
+        1,
+        "cleanup I/O failure must retain exact Session evidence: {persisted_sessions:?}",
+    );
+    let retained_session_id = persisted_sessions[0]
+        .path()
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .expect("retained Session id")
+        .to_string();
+    let recovery_receipts = fs::read_dir(sessions_dir.join("execution-launch-recovery"))
+        .map(|entries| entries.flatten().collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert_eq!(recovery_receipts.len(), 1, "{recovery_receipts:?}");
+
+    fs::remove_file(sessions_dir.join("runtime")).expect("remove runtime path blocker");
+    let mut restarted = sample_runtime(temp.path(), Vec::new(), None);
+    restarted.reconcile_durable_fresh_execution_launches();
+
+    assert!(!sessions_dir
+        .join(format!("{retained_session_id}.toml"))
+        .exists());
+    assert!(!durable_launch_recovery_exists(
+        &sessions_dir,
+        &retained_session_id,
+    ));
+}
+
+#[test]
+fn fresh_execution_abort_conflict_retains_work_marker_and_candidate() {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9413,6 +13928,10 @@ fn fresh_execution_callback_failure_rejects_work_marker_and_retains_unaborted_ca
             .exists(),
         "cleanup must retain the candidate Session until Aborted is durably proven"
     );
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
@@ -9420,8 +13939,91 @@ fn fresh_execution_callback_failure_rejects_work_marker_and_retains_unaborted_ca
         Utc::now(),
     );
     unrelated.title = Some("Unrelated writer after rejected callback".to_string());
-    gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
-        .expect("fresh callback failure must reject its external Prepared Work marker");
+    assert!(
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
+            .is_err(),
+        "abort refusal must retain its external Prepared Work marker unchanged",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_execution_launch_failure_retains_dangling_session_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-dangling-live");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    fs::remove_file(&candidate_path).expect("remove materialized candidate Session");
+    let missing_target = fixture.runtime.sessions_dir.join("missing-live-candidate");
+    symlink(&missing_target, &candidate_path).expect("create dangling candidate Session");
+    let receipt_path = fixture
+        .runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{}.json", fixture.candidate_session_id));
+    let receipt_before = fs::read(&receipt_path).expect("read recovery receipt");
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
+    ]);
+
+    let _events = fixture
+        .runtime
+        .fresh_execution_launch_failed_events(&fixture.window_id, "simulated launch failure");
+
+    assert!(fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .contains_key(&fixture.window_id));
+    assert!(fs::symlink_metadata(&candidate_path)
+        .expect("dangling candidate entry must remain")
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
+    assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read retained attempt")
+        .expect("retained attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+
+    fs::remove_file(&candidate_path).expect("restore true Missing fresh startup state");
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+    assert!(!durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read aborted attempt")
+        .expect("aborted attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
+    );
 }
 
 #[test]
@@ -9459,6 +14061,537 @@ fn fresh_execution_activated_response_loss_repairs_projection_pointer_and_worksp
         )
         .expect("read committed Workspace transaction"),
         gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+    );
+}
+
+#[test]
+fn fresh_execution_response_loss_recovery_rejects_same_id_session_replacement() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture =
+        pending_fresh_execution_fixture(temp.path(), "fresh-response-loss-session-replacement");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    let workspace_snapshot = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+    ]);
+    let sessions_dir = fixture.runtime.sessions_dir.clone();
+    let session_id = fixture.candidate_session_id.clone();
+    set_fresh_execution_pre_work_commit_hook_for_test(Box::new(move || {
+        replace_fresh_candidate_session_incarnation(&sessions_dir, &session_id);
+    }));
+
+    let events = fixture
+        .runtime
+        .fresh_execution_launch_failed_events(&fixture.window_id, "simulated response loss");
+
+    assert!(
+        events.is_empty(),
+        "a replaced Session must retain response-loss recovery for the exact owner"
+    );
+    assert_optional_files_unchanged(&workspace_snapshot);
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+}
+
+#[test]
+fn settled_fresh_execution_recovery_removes_only_receipt_without_republishing_authority() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-settled-no-write");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    let events = fixture
+        .runtime
+        .fresh_execution_launch_failed_events(&fixture.window_id, "settle fixture");
+    assert!(!events.is_empty());
+    assert!(!durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    persist_durable_launch_recovery(
+        &fixture.runtime.sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: fixture.operation_id.clone(),
+        },
+        &fixture.candidate_session_id,
+        &fixture.repo,
+        &fixture.repo,
+        fixture.owner,
+        Some(&fixture.binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("restore receipt after simulated unlink response loss");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &fixture.repo,
+            &fixture.candidate_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "post-launch blocker after receipt unlink response loss".to_string(),
+                missing_verification: Some("post-launch verification".to_string()),
+            },
+        )
+        .expect("advance the activated generation lifecycle"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    assert_ne!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read lifecycle-advanced binding"),
+        Some(fixture.binding.identity.clone()),
+        "the fixture must prove receipt cleanup no longer depends on the activation-time ledger head",
+    );
+
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+        .expect("trusted worktree directory");
+    let owner_ledger = trusted_dir
+        .parent()
+        .expect("trusted repository directory")
+        .join("execution-owners")
+        .join(format!("owner-{}", fixture.owner.number))
+        .join("generation-ledger.json");
+    let artifact_paths = [
+        owner_ledger,
+        trusted_dir.join("execution-control.json"),
+        trusted_dir.join("execution-generation-pointer.json"),
+        fixture
+            .repo
+            .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE),
+        fixture
+            .repo
+            .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+    ];
+    let before = artifact_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read settled authority artifact"))
+        .collect::<Vec<_>>();
+    let probes = artifact_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let probe = temp
+                .path()
+                .join(format!("authority-artifact-{index}.probe"));
+            fs::hard_link(path, &probe).expect("link authority artifact identity probe");
+            probe
+        })
+        .collect::<Vec<_>>();
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(!durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    for ((path, expected), probe) in artifact_paths.iter().zip(&before).zip(probes) {
+        assert_eq!(
+            fs::read(path).expect("read reconciled authority artifact"),
+            *expected,
+            "settled recovery must leave authority bytes unchanged: {}",
+            path.display(),
+        );
+        let sentinel = b"\nsettled-recovery-same-file\n";
+        OpenOptions::new()
+            .append(true)
+            .open(&probe)
+            .expect("open authority identity probe")
+            .write_all(sentinel)
+            .expect("append authority identity probe");
+        assert!(
+            fs::read(path)
+                .expect("read authority artifact after probe")
+                .ends_with(sentinel),
+            "settled recovery must not atomically replace authority artifact: {}",
+            path.display(),
+        );
+    }
+}
+
+#[test]
+fn historical_fresh_receipt_does_not_republish_over_a_different_current_owner() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-owner-superseded");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    let superseding_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3327,
+    };
+    replace_current_generation_authority_with_owner(
+        &fixture.repo,
+        superseding_owner,
+        "superseding-owner-session",
+    );
+    let artifacts = current_generation_authority_artifacts(&fixture.repo);
+    let before = artifacts
+        .iter()
+        .map(|path| fs::read(path).expect("read superseding authority artifact"))
+        .collect::<Vec<_>>();
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, superseding_owner)
+            .expect("read superseding authority")
+            .is_some()
+    );
+    for (path, expected) in artifacts.iter().zip(before) {
+        assert_eq!(
+            fs::read(path).expect("read authority after historical cleanup"),
+            expected,
+            "historical fresh cleanup must not replace the current owner's authority: {}",
+            path.display()
+        );
+    }
+    assert!(!durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+}
+
+#[test]
+fn historical_fresh_receipt_waits_for_a_foreign_owner_ledger_first_repair() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-owner-partial");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    let superseding_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3327,
+    };
+    let superseding_session_id = "partial-superseding-owner-session";
+    replace_current_generation_authority_with_owner(
+        &fixture.repo,
+        superseding_owner,
+        superseding_session_id,
+    );
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &fixture.repo,
+            superseding_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "prepare a foreign-owner successor crash".to_string(),
+                missing_verification: Some("foreign owner verification".to_string()),
+            },
+        )
+        .expect("block superseding owner"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    let artifacts = current_generation_authority_artifacts(&fixture.repo);
+    let blocked_authority = artifacts
+        .iter()
+        .map(|path| fs::read(path).expect("read blocked foreign authority"))
+        .collect::<Vec<_>>();
+    let foreign_successor = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "foreign-owner-ledger-first-successor".to_string(),
+        principal_id: "gwt-host-launch".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "foreign-owner-ledger-first-binding".to_string(),
+        initial_session_id: "foreign-owner-ledger-first-session".to_string(),
+        entrypoint: "$gwt-execute #3327".to_string(),
+        requested_at: Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+        &fixture.repo,
+        superseding_owner,
+        &foreign_successor,
+    )
+    .expect("prepare foreign owner successor");
+    gwt::cli::execution_state::activate_successor(
+        &fixture.repo,
+        superseding_owner,
+        &foreign_successor,
+    )
+    .expect("activate foreign owner successor");
+    for (path, old_bytes) in artifacts.iter().zip(&blocked_authority) {
+        fs::write(path, old_bytes).expect("restore pre-activation foreign projection/pointer");
+    }
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    for (path, expected) in artifacts.iter().zip(&blocked_authority) {
+        assert_eq!(
+            fs::read(path).expect("read partial foreign authority"),
+            *expected,
+            "old-owner recovery must retain and not overwrite a partial foreign authority: {}",
+            path.display()
+        );
+    }
+
+    gwt::cli::execution_state::activate_successor(
+        &fixture.repo,
+        superseding_owner,
+        &foreign_successor,
+    )
+    .expect("repair foreign owner projection/pointer");
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+    assert!(!durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    assert!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, superseding_owner)
+            .expect("read repaired foreign owner")
+            .is_some()
+    );
+}
+
+#[test]
+fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-owner-superseded");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let old_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "superseded-genesis-session";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        old_owner.kind,
+        old_owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize old genesis");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        old_owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize old genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, old_owner)
+        .expect("read old genesis binding")
+        .expect("old genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: old_owner.kind.as_str().to_string(),
+        owner_number: old_owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.clone());
+    session.linked_issue_number = Some(old_owner.number);
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind old genesis Session");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save old genesis Session");
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        old_owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist old genesis receipt");
+    let mut old_agent = sample_active_agent_session("tab-old-owner", "window-old-owner");
+    old_agent.session_id = session_id.to_string();
+    old_agent.branch_name = "work/issue-2359".to_string();
+    old_agent.worktree_path = repo.clone();
+    old_agent.agent_project_root = repo.display().to_string();
+    let old_work_context = WorkspaceResumeContext {
+        title: Some("Superseded genesis Work".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: Some("Must be discarded without touching the new owner".to_string()),
+        next_action: Some("Recover exact old launch".to_string()),
+    };
+    save_workspace_launch_projection(
+        &repo,
+        &old_agent,
+        Some("develop"),
+        Some(old_owner.number),
+        Some(&old_work_context),
+        WorkspaceLaunchProjectionKind::StartWork,
+        &HashSet::from([session_id.to_string()]),
+    )
+    .expect("publish old genesis Work");
+    let old_work_id = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read old WorkItems")
+        .expect("old WorkItems")
+        .work_items
+        .into_iter()
+        .find(|item| {
+            item.events
+                .iter()
+                .any(|event| event.agent_session_id.as_deref() == Some(session_id))
+        })
+        .expect("old genesis Work")
+        .id;
+    let unrelated_work_id = "unrelated-work-after-owner-change";
+    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        unrelated_work_id,
+        Utc::now(),
+    );
+    unrelated.title = Some("Unrelated current owner Work".to_string());
+    unrelated.agent_session_id = Some("superseding-genesis-owner-session".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, unrelated)
+        .expect("publish unrelated Work");
+    let superseding_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 3327,
+    };
+    replace_current_generation_authority_with_owner(
+        &repo,
+        superseding_owner,
+        "superseding-genesis-owner-session",
+    );
+    let artifacts = current_generation_authority_artifacts(&repo);
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "superseding-genesis-owner-session",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "prepare partial foreign genesis-owner successor".to_string(),
+                missing_verification: Some("foreign genesis verification".to_string()),
+            },
+        )
+        .expect("block foreign genesis owner"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    let blocked_authority = artifacts
+        .iter()
+        .map(|path| fs::read(path).expect("read blocked foreign genesis authority"))
+        .collect::<Vec<_>>();
+    let foreign_successor = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: "foreign-genesis-owner-ledger-first-successor".to_string(),
+        principal_id: "gwt-host-launch".to_string(),
+        work_id: None,
+        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+        session_binding_id: "foreign-genesis-owner-ledger-first-binding".to_string(),
+        initial_session_id: "foreign-genesis-owner-ledger-first-session".to_string(),
+        entrypoint: "$gwt-execute #3327".to_string(),
+        requested_at: Utc::now(),
+    };
+    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
+        &repo,
+        superseding_owner,
+        &foreign_successor,
+    )
+    .expect("prepare foreign genesis-owner successor");
+    gwt::cli::execution_state::activate_successor(&repo, superseding_owner, &foreign_successor)
+        .expect("activate foreign genesis-owner successor");
+    for (path, old_bytes) in artifacts.iter().zip(&blocked_authority) {
+        fs::write(path, old_bytes).expect("restore partial foreign genesis authority");
+    }
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id
+    ));
+    assert!(runtime
+        .sessions_dir
+        .join(format!("{session_id}.toml"))
+        .exists());
+    for (path, expected) in artifacts.iter().zip(&blocked_authority) {
+        assert_eq!(
+            fs::read(path).expect("read partial foreign genesis authority"),
+            *expected,
+            "old genesis recovery must not overwrite a partial foreign authority: {}",
+            path.display()
+        );
+    }
+    let pending_work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read WorkItems while foreign authority is partial")
+        .expect("WorkItems while foreign authority is partial");
+    assert!(
+        pending_work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == old_work_id)
+            .is_some_and(|item| !item.discarded),
+        "cleanup must wait until the different owner's authority is recoverably valid"
+    );
+
+    gwt::cli::execution_state::activate_successor(&repo, superseding_owner, &foreign_successor)
+        .expect("repair foreign genesis-owner projection/pointer");
+    let before = artifacts
+        .iter()
+        .map(|path| fs::read(path).expect("read repaired superseding genesis artifact"))
+        .collect::<Vec<_>>();
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        gwt::cli::execution_state::current_execution_binding(&repo, superseding_owner)
+            .expect("read superseding genesis authority")
+            .is_some()
+    );
+    for (path, expected) in artifacts.iter().zip(before) {
+        assert_eq!(
+            fs::read(path).expect("read authority after genesis cleanup"),
+            expected,
+            "historical genesis cleanup must not replace the current owner's authority: {}",
+            path.display()
+        );
+    }
+    assert!(!runtime
+        .sessions_dir
+        .join(format!("{session_id}.toml"))
+        .exists());
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id
+    ));
+    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("read Workspace after historical genesis cleanup")
+        .expect("Workspace after historical genesis cleanup");
+    assert!(
+        projection.latest_agent_for_session(session_id).is_none(),
+        "the superseded genesis Agent must be removed from the current Workspace"
+    );
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read WorkItems after historical genesis cleanup")
+        .expect("WorkItems after historical genesis cleanup");
+    assert!(
+        work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == old_work_id)
+            .is_some_and(|item| item.discarded),
+        "the brand-new Work published only by the failed genesis must be discarded"
+    );
+    assert!(
+        work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == unrelated_work_id)
+            .is_some_and(|item| !item.discarded),
+        "the different owner's Work must remain untouched"
     );
 }
 
@@ -9521,6 +14654,193 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
         2,
         "restart repair must not append a duplicate generation",
     );
+    assert!(!durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+}
+
+#[test]
+fn startup_fresh_execution_recovery_rejects_same_id_session_replacement() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture =
+        pending_fresh_execution_fixture(temp.path(), "fresh-startup-session-replacement");
+    leave_fresh_execution_activated_before_projection_commit(&mut fixture);
+    fixture.runtime.pending_fresh_execution_launches.clear();
+    fixture.runtime.active_agent_sessions.clear();
+    fixture.runtime.agent_capability_tokens.clear();
+    let workspace_snapshot = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+    ]);
+    let sessions_dir = fixture.runtime.sessions_dir.clone();
+    let session_id = fixture.candidate_session_id.clone();
+    set_fresh_execution_pre_work_commit_hook_for_test(Box::new(move || {
+        replace_fresh_candidate_session_incarnation(&sessions_dir, &session_id);
+    }));
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert_optional_files_unchanged(&workspace_snapshot);
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+}
+
+#[test]
+fn startup_fresh_recovery_ignores_unindexed_historical_sessions() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "fresh-unindexed-history");
+    clear_durable_launch_recovery(&fixture.runtime.sessions_dir, &fixture.candidate_session_id)
+        .expect("remove recovery receipt to model settled historical Session");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    assert!(candidate_path.exists());
+    for index in 0..250 {
+        fs::write(
+            fixture
+                .runtime
+                .sessions_dir
+                .join(format!("historical-{index}.toml")),
+            "not = [valid",
+        )
+        .expect("write historical Session fixture");
+    }
+
+    let mut runtime = fixture.runtime;
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        candidate_path.exists(),
+        "unindexed Session must not be recovered"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read unindexed attempt")
+        .expect("unindexed attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        "startup recovery must be proportional to pending receipts, not Session history",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_launch_recovery_persist_syncs_new_directory_and_receipt_entry() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "durable-receipt-persist");
+    clear_durable_launch_recovery(&fixture.runtime.sessions_dir, &fixture.candidate_session_id)
+        .expect("clear fixture receipt");
+    fs::remove_dir(
+        fixture
+            .runtime
+            .sessions_dir
+            .join("execution-launch-recovery"),
+    )
+    .expect("remove empty recovery directory");
+
+    let synced_directories = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let observed = Arc::clone(&synced_directories);
+    set_durable_launch_recovery_directory_sync_test_hook(Some(Box::new(move |directory| {
+        observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(directory.to_path_buf());
+        Ok(())
+    })));
+    let result = persist_durable_launch_recovery(
+        &fixture.runtime.sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: fixture.operation_id.clone(),
+        },
+        &fixture.candidate_session_id,
+        &fixture.repo,
+        &fixture.repo,
+        fixture.owner,
+        Some(&fixture.binding),
+        Some(&gwt_agent::AgentId::Codex),
+    );
+    set_durable_launch_recovery_directory_sync_test_hook(None);
+
+    result.expect("persist durably synchronized receipt");
+    let synced_directories = synced_directories
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        synced_directories.contains(&fixture.runtime.sessions_dir),
+        "creating the recovery directory must sync the sessions directory entry"
+    );
+    assert!(
+        synced_directories.contains(
+            &fixture
+                .runtime
+                .sessions_dir
+                .join("execution-launch-recovery")
+        ),
+        "renaming the receipt into place must sync the recovery directory entry"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_launch_recovery_clear_retries_directory_sync_after_unlink_response_loss() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "durable-receipt-clear");
+    let sync_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&sync_attempts);
+    set_durable_launch_recovery_directory_sync_test_hook(Some(Box::new(move |_directory| {
+        let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt == 0 {
+            return Err(std::io::Error::other(
+                "simulated directory sync response loss",
+            ));
+        }
+        Ok(())
+    })));
+
+    let first =
+        clear_durable_launch_recovery(&fixture.runtime.sessions_dir, &fixture.candidate_session_id);
+    let second =
+        clear_durable_launch_recovery(&fixture.runtime.sessions_dir, &fixture.candidate_session_id);
+    set_durable_launch_recovery_directory_sync_test_hook(None);
+
+    assert!(first.is_err(), "the first directory sync must fail visibly");
+    assert!(
+        !durable_launch_recovery_exists(
+            &fixture.runtime.sessions_dir,
+            &fixture.candidate_session_id
+        ),
+        "the unlink completed before its durability acknowledgement was lost"
+    );
+    second.expect("NotFound retry must complete the pending directory sync barrier");
+    assert_eq!(
+        sync_attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "NotFound retry must still synchronize the receipt directory"
+    );
 }
 
 #[test]
@@ -9580,6 +14900,11 @@ fn startup_does_not_commit_foreign_same_operation_for_stale_activated_session() 
     let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
 
     restarted.bootstrap();
+
+    assert!(durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
@@ -9667,6 +14992,10 @@ fn startup_does_not_delete_aborted_session_when_project_state_root_is_foreign() 
         candidate_path.exists(),
         "a foreign Missing result must not delete the sole Session recovery record",
     );
+    assert!(durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-after-foreign-aborted-recovery",
@@ -9681,7 +15010,7 @@ fn startup_does_not_delete_aborted_session_when_project_state_root_is_foreign() 
 }
 
 #[test]
-fn aborted_fresh_execution_cleanup_retains_pending_when_exact_session_was_replaced() {
+fn aborted_fresh_execution_cleanup_rejects_agent_substitution_without_mutation() {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9704,18 +15033,24 @@ fn aborted_fresh_execution_cleanup_retains_pending_when_exact_session_was_replac
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
         |session| {
-            let mut replacement = session
-                .execution_binding
-                .clone()
-                .expect("candidate execution binding");
-            replacement.identity.binding_id = "replacement-binding".to_string();
-            replacement.capability_generation += 1;
-            session
-                .set_execution_binding(Some(replacement))
-                .map_err(std::io::Error::other)
+            session.agent_id = gwt_agent::AgentId::Custom("review-bot".to_string());
+            Ok(())
         },
     )
-    .expect("replace candidate Session binding");
+    .expect("replace candidate Session Agent");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let replacement_before = fs::read(&candidate_path).expect("read replacement Session");
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
+    ]);
 
     let _events = fixture
         .runtime
@@ -9728,13 +15063,685 @@ fn aborted_fresh_execution_cleanup_retains_pending_when_exact_session_was_replac
             .contains_key(&fixture.window_id),
         "binding-mismatch cleanup must retain process-local retry evidence",
     );
+    assert_eq!(
+        fs::read(&candidate_path).expect("read retained replacement Session"),
+        replacement_before,
+        "strict cleanup must retain the replacement Session byte-identically",
+    );
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+}
+
+#[test]
+fn startup_aborted_cleanup_retains_same_binding_agent_with_replaced_branch() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture =
+        pending_fresh_execution_fixture(temp.path(), "fresh-aborted-same-ids-replacement");
+    gwt::cli::execution_state::abort_successor(
+        &fixture.repo,
+        fixture.owner,
+        &fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .get(&fixture.window_id)
+            .expect("pending fresh launch")
+            .request,
+        "simulated crash after durable abort",
+    )
+    .expect("abort fresh candidate");
+    gwt_agent::update_session(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+        |session| {
+            session.branch = "work/replaced-after-validation".to_string();
+            Ok(())
+        },
+    )
+    .expect("persist same-binding and same-Agent replacement Session branch");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let replacement_before = fs::read(&candidate_path).expect("read replacement Session");
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
+    ]);
+    let mut restarted = fixture.runtime;
+
+    restarted.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        candidate_path.exists(),
+        "recovery must not delete a replacement Session using a binding read from that replacement",
+    );
+    assert!(durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    assert_eq!(
+        fs::read(&candidate_path).expect("read retained replacement Session"),
+        replacement_before,
+    );
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_retains_dangling_fresh_session_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-dangling-startup");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    fs::remove_file(&candidate_path).expect("remove materialized candidate Session");
+    let missing_target = fixture
+        .runtime
+        .sessions_dir
+        .join("missing-startup-candidate");
+    symlink(&missing_target, &candidate_path).expect("create dangling startup Session");
+    let receipt_path = fixture
+        .runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{}.json", fixture.candidate_session_id));
+    let receipt_before = fs::read(&receipt_path).expect("read recovery receipt");
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
+    ]);
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(fs::symlink_metadata(&candidate_path)
+        .expect("dangling startup Session must remain")
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_link(&candidate_path).unwrap(), missing_target);
+    assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read retained attempt")
+        .expect("retained attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+}
+
+#[test]
+fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-missing-race");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    fs::remove_file(&candidate_path).expect("observe missing startup candidate Session");
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
+    ]);
+    let sessions_dir = fixture.runtime.sessions_dir.clone();
+    let repo = fixture.repo.clone();
+    let expected_session_id = fixture.candidate_session_id.clone();
+    set_missing_session_cleanup_hook_for_test(Box::new(move |session_id| {
+        assert_eq!(session_id, expected_session_id);
+        let mut replacement =
+            gwt_agent::Session::new(&repo, "work/replacement", gwt_agent::AgentId::Codex);
+        replacement.id = session_id.to_string();
+        replacement
+            .save(&sessions_dir)
+            .expect("materialize same-id Session after startup Missing observation");
+    }));
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        candidate_path.exists(),
+        "replacement Session must be retained"
+    );
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read retained attempt")
+        .expect("retained attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+    );
+}
+
+#[test]
+fn startup_retains_fresh_recovery_receipt_with_blank_operation_id() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pending_fresh_execution_fixture(temp.path(), "fresh-blank-receipt-op");
+    let receipt_path = fixture
+        .runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{}.json", fixture.candidate_session_id));
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read launch recovery receipt"))
+            .expect("parse launch recovery receipt");
+    receipt["kind"]["fresh_successor"]["operation_id"] =
+        serde_json::Value::String("   ".to_string());
+    fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize malformed receipt"),
+    )
+    .expect("persist malformed receipt");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let mut restarted = fixture.runtime;
+
+    restarted.reconcile_durable_fresh_execution_launches();
+
+    assert!(
+        receipt_path.exists(),
+        "invalid receipt must be retained for explicit repair instead of being mistaken for settled state",
+    );
+    assert!(candidate_path.exists());
+}
+
+#[test]
+fn startup_retains_schema_v2_recovery_receipt_without_full_session_identity() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-schema-v2-receipt");
+    let receipt_path = fixture
+        .runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{}.json", fixture.candidate_session_id));
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read recovery receipt"))
+            .expect("parse recovery receipt");
+    receipt["schema_version"] = serde_json::Value::from(2);
+    receipt
+        .as_object_mut()
+        .expect("receipt object")
+        .remove("expected_session_identity");
+    let receipt_before = serde_json::to_vec_pretty(&receipt).expect("serialize v2 receipt");
+    fs::write(&receipt_path, &receipt_before).expect("persist v2 receipt");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let candidate_before = fs::read(&candidate_path).expect("read candidate Session");
+    let authority_before = snapshot_optional_files(&exact_continue_authority_artifacts(
+        &fixture.repo,
+        fixture.owner,
+    ));
+    let work_before = snapshot_optional_files(&[
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.repo),
+        gwt_core::paths::gwt_repo_local_work_events_path(&fixture.repo),
+    ]);
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+    assert_eq!(fs::read(&candidate_path).unwrap(), candidate_before);
+    assert_optional_files_unchanged(&authority_before);
+    assert_optional_files_unchanged(&work_before);
+}
+
+#[test]
+fn startup_retains_bound_fresh_receipt_when_owner_ledger_is_missing() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-missing-ledger");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    fs::remove_file(&candidate_path).expect("remove candidate Session");
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+        .expect("trusted worktree directory");
+    let ledger_path = trusted_dir
+        .parent()
+        .expect("trusted repository directory")
+        .join("execution-owners")
+        .join(format!("owner-{}", fixture.owner.number))
+        .join("generation-ledger.json");
+    fs::remove_file(&ledger_path).expect("remove owner ledger");
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(durable_launch_recovery_exists(
+        &fixture.runtime.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+}
+
+#[test]
+fn startup_retains_missing_session_fresh_receipt_after_binding_identity_mismatch() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture =
+        pending_fresh_execution_fixture(temp.path(), "fresh-receipt-binding-mismatch");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    fs::remove_file(&candidate_path).expect("remove candidate Session");
+    let receipt_path = fixture
+        .runtime
+        .sessions_dir
+        .join("execution-launch-recovery")
+        .join(format!("{}.json", fixture.candidate_session_id));
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read recovery receipt"))
+            .expect("parse recovery receipt");
+    receipt["expected_binding"]["identity"]["ledger_head_hash"] =
+        serde_json::Value::String("mismatched-ledger-head".to_string());
+    fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize mismatched recovery receipt"),
+    )
+    .expect("persist mismatched recovery receipt");
+
+    fixture.runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(receipt_path.exists());
+    assert_eq!(
+        gwt::cli::execution_state::continuation_attempt_for_operation(
+            &fixture.repo,
+            fixture.owner,
+            &fixture.operation_id,
+        )
+        .expect("read retained attempt")
+        .expect("retained attempt")
+        .status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        "a mismatched recovery binding must not authorize aborting the candidate",
+    );
+}
+
+#[test]
+fn startup_clears_unbound_fresh_receipt_only_when_no_attempt_exists() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-unbound-fresh-no-attempt");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::FreshSuccessor {
+            operation_id: "unbound-fresh-no-attempt".to_string(),
+        },
+        "unbound-fresh-session",
+        &repo,
+        &repo,
+        owner,
+        None,
+        None,
+    )
+    .expect("persist unbound pre-prepare receipt");
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(!durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        "unbound-fresh-session",
+    ));
+}
+
+#[test]
+fn startup_retains_bound_genesis_receipt_when_all_execution_authority_is_missing() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-bound-genesis-missing-authority");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "bound-genesis-missing-authority";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis authority");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+            .expect("read genesis binding")
+            .expect("genesis binding"),
+        capability_generation: 1,
+    };
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist bound genesis receipt");
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+        .expect("trusted worktree directory");
+    fs::remove_file(
+        trusted_dir
+            .parent()
+            .expect("trusted repository directory")
+            .join("execution-owners")
+            .join(format!("owner-{}", owner.number))
+            .join("generation-ledger.json"),
+    )
+    .expect("remove owner ledger");
+    for path in current_generation_authority_artifacts(&repo) {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove execution authority artifact: {error}"),
+        }
+    }
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+}
+
+#[test]
+fn startup_retains_bound_genesis_receipt_when_ledger_is_missing_but_flat_projection_remains() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-bound-genesis-flat-only");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "bound-genesis-flat-only";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis authority");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+            .expect("read genesis binding")
+            .expect("genesis binding"),
+        capability_generation: 1,
+    };
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist bound genesis receipt");
+    let authority_paths = current_generation_authority_artifacts(&repo);
+    let authority_before = authority_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read flat authority artifact"))
+        .collect::<Vec<_>>();
+    let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+        .expect("trusted worktree directory");
+    let ledger_path = trusted_dir
+        .parent()
+        .expect("trusted repository directory")
+        .join("execution-owners")
+        .join(format!("owner-{}", owner.number))
+        .join("generation-ledger.json");
+    fs::remove_file(&ledger_path).expect("remove owner ledger");
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+    assert!(
+        !ledger_path.exists(),
+        "bound recovery must not recreate the ledger"
+    );
+    for (path, expected) in authority_paths.iter().zip(authority_before) {
+        assert_eq!(
+            fs::read(path).expect("read retained flat authority artifact"),
+            expected,
+            "bound recovery must not rewrite flat authority: {}",
+            path.display(),
+        );
+    }
+}
+
+#[test]
+fn startup_retains_blocked_genesis_receipt_after_full_binding_head_mismatch() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-binding-head-mismatch");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-binding-head-mismatch";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis authority");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let mut receipt_binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: identity.clone(),
+        capability_generation: 1,
+    };
+    receipt_binding.identity.ledger_head_hash = "mismatched-genesis-ledger-head".to_string();
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    persist_durable_launch_recovery(
+        &runtime.sessions_dir,
+        DurableLaunchRecoveryKind::Genesis,
+        session_id,
+        &repo,
+        &repo,
+        owner,
+        Some(&receipt_binding),
+        Some(&gwt_agent::AgentId::Codex),
+    )
+    .expect("persist mismatched bound genesis receipt");
+    gwt::cli::execution_state::block_uncommitted_genesis_launch(
+        &repo,
+        owner,
+        session_id,
+        &identity,
+        "simulated terminalization before Host restart",
+    )
+    .expect("terminalize exact genesis generation");
+    let authority_paths = current_generation_authority_artifacts(&repo);
+    let authority_before = authority_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read blocked authority artifact"))
+        .collect::<Vec<_>>();
+
+    runtime.reconcile_durable_fresh_execution_launches();
+
+    assert!(durable_launch_recovery_exists(
+        &runtime.sessions_dir,
+        session_id,
+    ));
+    for (path, expected) in authority_paths.iter().zip(authority_before) {
+        assert_eq!(
+            fs::read(path).expect("read retained blocked authority artifact"),
+            expected,
+            "binding mismatch must perform no authority repair: {}",
+            path.display(),
+        );
+    }
+}
+
+#[test]
+fn pending_launch_recovery_receipt_excludes_session_from_quick_start_cache_refresh() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-cache-exclusion");
+    let candidate_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let persisted = gwt_agent::Session::load(&candidate_path).expect("load pending candidate");
+
     assert!(
         fixture
             .runtime
-            .sessions_dir
-            .join(format!("{}.toml", fixture.candidate_session_id))
-            .exists(),
-        "strict cleanup must not delete the replacement Session",
+            .launch_wizard_cache
+            .session_by_id(&fixture.candidate_session_id)
+            .is_none(),
+        "initial cache load must exclude Sessions with a pending launch-recovery receipt",
+    );
+
+    fixture
+        .runtime
+        .apply_refreshed_launch_wizard_sessions(vec![persisted]);
+
+    assert!(
+        fixture
+            .runtime
+            .launch_wizard_cache
+            .session_by_id(&fixture.candidate_session_id)
+            .is_none(),
+        "off-thread cache refresh must not resurrect a pending failed launch",
     );
 }
 
@@ -9779,6 +15786,18 @@ fn startup_retries_aborted_fresh_execution_candidate_cleanup() {
     assert!(
         !candidate_path.exists(),
         "startup must finish exact cleanup recorded by the Aborted fresh attempt",
+    );
+    assert!(!durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
+    assert!(
+        restarted
+            .launch_wizard_cache
+            .quick_start_entries(&fixture.repo, "work/issue-2359")
+            .iter()
+            .all(|entry| entry.session_id != fixture.candidate_session_id),
+        "startup cleanup must evict the aborted candidate from the in-memory Quick Start cache",
     );
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
@@ -9836,6 +15855,10 @@ fn startup_retains_aborted_cleanup_after_io_failure_and_retries_successfully() {
         candidate_path.exists(),
         "cleanup I/O failure must retain the Session as durable retry evidence",
     );
+    assert!(durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
     fs::remove_dir(&removal_blocker).expect("clear cleanup I/O blocker");
 
     restarted.reconcile_durable_fresh_execution_launches();
@@ -9844,6 +15867,10 @@ fn startup_retains_aborted_cleanup_after_io_failure_and_retries_successfully() {
         !candidate_path.exists(),
         "a later startup reconciliation must finish cleanup after the I/O blocker clears",
     );
+    assert!(!durable_launch_recovery_exists(
+        &restarted.sessions_dir,
+        &fixture.candidate_session_id,
+    ));
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
             .expect("read preserved predecessor after retry"),
@@ -9991,6 +16018,10 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
     let predecessor_session_id = "stale-owner-session";
     let candidate_session_id = "takeover-candidate-session";
     let operation_id = "continue-op-takeover";
@@ -10046,6 +16077,8 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     start.title = Some("Active stale Work".to_string());
     start.owner = Some("Issue #2359".to_string());
     start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
     start.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
             branch: Some("work/issue-2359".to_string()),
@@ -10117,6 +16150,9 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
             project_root: repo.clone(),
             worktree_path: repo.clone(),
             owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: Some(predecessor_session_id.to_string()),
             execution: PendingContinueWorkExecution::Takeover(request),
             binding: binding.clone(),
             readiness_nonce: readiness_nonce.to_string(),
@@ -25959,6 +31995,89 @@ fn codex_hook_discovery_mode_extracts_installed_codex_version_output() {
         super::codex_hook_discovery_mode_from_codex_version_output("unexpected output\n"),
         None
     );
+}
+
+#[test]
+fn codex_hook_discovery_mode_reuses_canonical_health_evidence() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .build();
+    let old = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("codex-cli 0.130.0".to_string()),
+        ..Default::default()
+    };
+    let current = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("codex-cli 0.133.0".to_string()),
+        ..Default::default()
+    };
+    let unknown = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("unexpected output".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&old)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
+        CodexHookDiscoveryMode::WorkspaceHome,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unknown)),
+        CodexHookDiscoveryMode::Both,
+    );
+}
+
+#[test]
+fn codex_hook_discovery_mode_treats_latest_fallback_as_workspace_home() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        switched_to_fallback: true,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report)),
+        CodexHookDiscoveryMode::WorkspaceHome,
+    );
+}
+
+#[test]
+fn docker_codex_hook_discovery_mode_keeps_safe_both_fallback() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .build();
+    config.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, None),
+        CodexHookDiscoveryMode::Both,
+    );
+}
+
+#[test]
+fn codex_hook_discovery_has_no_standalone_process_probe() {
+    let source = include_str!("launch.rs");
+    let discovery = source
+        .split("pub(super) fn codex_hook_discovery_mode_for_launch_config")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(super) fn maybe_register_codex").next())
+        .expect("Codex hook discovery implementation");
+
+    assert!(!discovery.contains("detect_installed_codex_hook_discovery_mode"));
+    assert!(!discovery.contains(".output()"));
 }
 
 #[test]
