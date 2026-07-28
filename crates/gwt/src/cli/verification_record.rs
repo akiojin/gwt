@@ -242,8 +242,7 @@ fn register_plan_for_caller(
             Vec::new(),
             derived,
             fingerprint,
-            authority.owner_number,
-            authority.execution_binding.clone(),
+            authority,
         )
     })
 }
@@ -255,13 +254,12 @@ fn register_plan_with_context_unleased(
     surfaces: Vec<String>,
     derived: bool,
     worktree_fingerprint: String,
-    owner_number: Option<u64>,
-    execution_binding: Option<ExecutionBindingIdentity>,
+    authority: &VerificationCallerAuthority,
 ) -> io::Result<VerificationPlanRecord> {
     let mut plan = VerificationPlanRecord {
         session_id: session_id.to_string(),
-        owner_number,
-        execution_binding,
+        owner_number: authority.owner_number,
+        execution_binding: authority.execution_binding.clone(),
         commands,
         derived,
         surfaces,
@@ -304,8 +302,7 @@ fn derive_and_register_plan_for_caller(
             derived.surfaces.clone(),
             true,
             fingerprint_after,
-            authority.owner_number,
-            authority.execution_binding.clone(),
+            authority,
         )?;
         Ok((derived, plan))
     })
