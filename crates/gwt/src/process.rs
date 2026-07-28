@@ -51,6 +51,33 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
 }
 
+/// Return whether a GUI materializer process is alive on every supported host.
+/// This is intentionally separate from [`is_process_alive`]: the latter keeps
+/// Windows daemon-bootstrap compatibility semantics while launch-delivery
+/// leases need a real cross-platform owner probe.
+pub fn is_host_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        is_process_alive(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let mut system = System::new();
+        let pid = sysinfo::Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        system.process(pid).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +85,12 @@ mod tests {
     #[test]
     fn pid_zero_is_never_alive() {
         assert!(!is_process_alive(0));
+        assert!(!is_host_process_alive(0));
+    }
+
+    #[test]
+    fn current_host_process_is_alive_on_every_supported_platform() {
+        assert!(is_host_process_alive(std::process::id()));
     }
 
     #[cfg(unix)]

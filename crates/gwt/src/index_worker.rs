@@ -2896,6 +2896,9 @@ detached
     #[test]
     fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         let started = tmp.path().join("owner-started");
         let started_for_thread = started.clone();

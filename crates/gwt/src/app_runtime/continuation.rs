@@ -5378,16 +5378,22 @@ impl AppRuntime {
             composed_status,
             None,
         ));
+        // SPEC #3200 FR-052: the spawn path deliberately defers the Issue
+        // Monitor completion for a fresh execution launch until this
+        // SessionStart finalizer. It owns the same `launch_feedback_context`,
+        // so it must ACK the durable delivery — otherwise the delivery tuple
+        // stays pending forever and the daemon keeps redelivering it.
         if let Some(context) = pending.launch_feedback_context.as_ref() {
             if let Some(issue_number) = context.issue_monitor_issue_number {
                 let project_root = context
                     .issue_monitor_project_root
                     .as_deref()
                     .unwrap_or(&pending.project_root);
-                events.extend(self.issue_monitor_launch_succeeded_events(
+                events.extend(self.issue_monitor_launch_completed_delivery_events(
                     project_root,
                     issue_number,
                     window_id,
+                    context.issue_monitor_delivery_id.as_deref(),
                 ));
             }
         }

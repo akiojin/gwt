@@ -420,6 +420,25 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        self.close_window_events_with_monitor_notification(id, true)
+    }
+
+    /// Close a window whose Issue Monitor lifecycle transition was already
+    /// committed by the daemon or the fail-closed local fallback. Re-entering
+    /// the normal window-closed hook here would publish a second control for
+    /// the same lifecycle edge and could requeue the just-failed issue.
+    pub(crate) fn close_window_after_issue_monitor_finalize_events(
+        &mut self,
+        id: &str,
+    ) -> Vec<OutboundEvent> {
+        self.close_window_events_with_monitor_notification(id, false)
+    }
+
+    fn close_window_events_with_monitor_notification(
+        &mut self,
+        id: &str,
+        notify_issue_monitor: bool,
+    ) -> Vec<OutboundEvent> {
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         self.clear_agent_window_startup_restore(id);
         self.stop_window_runtime(id);
@@ -438,9 +457,12 @@ impl AppRuntime {
         if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }
-        if let Some(project_root) = issue_monitor_project_root {
-            events
-                .extend(self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]));
+        if notify_issue_monitor {
+            if let Some(project_root) = issue_monitor_project_root {
+                events.extend(
+                    self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]),
+                );
+            }
         }
         events
     }
