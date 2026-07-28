@@ -196,7 +196,33 @@ pub fn resolve_ephemeral_launch_worktree(
     // Default to HEAD: `git worktree add --detach <path> HEAD` always resolves
     // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
     // base ref such as `origin/develop` when they need a specific base.
+    // #3374: a remote base must reflect the FRESH origin state — fetch before
+    // materializing so the remote-tracking ref is not months stale. Unlike
+    // Start Work's prepare step, intake never creates remote branches: a repo
+    // without an origin remote, or whose origin lacks the base branch, falls
+    // back to HEAD (the local checkout is the only truth there).
     let base_ref = base_ref.unwrap_or("HEAD");
+    let base_ref = if base_ref.starts_with("origin/") {
+        let has_origin = manager
+            .has_origin_remote()
+            .map_err(|err| format!("failed to inspect origin remote: {err}"))?;
+        if has_origin {
+            manager
+                .fetch_origin()
+                .map_err(|err| format!("failed to fetch origin for intake base: {err}"))?;
+        }
+        if has_origin
+            && manager
+                .remote_branch_exists(base_ref)
+                .map_err(|err| format!("failed to verify intake base {base_ref}: {err}"))?
+        {
+            base_ref
+        } else {
+            "HEAD"
+        }
+    } else {
+        base_ref
+    };
     manager
         .create_detached(base_ref, &worktree_path)
         .map_err(|err| err.to_string())?;

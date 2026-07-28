@@ -105,6 +105,67 @@ fn intake_materialize_applies_reduced_skill_set() {
     );
 }
 
+/// #3374: an ephemeral intake worktree must surface the embedded (binary)
+/// skill bundle even where the project tracks gwt skills — the gwt repo
+/// itself tracks `.claude/skills/**`, so a stale-base worktree would
+/// otherwise pin months-old guidance that managed-asset distribution
+/// refuses to heal. Execution worktrees keep the tracked copies (SPEC #1942).
+#[test]
+fn intake_materialize_overrides_stale_tracked_gwt_skills() {
+    fn materialize_with_stale_tracked(kind: SessionKind) -> tempfile::TempDir {
+        let dir = tempdir().expect("tempdir");
+        run_git(dir.path(), &["init", "-q"]);
+        // A stale tracked copy of a curation skill (survives the reduced set).
+        let skill = dir
+            .path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md");
+        std::fs::create_dir_all(skill.parent().expect("skill dir")).expect("create skill dir");
+        std::fs::write(&skill, "stale tracked skill").expect("write stale skill");
+        run_git(
+            dir.path(),
+            &["add", ".claude/skills/gwt-register-issue/SKILL.md"],
+        );
+
+        let _env_guard = env_lock();
+        let cli_bin = dir.path().join("bin/gwtd");
+        std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+        std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+            dir.path(),
+            &AgentId::ClaudeCode,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            kind,
+        )
+        .expect("materialize managed assets");
+        dir
+    }
+
+    let intake = materialize_with_stale_tracked(SessionKind::Intake);
+    let refreshed = std::fs::read_to_string(
+        intake
+            .path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md"),
+    )
+    .expect("read refreshed skill");
+    assert_ne!(
+        refreshed, "stale tracked skill",
+        "intake must refresh a stale tracked gwt skill from the embedded bundle"
+    );
+
+    let execution = materialize_with_stale_tracked(SessionKind::Execution);
+    let preserved = std::fs::read_to_string(
+        execution
+            .path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md"),
+    )
+    .expect("read preserved skill");
+    assert_eq!(
+        preserved, "stale tracked skill",
+        "execution must keep the tracked copy (SPEC #1942 preserve-tracked)"
+    );
+}
+
 #[test]
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");

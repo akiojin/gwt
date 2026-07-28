@@ -10,7 +10,7 @@ use crate::cli::gwtd_resolver::{
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_agent::AgentId;
 use gwt_skills::{
-    distribute_to_worktree_for_targets, generate_codex_hooks_for_mode,
+    distribute_to_worktree_for_targets_with_policy, generate_codex_hooks_for_mode,
     generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
     generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
@@ -117,16 +117,22 @@ fn materialize_managed_gwt_assets_for_targets(
             ),
         ));
     }
-    distribute_to_worktree_for_targets(worktree, targets).map_err(|error| {
+    let lane_flags = gwt_skills::LaneRegistry::for_session_kind(session_kind).policy_flags;
+    // #3374: an ephemeral intake worktree refreshes tracked gwt-* assets from
+    // the embedded bundle — its tracked copies are a stale base-ref snapshot,
+    // not user content. Execution lanes keep the preserve-tracked default.
+    let policy = if lane_flags.embedded_assets_override_tracked {
+        gwt_skills::TrackedAssetWritePolicy::OverrideGwtManaged
+    } else {
+        gwt_skills::TrackedAssetWritePolicy::PreserveTracked
+    };
+    distribute_to_worktree_for_targets_with_policy(worktree, targets, policy).map_err(|error| {
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
     })?;
     // SPEC-3248 P4 (FR-011): a lane with a reduced skill set (intake) omits the
     // implementation skills/commands. Applied as a post-pass so the
     // distribution core is untouched; a non-reduced lane keeps the full set.
-    if gwt_skills::LaneRegistry::for_session_kind(session_kind)
-        .policy_flags
-        .reduced_skill_set
-    {
+    if lane_flags.reduced_skill_set {
         gwt_skills::apply_reduced_skill_set(worktree).map_err(|error| {
             io::Error::other(format!("failed to apply reduced skill set: {error}"))
         })?;
