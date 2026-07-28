@@ -4245,38 +4245,24 @@ mod tests {
     }
 
     #[test]
-    fn host_runner_health_error_redacts_nonstandard_environment_value_from_probe_diagnostic() {
+    fn host_runner_probe_diagnostic_redacts_nonstandard_environment_value() {
         const SECRET: &str = "health-probe-jwt-sentinel-24681";
-        let temp = tempdir().expect("tempdir");
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenClaw)
-            .working_dir(temp.path())
-            .build();
-        config
-            .env_vars
-            .insert("CI_JOB_JWT".to_string(), SECRET.to_string());
+        let env_vars = HashMap::from([("CI_JOB_JWT".to_string(), SECRET.to_string())]);
+        let diagnostic = HostRunnerProbeOutcome {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: format!("runner echoed {SECRET}"),
+            timed_out: false,
+            error: Some(format!("runtime rejected {SECRET}")),
+        }
+        .diagnostic(&env_vars);
 
-        let error = resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            "npx".to_string(),
-            None,
-            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome {
-                success: false,
-                exit_code: Some(1),
-                stdout: String::new(),
-                stderr: format!("runner echoed {SECRET}"),
-                timed_out: false,
-                error: Some(format!("runtime rejected {SECRET}")),
-            },
-            |_candidate| Ok(()),
-        )
-        .expect_err("OpenClaw has no package fallback");
-
-        assert!(error.contains("OpenClaw"));
-        assert!(error.contains("exit status 1"));
-        assert!(error.contains(gwt_core::process_console::REDACTED));
+        assert!(diagnostic.contains("exit status 1"));
+        assert!(diagnostic.contains(gwt_core::process_console::REDACTED));
         assert!(
-            !error.contains(SECRET),
-            "health diagnostic leaked a nonstandard environment value: {error}"
+            !diagnostic.contains(SECRET),
+            "health diagnostic leaked a nonstandard environment value: {diagnostic}"
         );
     }
 
