@@ -6778,7 +6778,11 @@ exit 1
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
-            .max_blocking_threads(1)
+            // The worker schedules its immediate first scan before the
+            // prepared effect. Keep a separate blocking slot so this test
+            // deterministically reaches the started-effect abort boundary;
+            // the queued-effect case is covered by the adjacent test.
+            .max_blocking_threads(2)
             .enable_all()
             .build()
             .expect("runtime");
