@@ -637,7 +637,7 @@ pub(super) fn provider_conversation_availability(
             ProviderConversationAvailability::Present
         }
         Ok(Some(_)) => ProviderConversationAvailability::Foreign,
-        Ok(None) => ProviderConversationAvailability::Present,
+        Ok(None) => ProviderConversationAvailability::Foreign,
         Err(_) => ProviderConversationAvailability::Unknown,
     }
 }

@@ -35,7 +35,16 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
 
 /// Return the current host process environment with GUI-launch PATH gaps filled.
 pub fn host_process_env() -> HashMap<String, String> {
-    hydrate_host_base_env(std::env::vars())
+    hydrate_host_base_env(process_env_lossy())
+}
+
+fn process_env_lossy() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().map(|(key, value)| {
+        (
+            key.to_string_lossy().into_owned(),
+            value.to_string_lossy().into_owned(),
+        )
+    })
 }
 
 /// Fill common GUI-launch PATH gaps in a host base environment.
@@ -79,21 +88,15 @@ where
 /// Idempotent: re-running on an already-hydrated PATH yields the same value
 /// because `push_unique_path` deduplicates entries. No-op on Windows.
 ///
-/// Reads the current process env via `vars_os` (not `vars`) so a single
-/// non-Unicode environment variable does not panic startup. Skips writing to
-/// `std::env` if the computed PATH is empty so we never blank a usable PATH.
+/// Reads the current process env via `vars_os` (not `vars`) and lossily
+/// decodes non-Unicode entries so a single value does not panic startup. Skips
+/// writing to `std::env` if the computed PATH is empty so we never blank a
+/// usable PATH.
 pub fn apply_host_path_hydration_to_std_env() {
     if cfg!(windows) {
         return;
     }
-    let base_env: Vec<(String, String)> = std::env::vars_os()
-        .filter_map(|(key, value)| {
-            let key = key.into_string().ok()?;
-            let value = value.into_string().ok()?;
-            Some((key, value))
-        })
-        .collect();
-    apply_host_path_hydration(base_env, |hydrated| {
+    apply_host_path_hydration(process_env_lossy(), |hydrated| {
         std::env::set_var("PATH", hydrated);
     });
 }
@@ -490,6 +493,29 @@ mod tests {
                 "PATH-mutating tests race every parallel process-spawn test: {mutation}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_process_env_lossily_decodes_non_unicode_entries() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let invalid_value = std::ffi::OsString::from_vec(vec![b'f', b'o', 0x80, b'o']);
+        let expected_value = invalid_value.to_string_lossy().into_owned();
+        let _env = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_NON_UTF8_PROCESS_ENV",
+            &invalid_value,
+        );
+
+        let env = host_process_env();
+
+        assert_eq!(
+            env.get("GWT_TEST_NON_UTF8_PROCESS_ENV"),
+            Some(&expected_value)
+        );
     }
 
     fn write_profile_config(profile: Profile) -> (tempfile::TempDir, PathBuf) {
@@ -988,7 +1014,7 @@ mod tests {
 
     #[test]
     fn apply_host_path_hydration_to_std_env_does_not_panic() {
-        apply_host_path_hydration(std::env::vars(), |_| {});
+        apply_host_path_hydration(process_env_lossy(), |_| {});
     }
 
     #[cfg(target_os = "linux")]

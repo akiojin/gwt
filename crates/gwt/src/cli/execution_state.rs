@@ -1750,6 +1750,62 @@ fn execution_binding_for_generation(
     }
 }
 
+/// Accept an exact current binding or a binding for an actual prefix of the
+/// same generation whose remaining events are lifecycle-only transitions
+/// owned by the same Session.
+///
+/// A takeover in the suffix, a different generation/binding, or an arbitrary
+/// non-prefix head always fails. This keeps the owner ledger as the single
+/// lifecycle source of truth without requiring a second Session-file commit.
+fn execution_binding_authorizes_lifecycle_descendant(
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+    expected_session_id: &str,
+    expected: &gwt_agent::ExecutionBindingIdentity,
+) -> bool {
+    if expected.generation_id != generation.identity.generation_id
+        || expected.binding_id != generation.identity.session_binding_id
+    {
+        return false;
+    }
+    let current = execution_binding_for_generation(ledger, generation);
+    if current == *expected {
+        return true;
+    }
+
+    let mut events = ledger
+        .lifecycle_events_for(&generation.identity.generation_id)
+        .map(|event| (event.sequence, Some(event.session_id.as_str())))
+        .chain(
+            ledger
+                .takeovers
+                .iter()
+                .filter(|event| event.generation_id == generation.identity.generation_id)
+                .map(|event| (event.sequence, None)),
+        )
+        .collect::<Vec<_>>();
+    events.sort_by_key(|(sequence, _)| *sequence);
+
+    for prefix_len in 0..events.len() {
+        let cutoff = prefix_len.checked_sub(1).map(|index| events[index].0);
+        let mut prefix = ledger.clone();
+        prefix.lifecycle_events.retain(|event| {
+            event.generation_id != generation.identity.generation_id
+                || cutoff.is_some_and(|sequence| event.sequence <= sequence)
+        });
+        prefix.takeovers.retain(|event| {
+            event.generation_id != generation.identity.generation_id
+                || cutoff.is_some_and(|sequence| event.sequence <= sequence)
+        });
+        if execution_binding_for_generation(&prefix, generation) == *expected {
+            return events[prefix_len..]
+                .iter()
+                .all(|(_, session_id)| *session_id == Some(expected_session_id));
+        }
+    }
+    false
+}
+
 /// Recovery-only probe for the exact binding emitted when a genesis
 /// generation was first published, before any later lifecycle or takeover
 /// events advanced its effective head.
@@ -1810,12 +1866,28 @@ fn session_binding_authorizes_current_generation(
         gwt_agent::SessionPathState::Missing => return Ok(legacy_unbound_compatibility),
         gwt_agent::SessionPathState::Error(_) => return Ok(false),
     };
+    durable_session_binding_authorizes_current_generation(context, ledger, session_id, session)
+}
+
+fn durable_session_binding_authorizes_current_generation(
+    context: &GenerationTransactionContext,
+    ledger: &ExecutionGenerationLedger,
+    session_id: &str,
+    session: &gwt_agent::Session,
+) -> io::Result<bool> {
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    let legacy_unbound_compatibility = current.identity.predecessor_generation_id.is_none()
+        && current
+            .identity
+            .session_binding_id
+            .starts_with("legacy-ecr-");
     let Some(binding) = session.execution_binding.as_ref() else {
         return Ok(legacy_unbound_compatibility);
     };
     let repo_hash =
         crate::index_worker::detect_repo_hash(&context.worktree).map(|value| value.to_string());
-    let current_binding = execution_binding_for_generation(ledger, current);
     Ok(session.id == session_id
         && session.worktree_path.exists()
         && worktree_binding_hash(&session.worktree_path) == context.worktree_binding_hash
@@ -1827,7 +1899,12 @@ fn session_binding_authorizes_current_generation(
         && binding.owner_number == context.owner.number
         && session.linked_issue_number == Some(context.owner.number)
         && binding.capability_generation > 0
-        && binding.identity == current_binding)
+        && execution_binding_authorizes_lifecycle_descendant(
+            ledger,
+            current,
+            session_id,
+            &binding.identity,
+        ))
 }
 
 /// Exact non-secret identity consumed by Session/verification projections.
@@ -1848,6 +1925,40 @@ pub fn current_execution_binding(
     Ok(Some(execution_binding_for_generation(&ledger, current)))
 }
 
+/// Verify that a projected Session binding is either current or an authentic
+/// same-Session lifecycle prefix of the current generation.
+pub(crate) fn execution_binding_authorizes_current_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    expected_session_id: &str,
+    expected: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(false);
+    };
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    if current.identity.worktree_binding_hash != worktree_binding_hash(worktree) {
+        return Ok(false);
+    }
+    let projection =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "execution generation projection is malformed: {error}"
+                ))
+            })?;
+    Ok(projection.primary_session_id == expected_session_id
+        && execution_binding_authorizes_lifecycle_descendant(
+            &ledger,
+            current,
+            expected_session_id,
+            expected,
+        ))
+}
+
 /// Recovery-only identity derived from the authoritative owner ledger without
 /// requiring the caller worktree's projection/pointer pair to be readable.
 /// Mutation gates must continue to use [`current_execution_binding`].
@@ -1862,6 +1973,74 @@ pub fn current_owner_execution_binding(
         invalid_generation_data("execution generation ledger current id is missing")
     })?;
     Ok(Some(execution_binding_for_generation(&ledger, current)))
+}
+
+/// Capture the exact durable Session binding allowed to attempt a PR
+/// mutation for the current generation.
+///
+/// Completed generations retain terminal handoff authority, while Blocked
+/// generations are returned only so [`pr_handoff_refusal`] can emit the
+/// lifecycle-specific recovery guidance before any external dispatch.
+/// Ledgerless executions preserve their legacy compatibility behavior.
+pub(crate) fn snapshot_pr_mutation_execution_binding(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> io::Result<Option<gwt_agent::SessionExecutionBinding>> {
+    let Some(record) = load(worktree)? else {
+        return Ok(None);
+    };
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&record)
+        || !generation_ledger_integrity_ok(&ledger)
+        || ledger.current_effective_status() != Some(record.status)
+    {
+        return Err(invalid_generation_data(
+            "PR mutation execution authority is inconsistent",
+        ));
+    }
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(generation_binding_mismatch)?;
+    if record.primary_session_id != session_id {
+        return Err(generation_binding_mismatch());
+    }
+    let context = GenerationTransactionContext::resolve(worktree, owner)?;
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&session_path)?;
+    if !durable_session_binding_authorizes_current_generation(
+        &context, &ledger, session_id, &session,
+    )? {
+        return Err(generation_binding_mismatch());
+    }
+    session
+        .execution_binding
+        .ok_or_else(generation_binding_mismatch)
+        .map(Some)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentExecutionBindingAuthority {
+    ActiveMutation,
+    PrMutation,
+}
+
+impl CurrentExecutionBindingAuthority {
+    fn allows(self, status: ExecutionControlStatus) -> bool {
+        match self {
+            Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::PrMutation => matches!(
+                status,
+                ExecutionControlStatus::Active | ExecutionControlStatus::Completed
+            ),
+        }
+    }
 }
 
 /// Return whether the caller carries the exact authority of the current
@@ -1895,13 +2074,27 @@ fn current_active_execution_binding_matches_context(
     expected_session_id: &str,
     expected_identity: &gwt_agent::ExecutionBindingIdentity,
 ) -> io::Result<bool> {
+    current_execution_binding_matches_context(
+        context,
+        expected_session_id,
+        expected_identity,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+    )
+}
+
+fn current_execution_binding_matches_context(
+    context: &GenerationTransactionContext,
+    expected_session_id: &str,
+    expected_identity: &gwt_agent::ExecutionBindingIdentity,
+    authority: CurrentExecutionBindingAuthority,
+) -> io::Result<bool> {
     let Some(ledger) = load_generation_ledger_from_context(context)? else {
         return Ok(false);
     };
     let current = ledger.current_generation().ok_or_else(|| {
         invalid_generation_data("execution generation ledger current id is missing")
     })?;
-    if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+    if !authority.allows(ledger.effective_status_for(current))
         || current.identity.worktree_binding_hash != context.worktree_binding_hash
     {
         return Ok(false);
@@ -1915,7 +2108,12 @@ fn current_active_execution_binding_matches_context(
                 ))
             })?;
     Ok(projection.primary_session_id == expected_session_id
-        && execution_binding_for_generation(&ledger, current) == *expected_identity)
+        && execution_binding_authorizes_lifecycle_descendant(
+            &ledger,
+            current,
+            expected_session_id,
+            expected_identity,
+        ))
 }
 
 /// Execute one producing operation while its owner generation and durable
@@ -1943,6 +2141,41 @@ pub fn with_current_active_execution_binding_lease_wait<T>(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionBinding,
     session_wait: Duration,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_execution_binding_lease_wait(
+        sessions_dir,
+        expected,
+        session_wait,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Execute one PR mutation while the exact Active or Completed generation
+/// binding and durable Session capability epoch remain leased.
+///
+/// Blocked generations never reach this dispatch boundary because
+/// [`pr_handoff_refusal`] rejects them with recovery guidance first.
+pub(crate) fn with_current_pr_mutation_execution_binding_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_execution_binding_lease_wait(
+        sessions_dir,
+        expected,
+        ACTIVE_BINDING_LEASE_WAIT,
+        CurrentExecutionBindingAuthority::PrMutation,
+        operation,
+    )
+}
+
+fn with_current_execution_binding_lease_wait<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    session_wait: Duration,
+    authority: CurrentExecutionBindingAuthority,
     operation: impl FnOnce() -> T,
 ) -> io::Result<Option<T>> {
     if gwt_agent::current_thread_holds_session_lease() {
@@ -1995,10 +2228,11 @@ pub fn with_current_active_execution_binding_lease_wait<T>(
                     || session.repo_hash.as_deref() != Some(expected.repo_hash.as_str())
                     || session.linked_issue_number != Some(expected.owner_number)
                     || canonical_worktree != context.worktree
-                    || !current_active_execution_binding_matches_context(
+                    || !current_execution_binding_matches_context(
                         context,
                         &expected.session_id,
                         &expected.identity,
+                        authority,
                     )?
                 {
                     return Ok(None);
@@ -2130,6 +2364,7 @@ fn read_record_contents(worktree: &Path) -> io::Result<Option<String>> {
 struct GenerationAuthorityHint {
     owner: Option<ExecutionOwnerKey>,
     projection: Option<ExecutionControlRecord>,
+    strictly_validated_owner: Option<ExecutionOwnerKey>,
 }
 
 fn generation_authority_hint(worktree: &Path) -> io::Result<Option<GenerationAuthorityHint>> {
@@ -2158,6 +2393,28 @@ fn generation_authority_hint(worktree: &Path) -> io::Result<Option<GenerationAut
                 // unreadable. Its mere presence must block legacy fail-open
                 // readers even though no owner metadata can be trusted.
                 pointer_present = true;
+            }
+        }
+    }
+
+    if let Some(owner) = pointer_owner {
+        if let Ok(Some(ledger)) = load_generation_ledger(worktree, owner) {
+            let current = ledger.current_generation();
+            if current.is_some_and(|generation| {
+                generation.identity.worktree_binding_hash == worktree_binding
+            }) {
+                let projection = current.and_then(|generation| {
+                    serde_json::from_str::<ExecutionControlRecord>(
+                        ledger.effective_projection_for(generation),
+                    )
+                    .ok()
+                    .map(hydrate_recovery_envelopes)
+                });
+                return Ok(Some(GenerationAuthorityHint {
+                    owner: Some(owner),
+                    projection,
+                    strictly_validated_owner: Some(owner),
+                }));
             }
         }
     }
@@ -2212,6 +2469,7 @@ fn generation_authority_hint(worktree: &Path) -> io::Result<Option<GenerationAut
     Ok(Some(GenerationAuthorityHint {
         owner: pointer_owner.or(matched_owner),
         projection: matched_projection,
+        strictly_validated_owner: None,
     }))
 }
 
@@ -2272,8 +2530,12 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
         kind: record.owner_kind,
         number: record.owner_number,
     };
-    let owner_ledger_exists = owner_generation_ledger_exists(worktree, owner)?;
-    if authority.is_some() || owner_ledger_exists {
+    let strictly_validated = authority
+        .as_ref()
+        .is_some_and(|hint| hint.strictly_validated_owner == Some(owner));
+    let owner_ledger_exists =
+        strictly_validated || owner_generation_ledger_exists(worktree, owner)?;
+    if !strictly_validated && (authority.is_some() || owner_ledger_exists) {
         match load_generation_ledger(worktree, owner) {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => {
@@ -4816,6 +5078,15 @@ fn persist_generation_lifecycle_transition_if_owned(
     )
 }
 
+fn generation_binding_mismatch() -> io::Error {
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        format!(
+            "{GENERATION_BINDING_MISMATCH_PREFIX} durable Session does not carry the exact current generation/binding/head"
+        ),
+    )
+}
+
 fn persist_generation_lifecycle_transition_if_owned_with_before_session_lease<F>(
     worktree: &Path,
     record: &ExecutionControlRecord,
@@ -4866,12 +5137,7 @@ where
                     &record.primary_session_id,
                     &session_state,
                 )? {
-                    return Err(io::Error::new(
-                        ErrorKind::PermissionDenied,
-                        format!(
-                            "{GENERATION_BINDING_MISMATCH_PREFIX} durable Session does not carry the exact current generation/binding/head"
-                        ),
-                    ));
+                    return Err(generation_binding_mismatch());
                 }
                 let effective_status = ledger.effective_status_for(&current);
                 if effective_status != from_status {
@@ -5376,12 +5642,18 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
             integrity_repair_guidance(record.status),
         ));
     }
-    if crate::cli::verification_record::authenticate_current_generation_caller(
-        &worktree,
-        session_id.as_deref(),
-    )
-    .is_err()
-    {
+    let caller_authenticated = match record.status {
+        ExecutionControlStatus::Completed => {
+            snapshot_pr_mutation_execution_binding(&worktree, session_id.as_deref()).map(|_| ())
+        }
+        ExecutionControlStatus::Active | ExecutionControlStatus::Blocked => {
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                &worktree,
+                session_id.as_deref(),
+            )
+        }
+    };
+    if caller_authenticated.is_err() {
         return Some(
             "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying."
                 .to_string(),
@@ -8636,6 +8908,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generation_lifecycle_descendant_authorizes_unchanged_durable_session_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-lifecycle-binding";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let active_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, active_binding.clone());
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+        let session_before = fs::read(&session_path).unwrap();
+
+        assert!(matches!(
+            settle(
+                dir.path(),
+                session_id,
+                ExecutionSettlement::Blocked {
+                    reason: "post-block verification required".to_string(),
+                    missing_verification: Some("verify.run".to_string()),
+                },
+            )
+            .unwrap(),
+            SettleResult::Settled(_)
+        ));
+
+        let blocked_binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            blocked_binding.ledger_head_hash, active_binding.ledger_head_hash,
+            "Blocked lifecycle must advance the generation head"
+        );
+        assert_eq!(
+            fs::read(&session_path).unwrap(),
+            session_before,
+            "lifecycle settlement must keep the durable Session byte-identical"
+        );
+        let durable = gwt_agent::Session::load(&session_path)
+            .unwrap()
+            .execution_binding
+            .unwrap();
+        assert_eq!(
+            durable.identity, active_binding,
+            "the Session remains bound to its authentic pre-lifecycle head"
+        );
+        assert_eq!(
+            durable.capability_generation, 1,
+            "a ledger-only lifecycle transition must not rotate the Host capability epoch"
+        );
+        assert_eq!(
+            crate::cli::verification_record::snapshot_current_generation_caller_binding(
+                dir.path(),
+                Some(session_id),
+            )
+            .expect("post-block verification caller remains authorized"),
+            Some(durable),
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn generation_lifecycle_refuses_dangling_legacy_session_without_mutation() {
@@ -9048,6 +9391,16 @@ mod tests {
         assert_eq!(after.generation_id, before.generation_id);
         assert_eq!(after.binding_id, before.binding_id);
         assert_ne!(after.ledger_head_hash, before.ledger_head_hash);
+        assert!(
+            !execution_binding_authorizes_current_generation(
+                dir.path(),
+                owner,
+                "session-adopting",
+                &before,
+            )
+            .unwrap(),
+            "a takeover suffix must never authorize the predecessor head"
+        );
         let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
         assert_eq!(ledger.generations.len(), 1);
         assert_eq!(ledger.takeovers.len(), 1);

@@ -259,6 +259,29 @@ test("picker ignores an earlier list response after reopening the same Workspace
   );
 });
 
+test("picker rejects an agents list when it cannot create a correlation identifier", () => {
+  const fixture = createFixture();
+  const picker = createPicker(fixture, {
+    createOperationId: () => "   ",
+  });
+
+  assert.equal(picker.open("workspace-1"), null);
+  assert.match(
+    fixture.dialogEl.textContent,
+    /Cannot create a Session list request identifier/,
+  );
+
+  picker.handleAgentsList({
+    workspace_id: "workspace-1",
+    agents: [sampleAgent],
+  });
+  assert.equal(
+    fixture.dialogEl.querySelectorAll(".workspace-resume-picker-row").length,
+    0,
+    "an uncorrelated list response must not populate the picker",
+  );
+});
+
 test("picker settles only the exact pending Session response", () => {
   const fixture = createFixture();
   const picker = createPicker(fixture);

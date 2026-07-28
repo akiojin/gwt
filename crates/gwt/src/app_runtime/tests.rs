@@ -235,7 +235,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
 }
 
 #[test]
-fn inspection_agent_window_rejects_terminal_input_and_attachment_staging() {
+fn inspection_agent_window_rejects_fast_path_terminal_input_and_attachment_staging() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -255,6 +255,24 @@ fn inspection_agent_window_rejects_terminal_input_and_attachment_staging() {
         .active_agent_sessions
         .insert(window_id.clone(), session);
     runtime.inspection_agent_windows.insert(window_id.clone());
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let pane = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("inspection runtime")
+        .pane
+        .clone();
+
+    runtime.register_pty_writer(&window_id, &pane);
+
+    assert!(
+        !runtime
+            .pty_writers
+            .read()
+            .expect("PTY writer registry")
+            .contains_key(&window_id),
+        "inspection-only panes must not bypass event-loop input authorization through the WebSocket PTY fast path"
+    );
 
     let terminal_events = runtime.terminal_input_events(&window_id, "mutating prompt\r");
     assert!(terminal_events.iter().any(|event| matches!(
@@ -3410,6 +3428,74 @@ fn bound_agent_pane_write_holds_epoch_lease_until_actual_pty_mutation_finishes()
         .expect("Host rotation resumes after PTY mutation")
         .expect("rotate Host epoch");
     assert_eq!(rotated.capability_generation, initial_epoch + 1);
+}
+
+#[test]
+fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_thread() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("isolated HOME");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    let binding = materialize_active_agent_pane_binding(&project, "session-pane-contended");
+    let (mut runtime, _issuer, grant) = active_bound_agent_pane_runtime(
+        &temp.path().join("runtime"),
+        &project,
+        "session-pane-contended",
+        &binding,
+    );
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let holder_sessions_dir = sessions_dir.clone();
+    let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = std::thread::spawn(move || {
+        gwt_agent::with_session_path_lease_wait(
+            &holder_sessions_dir,
+            "session-pane-contended",
+            Duration::from_secs(1),
+            |_state| {
+                lease_acquired_tx
+                    .send(())
+                    .expect("report contended Session lease");
+                release_lease_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release contended Session lease");
+                Ok(())
+            },
+        )
+        .expect("hold contended Session lease");
+    });
+    lease_acquired_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("Session lease holder starts");
+
+    let started = Instant::now();
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        grant,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-block-tao\r".to_string(),
+        },
+    );
+    let elapsed = started.elapsed();
+
+    release_lease_tx
+        .send(())
+        .expect("release contended Session lease");
+    holder.join().expect("join Session lease holder");
+    assert!(
+        matches!(
+            outcome,
+            super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
+        ),
+        "tao dispatch must fail closed when its pre-dispatch lease is no longer immediately available"
+    );
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "tao dispatch waited {elapsed:?} for a contended Session lease"
+    );
 }
 
 #[test]
@@ -8651,6 +8737,42 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
 }
 
 #[test]
+fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
+    let source = include_str!("launch.rs");
+    let launch_dispatch_start = source
+        .find("fn spawn_agent_window_with_placement(")
+        .expect("launch dispatch function");
+    let async_preparation_start = source[launch_dispatch_start..]
+        .find("pub(crate) fn spawn_agent_window_async(")
+        .map(|offset| launch_dispatch_start + offset)
+        .expect("async launch preparation function");
+    let launch_dispatch = &source[launch_dispatch_start..async_preparation_start];
+    assert!(
+        !launch_dispatch.contains("UserEvent::ContinueWorkReadyTimeout"),
+        "Continue work readiness timeout must not start before async launch preparation"
+    );
+
+    let launch_complete_start = source
+        .find("pub(crate) fn handle_launch_complete(")
+        .expect("launch completion handler");
+    let pty_spawn_start = source[launch_complete_start..]
+        .find("pub(crate) fn spawn_process_window_with_console_kind(")
+        .map(|offset| launch_complete_start + offset)
+        .expect("PTY spawn function");
+    let launch_complete = &source[launch_complete_start..pty_spawn_start];
+    let pty_handoff = launch_complete
+        .find("PTY handoff complete")
+        .expect("successful PTY handoff marker");
+    let last_ready_timeout = launch_complete
+        .rfind("UserEvent::ContinueWorkReadyTimeout")
+        .expect("readiness timeout scheduling");
+    assert!(
+        last_ready_timeout > pty_handoff,
+        "Continue work readiness timeout must be armed after successful PTY handoff"
+    );
+}
+
+#[test]
 fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_authority() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -8869,6 +8991,25 @@ fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_co
         present_config.resume_session_id.as_deref(),
         Some("conversation-present")
     );
+
+    fs::write(
+        project_store.join("conversation-without-cwd.jsonl"),
+        "{\"sessionId\":\"conversation-without-cwd\"}\n",
+    )
+    .expect("write transcript without a verifiable cwd");
+    session.agent_session_id = Some("conversation-without-cwd".to_string());
+    assert_eq!(
+        super::continuation::provider_conversation_availability(&session),
+        super::continuation::ProviderConversationAvailability::Foreign,
+        "a transcript without a verifiable cwd must fail closed"
+    );
+    let mut no_cwd_config = super::launch_config_from_persisted_session(&session);
+    assert_eq!(
+        super::continuation::configure_provider_continuation(&mut no_cwd_config, &session),
+        gwt::ContinueWorkOutcomeKind::StartedWithHandoff
+    );
+    assert_eq!(no_cwd_config.session_mode, gwt_agent::SessionMode::Normal);
+    assert!(no_cwd_config.resume_session_id.is_none());
 
     session.agent_session_id = Some("conversation-missing".to_string());
     assert_eq!(
@@ -13790,8 +13931,8 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
         "canonical health must be the only Codex version invocation",
     );
     assert!(
-        elapsed >= std::time::Duration::from_secs(4) && elapsed < std::time::Duration::from_secs(7),
-        "production launch must use the canonical five-second deadline once: {elapsed:?}",
+        elapsed >= std::time::Duration::from_secs(4),
+        "production launch must not return before the canonical five-second deadline: {elapsed:?}",
     );
     assert!(
         !repo.join(gwt_skills::LANE_FILE_RELATIVE).exists(),

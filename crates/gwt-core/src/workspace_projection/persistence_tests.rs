@@ -862,8 +862,29 @@ fn workspace_state_transaction_does_not_publish_current_when_event_append_fails(
 }
 
 #[test]
+fn external_workspace_operation_lock_uses_portable_contention_detection() {
+    assert!(
+        is_external_workspace_operation_lock_contended(&fs2::lock_contended_error()),
+        "operation lock contention must recognize fs2's platform-specific error"
+    );
+    assert!(!is_external_workspace_operation_lock_contended(
+        &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not contention")
+    ));
+}
+
+#[test]
 fn workspace_state_transaction_commit_refusal_blocks_until_explicit_rejection() {
+    let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    assert_eq!(
+        external_workspace_operation_directory(),
+        home_root
+            .join(".gwt")
+            .join(WORKSPACE_STATE_TRANSACTION_RECEIPT_DIR),
+        "external commit receipts must stay inside the test GWT_HOME"
+    );
     let current = temp.path().join("state/current.json");
     let works = temp.path().join("state/works.json");
     let events = temp.path().join("repo/.gwt/work/events.jsonl");
@@ -985,7 +1006,10 @@ fn workspace_state_transaction_commit_refusal_blocks_until_explicit_rejection() 
 
 #[test]
 fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_commit() {
+    let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
     let current = temp.path().join("state/current.json");
     let works = temp.path().join("state/works.json");
     let events = temp.path().join("repo/.gwt/work/events.jsonl");
@@ -1017,7 +1041,9 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
     let transaction_works = works.clone();
     let transaction_events = events.clone();
     let transaction_root = root.clone();
+    let transaction_home_root = home_root.clone();
     let transaction = std::thread::spawn(move || {
+        let _home = ScopedHome::set(&transaction_home_root);
         transact_workspace_state_at_with_commit(
             &transaction_current,
             &transaction_works,
@@ -1095,7 +1121,10 @@ fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_com
 
 #[test]
 fn workspace_state_transaction_resolver_rejects_a_cross_pair_operation_match() {
+    let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
     let current = temp.path().join("state/current.json");
     let actual_works = temp.path().join("actual/works.json");
     let wrong_works = temp.path().join("wrong/works.json");
@@ -1110,7 +1139,9 @@ fn workspace_state_transaction_resolver_rejects_a_cross_pair_operation_match() {
     let transaction_works = actual_works.clone();
     let transaction_events = events.clone();
     let transaction_root = root.clone();
+    let transaction_home_root = home_root.clone();
     let transaction = std::thread::spawn(move || {
+        let _home = ScopedHome::set(&transaction_home_root);
         transact_workspace_state_at_with_commit(
             &transaction_current,
             &transaction_works,
@@ -1224,7 +1255,10 @@ fn workspace_state_transaction_never_reports_success_after_staged_markers_disapp
 
 #[test]
 fn workspace_state_transaction_recovers_publish_failure_after_commit_without_recommitting() {
+    let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
     let current = temp.path().join("state/current.json");
     let works = temp.path().join("work-state/works.json");
     let events = temp.path().join("events-is-a-directory");
@@ -1353,7 +1387,10 @@ fn workspace_state_transaction_recovers_publish_failure_after_commit_without_rec
 
 #[test]
 fn workspace_state_transaction_validates_terminal_receipt_before_recovery_side_effects() {
+    let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
     let current = temp.path().join("state/current.json");
     let works = temp.path().join("work-state/works.json");
     let events = temp.path().join("events-is-a-directory");
@@ -1447,7 +1484,10 @@ fn workspace_state_transaction_validates_terminal_receipt_before_recovery_side_e
 
 #[test]
 fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_commit() {
+    let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
     let current = temp.path().join("state/current.json");
     let works = temp.path().join("work-state/works.json");
     let events = temp.path().join("repo/.gwt/work/events.jsonl");

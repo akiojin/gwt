@@ -5,9 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
-    environment::{host_process_env, hydrate_host_base_env},
+    environment::host_process_env,
     session::{SessionExecutionBinding, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
@@ -385,7 +387,7 @@ fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -
     {
         return None;
     }
-    hydrate_host_base_env(std::env::vars())
+    host_process_env()
         .into_iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
         .map(|(_, value)| value)

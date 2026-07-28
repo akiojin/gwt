@@ -946,6 +946,31 @@ async fn durable_agent_execution_authority_async(
         .unwrap_or(AgentDurableAuthority::Unavailable)
 }
 
+async fn durable_agent_execution_authority_with_lease_async(
+    principal: AgentSessionPrincipal,
+) -> AgentDurableAuthority {
+    let Some(binding) = principal.active_execution_binding().cloned() else {
+        return AgentDurableAuthority::ObservationOnly;
+    };
+    tokio::task::spawn_blocking(move || {
+        let authority = durable_agent_execution_authority(&principal);
+        if authority != AgentDurableAuthority::Current {
+            return authority;
+        }
+        match gwt::cli::execution_state::with_current_active_execution_binding_lease(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &binding,
+            || (),
+        ) {
+            Ok(Some(())) => AgentDurableAuthority::Current,
+            Ok(None) => AgentDurableAuthority::Stale,
+            Err(_) => AgentDurableAuthority::Unavailable,
+        }
+    })
+    .await
+    .unwrap_or(AgentDurableAuthority::Unavailable)
+}
+
 #[derive(Default)]
 struct AgentCapabilityRegistryState {
     principals_by_token: HashMap<String, AgentSessionPrincipal>,
@@ -2900,11 +2925,19 @@ async fn client_session_with_scope(
                                         if grant.principal().authorizes_producing_mutation()
                                             && request.mutates_host_state()
                                         {
-                                            match durable_agent_execution_authority_async(
-                                                grant.principal().clone(),
-                                            )
-                                            .await
-                                            {
+                                            let durable_authority =
+                                                if request.requires_producing_authority() {
+                                                    durable_agent_execution_authority_with_lease_async(
+                                                        grant.principal().clone(),
+                                                    )
+                                                    .await
+                                                } else {
+                                                    durable_agent_execution_authority_async(
+                                                        grant.principal().clone(),
+                                                    )
+                                                    .await
+                                                };
+                                            match durable_authority {
                                                 AgentDurableAuthority::Current => {}
                                                 AgentDurableAuthority::Stale => {
                                                     tracing::warn!(

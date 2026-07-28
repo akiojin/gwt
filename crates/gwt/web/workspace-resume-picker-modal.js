@@ -401,10 +401,12 @@ export function createWorkspaceResumePickerController({
       state.open = true;
       state.agents = [];
       state.workspaceId = workspaceId ?? null;
-      state.listOperationId = operationId;
-      state.error = "";
+      state.listOperationId = operationId || null;
+      state.error = operationId
+        ? ""
+        : "Cannot create a Session list request identifier.";
       render();
-      return operationId;
+      return operationId || null;
     },
     handleAgentsList: (event) => {
       if (!state.open) {

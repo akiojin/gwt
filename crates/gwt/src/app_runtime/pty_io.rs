@@ -230,6 +230,14 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+        if self.inspection_agent_windows.contains(id) {
+            // Inspection panes must always return through `terminal_input_events`,
+            // where the immutable inspection boundary is enforced. Publishing
+            // their raw PTY handle here would let the WebSocket fast path bypass
+            // that check.
+            self.deregister_pty_writer(id);
+            return;
+        }
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",

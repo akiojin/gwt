@@ -1460,11 +1460,11 @@ impl LaunchWizardMemoryCache {
     }
 
     fn visible_sessions(&self) -> Vec<gwt_agent::Session> {
-        self.sessions
-            .iter()
-            .filter(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id))
-            .cloned()
-            .collect()
+        // `sessions` is recovery-filtered at every ingest boundary
+        // (`load_sessions`, `replace_sessions`, and `record_session`). Keep UI
+        // reads cache-only so opening or sorting the wizard never performs one
+        // filesystem probe per Session on the tao thread.
+        self.sessions.clone()
     }
 
     fn latest_resumable_branch_session(
@@ -1494,9 +1494,6 @@ impl LaunchWizardMemoryCache {
     }
 
     pub(super) fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
-        if durable_launch_recovery_exists(&self.sessions_dir, session_id) {
-            return None;
-        }
         self.sessions
             .iter()
             .find(|session| session.id == session_id)
@@ -2194,6 +2191,23 @@ impl AppRuntime {
                 ) {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
+                        if is_continue_work {
+                            if let Some(operation_id) = self
+                                .pending_continue_work
+                                .get(&window_id)
+                                .map(|pending| pending.operation_id.clone())
+                            {
+                                let timeout_proxy = self.proxy.clone();
+                                let timeout_window_id = window_id.clone();
+                                thread::spawn(move || {
+                                    thread::sleep(CONTINUE_WORK_READY_TIMEOUT);
+                                    timeout_proxy.send(UserEvent::ContinueWorkReadyTimeout {
+                                        window_id: timeout_window_id,
+                                        operation_id,
+                                    });
+                                });
+                            }
+                        }
                         if launch_disposition == AgentLaunchDisposition::WorkProducing
                             && !is_fresh_execution_launch
                         {
@@ -2989,18 +3003,8 @@ impl AppRuntime {
                 .insert(window_id.clone(), context);
         }
         if let Some(continuation) = continuation {
-            let operation_id = continuation.operation_id.clone();
             self.pending_continue_work
                 .insert(window_id.clone(), continuation);
-            let timeout_proxy = proxy.clone();
-            let timeout_window_id = window_id.clone();
-            thread::spawn(move || {
-                thread::sleep(CONTINUE_WORK_READY_TIMEOUT);
-                timeout_proxy.send(UserEvent::ContinueWorkReadyTimeout {
-                    window_id: timeout_window_id,
-                    operation_id,
-                });
-            });
         }
 
         thread::spawn(move || {

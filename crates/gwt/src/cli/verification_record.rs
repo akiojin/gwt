@@ -1674,8 +1674,17 @@ fn snapshot_verification_caller_authority(
         || session_binding.repo_hash != repo_hash
         || session_binding.owner_kind != owner.kind.as_str()
         || session_binding.owner_number != owner.number
-        || session_binding.identity != current_binding
         || session_binding.capability_generation == 0
+    {
+        return Err(verification_caller_authority_error());
+    }
+    if !execution_state::execution_binding_authorizes_current_generation(
+        &canonical_worktree,
+        owner,
+        session_id,
+        &session_binding.identity,
+    )
+    .map_err(|_| verification_caller_authority_error())?
     {
         return Err(verification_caller_authority_error());
     }
@@ -3350,7 +3359,6 @@ pub(crate) mod tests {
         let blocked = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
             .expect("load blocked generation binding")
             .expect("blocked generation binding exists");
-        advance_generation_scoped_session_binding(session_id, blocked.clone());
         let commands = vec!["git --version".to_string()];
 
         let (plan_code, _) = run_verify_cli_as(

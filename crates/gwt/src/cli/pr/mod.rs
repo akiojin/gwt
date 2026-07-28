@@ -98,7 +98,7 @@ fn dispatch_pr_mutation<T>(
     let Some(expected) = expected else {
         return operation();
     };
-    match crate::cli::execution_state::with_current_active_execution_binding_lease(
+    match crate::cli::execution_state::with_current_pr_mutation_execution_binding_lease(
         &gwt_core::paths::gwt_sessions_dir(),
         expected,
         operation,
@@ -136,17 +136,16 @@ pub(super) fn run<E: CliEnv>(
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        mutation_binding =
-            match crate::cli::verification_record::snapshot_current_generation_caller_binding(
-                &worktree,
-                session_id.as_deref(),
-            ) {
-                Ok(binding) => binding,
-                Err(_) => {
-                    out.push_str("PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.\n");
-                    return Ok(2);
-                }
-            };
+        mutation_binding = match crate::cli::execution_state::snapshot_pr_mutation_execution_binding(
+            &worktree,
+            session_id.as_deref(),
+        ) {
+            Ok(binding) => binding,
+            Err(_) => {
+                out.push_str("PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.\n");
+                return Ok(2);
+            }
+        };
         let is_ready_handoff = matches!(
             cmd,
             PrCommand::Create { draft: false, .. }
@@ -960,6 +959,83 @@ mod tests {
         );
 
         assert_eq!(env.pr_create_call_log.len(), 2);
+        assert_eq!(env.pr_edit_call_log.len(), 1);
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
+    #[test]
+    fn pr_mutations_allow_the_exact_completed_generation_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("completed PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-completed");
+        persist_pr_generation_session(worktree.path(), "session-completed", identity);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-completed",
+        );
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                worktree.path(),
+                "session-completed",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle completed PR generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("completed handoff"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut out,
+            )
+            .expect("create PR from completed generation"),
+            0,
+            "{out}",
+        );
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::EditBody {
+                    number: 7,
+                    title: Some(s("completed update")),
+                    body: None,
+                    add_labels: vec![],
+                },
+                &mut out,
+            )
+            .expect("edit PR from completed generation"),
+            0,
+            "{out}",
+        );
+        out.clear();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+                .expect("mark PR ready from completed generation"),
+            0,
+            "{out}",
+        );
+
+        assert_eq!(env.pr_create_call_log.len(), 1);
         assert_eq!(env.pr_edit_call_log.len(), 1);
         assert_eq!(env.pr_ready_call_log, vec![7]);
     }

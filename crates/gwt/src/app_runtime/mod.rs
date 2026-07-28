@@ -2859,9 +2859,10 @@ impl AppRuntime {
                     .active_execution_binding()
                     .expect("producing principal carries an active binding")
                     .clone();
-                return match gwt::cli::execution_state::with_current_active_execution_binding_lease(
+                return match gwt::cli::execution_state::with_current_active_execution_binding_lease_wait(
                     &gwt_core::paths::gwt_sessions_dir(),
                     &binding,
+                    std::time::Duration::ZERO,
                     || {
                         #[cfg(test)]
                         run_agent_dispatch_test_hook(&AGENT_LEASED_MUTATION_TEST_HOOK);

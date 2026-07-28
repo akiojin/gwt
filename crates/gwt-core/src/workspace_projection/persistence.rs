@@ -920,6 +920,11 @@ fn external_workspace_commit_receipt_path(
     ))
 }
 
+fn is_external_workspace_operation_lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn try_acquire_external_workspace_operation_lock(
     current_path: &Path,
     work_items_path: &Path,
@@ -938,7 +943,7 @@ fn try_acquire_external_workspace_operation_lock(
         .open(lock_path)?;
     match lock.try_lock_exclusive() {
         Ok(()) => Ok(Some(lock)),
-        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+        Err(error) if is_external_workspace_operation_lock_contended(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
