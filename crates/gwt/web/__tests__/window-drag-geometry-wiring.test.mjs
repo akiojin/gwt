@@ -108,8 +108,13 @@ test("forceResetResizeState finalizes the abandoned gesture instead of discardin
   assert.ok(helper, "expected forceResetResizeState to exist");
   assert.match(
     helper[0],
-    /commitWindowGeometryGesture\(/,
-    "expected forceResetResizeState to commit the latest DOM geometry (Issue #3364: a clear-only reset let the next workspace_state snap the window back)",
+    /finishWindowResize\(\s*previous\.pointerId\s*\)/,
+    "expected forceResetResizeState to flush the queued pointer frame and commit the latest DOM geometry through the normal resize finalizer",
+  );
+  assert.doesNotMatch(
+    helper[0],
+    /clearLocalGeometryEdit\(/,
+    "force reset must retain the pending geometry guard until the committed echo arrives",
   );
 });
 

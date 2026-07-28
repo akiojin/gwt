@@ -237,11 +237,10 @@ test.describe("Window controls: resize handle + click semantics", () => {
       width: 640,
       height: 380,
     });
-    // Initial terminal fitting may have already published an optimistic
-    // geometry revision before this gesture. The resize must preserve that
-    // monotonic base instead of assuming the fixture's original revision.
-    expect(Number.isInteger(sentGeometry?.base_geometry_revision)).toBe(true);
-    expect(sentGeometry?.base_geometry_revision).toBeGreaterThanOrEqual(0);
+    // Explicit gestures use content-matched echo fencing. Omitting the
+    // revision avoids rejecting a valid commit merely because an unrelated
+    // focus broadcast advanced the shared workspace revision first.
+    expect(sentGeometry?.base_geometry_revision).toBeUndefined();
 
     // A focus broadcast can race the geometry update. Its unchanged geometry
     // revision must not restore the pre-resize dimensions.
