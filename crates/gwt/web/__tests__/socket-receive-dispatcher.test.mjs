@@ -588,3 +588,96 @@ test("dispatcher skips trace callbacks while shouldTrace is false", () => {
     "trace events must resume once shouldTrace returns true",
   );
 });
+
+// Issue #3365 — swallowed receive() failures must become visible. The
+// dispatcher keeps continuing with the remaining events (a poisoned event
+// must not stall the stream), but it now reports each failure through
+// `onReceiveError` so app.js can surface a degradation banner instead of a
+// console-only warn.
+test("onReceiveError reports a throwing receive and the flush continues", () => {
+  const received = [];
+  const errors = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      if (event.kind === "workspace_state") {
+        throw new Error("render exploded");
+      }
+      received.push(event);
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onReceiveError: (error, eventKind) => errors.push({ error, eventKind }),
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "still alive" });
+  scheduler.runOnce();
+
+  assert.equal(received.length, 1, "events after the failure must still be delivered");
+  assert.equal(received[0].kind, "terminal_output");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].eventKind, "workspace_state");
+  assert.match(String(errors[0].error), /render exploded/);
+});
+
+test("onReceiveError receives the kind hint for raw string payloads", () => {
+  const errors = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: () => {
+      throw new Error("boom");
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onReceiveError: (error, eventKind) => errors.push(eventKind),
+  });
+
+  dispatcher.handle({ data: JSON.stringify({ kind: "window_list", windows: [] }) });
+  scheduler.runOnce();
+
+  assert.deepEqual(errors, ["window_list"]);
+});
+
+test("a throwing onReceiveError does not break the flush", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      if (event.kind === "workspace_state") {
+        throw new Error("render exploded");
+      }
+      received.push(event);
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onReceiveError: () => {
+      throw new Error("reporter exploded");
+    },
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "still alive" });
+  assert.doesNotThrow(() => scheduler.runOnce());
+  assert.equal(received.length, 1);
+});
+
+test("a throwing receive without onReceiveError keeps the legacy warn-and-continue path", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      if (event.kind === "workspace_state") {
+        throw new Error("render exploded");
+      }
+      received.push(event);
+    },
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "still alive" });
+  assert.doesNotThrow(() => scheduler.runOnce());
+  assert.equal(received.length, 1);
+});

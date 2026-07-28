@@ -92,6 +92,9 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E4) — Settings windows surface.
   "settings-surface.js",
   "socket-receive-dispatcher.js",
+  // Issue #3365 — render-key exception safety + degradation banner.
+  "workspace-render-sync.js",
+  "render-degradation-banner.js",
   // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
   "terminal-attachments.js",
   "terminal-copy-shortcut.js",
