@@ -19,6 +19,21 @@ function positiveFiniteNumber(value, fallback) {
 // removed. Windows always render at their own `geometry`; framing is a
 // viewport concern owned by app.js (`frameWindow` / `enterOverview`).
 
+// Issue #3364 — the guard must be decidable at processing time WITHOUT
+// knowing the commit echo's revision: under load the receive queue holds
+// broadcasts whose revisions already passed the client model, so revision
+// arithmetic can neither suppress them nor recognise the echo. The guard
+// therefore acks the echo by geometry CONTENT and bounds itself with expiry
+// windows instead. A leaked active gesture stops suppressing after
+// `ACTIVE_EDIT_EXPIRY_MS` (mirrors the resize staleness guard); a pending
+// commit whose echo never arrives (lost socket) yields to server truth after
+// `PENDING_EDIT_EXPIRY_MS`.
+export const ACTIVE_EDIT_EXPIRY_MS = 30_000;
+export const PENDING_EDIT_EXPIRY_MS = 15_000;
+// Style strings and serde f64 round-trips can drift below a pixel; anything
+// closer than this counts as "the same placement".
+const ECHO_MATCH_EPSILON = 0.5;
+
 export function createGeometrySyncState() {
   return {
     localEdits: new Map(),
@@ -29,7 +44,7 @@ export function workspaceGeometryRevision(windowData) {
   return normalizeRevision(windowData?.geometry_revision ?? 0);
 }
 
-export function beginLocalGeometryEdit(state, id, baseRevision) {
+export function beginLocalGeometryEdit(state, id, baseRevision, now = Date.now()) {
   if (!state || !id) {
     return;
   }
@@ -38,10 +53,19 @@ export function beginLocalGeometryEdit(state, id, baseRevision) {
     baseRevision: normalizedBaseRevision,
     optimisticRevision: normalizedBaseRevision,
     phase: "active",
+    committedGeometry: null,
+    startedAt: finiteNumber(now),
+    committedAt: null,
   });
 }
 
-export function commitLocalGeometryEdit(state, id, baseRevision) {
+export function commitLocalGeometryEdit(
+  state,
+  id,
+  baseRevision,
+  geometry = null,
+  now = Date.now(),
+) {
   if (!state || !id) {
     return;
   }
@@ -53,6 +77,9 @@ export function commitLocalGeometryEdit(state, id, baseRevision) {
     baseRevision: normalizedBaseRevision,
     optimisticRevision: normalizedBaseRevision + 1,
     phase: "pending",
+    committedGeometry: geometry ? { ...geometry } : null,
+    startedAt: existing?.startedAt ?? finiteNumber(now),
+    committedAt: finiteNumber(now),
   });
 }
 
@@ -63,27 +90,59 @@ export function clearLocalGeometryEdit(state, id) {
   state.localEdits.delete(id);
 }
 
-export function shouldApplyWorkspaceGeometry(state, { id, geometryRevision }) {
+function geometryMatches(incoming, committed) {
+  if (!incoming || !committed) {
+    return false;
+  }
+  return (
+    Math.abs(finiteNumber(incoming.x) - finiteNumber(committed.x)) <= ECHO_MATCH_EPSILON &&
+    Math.abs(finiteNumber(incoming.y) - finiteNumber(committed.y)) <= ECHO_MATCH_EPSILON &&
+    Math.abs(finiteNumber(incoming.width) - finiteNumber(committed.width)) <=
+      ECHO_MATCH_EPSILON &&
+    Math.abs(finiteNumber(incoming.height) - finiteNumber(committed.height)) <=
+      ECHO_MATCH_EPSILON
+  );
+}
+
+// Decide what an incoming `workspace_state` window geometry means for a local
+// gesture. Returns `{ apply, patchGeometry }`:
+// - `apply: true` — no guard (or the guard was just released): render the
+//   incoming geometry as-is.
+// - `apply: false` — the incoming geometry is a backlogged stale broadcast;
+//   the caller must keep the local truth. `patchGeometry` carries the
+//   committed geometry for pending commits, or `null` while the gesture is
+//   still active (the caller patches from the live DOM instead).
+export function resolveIncomingGeometry(state, { id, geometry, now = Date.now() }) {
+  const applied = { apply: true, patchGeometry: null };
   if (!state || !id) {
-    return true;
+    return applied;
   }
   const localEdit = state.localEdits.get(id);
   if (!localEdit) {
-    return true;
+    return applied;
   }
-  const incomingRevision = normalizeRevision(geometryRevision);
-  const acceptedRevision =
-    localEdit.phase === "pending"
-      ? normalizeRevision(localEdit.optimisticRevision)
-      : localEdit.baseRevision;
-  if (
-    incomingRevision > acceptedRevision ||
-    (localEdit.phase === "pending" && incomingRevision === acceptedRevision)
-  ) {
+  const timestamp = finiteNumber(now);
+  if (localEdit.phase === "active") {
+    if (timestamp - finiteNumber(localEdit.startedAt) > ACTIVE_EDIT_EXPIRY_MS) {
+      state.localEdits.delete(id);
+      return applied;
+    }
+    return { apply: false, patchGeometry: null };
+  }
+  if (timestamp - finiteNumber(localEdit.committedAt) > PENDING_EDIT_EXPIRY_MS) {
     state.localEdits.delete(id);
-    return true;
+    return applied;
   }
-  return false;
+  if (geometryMatches(geometry, localEdit.committedGeometry)) {
+    state.localEdits.delete(id);
+    return applied;
+  }
+  return {
+    apply: false,
+    patchGeometry: localEdit.committedGeometry
+      ? { ...localEdit.committedGeometry }
+      : null,
+  };
 }
 
 export function localGeometryBaseRevision(state, id, windowData) {

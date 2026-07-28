@@ -626,12 +626,14 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // render at their own world geometry, so geometry-persist is gated purely
     // on a real dimension change (Tile/Stack/Align). The old
     // restore-from-minimized branch (wasMinimized / windowData.minimized) no
-    // longer exists.
+    // longer exists. Issue #3364 folded the intermediate `dimensionsChanged`
+    // into `shouldPersistTerminalGeometry` (conflict suppression moved to the
+    // renderWorkspace pre-pass).
     assert!(
         html.contains("const previousWidth = parseFloat(element.style.width")
             && html.contains("const previousHeight = parseFloat(element.style.height")
-            && html.contains("const dimensionsChanged =")
             && html.contains("const shouldPersistTerminalGeometry =")
+            && html.contains("previousWidth !== windowData.geometry.width")
             && html.contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
         "expected terminals to persist fitted geometry to backend on window \
              resize (Tile/Stack/Align)",
@@ -820,8 +822,11 @@ fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
             r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
         )
         .expect("valid regex");
+    // Issue #3364 — the finalizer commits through the shared
+    // commitWindowGeometryGesture path (guard + optimistic model/minimap
+    // sync + unconditional send) instead of a raw sendGeometry.
     let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)commitWindowGeometryGesture\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
         )
         .expect("valid regex");
 

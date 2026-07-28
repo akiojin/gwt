@@ -114,7 +114,7 @@
         createGeometrySyncState,
         localGeometryBaseRevision,
         resizeGeometryFromPointerState,
-        shouldApplyWorkspaceGeometry,
+        resolveIncomingGeometry,
         syncResizeStatePointerEvent,
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
@@ -2455,17 +2455,9 @@
         // observe the up-to-date `element.style.width/height`.
         applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
-        commitLocalGeometryEdit(
-          geometrySyncState,
-          resizeState.id,
-          resizeState.baseGeometryRevision,
-        );
-        sendGeometry(
-          resizeState.id,
-          runtime?.terminal.cols || 80,
-          runtime?.terminal.rows || 24,
-          resizeState.baseGeometryRevision,
-        );
+        // Issue #3364 — shared definitive-commit path (guard + optimistic
+        // model/minimap sync + unconditional send).
+        commitWindowGeometryGesture(resizeState.id, resizeState.baseGeometryRevision);
         runtime?.terminal.focus();
         resizeState = null;
         // SPEC-2356 Phase 9 (T-136): release the hover-reveal peek strip lock
@@ -2583,7 +2575,12 @@
         if (previous.stalenessTimer != null) {
           clearTimeout(previous.stalenessTimer);
         }
-        clearLocalGeometryEdit(geometrySyncState, previous.id);
+        // Issue #3364 — the abandoned gesture's latest DOM geometry is the
+        // user's last explicit placement: finalize it like a normal release.
+        // A clear-only reset silently discarded it, so the next
+        // workspace_state snapped the window back to the pre-gesture
+        // geometry.
+        commitWindowGeometryGesture(previous.id, previous.baseGeometryRevision);
         resizeState = null;
         delete document.documentElement.dataset.opResizeActive;
       }
@@ -2871,25 +2868,91 @@
           send(updateTerminalGridMessage(windowId, cols, rows));
           return;
         }
-        const element = windowMap.get(windowId);
-        if (!element) {
+        // SPEC-2008 camera-focus: windows are never minimized, so the element
+        // size is always the live geometry.
+        const geometry = domWindowGeometry(windowId);
+        if (!geometry) {
           return;
         }
         send({
           kind: "update_window_geometry",
           id: windowId,
-          geometry: {
-            x: parseNumber(element.style.left),
-            y: parseNumber(element.style.top),
-            // SPEC-2008 camera-focus: windows are never minimized, so the
-            // element size is always the live geometry.
-            width: parseNumber(element.style.width),
-            height: parseNumber(element.style.height),
-          },
+          geometry,
           cols,
           rows,
-          base_geometry_revision: baseGeometryRevision,
+          // Issue #3364 — `null` marks an explicit user-gesture commit: the
+          // field is omitted so the server applies it unconditionally instead
+          // of discarding the drop against a lagging client model revision.
+          // Automated senders (terminal fit persists) keep the default
+          // guarded base so a late fit can never clobber a newer placement.
+          base_geometry_revision:
+            baseGeometryRevision === null ? undefined : baseGeometryRevision,
         });
+      }
+
+      // Issue #3364 — a window's live DOM geometry (drag/resize write the
+      // inline style before any commit reaches the model).
+      function domWindowGeometry(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return null;
+        }
+        return {
+          x: parseNumber(element.style.left),
+          y: parseNumber(element.style.top),
+          width: parseNumber(element.style.width),
+          height: parseNumber(element.style.height),
+        };
+      }
+
+      // Issue #3364 — write a locally-committed geometry into the workspace
+      // model (the Fleet Minimap and every render key read the MODEL, not the
+      // DOM). Tab-group members share geometry server-side, so they are kept
+      // in step here too.
+      function applyLocalGeometryToModel(windowId, geometry) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        const groupId = windowGroupId(windowData);
+        for (const member of activeWorkspace().windows || []) {
+          if (windowGroupId(member) !== groupId) {
+            continue;
+          }
+          member.geometry = { ...geometry };
+        }
+      }
+
+      // Issue #3364 — the single definitive commit point for pointer
+      // gestures (drag drop, resize finish, force-reset finalization). The
+      // drag and resize paths previously diverged: only resize armed the
+      // local edit guard, and neither updated the model, so the drop position
+      // waited for the server echo (minimap frozen) and any backlogged stale
+      // broadcast snapped the window back. Committing here (a) arms the
+      // content-matched guard, (b) optimistically syncs the model and
+      // re-renders the Fleet Minimap immediately, and (c) sends the geometry
+      // as an unconditional user placement.
+      function commitWindowGeometryGesture(windowId, baseGeometryRevision) {
+        const geometry = domWindowGeometry(windowId);
+        if (!geometry) {
+          clearLocalGeometryEdit(geometrySyncState, windowId);
+          return;
+        }
+        commitLocalGeometryEdit(
+          geometrySyncState,
+          windowId,
+          baseGeometryRevision,
+          geometry,
+        );
+        applyLocalGeometryToModel(windowId, geometry);
+        fleetMinimap?.renderCells();
+        const runtime = terminalMap.get(windowId);
+        sendGeometry(
+          windowId,
+          runtime?.terminal.cols || 80,
+          runtime?.terminal.rows || 24,
+          null,
+        );
       }
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
@@ -4825,6 +4888,20 @@
               return;
             }
             focusWindowRemotely(windowData.id);
+            // Issue #3364 — arm the same local edit guard as the resize path
+            // so backlogged workspace_state broadcasts cannot fight the
+            // pointer mid-drag, and capture the base revision for the drop
+            // commit.
+            const dragBaseGeometryRevision = localGeometryBaseRevision(
+              geometrySyncState,
+              windowData.id,
+              workspaceWindowById(windowData.id) || windowData,
+            );
+            beginLocalGeometryEdit(
+              geometrySyncState,
+              windowData.id,
+              dragBaseGeometryRevision,
+            );
             dragState = {
               id: windowData.id,
               pointerId: event.pointerId,
@@ -4837,6 +4914,7 @@
               // drag-to-move is always allowed.
               allowMove: true,
               dockTargetId: null,
+              baseGeometryRevision: dragBaseGeometryRevision,
             };
             titlebar.setPointerCapture(event.pointerId);
           });
@@ -4983,34 +5061,26 @@
         }
         const previousWidth = parseFloat(element.style.width || "0");
         const previousHeight = parseFloat(element.style.height || "0");
-        const applyWorkspaceGeometry = shouldApplyWorkspaceGeometry(geometrySyncState, {
-          id: windowData.id,
-          geometryRevision: workspaceGeometryRevision(windowData),
-        });
         // SPEC-2008 camera-focus: maximize/minimize were removed. Windows always
         // render at their own world `geometry`; "focusing" a window flies the
         // camera to frame it (frameWindow), so there is no per-client fill
         // branch and no ping-pong of a shared maximized geometry anymore.
-        const dimensionsChanged =
-          applyWorkspaceGeometry &&
-          (previousWidth !== windowData.geometry.width ||
-            previousHeight !== windowData.geometry.height);
+        // Issue #3364 — geometry conflicts were already resolved (and
+        // suppressed windows patched back to the local truth) by the
+        // renderWorkspace pre-pass, so `windowData.geometry` IS the geometry
+        // to render.
         const shouldPersistTerminalGeometry =
-          applyWorkspaceGeometry && dimensionsChanged;
+          previousWidth !== windowData.geometry.width ||
+          previousHeight !== windowData.geometry.height;
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
-        if (applyWorkspaceGeometry) {
-          element.style.left = `${windowData.geometry.x}px`;
-          element.style.top = `${windowData.geometry.y}px`;
-          element.style.width = `${windowData.geometry.width}px`;
-          element.style.height = `${windowData.geometry.height}px`;
-        }
+        element.style.left = `${windowData.geometry.x}px`;
+        element.style.top = `${windowData.geometry.y}px`;
+        element.style.width = `${windowData.geometry.width}px`;
+        element.style.height = `${windowData.geometry.height}px`;
         element.style.zIndex = String(windowData.z_index);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
         renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
-        if (
-          applyWorkspaceGeometry &&
-          presetSurface(windowData.preset) === "terminal"
-        ) {
+        if (presetSurface(windowData.preset) === "terminal") {
           scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry);
         }
       }
@@ -5026,6 +5096,36 @@
               );
             if (pendingAgentKanbanPlacement) {
               send(pendingAgentKanbanPlacement);
+            }
+
+            // Issue #3364 — resolve local gesture guards BEFORE anything
+            // (render keys, minimap, telemetry, window elements) reads the
+            // incoming windows: while a gesture is active or a commit's echo
+            // is still in flight, a backlogged stale broadcast must neither
+            // snap the window back nor desync the Fleet Minimap. Suppressed
+            // windows (and their tab-group members, which share geometry
+            // server-side) are patched back to the local truth so the MODEL
+            // stays consistent with the DOM.
+            for (const incomingWindow of workspace?.windows || []) {
+              const decision = resolveIncomingGeometry(geometrySyncState, {
+                id: incomingWindow.id,
+                geometry: incomingWindow.geometry,
+              });
+              if (decision.apply) {
+                continue;
+              }
+              const localGeometry =
+                decision.patchGeometry || domWindowGeometry(incomingWindow.id);
+              if (!localGeometry) {
+                continue;
+              }
+              const suppressedGroupId = windowGroupId(incomingWindow);
+              for (const member of workspace.windows) {
+                if (windowGroupId(member) !== suppressedGroupId) {
+                  continue;
+                }
+                member.geometry = { ...localGeometry };
+              }
             }
 
             const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
@@ -5988,6 +6088,9 @@
               : null;
             clearTitlebarDockPreview();
             if (agentKanbanTarget) {
+              // The drop changes the PLACEMENT, not the canvas geometry: drop
+              // the guard so the server's kanban state applies untouched.
+              clearLocalGeometryEdit(geometrySyncState, dragState.id);
               send(
                 placeAgentWindowMessage(
                   dragState.id,
@@ -5997,20 +6100,25 @@
                 ),
               );
             } else if (dragState.dockTargetId) {
+              clearLocalGeometryEdit(geometrySyncState, dragState.id);
               send({
                 kind: "dock_window_tab",
                 id: dragState.id,
                 target_id: dragState.dockTargetId,
               });
             } else {
-              const runtime = terminalMap.get(dragState.id);
-              sendGeometry(
+              // Issue #3364 — commit the drop like the resize path commits
+              // its release: guard + optimistic model/minimap sync +
+              // unconditional send.
+              commitWindowGeometryGesture(
                 dragState.id,
-                runtime?.terminal.cols || 80,
-                runtime?.terminal.rows || 24,
+                dragState.baseGeometryRevision,
               );
             }
           } else {
+            // A click (no move) never sent geometry: release the guard armed
+            // at pointerdown.
+            clearLocalGeometryEdit(geometrySyncState, dragState.id);
             clearTitlebarDockPreview();
             handleTitlebarClick(dragState.id);
           }
@@ -6083,6 +6191,10 @@
             window_id: dragState.id,
           });
           clearTitlebarDockPreview();
+          // Issue #3364 — a cancelled drag is abandoned, not committed:
+          // release the guard so the next workspace_state restores the
+          // server's placement.
+          clearLocalGeometryEdit(geometrySyncState, dragState.id);
           dragState = null;
         } else if (dragState) {
           tracePointer(UI_TRACE_EVENT.pointerCancelIgnored, event, {
