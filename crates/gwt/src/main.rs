@@ -217,21 +217,6 @@ fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
 }
 
-fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) {
-    clients.dispatch(vec![OutboundEvent::broadcast(
-        BackendEvent::LogEntryAppended { entry },
-    )]);
-}
-
-/// SPEC-2809 Phase F1 — fan out one external-process line to every
-/// connected client. The Console window renders it under the matching
-/// kind tab; the Logs window renders it inside the Process kind facet.
-fn broadcast_process_line(clients: &ClientHub, line: gwt_core::process_console::ProcessLine) {
-    clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::ProcessLine {
-        line,
-    })]);
-}
-
 fn spawn_project_index_status_check(
     _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
@@ -1280,9 +1265,9 @@ mod tests {
     use super::{
         app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
         apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
-        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
-        build_shell_process_launch, close_window_from_workspace, combined_window_id,
-        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
+        close_window_from_workspace, combined_window_id, current_git_branch,
+        docker_bundle_mounts_for_home, docker_bundle_override_content,
         gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
@@ -1902,16 +1887,21 @@ mod tests {
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
     }
 
+    // Issue #3366 — delivery gating lives in `AppRuntime::log_entry_events`
+    // (see app_runtime tests); this guards the hub fan-out and payload
+    // shape once an entry passes the gate.
     #[test]
     fn log_entry_broadcast_reaches_all_registered_clients() {
         let clients = ClientHub::default();
         let native = clients.register("native".to_string());
         let browser = clients.register("browser".to_string());
 
-        broadcast_log_entry(
-            &clients,
-            LogEvent::new(LogLevel::Warn, "pty", "reader stalled").with_detail("retrying"),
-        );
+        clients.dispatch(vec![OutboundEvent::broadcast(
+            BackendEvent::LogEntryAppended {
+                entry: LogEvent::new(LogLevel::Warn, "pty", "reader stalled")
+                    .with_detail("retrying"),
+            },
+        )]);
 
         let native_payload = native.try_recv().expect("native payload");
         let browser_payload = browser.try_recv().expect("browser payload");
@@ -7787,10 +7777,14 @@ fn main() -> std::io::Result<()> {
                 // stragglers from older clients are dropped silently.
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
-                broadcast_log_entry(&clients, entry);
+                // Issue #3366 — gated on an open Logs window; see
+                // `AppRuntime::log_entry_events`.
+                clients.dispatch(app.log_entry_events(entry));
             }
             Event::UserEvent(UserEvent::ProcessLine { line }) => {
-                broadcast_process_line(&clients, line);
+                // Issue #3366 — gated on an open Console window; see
+                // `AppRuntime::process_line_events`.
+                clients.dispatch(app.process_line_events(line));
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);
