@@ -335,6 +335,42 @@ pub fn defer_all_best_effort(worktree: &Path, session_id: &str, reason: &str) {
     );
 }
 
+/// T-248 absorbed core: a successful `execution.reopen` revives the
+/// obligations that `execution.blocked` deferred, for the kinds the
+/// recovery evidence does NOT cover (issue updates and PR work — the
+/// reopen contract already proves fresh implementation/verification
+/// evidence). Recovery therefore re-owes exactly the work the block
+/// parked, through the existing obligation gate — no separate Gate Doctor
+/// surface (user decision, 2026-07-28).
+pub fn revive_deferred_best_effort(worktree: &Path, session_id: &str, kinds: &[ObligationKind]) {
+    let result = crate::cli::trusted_store::with_write_lease(worktree, || {
+        let Some(mut state) = load(worktree)? else {
+            return Ok(());
+        };
+        if state.session_id != session_id || !integrity_ok(&state) {
+            return Ok(());
+        }
+        let mut changed = false;
+        for entry in &mut state.obligations {
+            let deferred = entry
+                .settled
+                .as_ref()
+                .is_some_and(|settlement| settlement.evidence.starts_with("deferred:"));
+            if deferred && kinds.contains(&entry.kind) {
+                entry.settled = None;
+                changed = true;
+            }
+        }
+        if changed {
+            save(worktree, &state)?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        tracing::warn!(?error, "deferred obligation revival failed");
+    }
+}
+
 /// T-243 core: classify assertive completion claims in assistant prose.
 /// Deliberately narrow — only implemented/fixed and verified/tests-pass
 /// claim forms (ja+en). PR/issue mentions are excluded: they appear in
@@ -667,6 +703,49 @@ mod tests {
             "issue.comment",
         );
         assert!(open_obligation_refusal(dir.path(), "sess-1", &[ObligationKind::Pr]).is_none());
+    }
+
+    // T-248 absorbed core: revival reopens only DEFERRED entries of the
+    // requested kinds; evidence-settled entries and other sessions stay
+    // untouched.
+    #[test]
+    fn revive_deferred_reopens_only_deferred_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
+        mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
+        // Implementation settles with real evidence; the issue update is
+        // deferred by execution.blocked.
+        settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::Implementation],
+            "verify.run vr-1",
+        );
+        settle_kinds_best_effort(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::IssueUpdate],
+            "deferred: execution.blocked (cannot comment)",
+        );
+        assert!(open_kinds(dir.path(), "sess-1").is_empty());
+
+        revive_deferred_best_effort(
+            dir.path(),
+            "sess-1",
+            &[ObligationKind::IssueUpdate, ObligationKind::Pr],
+        );
+        assert_eq!(
+            open_kinds(dir.path(), "sess-1"),
+            vec![ObligationKind::IssueUpdate],
+            "only the deferred issue update revives; evidence-settled implementation stays settled"
+        );
+
+        // Cross-session revival is a no-op.
+        revive_deferred_best_effort(dir.path(), "sess-other", &[ObligationKind::IssueUpdate]);
+        assert_eq!(
+            open_kinds(dir.path(), "sess-1"),
+            vec![ObligationKind::IssueUpdate]
+        );
     }
 
     // No-secrets: raw prompts never persist, only digests.
