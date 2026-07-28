@@ -406,6 +406,138 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_snapshot_preserves_full_scrollback_row_after_narrow_resize() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process(b"ABCDEFGHIJ\r\ntwo\r\nthree\r\nfour");
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        for (col, expected) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
+            assert_eq!(
+                replay_oldest
+                    .cell(0, col.try_into().unwrap())
+                    .expect("first reflowed history row cell")
+                    .contents(),
+                *expected
+            );
+        }
+        for (col, expected) in ["G", "H", "I", "J"].iter().enumerate() {
+            assert_eq!(
+                replay_oldest
+                    .cell(1, col.try_into().unwrap())
+                    .expect("second reflowed history row cell")
+                    .contents(),
+                *expected,
+                "old-width history suffix was lost at reflowed column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_scrollback_sgr_after_narrow_resize() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process(b"\x1b[31mABCDEF\x1b[34mGHIJ\x1b[0m\r\ntwo\r\nthree\r\nfour");
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        for col in 0..6 {
+            assert_eq!(
+                replay_oldest
+                    .cell(0, col)
+                    .expect("red history cell")
+                    .fgcolor(),
+                vt100::Color::Idx(1),
+                "red SGR attribute changed at first reflowed row column {col}"
+            );
+        }
+        for col in 0..4 {
+            assert_eq!(
+                replay_oldest
+                    .cell(1, col)
+                    .expect("blue history cell")
+                    .fgcolor(),
+                vt100::Color::Idx(4),
+                "blue SGR attribute changed at second reflowed row column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_semantic_snapshot_does_not_split_wide_glyph_at_reflow_boundary() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process("abcde漢Z\r\ntwo\r\nthree\r\nfour".as_bytes());
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        assert_eq!(
+            replay_oldest
+                .cell(1, 0)
+                .expect("wide history cell")
+                .contents(),
+            "漢"
+        );
+        assert!(
+            replay_oldest
+                .cell(1, 1)
+                .expect("wide history continuation")
+                .is_wide_continuation(),
+            "wide glyph continuation must remain adjacent after reflow"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(1, 2)
+                .expect("cell after wide history glyph")
+                .contents(),
+            "Z",
+            "cell following a boundary-wide glyph must not be lost"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_applies_history_limit_after_narrow_reflow() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process(b"ABCDEFGHIJ\r\nKLMNOPQRST\r\nthree\r\nfour\r\nfive");
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 3);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        assert_eq!(
+            replay_oldest.scrollback(),
+            3,
+            "max_scrollback must bound reflowed physical history rows"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(0, 0)
+                .expect("oldest retained physical history row")
+                .contents(),
+            "G",
+            "the newest physical history rows must be retained after reflow"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(1, 0)
+                .expect("first physical row from newest logical line")
+                .contents(),
+            "K"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(2, 0)
+                .expect("second physical row from newest logical line")
+                .contents(),
+            "Q"
+        );
+    }
+
+    #[test]
     fn test_semantic_snapshot_round_trips_active_alternate_screen_and_restore_state() {
         let mut source = vt100::Parser::new(3, 10, 32);
         source.process(b"\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b=\x1b[?25l");
