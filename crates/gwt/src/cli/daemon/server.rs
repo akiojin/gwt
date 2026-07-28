@@ -5129,6 +5129,121 @@ exit 0
         );
     }
 
+    /// Wait until `path` accumulates at least `expected` newline-terminated
+    /// markers, so a test can observe repeated fake-gh invocations rather than
+    /// only the first one.
+    async fn wait_for_marker_count(path: &Path, expected: usize, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if fs::read_to_string(path).unwrap_or_default().lines().count() >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
+    async fn hung_scan_is_cut_at_its_deadline_and_the_driver_scans_again_on_the_next_tick() {
+        // Issue #3349: the driver froze forever because a single `gh` call
+        // inside the scan never returned. The scan now carries an absolute
+        // deadline that kills the hung child, the driver records the expiry as
+        // a scan error, and the next tick starts a fresh scan instead of
+        // staying silently stalled.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let scan_started_path = temp.path().join("scan-started");
+        // Deliberately never created: every fake gh invocation hangs until its
+        // deadline terminates the process tree.
+        let release_scan_path = temp.path().join("never-released");
+        let active_scan_path = temp.path().join("active-scan");
+        let overlap_scan_path = temp.path().join("overlap-scan");
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "block");
+        let _started = ScopedEnvVar::set("GWT_FAKE_GH_STARTED", &scan_started_path);
+        let _release = ScopedEnvVar::set("GWT_FAKE_GH_RELEASE", &release_scan_path);
+        let _active = ScopedEnvVar::set("GWT_FAKE_GH_ACTIVE", &active_scan_path);
+        let _overlap = ScopedEnvVar::set("GWT_FAKE_GH_OVERLAP", &overlap_scan_path);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed issue monitor prefs");
+
+        let hub = BroadcastHub::new();
+        let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = spawn_issue_monitor_worker_with_config_and_timeout(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            Duration::from_millis(1_500),
+        );
+
+        let first_scan_started = wait_for_path(&scan_started_path, Duration::from_secs(5)).await;
+        let expired_status =
+            recv_issue_monitor_status_matching(&mut status_rx, Duration::from_secs(8), |status| {
+                status.last_error.as_deref().is_some_and(|error| {
+                    error.contains("deadline")
+                        || error.contains("timed out")
+                        || error.contains("watchdog")
+                })
+            })
+            .await;
+        let driver_recovered =
+            wait_for_marker_count(&scan_started_path, 2, Duration::from_secs(10)).await;
+
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .expect("worker shutdown is bounded")
+            .expect("worker exits cleanly");
+
+        assert!(
+            first_scan_started,
+            "the hanging fake gh must be reached by the first scan"
+        );
+        assert!(
+            expired_status.is_some(),
+            "the expired scan must surface as an operator-visible scan error"
+        );
+        assert!(
+            driver_recovered,
+            "the driver must start a fresh scan after the hung one is cut at its deadline"
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // global fake-gh env must stay isolated for the full worker run
     async fn issue_monitor_worker_applies_control_during_scan_without_rewinding_mutation() {

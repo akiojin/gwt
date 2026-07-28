@@ -63,8 +63,7 @@ use super::{
     KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
     LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
     PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
-    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
-    WorkspaceResumeContext,
+    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -13593,6 +13592,82 @@ fn leave_fresh_execution_activated_before_projection_commit(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
     ));
+}
+
+/// SPEC #3200 FR-052: a fresh linked-owner launch is not producing until
+/// SessionStart authenticates, so `spawn_agent_window_with_placement` defers
+/// the Issue Monitor completion. The SessionStart finalizer therefore owns the
+/// durable delivery ACK — if it emitted the plain "launch succeeded" events the
+/// delivery tuple would stay pending forever and the daemon would redeliver it.
+#[test]
+fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-monitor-delivery");
+    let delivery_id = "launch:effect-fresh-monitor-delivery";
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.repo);
+
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: fixture.owner.number,
+        title: "fresh linked-owner launch".to_string(),
+        labels: vec!["bug".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        fixture.owner.number,
+        "claim-fresh-monitor-delivery",
+        "host/session",
+        "effect-fresh-monitor-delivery",
+        "2026-07-28T00:00:00Z",
+    ));
+    assert!(monitor.claim_launch_delivery(
+        fixture.owner.number,
+        delivery_id,
+        &fixture.runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        &fixture.window_id,
+        |_| true,
+    ));
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+        .expect("seed the durable launch delivery");
+
+    let pending = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&fixture.window_id)
+        .expect("pending fresh launch");
+    pending.launch_feedback_context = Some(LaunchFeedbackContext {
+        client_id: "__issue_monitor__".to_string(),
+        title: "Issue Monitor".to_string(),
+        issue_monitor_issue_number: Some(fixture.owner.number),
+        issue_monitor_delivery_id: Some(delivery_id.to_string()),
+    });
+    let readiness_nonce = pending.readiness_nonce.clone();
+
+    let events = fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+
+    assert!(
+        !events.is_empty(),
+        "an authenticated SessionStart must complete the fresh launch"
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload issue monitor prefs")
+            .pending_launch_deliveries
+            .is_empty(),
+        "the fresh-execution finalizer must ACK the durable delivery it deferred"
+    );
 }
 
 #[test]
