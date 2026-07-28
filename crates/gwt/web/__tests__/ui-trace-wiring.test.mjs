@@ -216,6 +216,35 @@ test("terminal activation diagnostics use centralized metadata-only trace consta
   );
 });
 
+function terminalInputTraceFields(marker) {
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = appSource.match(
+    new RegExp(
+      `console\\.debug\\(\\s*["']${escapedMarker}["']\\s*,\\s*\\{([\\s\\S]*?)\\}\\s*\\);`,
+    ),
+  );
+  assert.ok(match, `missing terminal input trace marker ${marker}`);
+  return match[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.match(/^([A-Za-z_$][\w$]*)\s*(?::|,)/)?.[1])
+    .filter(Boolean)
+    .sort();
+}
+
+test("terminal input console traces use stage-local metadata-only exact allowlists", () => {
+  assert.deepEqual(
+    terminalInputTraceFields("[gwt_input_trace:onData:dropped]"),
+    ["reason", "seq", "windowId", "wsState"],
+  );
+  assert.deepEqual(terminalInputTraceFields("[gwt_input_trace:onData]"), [
+    "seq",
+    "windowId",
+    "wsState",
+  ]);
+});
+
 test("backend UI trace save result is surfaced to the user", () => {
   assert.match(appSource, /case\s+"ui_trace_saved"/);
   assert.match(appSource, /case\s+"ui_trace_error"/);

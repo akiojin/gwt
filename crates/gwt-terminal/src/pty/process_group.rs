@@ -9,69 +9,19 @@
 
 #[cfg(windows)]
 mod imp {
-    use windows::Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        },
-        System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-    };
-
     #[derive(Default)]
     pub struct ProcessGroup {
-        job: Option<HANDLE>,
+        job: Option<gwt_core::process_tree::WindowsJobObject>,
     }
-
-    // A Win32 Job Object HANDLE is an opaque pointer safe to share across
-    // threads; our access is serialized by Drop anyway.
-    unsafe impl Send for ProcessGroup {}
-    unsafe impl Sync for ProcessGroup {}
 
     impl ProcessGroup {
         pub fn attach(pid: u32) -> Self {
-            unsafe {
-                let job = match CreateJobObjectW(None, None) {
-                    Ok(h) => h,
-                    Err(error) => {
-                        tracing::debug!(%error, "CreateJobObjectW failed");
-                        return Self::default();
-                    }
-                };
-
-                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
-                if let Err(error) = SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    &info as *const _ as _,
-                    info_size,
-                ) {
-                    tracing::debug!(%error, "SetInformationJobObject failed");
-                    let _ = CloseHandle(job);
-                    return Self::default();
+            match gwt_core::process_tree::WindowsJobObject::attach_running(pid) {
+                Ok(job) => Self { job: Some(job) },
+                Err(error) => {
+                    tracing::debug!(pid, %error, "Windows Job attach failed");
+                    Self::default()
                 }
-
-                let proc = match OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) {
-                    Ok(h) => h,
-                    Err(error) => {
-                        tracing::debug!(pid, %error, "OpenProcess failed");
-                        let _ = CloseHandle(job);
-                        return Self::default();
-                    }
-                };
-
-                let assign = AssignProcessToJobObject(job, proc);
-                let _ = CloseHandle(proc);
-                if let Err(error) = assign {
-                    tracing::debug!(pid, %error, "AssignProcessToJobObject failed");
-                    let _ = CloseHandle(job);
-                    return Self::default();
-                }
-
-                Self { job: Some(job) }
             }
         }
 
@@ -79,13 +29,8 @@ mod imp {
         ///
         /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
         pub fn terminate(&mut self) {
-            if let Some(job) = self.job.take() {
-                // Closing the last handle to a Job configured with
-                // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every process
-                // still assigned to it.
-                unsafe {
-                    let _ = CloseHandle(job);
-                }
+            if let Some(mut job) = self.job.take() {
+                let _ = job.terminate();
             }
         }
     }
@@ -149,3 +94,14 @@ mod imp {
 }
 
 pub use imp::ProcessGroup;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windows_process_group_reuses_shared_job_owner() {
+        let source = include_str!("process_group.rs");
+        assert!(source.contains("WindowsJobObject::attach_running(pid)"));
+        assert!(!source.contains(concat!("Create", "JobObjectW")));
+        assert!(!source.contains(concat!("AssignProcess", "ToJobObject")));
+    }
+}
