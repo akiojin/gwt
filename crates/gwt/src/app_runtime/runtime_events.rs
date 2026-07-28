@@ -56,6 +56,56 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
 }
 
 impl AppRuntime {
+    /// Issue #3366 — whether any project tab's workspace still holds a
+    /// window of the given preset. Docked windows stay in the workspace
+    /// window list, so tab groups are covered. The check spans every tab
+    /// (not just the active one) because surfaces on an inactive tab keep
+    /// their accumulated client state and do not re-request a snapshot
+    /// when their tab becomes active again.
+    fn any_window_open(&self, preset: WindowPreset) -> bool {
+        self.tabs.iter().any(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .any(|window| window.preset == preset)
+        })
+    }
+
+    /// Issue #3366 — deliver one external-process line to the client hub
+    /// only while a Console window exists. Raw `process_line` events are
+    /// consumed exclusively by Console window controllers, and every
+    /// Console mount replays the `ProcessConsoleHub` ring buffer through
+    /// `LoadProcessConsole`, so nothing is lost while suppressed.
+    /// Unconditional broadcast measured ≈956 msg/s under normal agent
+    /// load and delayed a new client's first workspace paint by ~1 min.
+    pub(crate) fn process_line_events(
+        &self,
+        line: gwt_core::process_console::ProcessLine,
+    ) -> Vec<OutboundEvent> {
+        if !self.any_window_open(WindowPreset::Console) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::ProcessLine { line })]
+    }
+
+    /// Issue #3366 — deliver one tracing log event to the client hub only
+    /// while a Logs window exists. `log_entry_appended` is consumed
+    /// exclusively by Logs window state, and `LoadLogs` re-reads the log
+    /// directory on mount, so the live stream is pure overhead without an
+    /// open Logs surface.
+    pub(crate) fn log_entry_events(
+        &self,
+        entry: gwt_core::logging::LogEvent,
+    ) -> Vec<OutboundEvent> {
+        if !self.any_window_open(WindowPreset::Logs) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::LogEntryAppended {
+            entry,
+        })]
+    }
+
     pub(crate) fn handle_runtime_output(
         &mut self,
         id: String,
