@@ -891,13 +891,16 @@ fn daemon_broadcast_user_event(
             Some(UserEvent::DaemonRuntimeHook(event))
         }
         gwt::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
-            issue_monitor_daemon_user_event(event)
+            issue_monitor_daemon_user_event(event, project_root)
         }
     }
 }
 
 #[cfg(unix)]
-fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent> {
+fn issue_monitor_daemon_user_event(
+    event: serde_json::Value,
+    project_root: &Path,
+) -> Option<UserEvent> {
     let event_name = event.get("event")?.as_str()?;
     let payload = event
         .get("payload")
@@ -946,6 +949,7 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
             Some(UserEvent::IssueMonitorLaunchRequest {
+                project_root: project_root.to_path_buf(),
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
@@ -955,7 +959,10 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
             // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
             // review agent for a PR-ready autonomous issue.
             let dispatch: gwt::AutonomousReviewDispatch = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::IssueMonitorReviewDispatch { dispatch })
+            Some(UserEvent::IssueMonitorReviewDispatch {
+                project_root: project_root.to_path_buf(),
+                dispatch,
+            })
         }
         _ => None,
     }
@@ -1108,6 +1115,7 @@ enum UserEvent {
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     IssueMonitorLaunchRequest {
+        project_root: PathBuf,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
@@ -1115,6 +1123,7 @@ enum UserEvent {
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
+        project_root: PathBuf,
         dispatch: gwt::AutonomousReviewDispatch,
     },
     LaunchProgress {
@@ -1514,15 +1523,46 @@ mod tests {
             99,
         ) {
             Some(UserEvent::IssueMonitorLaunchRequest {
+                project_root: actual_project_root,
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
             }) => {
+                assert_eq!(actual_project_root, project_root);
                 assert_eq!(issue_number, 42);
                 assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
                 assert_eq!(delivery_id.as_deref(), Some("launch:effect-42"));
             }
             other => panic!("unexpected issue monitor launch event: {other:?}"),
+        }
+
+        let dispatch = gwt::AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 84,
+            reviewed_sha: "abc123".to_string(),
+            required_criteria: vec!["tests pass".to_string()],
+            diff: "diff --git a/a b/a".to_string(),
+            linked_issue_kind: gwt::LinkedIssueKind::Issue,
+        };
+        let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "review_dispatch",
+            serde_json::to_value(&dispatch).expect("dispatch serializes"),
+            42,
+        );
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            review_payload,
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::IssueMonitorReviewDispatch {
+                project_root: actual_project_root,
+                dispatch: actual_dispatch,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(actual_dispatch, dispatch);
+            }
+            other => panic!("unexpected issue monitor review event: {other:?}"),
         }
     }
 
@@ -7984,19 +8024,28 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
+                project_root,
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
             }) => {
-                let events = app.auto_launch_issue_monitor_delivery_events(
+                let events = app.auto_launch_issue_monitor_delivery_events_for_project(
+                    &project_root,
                     issue_number,
                     linked_issue_kind,
                     delivery_id,
                 );
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch { dispatch }) => {
-                let events = app.auto_dispatch_issue_monitor_review_events(dispatch);
+            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {
+                project_root,
+                dispatch,
+            }) => {
+                let events =
+                    app.auto_dispatch_issue_monitor_review_events_for_project(
+                        &project_root,
+                        dispatch,
+                    );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {

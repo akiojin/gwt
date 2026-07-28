@@ -439,6 +439,7 @@ impl AppRuntime {
         id: &str,
         notify_issue_monitor: bool,
     ) -> Vec<OutboundEvent> {
+        let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         self.clear_agent_window_startup_restore(id);
         self.stop_window_runtime(id);
         self.remove_window_state_tracking(id);
@@ -457,7 +458,11 @@ impl AppRuntime {
             events.push(event);
         }
         if notify_issue_monitor {
-            events.extend(self.issue_monitor_windows_closed_events(&[id.to_string()]));
+            if let Some(project_root) = issue_monitor_project_root {
+                events.extend(
+                    self.issue_monitor_windows_closed_events(&project_root, &[id.to_string()]),
+                );
+            }
         }
         events
     }

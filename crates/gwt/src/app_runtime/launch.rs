@@ -2385,7 +2385,14 @@ impl AppRuntime {
                                     launch_feedback_context.as_ref().and_then(|context| {
                                         context.issue_monitor_delivery_id.as_deref()
                                     });
+                                let issue_monitor_project_root = launch_feedback_context
+                                    .as_ref()
+                                    .and_then(|context| {
+                                        context.issue_monitor_project_root.as_deref()
+                                    })
+                                    .unwrap_or(&project_root);
                                 events.extend(self.issue_monitor_launch_completed_delivery_events(
+                                    issue_monitor_project_root,
                                     issue_number,
                                     &window_id,
                                     delivery_id,

@@ -512,6 +512,7 @@ impl AppRuntime {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
+        let closing_project_root = self.tabs[index].project_root.clone();
 
         let window_ids = self
             .tabs
@@ -534,9 +535,10 @@ impl AppRuntime {
         }
 
         // Return any Issue Monitor launched windows to pending before the tab is
-        // removed, while the closing project is still the active root. Closing a
-        // project pauses (does not complete) its in-flight work.
-        let issue_monitor_events = self.issue_monitor_windows_closed_events(&window_ids);
+        // removed. The closing tab owns this lifecycle even when another tab is
+        // active. Closing a project pauses (does not complete) its in-flight work.
+        let issue_monitor_events =
+            self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {
