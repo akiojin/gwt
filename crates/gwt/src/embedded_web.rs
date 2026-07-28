@@ -113,8 +113,10 @@ root_js_modules! {
     "index-settings-panel.js" => "renderIndexSettingsPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
-    // SPEC-2008 Phase 25 — revision-aware window geometry sync primitives.
-    "window-geometry-sync.js" => "shouldApplyWorkspaceGeometry",
+    // SPEC-2008 Phase 25 — window geometry sync primitives (Issue #3364:
+    // the revision-arithmetic guard became the content-matched
+    // resolveIncomingGeometry).
+    "window-geometry-sync.js" => "resolveIncomingGeometry",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
