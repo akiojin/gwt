@@ -609,6 +609,27 @@ export function rearmRefreshOnVisible({
 }
 
 /**
+ * Resolve caller-owned pending refresh state after an activation attempt.
+ *
+ * Persisted geometry and an already-pending refresh are both authoritative.
+ * A failed authoritative attempt must stay pending for a later visibility or
+ * layout recovery, while a successful one clears that intent. Focus-only
+ * failures leave the flag untouched so routine focus retries do not create
+ * geometry work.
+ */
+export function resolveTerminalViewportRefreshSettlement({
+  activationRan,
+  shouldPersistGeometry = false,
+  hasPendingRefresh = false,
+} = {}) {
+  const authoritative = shouldPersistGeometry === true || hasPendingRefresh === true;
+  return {
+    shouldUpdate: authoritative,
+    pending: authoritative && activationRan !== true,
+  };
+}
+
+/**
  * Route a terminal fit without ever treating a hidden or unresolved grid as
  * authoritative. Persisted requests stay pending until a later visible fit
  * can measure the terminal and publish fresh cols/rows.

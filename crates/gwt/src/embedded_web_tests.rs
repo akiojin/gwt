@@ -766,7 +766,7 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
     // the revealed terminal keeps the stale grid until a manual resize.
     let html = frontend_bundle_source();
     let focus_retry = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
+            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -779,6 +779,14 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
     assert!(
             runtime_init.is_match(html),
             "expected createTerminalRuntime to initialize activationAttempts so the focus-path retry has a bounded counter (Issue #2937)",
+        );
+    let refresh_settlement = regex::Regex::new(
+            r#"(?s)const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)"#,
+        )
+        .expect("valid regex");
+    assert!(
+            refresh_settlement.is_match(html),
+            "expected failed authoritative activation to rearm viewportRefreshPending before retry exhaustion and successful activation to clear it before the fast-path return (SPEC-2008 FR-122)",
         );
 }
 

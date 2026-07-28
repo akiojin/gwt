@@ -884,6 +884,140 @@ test("activation intent coalescing keeps authoritative persistence through retri
   });
 });
 
+test("activation settlement rearms only failed authoritative viewport refreshes", () => {
+  const settle = terminalViewportReflow.resolveTerminalViewportRefreshSettlement;
+  const cases = [
+    {
+      name: "persisted activation failure",
+      input: {
+        activationRan: false,
+        shouldPersistGeometry: true,
+        hasPendingRefresh: false,
+      },
+      expected: { shouldUpdate: true, pending: true },
+    },
+    {
+      name: "consumed pending refresh failure",
+      input: {
+        activationRan: false,
+        shouldPersistGeometry: false,
+        hasPendingRefresh: true,
+      },
+      expected: { shouldUpdate: true, pending: true },
+    },
+    {
+      name: "focus-only failure",
+      input: {
+        activationRan: false,
+        shouldPersistGeometry: false,
+        hasPendingRefresh: false,
+      },
+      expected: { shouldUpdate: false, pending: false },
+    },
+  ];
+
+  for (const { name, input, expected } of cases) {
+    assert.deepEqual(settle?.(input), expected, name);
+  }
+});
+
+test("successful authoritative activation clears the viewport refresh settlement", () => {
+  assert.deepEqual(
+    terminalViewportReflow.resolveTerminalViewportRefreshSettlement?.({
+      activationRan: true,
+      shouldPersistGeometry: true,
+      hasPendingRefresh: true,
+    }),
+    { shouldUpdate: true, pending: false },
+  );
+});
+
+test("retry exhaustion preserves refresh intent for a later visibility restore", () => {
+  const settle = terminalViewportReflow.resolveTerminalViewportRefreshSettlement;
+  const host = {
+    clientWidth: 0,
+    clientHeight: 0,
+    getBoundingClientRect: () => ({
+      width: host.clientWidth,
+      height: host.clientHeight,
+    }),
+  };
+  const geometry = [];
+  const runtime = {
+    viewportRefreshPending: false,
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: { parentElement: host },
+      refresh: () => {},
+      focus: () => {},
+    },
+    fitAddon: {
+      proposeDimensions: () => ({ cols: 120, rows: 36 }),
+      fit: () => {
+        runtime.terminal.cols = 120;
+        runtime.terminal.rows = 36;
+      },
+    },
+  };
+  const applySettlement = (activation, shouldPersistGeometry, hasPendingRefresh) => {
+    const settlement = settle?.({
+      activationRan: activation.ran,
+      shouldPersistGeometry,
+      hasPendingRefresh,
+    });
+    if (settlement?.shouldUpdate) {
+      runtime.viewportRefreshPending = settlement.pending;
+    }
+  };
+
+  // One initial frame plus HANDSHAKE_RETRY_LIMIT (60) bounded retries.
+  for (let attempt = 0; attempt <= 60; attempt += 1) {
+    const hasPendingRefresh = runtime.viewportRefreshPending;
+    const activation = runTerminalActivationSequence({
+      runtime,
+      windowId: "retry-exhaustion",
+      shouldPersistGeometry: true,
+      hasPendingRefresh,
+      sendGeometry: (windowId, cols, rows) =>
+        geometry.push({ windowId, cols, rows }),
+    });
+    assert.equal(activation.ran, false);
+    applySettlement(activation, true, hasPendingRefresh);
+  }
+
+  assert.equal(runtime.viewportRefreshPending, true);
+  assert.deepEqual(geometry, []);
+
+  // A later document visibility restore consumes the flag, then succeeds
+  // once layout has settled and clears the authoritative refresh state.
+  const pendingConsumed = rearmRefreshOnVisible({
+    hasPendingRefresh: () => runtime.viewportRefreshPending,
+    canRefresh: () => true,
+    clearPendingRefresh: () => {
+      runtime.viewportRefreshPending = false;
+    },
+  });
+  assert.equal(pendingConsumed, true);
+  host.clientWidth = 960;
+  host.clientHeight = 540;
+  const restored = runTerminalActivationSequence({
+    runtime,
+    windowId: "retry-exhaustion",
+    shouldPersistGeometry: true,
+    hasPendingRefresh: true,
+    sendGeometry: (windowId, cols, rows) =>
+      geometry.push({ windowId, cols, rows }),
+  });
+  applySettlement(restored, true, true);
+
+  assert.equal(restored.ran, true);
+  assert.equal(runtime.viewportRefreshPending, false);
+  assert.deepEqual(geometry, [
+    { windowId: "retry-exhaustion", cols: 120, rows: 36 },
+  ]);
+});
+
 test("pending reveal and topmost focus share one authoritative activation frame", () => {
   const frameQueue = [];
   let scheduledFrameCount = 0;
@@ -2088,6 +2222,11 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /if\s*\(!activation\.ran\)[\s\S]*?scheduleTerminalFocusActivation\(windowId,\s*\{\s*shouldPersistGeometry,\s*reason,/,
     "a bounded retry must inherit the consumed effective intent",
+  );
+  assert.match(
+    appSource,
+    /const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)/,
+    "activation settlement must rearm failed authoritative refreshes before retry exhaustion and clear successful ones before the fast path returns",
   );
   assert.match(
     appSource,

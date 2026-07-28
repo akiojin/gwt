@@ -101,6 +101,7 @@
         mergeTerminalActivationIntent,
         observeTerminalFontMetricsReady,
         rearmRefreshOnVisible,
+        resolveTerminalViewportRefreshSettlement,
         runTerminalActivationSequence,
         runTerminalFitRequest,
         runTerminalRevealActivation,
@@ -2823,6 +2824,14 @@
             should_focus: shouldFocus,
             should_persist_geometry: shouldPersistGeometry,
           });
+          const refreshSettlement = resolveTerminalViewportRefreshSettlement({
+            activationRan: activation.ran,
+            shouldPersistGeometry,
+            hasPendingRefresh,
+          });
+          if (refreshSettlement.shouldUpdate) {
+            activeRuntime.viewportRefreshPending = refreshSettlement.pending;
+          }
           if (!activation.ran) {
             activeRuntime.activationAttempts =
               (activeRuntime.activationAttempts || 0) + 1;
