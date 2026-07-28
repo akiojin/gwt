@@ -2210,6 +2210,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "process_line",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "terminal_snapshot",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3144,6 +3149,13 @@ mod tests {
         );
         assert_eq!(
             terminal_output.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
+        let process_line = backend_event_policy("process_line").expect("process_line policy");
+        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
+        assert_eq!(
+            process_line.backpressure,
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
