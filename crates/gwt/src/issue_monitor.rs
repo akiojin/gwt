@@ -3908,22 +3908,7 @@ impl IssueMonitorState {
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
-        let retained_deliveries = self
-            .pending_launch_deliveries
-            .iter()
-            .filter(|delivery| delivery.issue_number == issue_number)
-            .cloned()
-            .collect::<Vec<_>>();
         self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
-        for delivery in retained_deliveries {
-            if !self
-                .pending_launch_deliveries
-                .iter()
-                .any(|pending| pending.delivery_id == delivery.delivery_id)
-            {
-                self.pending_launch_deliveries.push_back(delivery);
-            }
-        }
     }
 
     pub fn record_launch_failed_delivery(
@@ -5941,6 +5926,95 @@ mod tests {
             0,
             "the retained outbox remains the only launch path"
         );
+    }
+
+    #[test]
+    fn autonomous_direct_launch_failure_requeues_without_replaying_old_delivery() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+
+        monitor.record_launch_failed(42, "legacy autonomous launch failure");
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the autonomous failure is scheduled through the retry path"
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        let record = monitor.autonomous_record(42).expect("retry record");
+        assert_eq!(record.phase, AutonomousPhase::Idle);
+        assert!(record.retry_not_before.is_some());
+        assert!(monitor.queue.contains(&42));
+        assert!(!monitor.active_launches.contains(&42));
+        assert!(
+            monitor.prefs().pending_launch_deliveries.is_empty(),
+            "a retryable issue cannot also replay its previous durable delivery"
+        );
+    }
+
+    #[test]
+    fn autonomous_exact_delivery_failure_consumes_outbox_before_retrying() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-42",
+            |_| false,
+        ));
+
+        assert!(monitor.record_launch_failed_delivery(
+            42,
+            "exact autonomous launch failure",
+            Some("launch:effect-42"),
+            Some("gui-a"),
+        ));
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(monitor.queue.contains(&42));
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
     }
 
     #[test]
