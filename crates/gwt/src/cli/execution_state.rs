@@ -1079,14 +1079,32 @@ fn run_reopen(
             "execution.reopen requires a non-empty params.reason".to_string(),
         )));
     }
-    crate::cli::trusted_store::with_write_lease(worktree, || {
+    let code = crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_reopen_locked(worktree, session_id, reason, out))
     })
     .map_err(|err| {
         SpecOpsError::from(ApiError::Unexpected(
             crate::cli::trusted_store::store_health_error("settling execution state", &err),
         ))
-    })?
+    })??;
+    // T-248 absorbed core: a real reopen revives the obligations the block
+    // deferred, except the kinds the recovery evidence already covers
+    // (implementation/verification are proven by the mandatory post-block
+    // Fresh run). Runs after the lease — revival takes its own.
+    if code == 0 && out.contains("execution: reopened") {
+        crate::cli::action_obligation::revive_deferred_best_effort(
+            worktree,
+            session_id,
+            &[
+                crate::cli::action_obligation::ObligationKind::IssueUpdate,
+                crate::cli::action_obligation::ObligationKind::Pr,
+            ],
+        );
+        out.push_str(
+            "execution: deferred issue/pr obligations revived — recovery re-owes the parked work\n",
+        );
+    }
+    Ok(code)
 }
 
 fn run_reopen_locked(
