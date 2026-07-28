@@ -3141,14 +3141,14 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
-                if gwt_agent::apply_host_bunx_cache_fast_path(&mut config) {
-                    tracing::debug!(
-                        agent = %config.agent_id,
-                        command = %config.command,
-                        "reusing fresh Bun agent package cache"
-                    );
-                }
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+                && gwt_agent::apply_host_bunx_cache_fast_path(&mut config)
+            {
+                tracing::debug!(
+                    agent = %config.agent_id,
+                    command = %config.command,
+                    "reusing fresh Bun agent package cache"
+                );
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
