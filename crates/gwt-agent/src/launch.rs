@@ -5,10 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
-    environment::{host_process_env, hydrate_host_base_env},
-    session::GWT_SESSION_RUNTIME_PATH_ENV,
+    environment::host_process_env,
+    session::{SessionExecutionBinding, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
@@ -185,10 +187,54 @@ pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
     resolve_runner_with_env(agent_id, version, &env)
 }
 
+/// Build the descriptor-defined argv used to check an installed built-in
+/// runner without assuming that `--version` is the first argument.
+pub fn builtin_version_probe_args(agent_id: &AgentId) -> Option<Vec<String>> {
+    let descriptor = agent_id.builtin_descriptor()?;
+    let mut args = descriptor
+        .version_prefix_args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    args.push(descriptor.version_flag.to_string());
+    Some(args)
+}
+
+/// Resolve the latest package runner against the launch environment rather
+/// than the gwt process environment.
+pub fn resolve_latest_runner_with_env(
+    agent_id: &AgentId,
+    env: &HashMap<String, String>,
+) -> ResolvedRunner {
+    resolve_latest_runner_with_effective_env(agent_id, env, &[], None)
+}
+
+/// Resolve the latest package runner with the exact environment and cwd that
+/// will be used for launch. Explicit environment entries are applied after
+/// `remove_env`; relative PATH entries are interpreted from `cwd`.
+pub(crate) fn resolve_latest_runner_with_effective_env(
+    agent_id: &AgentId,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+) -> ResolvedRunner {
+    resolve_runner_with_effective_env(agent_id, "latest", env, remove_env, cwd)
+}
+
 fn resolve_runner_with_env(
     agent_id: &AgentId,
     version: &str,
     env: &HashMap<String, String>,
+) -> ResolvedRunner {
+    resolve_runner_with_effective_env(agent_id, version, env, &[], None)
+}
+
+fn resolve_runner_with_effective_env(
+    agent_id: &AgentId,
+    version: &str,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
 ) -> ResolvedRunner {
     if version == "installed" || version.is_empty() {
         return ResolvedRunner {
@@ -211,7 +257,8 @@ fn resolve_runner_with_env(
         format!("{package}@{version}")
     };
 
-    let (executable, needs_yes) = find_bunx_or_npx_for_agent_with_env(agent_id, env);
+    let (executable, needs_yes) =
+        find_bunx_or_npx_for_agent_with_effective_env(agent_id, env, remove_env, cwd);
     let mut base_args = Vec::new();
     if needs_yes {
         base_args.push("--yes".to_string());
@@ -224,14 +271,19 @@ fn resolve_runner_with_env(
     }
 }
 
-fn resolve_custom_runner(agent: &CustomCodingAgent) -> ResolvedRunner {
+fn resolve_custom_runner_with_effective_env(
+    agent: &CustomCodingAgent,
+    env: &HashMap<String, String>,
+    cwd: Option<&Path>,
+) -> ResolvedRunner {
     match agent.agent_type {
         CustomAgentType::Command | CustomAgentType::Path => ResolvedRunner {
             executable: agent.command.clone(),
             base_args: Vec::new(),
         },
         CustomAgentType::Bunx => {
-            let (executable, needs_yes) = find_bunx_or_npx();
+            let (executable, needs_yes) =
+                find_package_runner_with_effective_env(package_runner_candidates(), env, &[], cwd);
             let mut base_args = Vec::new();
             if needs_yes {
                 base_args.push("--yes".to_string());
@@ -268,25 +320,18 @@ fn package_runner_candidates() -> &'static [(&'static str, bool)] {
     }
 }
 
-/// Find bunx or npx executable, preferring global bunx over local node_modules.
-///
-/// Returns `(executable_name, needs_yes_flag)`.
-/// - bunx: no `--yes` needed
-/// - npx: `--yes` needed to suppress interactive prompt
-fn find_bunx_or_npx() -> (String, bool) {
-    let env = host_process_env();
-    find_bunx_or_npx_with_env(&env)
-}
-
-fn find_bunx_or_npx_with_env(env: &HashMap<String, String>) -> (String, bool) {
-    find_package_runner_with_env(package_runner_candidates(), env)
-}
-
-fn find_bunx_or_npx_for_agent_with_env(
+fn find_bunx_or_npx_for_agent_with_effective_env(
     agent_id: &AgentId,
     env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
 ) -> (String, bool) {
-    find_package_runner_with_env(package_runner_candidates_for_agent(agent_id), env)
+    find_package_runner_with_effective_env(
+        package_runner_candidates_for_agent(agent_id),
+        env,
+        remove_env,
+        cwd,
+    )
 }
 
 fn package_runner_candidates_for_agent(agent_id: &AgentId) -> &'static [(&'static str, bool)] {
@@ -307,17 +352,45 @@ fn package_runner_candidates_for_agent(agent_id: &AgentId) -> &'static [(&'stati
     }
 }
 
-fn find_package_runner_with_env(
+fn find_package_runner_with_effective_env(
     candidates: &'static [(&'static str, bool)],
     env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
 ) -> (String, bool) {
-    let env = hydrate_host_base_env(env.clone());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let path = env.get("PATH").map(String::as_str);
-    find_package_runner_in_path(candidates, path, &cwd).unwrap_or_else(|| {
-        // Last resort: assume bunx is available
-        ("bunx".to_string(), false)
-    })
+    let cwd = absolute_launch_cwd(cwd);
+    let path = effective_launch_path(env, remove_env);
+    path.as_deref()
+        .and_then(|path| find_package_runner_in_path(candidates, Some(path), &cwd))
+        .unwrap_or_else(|| {
+            // Last resort: assume bunx is available
+            ("bunx".to_string(), false)
+        })
+}
+
+fn absolute_launch_cwd(cwd: Option<&Path>) -> PathBuf {
+    let process_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match cwd {
+        Some(cwd) if cwd.is_absolute() => cwd.to_path_buf(),
+        Some(cwd) => process_cwd.join(cwd),
+        None => process_cwd,
+    }
+}
+
+fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -> Option<String> {
+    if let Some((_, value)) = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
+        return Some(value.clone());
+    }
+    if remove_env
+        .iter()
+        .any(|key| key.eq_ignore_ascii_case("PATH"))
+    {
+        return None;
+    }
+    host_process_env()
+        .into_iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value)
 }
 
 fn find_package_runner_in_path(
@@ -325,8 +398,9 @@ fn find_package_runner_in_path(
     path: Option<&str>,
     cwd: &Path,
 ) -> Option<(String, bool)> {
+    let path = path.and_then(|path| absolute_search_path(path, cwd));
     for (name, needs_yes) in candidates {
-        let found = match path {
+        let found = match path.as_deref() {
             Some(path) => which::which_in(name, Some(path), cwd),
             None => which::which(name),
         };
@@ -339,6 +413,47 @@ fn find_package_runner_in_path(
         }
     }
     None
+}
+
+fn absolute_search_path(path: &str, cwd: &Path) -> Option<std::ffi::OsString> {
+    let entries = std::env::split_paths(std::ffi::OsStr::new(path)).map(|entry| {
+        if entry.as_os_str().is_empty() {
+            cwd.to_path_buf()
+        } else if entry.is_absolute() {
+            entry
+        } else {
+            cwd.join(entry)
+        }
+    });
+    std::env::join_paths(entries).ok()
+}
+
+/// Resolve a direct runner to the absolute executable selected by the launch
+/// environment. Path-bearing commands are made absolute without requiring
+/// them to exist so the canonical health probe remains the authority that
+/// accepts or rejects the candidate.
+pub(crate) fn resolve_direct_runner_with_effective_env(
+    command: &str,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let cwd = absolute_launch_cwd(cwd);
+    let candidate = Path::new(command);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            cwd.join(candidate)
+        };
+        return Some(candidate.display().to_string());
+    }
+
+    let path = effective_launch_path(env, remove_env)?;
+    let path = absolute_search_path(&path, &cwd)?;
+    which::which_in(command, Some(path), &cwd)
+        .ok()
+        .map(|candidate| candidate.display().to_string())
 }
 
 /// Platform priority list of `npx` fallback executables consulted when the host
@@ -366,14 +481,34 @@ fn npx_fallback_candidates() -> &'static [(&'static str, bool)] {
 /// bare `"npx"` name when no candidate resolves on the launch `PATH`, preserving
 /// the prior behavior for environments without a resolvable npx.
 pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    find_package_runner_in_path(
-        npx_fallback_candidates(),
-        env.get("PATH").map(String::as_str),
-        &cwd,
-    )
-    .map(|(executable, _needs_yes)| executable)
-    .unwrap_or_else(|| "npx".to_string())
+    resolve_host_npx_fallback_executable_with_effective_env(env, &[], None)
+}
+
+pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+) -> String {
+    let cwd = absolute_launch_cwd(cwd);
+    effective_launch_path(env, remove_env)
+        .as_deref()
+        .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
+        .map(|(executable, _needs_yes)| executable)
+        .unwrap_or_else(|| "npx".to_string())
+}
+
+/// Execution lifecycle intent is independent from provider conversation
+/// continuity. In particular, `SessionMode::Resume` can resume the same
+/// conversation while a coordinator starts a new producing generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ExecutionLaunchIntent {
+    /// Preserve the legacy launch classifier. Resume/Continue remain
+    /// inspection-only unless an explicit coordinator supplies a binding.
+    #[default]
+    Automatic,
+    /// Launch a producing continuation already authorized by the execution
+    /// coordinator. The binding is installed atomically at Session bootstrap.
+    PreparedContinuation(SessionExecutionBinding),
 }
 
 /// Reuse a fresh Bun-created package executable for a host launch.
@@ -735,6 +870,7 @@ pub struct LaunchConfig {
     /// feedback wiring but must not take over (or be gated by) the
     /// implementing session's execution lifecycle.
     pub suppress_execution_control: bool,
+    pub execution_intent: ExecutionLaunchIntent,
 }
 
 /// Permission mode for agent launch.
@@ -794,6 +930,7 @@ pub struct AgentLaunchBuilder {
     is_ephemeral: bool,
     ephemeral_base_ref: Option<String>,
     suppress_execution_control: bool,
+    execution_intent: ExecutionLaunchIntent,
 }
 
 impl AgentLaunchBuilder {
@@ -830,6 +967,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: false,
             ephemeral_base_ref: None,
             suppress_execution_control: false,
+            execution_intent: ExecutionLaunchIntent::Automatic,
         }
     }
 
@@ -846,6 +984,13 @@ impl AgentLaunchBuilder {
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;
+        self
+    }
+
+    /// Resume a provider conversation as the producing pane for a generation
+    /// that the Continue Work coordinator has already prepared.
+    pub fn prepared_continuation(mut self, binding: SessionExecutionBinding) -> Self {
+        self.execution_intent = ExecutionLaunchIntent::PreparedContinuation(binding);
         self
     }
 
@@ -1034,16 +1179,31 @@ impl AgentLaunchBuilder {
         }
 
         // Resolve runner (installed binary vs bunx/npx)
-        let runner = self
+        let mut runner_env = self
             .custom_agent
             .as_ref()
-            .map(resolve_custom_runner)
-            .unwrap_or_else(|| {
-                resolve_runner(
+            .map(|agent| agent.env.clone())
+            .unwrap_or_default();
+        runner_env.extend(self.custom_agent_env.clone());
+        runner_env.extend(self.env_overrides.clone());
+        let runner = self.custom_agent.as_ref().map_or_else(
+            || {
+                resolve_runner_with_effective_env(
                     &self.agent_id,
                     self.version.as_deref().unwrap_or("installed"),
+                    &runner_env,
+                    &[],
+                    self.working_dir.as_deref(),
                 )
-            });
+            },
+            |agent| {
+                resolve_custom_runner_with_effective_env(
+                    agent,
+                    &runner_env,
+                    self.working_dir.as_deref(),
+                )
+            },
+        );
 
         let mut args = runner.base_args;
         if let Some(custom_agent) = self.custom_agent.as_ref() {
@@ -1145,6 +1305,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: self.is_ephemeral,
             ephemeral_base_ref: self.ephemeral_base_ref,
             suppress_execution_control: self.suppress_execution_control,
+            execution_intent: self.execution_intent,
         }
     }
 
@@ -2398,6 +2559,53 @@ mod tests {
     }
 
     #[test]
+    fn resume_conversation_and_prepared_execution_intents_are_independent() {
+        let binding = crate::SessionExecutionBinding {
+            schema_version: crate::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-continuation".to_string(),
+            repo_hash: "repo-hash".to_string(),
+            owner_kind: "spec".to_string(),
+            owner_number: 2359,
+            identity: crate::ExecutionBindingIdentity {
+                generation_id: "generation-successor".to_string(),
+                binding_id: "binding-operation-1".to_string(),
+                ledger_head_hash: "prepared-attempt-hash".to_string(),
+            },
+            capability_generation: 2,
+        };
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("conversation-existing")
+            .prepared_continuation(binding.clone())
+            .build();
+
+        assert_eq!(config.session_mode, SessionMode::Resume);
+        assert_eq!(
+            config.execution_intent,
+            ExecutionLaunchIntent::PreparedContinuation(binding)
+        );
+        assert!(
+            config.args.iter().any(|arg| arg == "conversation-existing"),
+            "the provider conversation remains a Resume even though execution is producing"
+        );
+    }
+
+    #[test]
+    fn ordinary_resume_defaults_to_automatic_execution_intent() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("conversation-inspection")
+            .build();
+
+        assert_eq!(config.session_mode, SessionMode::Resume);
+        assert_eq!(
+            config.execution_intent,
+            ExecutionLaunchIntent::Automatic,
+            "Automatic preserves the existing classifier where Resume is inspection-only"
+        );
+    }
+
+    #[test]
     fn build_claude_has_telemetry_disable_vars() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
 
@@ -2721,7 +2929,13 @@ mod tests {
             ("HOME".to_string(), home.path().display().to_string()),
         ]);
 
-        let (executable, needs_yes) = find_bunx_or_npx_with_env(&env);
+        let hydrated = hydrate_host_base_env(env);
+        let (executable, needs_yes) = find_package_runner_with_effective_env(
+            package_runner_candidates(),
+            &hydrated,
+            &[],
+            None,
+        );
 
         assert_eq!(PathBuf::from(executable), bunx);
         assert!(!needs_yes);
@@ -3145,6 +3359,77 @@ mod tests {
         let resolved = resolve_host_npx_fallback_executable(&env);
 
         assert_eq!(PathBuf::from(resolved), temp.path().join("npx"));
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn latest_runner_resolves_relative_path_against_launch_cwd() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let launch_cwd = temp.path().join("project");
+        let bin = launch_cwd.join("tools");
+        std::fs::create_dir_all(&bin).expect("create launch PATH directory");
+        let npx = bin.join("npx");
+        write_test_runner(&npx);
+        let env = HashMap::from([("PATH".to_string(), "tools".to_string())]);
+
+        let runner = resolve_latest_runner_with_effective_env(
+            &AgentId::ClaudeCode,
+            &env,
+            &[],
+            Some(&launch_cwd),
+        );
+
+        assert_eq!(PathBuf::from(runner.executable), npx);
+        assert_eq!(runner.base_args[0], "--yes");
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn builder_latest_selection_uses_explicit_path_and_launch_cwd() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let launch_cwd = temp.path().join("project");
+        let bin = launch_cwd.join("tools");
+        std::fs::create_dir_all(&bin).expect("create launch PATH directory");
+        let npx = bin.join("npx");
+        write_test_runner(&npx);
+
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(&launch_cwd)
+            .version("latest")
+            .env("PATH", "tools")
+            .build();
+
+        assert_eq!(PathBuf::from(config.command), npx);
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn package_runner_effective_path_applies_remove_before_explicit_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let inherited_bin = temp.path().join("inherited");
+        let explicit_bin = temp.path().join("explicit");
+        std::fs::create_dir_all(&inherited_bin).expect("create inherited bin");
+        std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
+        write_test_runner(&inherited_bin.join("npx"));
+        write_test_runner(&explicit_bin.join("npx"));
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &inherited_bin);
+
+        let removed = resolve_host_npx_fallback_executable_with_effective_env(
+            &HashMap::new(),
+            &["PATH".to_string()],
+            Some(temp.path()),
+        );
+        let overridden = resolve_host_npx_fallback_executable_with_effective_env(
+            &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
+            &["PATH".to_string()],
+            Some(temp.path()),
+        );
+
+        assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");
+        assert_eq!(PathBuf::from(overridden), explicit_bin.join("npx"));
     }
 
     #[cfg(not(windows))]

@@ -193,6 +193,21 @@ pub enum AttachmentProgressPhase {
     Failed,
 }
 
+/// Final, client-scoped result of one correlated `Continue work` operation.
+///
+/// The public result deliberately carries no Session, conversation, execution
+/// binding, Host route, or capability identity. Those values are resolved and
+/// verified by the current Host and remain internal authorization evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinueWorkOutcomeKind {
+    FocusedExisting,
+    ContinuedConversation,
+    StartedWithHandoff,
+    ConflictUnknown,
+    Failed,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -586,6 +601,9 @@ pub enum FrontendEvent {
     /// which previous agent to restart without going through the Launch
     /// Wizard.
     ListResumableAgents {
+        /// Retry correlation only; this value grants no authority.
+        #[serde(default)]
+        operation_id: String,
         #[serde(default)]
         workspace_id: Option<String>,
     },
@@ -600,9 +618,22 @@ pub enum FrontendEvent {
     /// current viewport so the spawned agent window appears at a sensible
     /// position inside the visible canvas.
     ResumeWorkspaceAgent {
+        /// Retry correlation only; this value grants no authority.
+        #[serde(default)]
+        operation_id: String,
         session_id: String,
         #[serde(default)]
         agent_session_id: Option<String>,
+        bounds: WindowGeometry,
+    },
+    /// Start or recover the producing Execution for one opaque Work identity.
+    ///
+    /// Caller-controlled Session/conversation/generation/binding identifiers
+    /// are intentionally absent. `operation_id` is a retry correlation key,
+    /// not authority.
+    ContinueWork {
+        operation_id: String,
+        work_id: String,
         bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {
@@ -1817,6 +1848,8 @@ pub enum BackendEvent {
     /// so the picker modal can render an explicit "Nothing to resume"
     /// notice instead of silently leaving the user without feedback.
     WorkspaceResumableAgents {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         agents: Vec<crate::launch_wizard::ResumableAgentView>,
         #[serde(skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
@@ -1825,6 +1858,8 @@ pub enum BackendEvent {
     /// Client-scoped reply so the picker modal can keep itself open and
     /// re-enable the selected entry with the user-facing reason.
     WorkspaceResumeAgentError {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         session_id: String,
         message: String,
     },
@@ -1833,9 +1868,24 @@ pub enum BackendEvent {
     /// focused. Lets the frontend settle its pending Resume UI
     /// deterministically instead of guessing from broadcasts.
     WorkspaceResumeAgentStarted {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         session_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+    },
+    /// Strong, exactly-correlated result for [`FrontendEvent::ContinueWork`].
+    /// Success variants are emitted only after their required Host/ledger/Work
+    /// readback; scheduling or PTY allocation is never success.
+    ContinueWorkOutcome {
+        operation_id: String,
+        work_id: String,
+        outcome: ContinueWorkOutcomeKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        retryable: bool,
     },
     LaunchProgress {
         id: String,
@@ -2249,10 +2299,15 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
     ),
+    // Issue #3315: attachment progress is a lossless latest-state snapshot
+    // coalesced per operation (`operation_id`), not a droppable ephemeral
+    // status. This guarantees the terminal `Attached` / `Failed` phase reaches
+    // the client even under a lossy terminal-output flood, so the frontend
+    // surface never gets stuck at `Queued · 100%`.
     BackendEventPolicy::new(
         "attachment_progress",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "window_state",
@@ -2463,6 +2518,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     // always-deliver (same transport guarantee as errors).
     BackendEventPolicy::new(
         "workspace_resume_agent_started",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "continue_work_outcome",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
@@ -2709,6 +2769,7 @@ impl BackendEvent {
             BackendEvent::WorkspaceResumableAgents { .. } => "workspace_resumable_agents",
             BackendEvent::WorkspaceResumeAgentError { .. } => "workspace_resume_agent_error",
             BackendEvent::WorkspaceResumeAgentStarted { .. } => "workspace_resume_agent_started",
+            BackendEvent::ContinueWorkOutcome { .. } => "continue_work_outcome",
             BackendEvent::LaunchProgress { .. } => "launch_progress",
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
@@ -2809,9 +2870,9 @@ mod tests {
     use super::{
         backend_event_policy, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
-        FrontendEvent, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-        IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-        UiTracePayload, BACKEND_EVENT_POLICIES,
+        ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
+        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
+        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -3131,6 +3192,115 @@ mod tests {
     fn workspace_resume_agent_started_policy_guarantees_delivery() {
         let policy = backend_event_policy("workspace_resume_agent_started")
             .expect("workspace_resume_agent_started registered in BACKEND_EVENT_POLICIES");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
+        );
+    }
+
+    #[test]
+    fn workspace_resume_agent_wire_contract_echoes_operation_correlation() {
+        let list_request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "list_resumable_agents",
+            "operation_id": "list-operation-1",
+            "workspace_id": "workspace-1"
+        }))
+        .expect("deserialize correlated list request");
+        assert!(matches!(
+            list_request,
+            FrontendEvent::ListResumableAgents { operation_id, .. }
+                if operation_id == "list-operation-1"
+        ));
+
+        let list = serde_json::to_value(BackendEvent::WorkspaceResumableAgents {
+            operation_id: "list-operation-1".to_string(),
+            agents: Vec::new(),
+            workspace_id: Some("workspace-1".to_string()),
+        })
+        .expect("serialize correlated list response");
+        assert_eq!(list["operation_id"], "list-operation-1");
+
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "resume_workspace_agent",
+            "operation_id": "resume-operation-1",
+            "session_id": "session-1",
+            "bounds": { "x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0 }
+        }))
+        .expect("deserialize correlated Resume request");
+        assert!(matches!(
+            request,
+            FrontendEvent::ResumeWorkspaceAgent { operation_id, .. }
+                if operation_id == "resume-operation-1"
+        ));
+
+        let started = serde_json::to_value(BackendEvent::WorkspaceResumeAgentStarted {
+            operation_id: "resume-operation-1".to_string(),
+            session_id: "session-1".to_string(),
+            branch: None,
+        })
+        .expect("serialize correlated Resume ack");
+        assert_eq!(started["operation_id"], "resume-operation-1");
+    }
+
+    #[test]
+    fn continue_work_wire_contract_carries_only_correlated_intent_and_typed_outcome() {
+        let request = serde_json::json!({
+            "kind": "continue_work",
+            "operation_id": "continue-work-operation-1",
+            "work_id": "work-session-opaque",
+            "bounds": {
+                "x": 12.0,
+                "y": 24.0,
+                "width": 960.0,
+                "height": 640.0
+            }
+        });
+        let parsed: FrontendEvent =
+            serde_json::from_value(request).expect("parse Continue work request");
+        assert!(matches!(
+            parsed,
+            FrontendEvent::ContinueWork {
+                operation_id,
+                work_id,
+                ..
+            } if operation_id == "continue-work-operation-1"
+                && work_id == "work-session-opaque"
+        ));
+
+        let event = BackendEvent::ContinueWorkOutcome {
+            operation_id: "continue-work-operation-1".to_string(),
+            work_id: "work-session-opaque".to_string(),
+            outcome: ContinueWorkOutcomeKind::ContinuedConversation,
+            message: None,
+            error_code: None,
+            retryable: false,
+        };
+        let value = serde_json::to_value(event).expect("serialize Continue work outcome");
+        assert_eq!(value["kind"], "continue_work_outcome");
+        assert_eq!(value["operation_id"], "continue-work-operation-1");
+        assert_eq!(value["work_id"], "work-session-opaque");
+        assert_eq!(value["outcome"], "continued_conversation");
+        assert_eq!(value["retryable"], false);
+        for forbidden in [
+            "session_id",
+            "conversation_id",
+            "generation_id",
+            "binding_id",
+            "host_route",
+            "token",
+        ] {
+            assert!(
+                value.get(forbidden).is_none(),
+                "public outcome must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_work_outcome_policy_guarantees_delivery() {
+        let policy = backend_event_policy("continue_work_outcome")
+            .expect("continue_work_outcome registered in BACKEND_EVENT_POLICIES");
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
         assert_eq!(
             policy.backpressure,
@@ -4066,6 +4236,31 @@ mod tests {
             event.delivery_policy().kind,
             "attachment_progress",
             "attachment progress must be registered in the backend event policy catalog"
+        );
+    }
+
+    // Issue #3315: attachment progress must be delivered as a lossless
+    // latest-state snapshot (coalesced per operation) so the terminal
+    // `Attached` / `Failed` phase is never dropped under a lossy output flood.
+    // The former `EphemeralStatus` / `BestEffort` class treated it as droppable,
+    // which left the frontend surface stuck at `Queued · 100%`.
+    #[test]
+    fn attachment_progress_delivers_as_lossless_snapshot() {
+        let policy =
+            backend_event_policy("attachment_progress").expect("attachment_progress policy");
+        assert_eq!(
+            policy.delivery,
+            BackendEventDeliveryClass::Snapshot,
+            "attachment progress must be a lossless snapshot, not a droppable ephemeral status"
+        );
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot,
+            "attachment progress coalesces the latest state per client scope"
+        );
+        assert!(
+            !policy.coalesces_on_frontend(),
+            "snapshot delivery is server-coalesced, not frontend LatestWins"
         );
     }
 

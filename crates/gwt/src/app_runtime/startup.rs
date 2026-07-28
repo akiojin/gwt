@@ -136,6 +136,12 @@ pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id:
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
+        // Fresh linked-owner launch authority is durable in the Session and
+        // owner ledger, while readiness capabilities are intentionally
+        // process-local. Reconcile that durable pair before startup migrations
+        // or auto-resume can observe a partial Activated/Aborted transaction.
+        self.reconcile_durable_fresh_execution_launches();
+
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
         // Workspace Overview Completed column reflects past completions on the
@@ -606,7 +612,7 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
-    fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+    pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
             return Vec::new();
         };
@@ -616,8 +622,9 @@ impl AppRuntime {
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
             .filter_map(|path| {
                 let session_id = path.file_stem()?.to_str()?;
-                gwt_agent::update_session(&self.sessions_dir, session_id, |session| {
-                    if session.worktree_path.exists()
+                gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
+                    if session.status != gwt_agent::AgentStatus::Interrupted
+                        && session.worktree_path.exists()
                         && session.should_mark_interrupted_from_lifecycle()
                     {
                         session.update_status(gwt_agent::AgentStatus::Interrupted);

@@ -728,12 +728,14 @@ impl AppRuntime {
     pub(crate) fn list_resumable_agents_events(
         &mut self,
         client_id: &str,
+        operation_id: String,
         workspace_id: Option<String>,
     ) -> Vec<OutboundEvent> {
         let agents = self.collect_resumable_agents(workspace_id.as_deref());
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::WorkspaceResumableAgents {
+                operation_id,
                 agents,
                 workspace_id,
             },
@@ -743,6 +745,7 @@ impl AppRuntime {
     pub(crate) fn resume_workspace_agent_events(
         &mut self,
         client_id: &str,
+        operation_id: String,
         session_id: String,
         agent_session_id: Option<String>,
         bounds: WindowGeometry,
@@ -751,6 +754,7 @@ impl AppRuntime {
             vec![OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentError {
+                    operation_id: operation_id.clone(),
                     session_id: session_id.clone(),
                     message,
                 },
@@ -762,6 +766,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentStarted {
+                    operation_id: operation_id.clone(),
                     session_id: session_id.to_string(),
                     branch,
                 },
@@ -884,9 +889,6 @@ impl AppRuntime {
         if let Some(level) = session.reasoning_level.clone() {
             builder = builder.reasoning_level(level);
         }
-        if session.skip_permissions {
-            builder = builder.skip_permissions(true);
-        }
         if session.fast_mode_enabled() {
             builder = builder.fast_mode(true);
         }
@@ -917,11 +919,12 @@ impl AppRuntime {
             );
         } else if session.agent_id.supports_resume_picker() {
             builder = builder.session_mode(gwt_agent::SessionMode::Resume);
+        } else if session.agent_id.supports_continue_latest() {
+            builder = builder.session_mode(gwt_agent::SessionMode::Continue);
         } else {
-            // Legacy metadata-only rows for agents without a native resume
-            // picker remain a fresh start fallback. Claude Code / Codex use
-            // their provider-native picker instead of silently losing Resume.
-            builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+            return reply_error(
+                "No saved conversation is available for this Session; use Continue work to start a linked execution with handoff context.".to_string(),
+            );
         }
 
         let mut config = builder.build();
@@ -1043,6 +1046,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentStarted {
+                    operation_id: String::new(),
                     session_id,
                     branch: Some(branch),
                 },

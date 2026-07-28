@@ -95,6 +95,7 @@ struct RuntimeStopThreads {
 
 mod attachments;
 mod board;
+mod continuation;
 mod file_windows;
 mod frontend_action_log;
 mod knowledge;
@@ -132,14 +133,15 @@ use knowledge::knowledge_error_event;
 use knowledge::KnowledgeRefreshTask;
 pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSearchRequest};
 #[cfg(test)]
-use launch::AgentLaunchCompletion;
-#[cfg(test)]
 use launch::{
+    codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     maybe_register_codex_managed_hook_trust_for_launch,
 };
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
+#[cfg(test)]
+pub(crate) use launch::{AgentLaunchCompletion, AgentLaunchDisposition};
 pub use launch::{AgentLaunchResult, LaunchWizardMemoryCache, ProcessLaunch};
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
@@ -198,6 +200,60 @@ pub(crate) struct WorkspaceResumeContext {
     pub(crate) next_action: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingContinueWork {
+    pub(crate) client_id: ClientId,
+    pub(crate) operation_id: String,
+    pub(crate) work_id: String,
+    pub(crate) project_root: PathBuf,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) work_branch: String,
+    pub(crate) work_agent_id: gwt_agent::AgentId,
+    pub(crate) work_agent_session_id: Option<String>,
+    pub(crate) execution: PendingContinueWorkExecution,
+    pub(crate) binding: gwt_agent::SessionExecutionBinding,
+    pub(crate) readiness_nonce: String,
+    pub(crate) outcome: gwt::ContinueWorkOutcomeKind,
+    pub(crate) resume_context: WorkspaceResumeContext,
+    pub(crate) predecessor_session_id: String,
+    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PendingContinueWorkExecution {
+    Successor(gwt::cli::execution_state::SuccessorRequest),
+    Takeover(gwt::cli::execution_state::GenerationTakeoverRequest),
+}
+
+/// Explicit linked-owner launch that is waiting for an authenticated
+/// SessionStart before replacing an integrity-valid Blocked generation.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingFreshExecutionLaunch {
+    pub(crate) operation_id: String,
+    pub(crate) project_root: PathBuf,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    pub(crate) request: gwt::cli::execution_state::SuccessorRequest,
+    pub(crate) binding: gwt_agent::SessionExecutionBinding,
+    pub(crate) session_identity: gwt_agent::SessionExecutionIdentity,
+    pub(crate) readiness_nonce: String,
+    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+    pub(crate) base_branch: Option<String>,
+    pub(crate) linked_issue_number: Option<u64>,
+    pub(crate) resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) launch_feedback_context: Option<LaunchFeedbackContext>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedContinueWorkOutcome {
+    pub(crate) work_id: String,
+    pub(crate) outcome: gwt::ContinueWorkOutcomeKind,
+    pub(crate) message: Option<String>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) retryable: bool,
+}
+
 impl WorkspaceResumeContext {
     fn purpose_title(&self) -> Option<String> {
         self.title
@@ -232,6 +288,41 @@ pub struct OutboundEvent {
 pub(crate) enum AgentFrontendDispatchOutcome {
     Dispatched(Vec<OutboundEvent>),
     StaleCapability,
+    ExecutionAuthorityUnavailable,
+}
+
+#[cfg(test)]
+type AgentDispatchTestHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+#[cfg(test)]
+std::thread_local! {
+    static AGENT_AFTER_DURABLE_CHECK_TEST_HOOK: AgentDispatchTestHook =
+        const { AgentDispatchTestHook::new(None) };
+    static AGENT_LEASED_MUTATION_TEST_HOOK: AgentDispatchTestHook =
+        const { AgentDispatchTestHook::new(None) };
+}
+
+#[cfg(test)]
+fn set_agent_after_durable_check_test_hook(hook: impl FnOnce() + 'static) {
+    AGENT_AFTER_DURABLE_CHECK_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+#[cfg(test)]
+fn set_agent_leased_mutation_test_hook(hook: impl FnOnce() + 'static) {
+    AGENT_LEASED_MUTATION_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+#[cfg(test)]
+fn run_agent_dispatch_test_hook(slot: &'static std::thread::LocalKey<AgentDispatchTestHook>) {
+    slot.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 impl OutboundEvent {
@@ -510,6 +601,20 @@ pub struct AppRuntime {
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
+    /// Prepared producing continuations keyed by their pending/active window.
+    /// The entry remains until an authenticated SessionStart finalizes the
+    /// generation + Work transaction and promotes the same bearer.
+    pub(crate) pending_continue_work: HashMap<String, PendingContinueWork>,
+    /// Fresh linked-owner launches prepared from legacy Blocked authority.
+    /// Like Continue work, these remain non-producing until SessionStart
+    /// proves the exact candidate binding and the successor CAS commits.
+    pub(crate) pending_fresh_execution_launches: HashMap<String, PendingFreshExecutionLaunch>,
+    /// Process-local fast replay for a lost client response. Durable
+    /// reconciliation still uses the owner ledger + Work commit receipt.
+    pub(crate) continue_work_outcomes: HashMap<String, CachedContinueWorkOutcome>,
+    /// Additional WebSocket clients waiting on an in-flight operation after
+    /// reconnect/retry. The original requester remains on PendingContinueWork.
+    pub(crate) continue_work_waiters: HashMap<String, HashSet<ClientId>>,
     /// SPEC-2359 W-17 (FR-398, Issue #3034): launches whose window is
     /// registered but whose agent session is not live yet, keyed by
     /// (tab, branch, working dir). A re-click in this window focuses the
@@ -519,6 +624,9 @@ pub struct AppRuntime {
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Historical provider conversations that are deliberately detached from
+    /// Work execution authority. Input and attachment paths fail closed.
+    pub(crate) inspection_agent_windows: HashSet<String>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -851,9 +959,14 @@ impl AppRuntime {
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
+            pending_continue_work: HashMap::new(),
+            pending_fresh_execution_launches: HashMap::new(),
+            continue_work_outcomes: HashMap::new(),
+            continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            inspection_agent_windows: HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
@@ -2488,16 +2601,27 @@ impl AppRuntime {
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(&client_id, source, journal_id)
             }
-            FrontendEvent::ListResumableAgents { workspace_id } => {
-                self.list_resumable_agents_events(&client_id, workspace_id)
-            }
+            FrontendEvent::ListResumableAgents {
+                operation_id,
+                workspace_id,
+            } => self.list_resumable_agents_events(&client_id, operation_id, workspace_id),
             FrontendEvent::ResumeWorkspaceAgent {
+                operation_id,
                 session_id,
                 agent_session_id,
                 bounds,
-            } => {
-                self.resume_workspace_agent_events(&client_id, session_id, agent_session_id, bounds)
-            }
+            } => self.resume_workspace_agent_events(
+                &client_id,
+                operation_id,
+                session_id,
+                agent_session_id,
+                bounds,
+            ),
+            FrontendEvent::ContinueWork {
+                operation_id,
+                work_id,
+                bounds,
+            } => self.continue_work_events(&client_id, operation_id, work_id, bounds),
             FrontendEvent::ResumeBranchLatestAgent {
                 id,
                 branch_name,
@@ -2818,17 +2942,94 @@ impl AppRuntime {
         grant: AgentCapabilityGrant,
         request: AgentFrontendRequest,
     ) -> AgentFrontendDispatchOutcome {
-        let current = self
-            .agent_capability_issuer
-            .as_ref()
-            .is_some_and(|issuer| issuer.grant_is_current(&grant));
-        if !current {
+        let Some(issuer) = self.agent_capability_issuer.clone() else {
+            return AgentFrontendDispatchOutcome::StaleCapability;
+        };
+        if !issuer.grant_is_current(&grant) {
             tracing::warn!(
                 target: "gwt_security",
                 "queued agent pane request rejected after capability rotation or revoke"
             );
             return AgentFrontendDispatchOutcome::StaleCapability;
         }
+        if request.requires_producing_authority()
+            && !grant.principal().authorizes_producing_mutation()
+        {
+            tracing::warn!(
+                target: "gwt_security",
+                "observation-only agent pane request rejected before runtime mutation"
+            );
+            return AgentFrontendDispatchOutcome::StaleCapability;
+        }
+        let durable_mutation =
+            grant.principal().authorizes_producing_mutation() && request.mutates_host_state();
+        if durable_mutation {
+            match issuer.durable_authority(&grant) {
+                AgentDurableAuthority::Current => {}
+                AgentDurableAuthority::Stale | AgentDurableAuthority::ObservationOnly => {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "queued agent pane request rejected by durable execution binding fence"
+                    );
+                    return AgentFrontendDispatchOutcome::StaleCapability;
+                }
+                AgentDurableAuthority::Unavailable => {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "queued agent pane request rejected because execution authority is unavailable"
+                    );
+                    return AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable;
+                }
+            }
+            #[cfg(test)]
+            run_agent_dispatch_test_hook(&AGENT_AFTER_DURABLE_CHECK_TEST_HOOK);
+            if request.requires_producing_authority() {
+                let binding = grant
+                    .principal()
+                    .active_execution_binding()
+                    .expect("producing principal carries an active binding")
+                    .clone();
+                return match gwt::cli::execution_state::with_current_active_execution_binding_lease_wait(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &binding,
+                    std::time::Duration::ZERO,
+                    || {
+                        #[cfg(test)]
+                        run_agent_dispatch_test_hook(&AGENT_LEASED_MUTATION_TEST_HOOK);
+                        self.dispatch_agent_frontend_event_with_current_grant(
+                            &issuer, client_id, grant, request,
+                        )
+                    },
+                ) {
+                    Ok(Some(outcome)) => outcome,
+                    Ok(None) => {
+                        tracing::warn!(
+                            target: "gwt_security",
+                            "queued agent pane request rejected after leased execution authority changed"
+                        );
+                        AgentFrontendDispatchOutcome::StaleCapability
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "gwt_security",
+                            "queued agent pane request rejected because leased execution authority is unavailable"
+                        );
+                        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
+                    }
+                };
+            }
+        }
+
+        self.dispatch_agent_frontend_event_with_current_grant(&issuer, client_id, grant, request)
+    }
+
+    fn dispatch_agent_frontend_event_with_current_grant(
+        &mut self,
+        issuer: &AgentCapabilityIssuer,
+        client_id: ClientId,
+        grant: AgentCapabilityGrant,
+        request: AgentFrontendRequest,
+    ) -> AgentFrontendDispatchOutcome {
         match request {
             AgentFrontendRequest::CloseWindow {
                 id,
@@ -2850,11 +3051,16 @@ impl AppRuntime {
                 );
                 AgentFrontendDispatchOutcome::Dispatched(Vec::new())
             }
-            request => AgentFrontendDispatchOutcome::Dispatched(self.handle_agent_frontend_event(
-                client_id,
-                grant.principal().clone(),
-                request,
-            )),
+            request => {
+                let principal = grant.principal().clone();
+                issuer
+                    .with_current_grant(&grant, || {
+                        self.handle_agent_frontend_event(client_id, principal, request)
+                    })
+                    .map_or(AgentFrontendDispatchOutcome::StaleCapability, |events| {
+                        AgentFrontendDispatchOutcome::Dispatched(events)
+                    })
+            }
         }
     }
 
