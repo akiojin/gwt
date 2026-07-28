@@ -43,8 +43,9 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
     drive_local_issue_monitor_claim_effects_with, local_issue_monitor_fallback_commit_count,
-    prepare_local_issue_monitor_claim_proposals, rebase_mutate_and_persist_issue_monitor_state,
-    record_issue_monitor_scan_failures, reset_local_issue_monitor_fallback_commit_count,
+    local_issue_monitor_remote_scan_count, prepare_local_issue_monitor_claim_proposals,
+    rebase_mutate_and_persist_issue_monitor_state, record_issue_monitor_scan_failures,
+    reset_local_issue_monitor_fallback_commit_count, reset_local_issue_monitor_remote_scan_count,
     save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
     AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
     AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, IssueMonitorProfileSaveContext,
@@ -17407,18 +17408,9 @@ fn app_runtime_issue_monitor_control_never_scans_or_claims_on_gui_thread() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _gh_lock = fake_gh_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let fake_gh = write_fake_gh_issue_list(temp.path());
-    let marker = temp.path().join("gh-called");
-    let _path = prepend_fake_gh_to_path(&fake_gh);
-    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
-    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
-    let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &marker);
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -17435,12 +17427,17 @@ fn app_runtime_issue_monitor_control_never_scans_or_claims_on_gui_thread() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    reset_local_issue_monitor_remote_scan_count();
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetIssueMonitorEnabled { enabled: true },
     );
 
-    assert!(!marker.exists(), "GUI control must not invoke gh");
+    assert_eq!(
+        local_issue_monitor_remote_scan_count(),
+        0,
+        "GUI control must not enter the remote scan path"
+    );
     assert!(
         runtime.window_details.is_empty(),
         "GUI control must not launch"
@@ -18624,8 +18621,14 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    reset_local_issue_monitor_remote_scan_count();
     let events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    assert_eq!(
+        local_issue_monitor_remote_scan_count(),
+        1,
+        "the explicit List action proves the remote-scan test probe is live"
+    );
 
     let status = events
         .iter()

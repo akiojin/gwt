@@ -681,6 +681,9 @@ thread_local! {
     static LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static LOCAL_ISSUE_MONITOR_REMOTE_SCANS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 #[cfg(test)]
@@ -691,6 +694,16 @@ fn reset_local_issue_monitor_fallback_commit_count() {
 #[cfg(test)]
 fn local_issue_monitor_fallback_commit_count() -> usize {
     LOCAL_ISSUE_MONITOR_FALLBACK_COMMITS.get()
+}
+
+#[cfg(test)]
+fn reset_local_issue_monitor_remote_scan_count() {
+    LOCAL_ISSUE_MONITOR_REMOTE_SCANS.set(0);
+}
+
+#[cfg(test)]
+fn local_issue_monitor_remote_scan_count() -> usize {
+    LOCAL_ISSUE_MONITOR_REMOTE_SCANS.get()
 }
 
 fn load_mutate_and_persist_issue_monitor_state<T: Default>(
@@ -2806,6 +2819,9 @@ impl AppRuntime {
             });
             return self.issue_monitor_snapshot_events_for(client_id, monitor);
         }
+        #[cfg(test)]
+        LOCAL_ISSUE_MONITOR_REMOTE_SCANS
+            .set(LOCAL_ISSUE_MONITOR_REMOTE_SCANS.get().saturating_add(1));
         let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             std::time::Instant::now() + std::time::Duration::from_secs(60),
         );
