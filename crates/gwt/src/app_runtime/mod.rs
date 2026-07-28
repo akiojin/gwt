@@ -1,4 +1,5 @@
 use super::*;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 #[derive(Clone)]
 pub enum AppEventProxy {
@@ -526,6 +527,15 @@ pub struct AppRuntime {
     /// "safe to delete" badge and the derived Done-equivalent classification.
     pub(crate) work_merged_branches:
         HashMap<PathBuf, HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    /// SPEC-3170 FR-075: normalized branches whose materialized worktree was
+    /// dirty during the latest background merge scan. Projection rendering
+    /// consumes this cache instead of probing every worktree on the event
+    /// loop.
+    pub(crate) work_dirty_branches: HashMap<PathBuf, HashSet<String>>,
+    /// SPEC-3170 FR-076: normalized branches whose worktrees contain a live
+    /// process cwd according to the latest background merge scan. Projection
+    /// consumes only this cache and never enumerates OS processes.
+    pub(crate) work_live_process_branches: HashMap<PathBuf, HashSet<String>>,
     /// SPEC-2359 US-84: per-project cleanup-ready branches and their reason.
     /// This includes merged branches and branches with no effective tree diff
     /// from the canonical base. Runtime-only; never persisted.
@@ -556,6 +566,11 @@ pub struct AppRuntime {
     /// Same root fix for the home works.json (megabytes of Work items +
     /// events): cache hit clones instead of re-parsing per projection event.
     pub(crate) work_items_cache: std::cell::RefCell<gwt_core::workspace_projection::WorkItemsCache>,
+    /// SPEC-3170 FR-076: latest fully built projection per tab. FrontendReady
+    /// replays this snapshot (or a live-session-only fallback) without
+    /// entering disk-backed projection loading on the GUI event loop.
+    pub(crate) active_work_projection_cache:
+        std::cell::RefCell<HashMap<String, gwt::ActiveWorkProjectionView>>,
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
@@ -833,6 +848,8 @@ impl AppRuntime {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_dirty_branches: HashMap::new(),
+            work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -843,6 +860,7 @@ impl AppRuntime {
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
+            active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -879,11 +897,17 @@ impl AppRuntime {
         project_root: &Path,
         merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>>,
         cleanup_ready_branches: HashMap<String, String>,
+        dirty_branches: HashSet<String>,
+        live_process_branches: HashSet<String>,
     ) -> Vec<OutboundEvent> {
         self.work_merged_branches
             .insert(project_root.to_path_buf(), merged_branches);
         self.work_cleanup_ready_branches
             .insert(project_root.to_path_buf(), cleanup_ready_branches);
+        self.work_dirty_branches
+            .insert(project_root.to_path_buf(), dirty_branches);
+        self.work_live_process_branches
+            .insert(project_root.to_path_buf(), live_process_branches);
         self.active_work_projection_broadcast_for_active_tab()
             .into_iter()
             .collect()
@@ -988,22 +1012,28 @@ impl AppRuntime {
             else {
                 return;
             };
-            let targets = work_branch_scan_targets(&projection);
+            let mut targets = work_branch_scan_targets(&projection);
+            append_workspace_projection_scan_target(&project_root, &mut targets);
             if targets.is_empty() {
                 proxy.send(UserEvent::WorkMergeStatus {
                     project_root,
                     merged_branches: HashMap::new(),
                     cleanup_ready_branches: HashMap::new(),
+                    dirty_branches: HashSet::new(),
+                    live_process_branches: HashSet::new(),
                 });
                 return;
             }
+            let live_process_branches = work_branches_with_live_processes(&targets);
             let mut merged: Vec<String> = Vec::new();
             let mut cleanup_ready_branches: HashMap<String, String> = HashMap::new();
-            for target in targets {
-                if work_branch_has_dirty_worktree(&target) {
+            let mut dirty_branches = HashSet::new();
+            for target in &targets {
+                if work_branch_has_dirty_worktree(target) {
+                    dirty_branches.insert(target.branch.clone());
                     continue;
                 }
-                let branch = target.branch;
+                let branch = target.branch.clone();
                 if let Ok(Some(readiness)) =
                     gwt_git::branch::cleanup_readiness_base_target(&project_root, &branch)
                 {
@@ -1041,6 +1071,8 @@ impl AppRuntime {
                 project_root,
                 merged_branches,
                 cleanup_ready_branches,
+                dirty_branches,
+                live_process_branches,
             });
         });
     }
@@ -3716,12 +3748,96 @@ fn work_branch_scan_targets(
     targets
 }
 
+fn append_workspace_projection_scan_target(
+    project_root: &Path,
+    targets: &mut Vec<WorkBranchScanTarget>,
+) {
+    let Ok(Some(projection)) =
+        gwt_core::workspace_projection::load_workspace_projection(project_root)
+    else {
+        return;
+    };
+    let Some(details) = projection.git_details else {
+        return;
+    };
+    let Some(branch) = details
+        .branch
+        .as_deref()
+        .map(crate::runtime_support::normalize_branch_name)
+        .filter(|branch| !branch.is_empty())
+    else {
+        return;
+    };
+    let target = if let Some(target) = targets.iter_mut().find(|target| target.branch == branch) {
+        target
+    } else {
+        targets.push(WorkBranchScanTarget {
+            branch: branch.clone(),
+            worktree_paths: Vec::new(),
+        });
+        targets.last_mut().expect("just pushed scan target")
+    };
+    if let Some(path) = details.worktree_path {
+        if !target
+            .worktree_paths
+            .iter()
+            .any(|existing| existing == &path)
+        {
+            target.worktree_paths.push(path);
+        }
+    }
+    targets.sort_by(|left, right| left.branch.cmp(&right.branch));
+}
+
 fn work_branch_has_dirty_worktree(target: &WorkBranchScanTarget) -> bool {
     target.worktree_paths.iter().any(|path| {
         gwt_git::diff::get_status(path)
             .map(|entries| !entries.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
+}
+
+fn work_branches_with_live_processes(targets: &[WorkBranchScanTarget]) -> HashSet<String> {
+    let mut worktrees = Vec::new();
+    for target in targets {
+        for path in &target.worktree_paths {
+            let Ok(path) = dunce::canonicalize(path) else {
+                continue;
+            };
+            if !worktrees
+                .iter()
+                .any(|(branch, existing)| branch == &target.branch && existing == &path)
+            {
+                worktrees.push((target.branch.clone(), path));
+            }
+        }
+    }
+    if worktrees.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+    );
+
+    let mut live_branches = HashSet::new();
+    for process in system.processes().values() {
+        let Some(cwd) = process.cwd() else {
+            continue;
+        };
+        let Ok(cwd) = dunce::canonicalize(cwd) else {
+            continue;
+        };
+        for (branch, worktree) in &worktrees {
+            if cwd == *worktree || cwd.starts_with(worktree) {
+                live_branches.insert(branch.clone());
+            }
+        }
+    }
+    live_branches
 }
 
 fn improvement_action_error_message(message: impl Into<String>) -> String {
