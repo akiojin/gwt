@@ -467,7 +467,7 @@ fn format_pane_help() -> String {
         "",
         "Notes:",
         "  - Intended for gwt-launched agent panes with GWT_PANE_WS_URL set.",
-        "  - The pane WebSocket uses the browser listener, separate from agent capabilities.",
+        "  - Managed panes use the authenticated agent listener (loopback on Host; runtime bridge in containers).",
         "  - send is self-only: it targets the pane bound to GWT_SESSION_ID and",
         "    rejects panes owned by other sessions (SPEC-3050).",
         "",

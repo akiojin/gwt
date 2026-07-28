@@ -451,6 +451,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env lock must span the awaited fixture read
     async fn usage_poller_skips_http_for_real_bun_global_placeholder_fixture_without_safe_target() {
         let _env = gwt_core::test_support::env_lock()
             .lock()

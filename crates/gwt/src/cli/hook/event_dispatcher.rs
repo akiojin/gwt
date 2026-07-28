@@ -8,10 +8,11 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    board_reminder, diagnostics, execution_completion_stop_check, execution_control_stop_check,
-    intake_completion_stop_check, skill_build_spec_stop_check, skill_discussion_stop_check,
-    skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
-    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    action_obligation_stop_check, board_reminder, diagnostics, execution_completion_stop_check,
+    execution_control_stop_check, intake_completion_stop_check, skill_build_spec_stop_check,
+    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+    work_event_settlement_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
+    IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -100,6 +101,11 @@ fn handle_user_prompt_submit(
     run_value(event, "intake-outcome-required-since", || {
         intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
+    // SPEC-3248 P11 (T-240 core): producing prompts in execution lanes arm
+    // typed action obligations. Fail-open state writer.
+    run_value(event, "action-obligation-record", || {
+        action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
+    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
@@ -114,6 +120,12 @@ fn handle_user_prompt_submit(
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
+    let execution_binding = run_step(event, "execution-binding", || {
+        crate::daemon_runtime::authorize_managed_mutating_hook(input)
+    })?;
+    if execution_binding != HookOutput::Silent {
+        return Ok(execution_binding);
+    }
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
@@ -162,7 +174,7 @@ fn handle_stop(
     // intake completion gate (SPEC-3248 P7A) has a persistent side effect
     // (self-improvement auto-capture) that must only fire for the block the
     // agent actually sees.
-    let stop_checks: [(&str, StopCheck<'_>); 8] = [
+    let stop_checks: [(&str, StopCheck<'_>); 9] = [
         (
             "skill-discussion-stop-check",
             Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
@@ -222,6 +234,19 @@ fn handle_stop(
             "execution-control-stop-check",
             Box::new(|| {
                 execution_control_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
+        ),
+        // SPEC-3248 P11 (T-242 core): open producing obligations from this
+        // session's prompts block Stop until settled by canonical
+        // operations or deferred via execution.blocked.
+        (
+            "action-obligation-stop-check",
+            Box::new(|| {
+                action_obligation_stop_check::handle_with_input(
                     worktree_root,
                     input,
                     current_session,
@@ -415,6 +440,79 @@ mod tests {
         );
         assert!(text.contains("create_goal"), "{text}");
         assert!(text.contains("discuss.goal_started"), "{text}");
+    }
+
+    #[test]
+    fn pre_tool_use_denies_unproven_managed_mutation_before_runtime_side_effects() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let runtime_path = worktree.path().join("runtime").join("state.json");
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-hook-fence");
+        let _runtime_path =
+            ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, runtime_path.as_os_str());
+        let _forward_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            "http://127.0.0.1:45123/internal/hook-live",
+        );
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let input = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "crates/gwt/src/lib.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }
+        })
+        .to_string();
+
+        let output = handle_with_input("PreToolUse", &input, worktree.path(), None)
+            .expect("managed mutation denial");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = output else {
+            panic!("unproven managed mutation must be denied");
+        };
+        assert!(detail.contains("Continue work"), "{detail}");
+        assert!(
+            !runtime_path.exists(),
+            "binding authorization must run before runtime-state or forwarding side effects"
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_denies_managed_mutation_when_bridge_pair_is_missing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let runtime_path = worktree.path().join("runtime").join("state.json");
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-hook-no-bridge");
+        let _runtime_path =
+            ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, runtime_path.as_os_str());
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let input = serde_json::json!({
+            "tool_name": "apply_patch",
+            "tool_input": { "patch": "*** Begin Patch" }
+        })
+        .to_string();
+
+        let output = handle_with_input("PreToolUse", &input, worktree.path(), None)
+            .expect("managed mutation denial");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = output else {
+            panic!("managed Session without a Host bridge must deny mutation");
+        };
+        assert!(detail.contains("Continue work"), "{detail}");
+        assert!(
+            !runtime_path.exists(),
+            "the missing bridge must deny before runtime-state side effects"
+        );
     }
 
     #[test]

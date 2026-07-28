@@ -1,3 +1,5 @@
+import { createLaunchOperationId } from "./launch-pending-controller.js";
+
 export function createWorkspaceKanbanSurface({
   activeWorkspace,
   agentStatusLabel,
@@ -14,6 +16,7 @@ export function createWorkspaceKanbanSurface({
   focusBoardEntry,
   branchesSurface,
   launchPending,
+  continueWork,
 }) {
   const workspaceStateMap = new Map();
 
@@ -235,10 +238,12 @@ export function createWorkspaceKanbanSurface({
   }
 
   function eventTitle(event) {
-    return compactText(
-      event?.title || event?.summary || event?.kind || event?.board_entry_id,
-      "Work event",
-    );
+    const boardEntryId = compactText(event?.board_entry_id);
+    for (const candidate of [event?.title, event?.summary, event?.kind]) {
+      const title = compactText(candidate);
+      if (title && title !== boardEntryId) return title;
+    }
+    return "Work event";
   }
 
   function containersFor(entry) {
@@ -802,6 +807,27 @@ export function createWorkspaceKanbanSurface({
     return true;
   }
 
+  function appendBoardDiagnostics(container, refs) {
+    const list = Array.isArray(refs) ? refs.filter(Boolean) : [];
+    if (list.length === 0) return false;
+    const details = createNode("details", "workspace-linked-diagnostics");
+    details.dataset.section = "board-diagnostics";
+    details.appendChild(
+      createNode("summary", "workspace-linked-diagnostics-summary", `Diagnostics (${list.length})`),
+    );
+    appendBoardRefs(details, list);
+    container.appendChild(details);
+    return true;
+  }
+
+  function boardDiagnosticRefs(workspace) {
+    const refs = new Set(Array.isArray(workspace?.board_refs) ? workspace.board_refs : []);
+    for (const event of Array.isArray(workspace?.events) ? workspace.events : []) {
+      if (event?.board_entry_id) refs.add(event.board_entry_id);
+    }
+    return Array.from(refs).filter(Boolean);
+  }
+
   function hookHealthStatus(health) {
     return String(health?.status || "").trim().toLowerCase();
   }
@@ -903,7 +929,7 @@ export function createWorkspaceKanbanSurface({
     if (!branch) return null;
     // Same entry as the Branches surface "Launch Agent": opens the launch
     // wizard for this Workspace's existing branch (user wording 2026-06-11).
-    const launch = createNode("button", "wizard-button primary", "Launch Agent");
+    const launch = createNode("button", "wizard-button", "Launch Agent");
     launch.type = "button";
     launch.dataset.action = "launch-workspace";
     launch.addEventListener("click", () => {
@@ -932,7 +958,8 @@ export function createWorkspaceKanbanSurface({
       const group = createNode("div", "workspace-detail-work-group");
       if (work?.id) group.dataset.workId = work.id;
       const agents = Array.isArray(work?.agents) ? work.agents : [];
-      const displayedAgents = agents.length > 0 ? agents : [work];
+      const canonicalAgents = displayedWorkAgents(agents);
+      const displayedAgents = canonicalAgents.length > 0 ? canonicalAgents : [work];
       const firstAgent = displayedAgents[0];
       renderedAgentTotal += agents.length;
       group.dataset.agentColor = agentColorKeyword(firstAgent);
@@ -957,38 +984,35 @@ export function createWorkspaceKanbanSurface({
         lifecycle.dataset.lifecycle = String(work.lifecycle_state || "active").toLowerCase();
         head.appendChild(lifecycle);
       }
-      appendWorkCloseActions(head, work);
       group.appendChild(head);
 
+      const actionRail = createNode("div", "workspace-detail-work-action-rail");
+      appendContinueWorkAction(actionRail, work);
+      appendWorkCloseActions(actionRail, work);
+      if (actionRail.childNodes.length > 0) {
+        group.appendChild(actionRail);
+      }
+
+      let renderedSessionCount = 0;
       for (const agent of displayedAgents) {
         const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
-        if (sessions.length === 0) {
-          // No conversation recorded yet — still expose a Resume control on
-          // the placeholder row so a session-less Work stays launchable.
-          const empty = createNode(
+        if (sessions.length === 0) continue;
+        // Multiple Session rows per agent read as noise — render only that
+        // agent's latest conversation while preserving every Agent in Work.
+        const latest =
+          sessions.find((session) => session && session.is_active) ||
+          sessions[sessions.length - 1];
+        group.appendChild(renderSessionRow(agent, latest));
+        renderedSessionCount += 1;
+      }
+      if (renderedSessionCount === 0) {
+        group.appendChild(
+          createNode(
             "div",
-            "workspace-overview-empty workspace-detail-session-empty",
-            "No session yet",
-          );
-          const resumeBtn = renderWorkResumeButton(agent);
-          if (resumeBtn) {
-            empty.appendChild(resumeBtn);
-          }
-          group.appendChild(empty);
-        } else {
-          // Multiple Session rows per agent read as noise — render only that
-          // agent's latest conversation while preserving every Agent in Work.
-          const latest =
-            sessions.find((session) => session && session.is_active) ||
-            sessions[sessions.length - 1];
-          group.appendChild(renderSessionRow(agent, latest));
-          // When the visible Session is history-only (not resumable) on a
-          // non-running Work, offer a distinct fresh-conversation control.
-          const startFresh = renderStartFreshButton(agent, [latest]);
-          if (startFresh) {
-            group.appendChild(startFresh);
-          }
-        }
+            "workspace-overview-empty workspace-detail-session-guidance",
+            "No previous session to inspect. Continue work can start a new one.",
+          ),
+        );
       }
       wrap.appendChild(group);
     }
@@ -1008,6 +1032,65 @@ export function createWorkspaceKanbanSurface({
     }
   }
 
+  function displayedWorkAgents(agents) {
+    const selected = new Map();
+    for (const [index, agent] of agents.entries()) {
+      const identity = displayedWorkAgentIdentity(agent, index);
+      const previous = selected.get(identity);
+      if (!previous || compareDisplayedWorkAgent(agent, previous) < 0) {
+        selected.set(identity, agent);
+      }
+    }
+    return Array.from(selected.values());
+  }
+
+  function displayedWorkAgentIdentity(agent, index) {
+    const raw = String(agent?.agent_id || agent?.display_name || "").trim();
+    if (!raw) return `session:${agent?.session_id || index}`;
+
+    // Keep this fallback aligned with gwt_agent::resolve_agent_id: only known
+    // built-in aliases collapse, while an unknown custom command retains its
+    // exact trimmed spelling. In particular, punctuation is identity-significant.
+    const builtinByAlias = new Map([
+      ["claude", "claude"],
+      ["claudecode", "claude"],
+      ["claude-code", "claude"],
+      ["claude code", "claude"],
+      ["codex", "codex"],
+      ["agy", "agy"],
+      ["antigravity", "agy"],
+      ["antigravity cli", "agy"],
+      ["antigravity-cli", "agy"],
+      ["gemini", "gemini"],
+      ["gemini cli", "gemini"],
+      ["gemini-cli", "gemini"],
+      ["gemini cli legacy", "gemini"],
+      ["gemini cli (legacy)", "gemini"],
+      ["opencode", "opencode"],
+      ["open-code", "opencode"],
+      ["openclaw", "openclaw"],
+      ["open-claw", "openclaw"],
+      ["hermes", "hermes"],
+      ["hermes agent", "hermes"],
+      ["hermes-agent", "hermes"],
+      ["gh", "gh"],
+      ["copilot", "gh"],
+      ["github copilot", "gh"],
+      ["github-copilot", "gh"],
+    ]);
+    const builtin = builtinByAlias.get(raw.toLowerCase());
+    return builtin ? `agent:${builtin}` : `agent:${raw}`;
+  }
+
+  function compareDisplayedWorkAgent(left, right) {
+    const leftHasSession = Array.isArray(left?.sessions) && left.sessions.length > 0;
+    const rightHasSession = Array.isArray(right?.sessions) && right.sessions.length > 0;
+    if (leftHasSession !== rightHasSession) {
+      return leftHasSession ? -1 : 1;
+    }
+    return String(right?.updated_at || "").localeCompare(String(left?.updated_at || ""));
+  }
+
   function appendWorkCloseActions(container, work) {
     if (!work?.id) return;
     const lifecycle = String(work.lifecycle_state || "active").toLowerCase();
@@ -1020,6 +1103,9 @@ export function createWorkspaceKanbanSurface({
       ["close-work-discard", "Discard", "discarded"],
     ]) {
       const button = createNode("button", "wizard-button is-compact", label);
+      if (closeKind === "discarded") {
+        button.classList.add("destructive");
+      }
       button.type = "button";
       button.dataset.action = action;
       if (!work.manual_close_allowed) {
@@ -1036,6 +1122,53 @@ export function createWorkspaceKanbanSurface({
     container.appendChild(actions);
   }
 
+  function appendContinueWorkAction(container, work) {
+    const workId = String(work?.id || "").trim();
+    const lifecycle = String(work?.lifecycle_state || "").toLowerCase();
+    if (!workId || work?.discarded === true || lifecycle === "discarded") {
+      return;
+    }
+    const button = createNode(
+      "button",
+      "wizard-button primary is-compact workspace-detail-work-primary-action",
+      "Continue work",
+    );
+    button.type = "button";
+    button.dataset.action = "continue-work";
+    button.dataset.workId = workId;
+    if (launchPending?.isPending(`continue:${workId}`)) {
+      // Keep the replacement control focusable so keyboard focus survives
+      // this render. Native `disabled` buttons cannot receive focus in a real
+      // browser; aria-disabled plus the click guard below preserves both the
+      // pending semantics and the no-double-send contract.
+      button.setAttribute("aria-disabled", "true");
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Continuing...";
+      button.classList.add("is-pending");
+    }
+    button.addEventListener("click", () => {
+      if (launchPending?.isPending(`continue:${workId}`)) {
+        return;
+      }
+      const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
+      if (!bounds || typeof continueWork !== "function") {
+        return;
+      }
+      if (continueWork(workId, bounds)) {
+        const focusRoot = button.closest?.(".window") || button.ownerDocument;
+        renderWindows(true);
+        const replacement = Array.from(
+          focusRoot?.querySelectorAll?.("[data-action='continue-work']") || [],
+        ).find((candidate) => candidate.dataset.workId === workId);
+        if (replacement && typeof replacement.focus === "function") {
+          try { replacement.focus({ preventScroll: true }); }
+          catch { replacement.focus(); }
+        }
+      }
+    });
+    container.appendChild(button);
+  }
+
   function displayedWorkspaceWorks(workspace) {
     if (Array.isArray(workspace?.works) && workspace.works.length > 0) {
       return workspace.works;
@@ -1049,28 +1182,6 @@ export function createWorkspaceKanbanSurface({
       manual_close_allowed: false,
       close_blocked_reason: "",
     }));
-  }
-
-  function renderWorkResumeButton(work) {
-    // A live (running) Work has nothing to resume; only Paused / historical
-    // Works get a Resume control. Works without a status (history view) are
-    // treated as resumable.
-    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
-    if (status === "active" || status === "running") {
-      return null;
-    }
-    if (!work || !work.session_id) {
-      return null;
-    }
-    const button = createNode("button", "wizard-button is-compact", "Resume");
-    button.type = "button";
-    button.dataset.action = "resume-work";
-    button.dataset.sessionId = work.session_id;
-    if (isWorkResumePending(work.session_id)) {
-      markResumeButtonPending(button);
-    }
-    button.addEventListener("click", () => resumeWork(work));
-    return button;
   }
 
   // SPEC-2359 W-17 (FR-398): pending key shared with the Resume picker and
@@ -1089,30 +1200,8 @@ export function createWorkspaceKanbanSurface({
 
   function markResumeButtonPending(button) {
     button.disabled = true;
-    button.textContent = "Resuming...";
+    button.textContent = "Opening...";
     button.classList.add("is-pending");
-  }
-
-  function resumeWork(work) {
-    const sessionId = work && work.session_id;
-    if (!sessionId) {
-      return;
-    }
-    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-    if (!bounds) {
-      return;
-    }
-    if (
-      launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Resume")
-    ) {
-      return;
-    }
-    // resume_workspace_agent resumes by the gwt session id (the Work / launch),
-    // which is exactly work.session_id. Without an agent_session_id the Work's
-    // latest conversation (or a fresh start) is resumed.
-    send({ kind: "resume_workspace_agent", session_id: sessionId, bounds });
-    renderWindows();
   }
 
   function renderSessionResumeButton(work, session) {
@@ -1132,53 +1221,22 @@ export function createWorkspaceKanbanSurface({
     if (session && session.resumable === false) {
       return null;
     }
-    const button = createNode("button", "wizard-button is-compact", "Resume");
+    const button = createNode("button", "wizard-button is-compact", "Inspect session");
     button.type = "button";
     button.dataset.action = "resume-session";
     button.dataset.sessionId = work.session_id;
     const agentSessionId = session && session.agent_session_id;
     if (agentSessionId) {
       button.dataset.agentSessionId = agentSessionId;
-      button.setAttribute("aria-label", `Resume conversation ${agentSessionId}`);
+      button.setAttribute("aria-label", `Inspect conversation ${agentSessionId}`);
     } else {
-      button.setAttribute("aria-label", "Resume this conversation");
+      button.setAttribute("aria-label", "Inspect this conversation");
     }
     if (isWorkResumePending(work.session_id)) {
       markResumeButtonPending(button);
     }
     button.addEventListener("click", () => resumeSession(work, session));
     return button;
-  }
-
-  function renderStartFreshButton(work, sessions) {
-    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
-    if (status === "active" || status === "running") {
-      return null;
-    }
-    if (!work || !work.session_id) {
-      return null;
-    }
-    const list = Array.isArray(sessions) ? sessions : [];
-    // If any Session is resumable, a per-Session Resume is already shown — no
-    // need for a Work-level fallback.
-    const anyResumable = list.some(
-      (entry) => entry && entry.resumable !== false && entry.agent_session_id,
-    );
-    if (anyResumable) {
-      return null;
-    }
-    const wrap = createNode("div", "workspace-detail-session-fresh");
-    const button = createNode("button", "wizard-button is-compact", "Start Fresh");
-    button.type = "button";
-    button.dataset.action = "resume-work";
-    button.dataset.sessionId = work.session_id;
-    button.setAttribute("aria-label", "Start a fresh conversation for this Work");
-    if (isWorkResumePending(work.session_id)) {
-      markResumeButtonPending(button);
-    }
-    button.addEventListener("click", () => resumeWork(work));
-    wrap.appendChild(button);
-    return wrap;
   }
 
   function resumeSession(work, session) {
@@ -1190,23 +1248,25 @@ export function createWorkspaceKanbanSurface({
     if (!bounds) {
       return;
     }
+    const operationId = createLaunchOperationId("resume");
     // resume_workspace_agent loads the launch config from the gwt session id
     // (the Work) and resumes the specific conversation named by
     // agent_session_id (this Session row).
     if (
       launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Resume")
+      && !launchPending.begin(workPendingKey(sessionId), "Inspect session", operationId)
     ) {
       return;
     }
     const agentSessionId = session && session.agent_session_id ? session.agent_session_id : null;
     send({
       kind: "resume_workspace_agent",
+      operation_id: operationId,
       session_id: sessionId,
       agent_session_id: agentSessionId,
       bounds,
     });
-    renderWindows();
+    renderWindows(true);
   }
 
   function shortSessionId(value) {
@@ -1348,9 +1408,12 @@ export function createWorkspaceKanbanSurface({
       const meta = createNode("div", "workspace-detail-event-meta");
       appendMetaText(meta, event.kind);
       appendMetaText(meta, event.updated_at);
-      appendMetaText(meta, event.board_entry_id);
       item.appendChild(title);
-      if (event.summary && event.summary !== event.title) {
+      if (
+        event.summary
+        && event.summary !== event.title
+        && event.summary !== event.board_entry_id
+      ) {
         appendTextBlock(item, event.summary, "workspace-detail-event-summary");
       }
       item.appendChild(meta);
@@ -1359,11 +1422,13 @@ export function createWorkspaceKanbanSurface({
 
   function resumeWorkspace(workspace) {
     const workspaceId = workspace?.id ?? null;
+    let operationId = "";
     if (typeof openWorkspaceResumePicker === "function") {
-      openWorkspaceResumePicker(workspaceId);
+      operationId = String(openWorkspaceResumePicker(workspaceId) || "");
     }
     send({
       kind: "list_resumable_agents",
+      operation_id: operationId,
       workspace_id: workspaceId ?? undefined,
     });
   }
@@ -1500,7 +1565,7 @@ export function createWorkspaceKanbanSurface({
           ["PR", workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
           ["PR state", workspace.pr_state],
         ]);
-        const hadBoardRefs = appendBoardRefs(body, workspace.board_refs);
+        const hadBoardRefs = appendBoardDiagnostics(body, boardDiagnosticRefs(workspace));
         if (!workspace.owner && !workspace.pr_number && !workspace.pr_state && !hadBoardRefs) {
           body.appendChild(createNode("div", "workspace-overview-empty", "No linked work"));
         }
@@ -1685,13 +1750,13 @@ export function createWorkspaceKanbanSurface({
     renderWorkspaceOverviewWindow(windowData.id);
   }
 
-  function renderWindows() {
+  function renderWindows(force = false) {
     for (const windowData of activeWorkspace()?.windows || []) {
       const preset = workspaceWindowById(windowData.id)?.preset;
       if (preset !== "work" && preset !== "workspace" && preset !== "branches") {
         continue;
       }
-      renderWorkspaceOverviewWindow(windowData.id);
+      renderWorkspaceOverviewWindow(windowData.id, force);
     }
   }
 

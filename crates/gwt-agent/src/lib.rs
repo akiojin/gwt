@@ -40,30 +40,40 @@ pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::LaunchEnvironment;
 pub use launch::{
     canonical_launch_args, normalize_launch_args, resolve_host_npx_fallback_executable,
-    resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner,
+    resolve_runner, AgentLaunchBuilder, ExecutionLaunchIntent, LaunchConfig, ResolvedRunner,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
     install_launch_gwt_bin_env_with_lookup, pane_websocket_url_for_launch_runtime,
-    prepare_agent_launch, register_codex_managed_hook_trust_in_docker, resolve_launch_worktree,
-    resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup, HookForwardEnv,
-    PreparedAgentLaunch, PreparedProcessLaunch,
+    prepare_agent_launch, register_codex_managed_hook_trust_in_docker,
+    resolve_host_runner_health_checked, resolve_host_runner_health_checked_with_probe_and_repair,
+    resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
+    HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
+    PreparedAgentLaunch, PreparedProcessLaunch, WindowsNpxCacheRepairCandidate,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
     PresetDefinition, PresetError, PresetId,
 };
 pub use session::{
-    persist_agent_session_id, persist_session_completed_stop, persist_session_hook_event,
-    persist_session_restore_window_on_startup, persist_session_status, reset_runtime_state_dir,
-    reset_runtime_state_dir_for_pid, runtime_state_dir_for_pid, runtime_state_path,
-    runtime_state_path_for_pid, sessions_dir_from_runtime_path, update_session,
-    validate_docker_runtime_worktree_path, validate_session_id_path_component,
-    AgentSessionHistoryEntry, DockerRuntimeBinding, PendingDiscussionResume, Session,
-    SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-    GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    current_thread_holds_session_lease, inspect_session_path, persist_agent_session_id,
+    persist_session_completed_stop, persist_session_execution_binding, persist_session_hook_event,
+    persist_session_restore_window_on_startup, persist_session_status,
+    remove_session_if_execution_identity_matches,
+    remove_session_if_execution_identity_matches_or_missing_with,
+    remove_session_if_execution_identity_matches_with, reset_runtime_state_dir,
+    reset_runtime_state_dir_for_pid, rotate_session_execution_capability,
+    runtime_state_dir_for_pid, runtime_state_path, runtime_state_path_for_pid,
+    sessions_dir_from_runtime_path, update_session, update_session_if_changed,
+    validate_docker_runtime_worktree_path, validate_session_id_path_component, with_session_lease,
+    with_session_lease_wait, with_session_path_lease, with_session_path_lease_wait,
+    AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionBindingIdentity,
+    PendingDiscussionResume, Session, SessionExecutionBinding, SessionExecutionIdentity,
+    SessionPathState, SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

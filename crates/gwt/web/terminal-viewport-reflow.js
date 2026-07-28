@@ -29,6 +29,187 @@ function normalizeMaxTerminalRefreshesPerFrame(value) {
 }
 
 /**
+ * Decode a replacement snapshot independently from the live streaming UTF-8
+ * decoder and return a fresh decoder for subsequent live output.
+ *
+ * A live decoder may hold an incomplete multi-byte prefix because output is
+ * decoded with `{ stream: true }`. Reusing it for a snapshot can inject a
+ * replacement character into the snapshot and can also contaminate the first
+ * live chunk after replacement. Snapshot replacement is an explicit stream
+ * boundary, so both sides receive fresh decoder state.
+ */
+export function decodeTerminalSnapshotBoundary(
+  snapshotBytes,
+  createDecoder = () => new TextDecoder(),
+) {
+  const snapshotDecoder = createDecoder();
+  const nextLiveDecoder = createDecoder();
+  return {
+    snapshotText: snapshotDecoder.decode(snapshotBytes),
+    nextLiveDecoder,
+  };
+}
+
+/**
+ * Mark receipt of a terminal snapshot by discarding every live-output queue
+ * that predates it. Output arriving after this synchronous boundary is left
+ * alone and will therefore be replayed after the snapshot is applied.
+ */
+export function clearTerminalOutputBeforeSnapshot({
+  windowId,
+  runtime,
+  pendingOutputMap,
+  clearBatchedOutput,
+}) {
+  clearBatchedOutput(windowId);
+  pendingOutputMap.delete(windowId);
+  if (runtime) {
+    runtime.deferredWrites = [];
+  }
+}
+
+/**
+ * Serialize replacement snapshots behind xterm's asynchronous write queue.
+ *
+ * xterm writes that were already issued cannot be cancelled. The first empty
+ * write is therefore a barrier: its callback runs only after older writes have
+ * drained. Snapshot receipts remain latest-wins while a barrier or snapshot is
+ * in flight, and only the final snapshot publishes its decoder and completion
+ * effects.
+ */
+export function createTerminalSnapshotWriteCoordinator({
+  terminal,
+  hasPendingSnapshot,
+  takePendingSnapshot,
+  discardPendingSnapshot,
+  decodeSnapshot,
+  isRuntimeCurrent,
+  installLiveDecoder,
+  onSnapshotFailureSettled = () => {},
+  onLatestSnapshotWritten,
+  onError = () => {},
+}) {
+  let writeInFlight = false;
+
+  function reportError(error, stage) {
+    if (!isRuntimeCurrent()) {
+      return;
+    }
+    try {
+      onError(error, stage);
+    } catch {
+      // Error reporting must never poison xterm's asynchronous write queue.
+    }
+  }
+
+  function releaseFailedSnapshot(error, stage, { discardPending = false } = {}) {
+    writeInFlight = false;
+    if (!isRuntimeCurrent()) {
+      return;
+    }
+    if (discardPending) {
+      try {
+        discardPendingSnapshot();
+      } catch (discardError) {
+        reportError(discardError, "discard");
+      }
+    }
+    reportError(error, stage);
+    if (hasPendingSnapshot()) {
+      start();
+      return;
+    }
+    try {
+      onSnapshotFailureSettled();
+    } catch (settlementError) {
+      reportError(settlementError, "failure-settlement");
+    }
+  }
+
+  function writeLatestSnapshot() {
+    if (!isRuntimeCurrent()) {
+      return;
+    }
+    let pending;
+    try {
+      pending = takePendingSnapshot();
+    } catch (error) {
+      releaseFailedSnapshot(error, "take", { discardPending: true });
+      return;
+    }
+    if (!pending.present) {
+      writeInFlight = false;
+      return;
+    }
+
+    let snapshotText;
+    let nextLiveDecoder;
+    try {
+      ({ snapshotText, nextLiveDecoder } = decodeSnapshot(pending.snapshot));
+    } catch (error) {
+      releaseFailedSnapshot(error, "decode");
+      return;
+    }
+    try {
+      terminal.reset();
+    } catch (error) {
+      releaseFailedSnapshot(error, "reset");
+      return;
+    }
+    try {
+      terminal.write(snapshotText, () => {
+        if (!isRuntimeCurrent()) {
+          return;
+        }
+        if (hasPendingSnapshot()) {
+          writeLatestSnapshot();
+          return;
+        }
+
+        writeInFlight = false;
+        try {
+          installLiveDecoder(nextLiveDecoder);
+        } catch (error) {
+          reportError(error, "install-decoder");
+        }
+        try {
+          onLatestSnapshotWritten();
+        } catch (error) {
+          reportError(error, "completion");
+        }
+      });
+    } catch (error) {
+      releaseFailedSnapshot(error, "snapshot-write");
+    }
+  }
+
+  function start() {
+    if (writeInFlight || !hasPendingSnapshot() || !isRuntimeCurrent()) {
+      return false;
+    }
+    writeInFlight = true;
+    try {
+      terminal.write("", () => {
+        if (!isRuntimeCurrent()) {
+          return;
+        }
+        writeLatestSnapshot();
+      });
+    } catch (error) {
+      releaseFailedSnapshot(error, "barrier-write", { discardPending: true });
+      return false;
+    }
+    return true;
+  }
+
+  function shouldDeferOutput() {
+    return writeInFlight || hasPendingSnapshot();
+  }
+
+  return Object.freeze({ shouldDeferOutput, start });
+}
+
+/**
  * Coalesce terminal viewport fit requests through one bounded frame queue.
  *
  * Fitting an xterm terminal can force render/measure work and optionally
@@ -407,8 +588,8 @@ export function viewportEligibleForRefresh({ element, workspaceWindow }) {
  * unsettled layout). The pending flag is caller-owned so app.js can store it
  * on each terminal runtime without this pure helper knowing about terminalMap.
  *
- * Returns true only when the pending refresh was consumed and the caller's
- * refresh scheduler was invoked.
+ * Returns true when the pending refresh was consumed. Callers may provide an
+ * optional continuation, or schedule the authoritative follow-up themselves.
  */
 export function rearmRefreshOnVisible({
   hasPendingRefresh,
@@ -424,6 +605,134 @@ export function rearmRefreshOnVisible({
   if (typeof canRefresh === "function" && !canRefresh()) return false;
   if (typeof clearPendingRefresh === "function") clearPendingRefresh();
   if (typeof scheduleRefresh === "function") scheduleRefresh();
+  return true;
+}
+
+/**
+ * Route a terminal fit without ever treating a hidden or unresolved grid as
+ * authoritative. Persisted requests stay pending until a later visible fit
+ * can measure the terminal and publish fresh cols/rows.
+ */
+export function runTerminalFitRequest({
+  persist = false,
+  canFit,
+  activate,
+  markPending,
+}) {
+  if (typeof canFit === "function" && !canFit()) {
+    if (persist && typeof markPending === "function") {
+      markPending();
+    }
+    return null;
+  }
+  const activation = typeof activate === "function" ? activate() : null;
+  if (persist && activation?.ran !== true && typeof markPending === "function") {
+    markPending();
+  }
+  return activation;
+}
+
+/**
+ * A reveal has exactly one authoritative geometry owner. Pending viewport
+ * state is consumed first, then every reveal submits one persisted request to
+ * the activation scheduler, where an existing frame can OR-coalesce it.
+ */
+export function runTerminalRevealActivation({
+  schedulePendingOutput,
+  consumePendingRefresh,
+  scheduleActivation,
+}) {
+  const pendingOutputScheduled =
+    typeof schedulePendingOutput === "function" && schedulePendingOutput() === true;
+  const options = { shouldPersistGeometry: true };
+  const pendingRefreshConsumed =
+    typeof consumePendingRefresh === "function" &&
+    consumePendingRefresh() === true;
+  let activationScheduled = false;
+  if (typeof scheduleActivation === "function") {
+    scheduleActivation(options);
+    activationScheduled = true;
+  }
+  return { pendingOutputScheduled, pendingRefreshConsumed, activationScheduled };
+}
+
+/**
+ * Coalesce activation requests targeting the same scheduled frame. Persistence
+ * is monotonic: a later authoritative request upgrades existing focus-only
+ * work, while later focus-only requests cannot downgrade it. The reason follows
+ * the first request at the strongest persistence level.
+ */
+export function mergeTerminalActivationIntent(currentIntent, nextIntent = {}) {
+  const next = {
+    shouldPersistGeometry: nextIntent?.shouldPersistGeometry === true,
+    reason:
+      typeof nextIntent?.reason === "string" && nextIntent.reason.length > 0
+        ? nextIntent.reason
+        : "focus_activation",
+  };
+  if (!currentIntent) {
+    return next;
+  }
+
+  const current = {
+    shouldPersistGeometry: currentIntent.shouldPersistGeometry === true,
+    reason:
+      typeof currentIntent.reason === "string" && currentIntent.reason.length > 0
+        ? currentIntent.reason
+        : "focus_activation",
+  };
+  if (!current.shouldPersistGeometry && next.shouldPersistGeometry) {
+    return next;
+  }
+  return current;
+}
+
+/**
+ * Return the effective activation intent and an empty pending slot. Keeping the
+ * state transition pure lets callers consume exactly once from an existing rAF.
+ */
+export function takeTerminalActivationIntent(pendingIntent) {
+  if (!pendingIntent) {
+    return { intent: null, pendingIntent: null };
+  }
+  return {
+    intent: mergeTerminalActivationIntent(null, pendingIntent),
+    pendingIntent: null,
+  };
+}
+
+/**
+ * Treat loaded document fonts as a one-shot xterm cell-metric invalidation.
+ * Runtime ids are read only when the promise resolves, so terminals removed
+ * while fonts load are never recreated or updated by a stale callback.
+ */
+export function observeTerminalFontMetricsReady({
+  fontsReady,
+  terminalIds,
+  canRefresh,
+  scheduleFit,
+  markPending,
+}) {
+  if (!fontsReady || typeof fontsReady.then !== "function") {
+    return false;
+  }
+  fontsReady.then(
+    () => {
+      const currentIds =
+        typeof terminalIds === "function" ? Array.from(terminalIds()) : [];
+      for (const value of currentIds) {
+        const windowId = String(value);
+        if (typeof canRefresh === "function" && canRefresh(windowId)) {
+          if (typeof scheduleFit === "function") {
+            scheduleFit(windowId, true);
+          }
+        } else if (typeof markPending === "function") {
+          markPending(windowId);
+        }
+      }
+    },
+    () => {},
+  );
   return true;
 }
 
@@ -606,7 +915,7 @@ export function runTerminalActivationSequence({
   const { terminal, fitAddon } = runtime;
   const currentGrid = currentTerminalGrid(terminal);
   let fullActivationReason = "activated";
-  if (allowFastPath) {
+  if (allowFastPath && !shouldPersistGeometry) {
     const fastPath = terminalActivationFastPathState({
       runtime,
       pendingOutputCount,
