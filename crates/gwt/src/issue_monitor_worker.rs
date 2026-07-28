@@ -875,6 +875,7 @@ mod tests {
     use super::*;
     use crate::{IssueMonitorConfig, MonitorInboxState};
     use gwt_github::{Cache, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+    use std::path::PathBuf;
 
     fn issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {
@@ -1588,5 +1589,159 @@ exit 1
         );
 
         assert_eq!(resolve_default_base_branch(tmp.path()), "develop");
+    }
+
+    /// A `gh` stand-in that refuses to answer unless it was spawned from inside
+    /// a bare repository (`HEAD` + `objects/` + `refs/` sit directly in the
+    /// cwd). A container root holds none of those, so this is exactly the
+    /// failure Issue #3348 observed in production.
+    fn write_bare_repo_bound_fake_gh(bin_dir: &Path, call_log: &Path) -> PathBuf {
+        std::fs::create_dir_all(bin_dir).expect("create fake gh bin dir");
+        let call_log = call_log.display().to_string();
+        #[cfg(windows)]
+        {
+            let fake_gh = bin_dir.join("gh.cmd");
+            std::fs::write(
+                &fake_gh,
+                format!(
+                    "@echo off\r\n\
+if not exist \"HEAD\" goto notbare\r\n\
+if not exist \"objects\\\" goto notbare\r\n\
+if not exist \"refs\\\" goto notbare\r\n\
+echo %*>>\"{call_log}\"\r\n\
+echo %* | findstr /C:\"mergeCommit\" >nul\r\n\
+if not errorlevel 1 (\r\n\
+  echo {{\"mergeCommit\":{{\"oid\":\"squash999\"}}}}\r\n\
+  exit /b 0\r\n\
+)\r\n\
+echo %* | findstr /C:\"headRefOid\" >nul\r\n\
+if not errorlevel 1 (\r\n\
+  echo {{\"headRefOid\":\"abc123\"}}\r\n\
+  exit /b 0\r\n\
+)\r\n\
+echo {{}}\r\n\
+exit /b 0\r\n\
+:notbare\r\n\
+>&2 echo gh ran outside the child bare repository: %CD%\r\n\
+exit /b 1\r\n"
+                ),
+            )
+            .expect("write fake gh");
+            fake_gh
+        }
+        #[cfg(not(windows))]
+        {
+            let fake_gh = bin_dir.join("gh");
+            std::fs::write(
+                &fake_gh,
+                format!(
+                    r#"#!/bin/sh
+if [ ! -f HEAD ] || [ ! -d objects ] || [ ! -d refs ]; then
+  printf '%s\n' "gh ran outside the child bare repository: $(pwd)" >&2
+  exit 1
+fi
+printf '%s\n' "$*" >> "{call_log}"
+case "$*" in
+  *mergeCommit*) printf '%s\n' '{{"mergeCommit":{{"oid":"squash999"}}}}' ;;
+  *headRefOid*)  printf '%s\n' '{{"headRefOid":"abc123"}}' ;;
+  *)             printf '%s\n' '{{}}' ;;
+esac
+exit 0
+"#
+                ),
+            )
+            .expect("write fake gh");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+            fake_gh
+        }
+    }
+
+    /// Issue #3348 regression: in a container-layout project the monitored
+    /// project root is NOT a git repository — it merely holds the bare
+    /// `<repo>.git` plus the worktrees. Every autonomous-loop `gh` call used to
+    /// be spawned with that raw root as cwd, so gh could not resolve the base
+    /// repo and each fetch failed silently: the loop never advanced, the merge
+    /// was never observed, and the active slot stayed held forever. The fake
+    /// `gh` here fails unless it runs inside the child bare repo, so reverting
+    /// the `main_worktree_root` normalization turns this test red.
+    #[test]
+    fn advance_autonomous_in_flight_reaches_gh_from_child_bare_repo_for_container_root() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let container_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&container_root).expect("create container root");
+        let bare_repo = container_root.join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        let call_log = tmp.path().join("gh-calls.log");
+        let fake_gh = write_bare_repo_bound_fake_gh(&tmp.path().join("bin"), &call_log);
+        let mut path_entries = vec![fake_gh.parent().expect("fake gh parent").to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing));
+        }
+        let _path = gwt_core::test_support::ScopedEnvVar::set(
+            "PATH",
+            std::env::join_paths(path_entries).expect("join PATH"),
+        );
+
+        let issues = vec![IssueMonitorIssue {
+            number: 42,
+            title: "Issue 42".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: Some("## Acceptance Criteria\n- [ ] AC-1: returns 200\n".to_string()),
+            url: None,
+        }];
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        crate::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-07-28T00:00:00Z");
+        // Delivering is the narrowest phase that proves the loop reaches gh: it
+        // watches the merge (`--json mergeCommit`) and then re-reads the merged
+        // head (`--json headRefOid`) for the layer-4 identity check.
+        monitor.begin_review(42, 7, "abc123");
+        monitor.record_review_verdict(42, true);
+        monitor.begin_delivering(42);
+
+        advance_autonomous_in_flight(
+            &mut monitor,
+            &issues,
+            "owner/repo",
+            &container_root,
+            b"secret",
+            "2026-07-28T00:10:00Z",
+        );
+
+        let calls = std::fs::read_to_string(&call_log).unwrap_or_default();
+        assert!(
+            calls.contains("mergeCommit") && calls.contains("headRefOid"),
+            "the loop must reach gh from the child bare repo (calls={calls:?})",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged),
+            "a merged PR observed through the normalized gh path frees the slot",
+        );
+        assert_eq!(monitor.active_count(), 0);
     }
 }

@@ -1305,7 +1305,13 @@ mod tests {
             "git init --bare failed: {}",
             String::from_utf8_lossy(&init.stderr)
         );
-        let expected = std::fs::canonicalize(&bare_repo).expect("canonical bare repo");
+        // `main_worktree_root` canonicalizes and then strips the Windows
+        // verbatim (`\\?\`) prefix, because a child process cannot always
+        // consume a verbatim path. Assert against that same contract so the
+        // expectation holds on Windows as well as on unix.
+        let expected = gwt_core::paths::normalize_windows_child_process_path(
+            &std::fs::canonicalize(&bare_repo).expect("canonical bare repo"),
+        );
         let mut observed_cwd = None;
 
         let output = run_gh_command_with(tmp.path(), &["pr", "list"], |cwd, args| {
