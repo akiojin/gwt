@@ -4252,7 +4252,7 @@ mod tests {
         let request_id = "e544de42-fd9f-49a7-9ba2-b8b16ca1572a";
         let window_id = "tab-owned::agent-1";
 
-        runtime.block_on(async {
+        let ticket = runtime.block_on(async {
             let mut request = pane_url
                 .as_str()
                 .into_client_request()
@@ -4381,21 +4381,30 @@ mod tests {
                 0,
                 "the direct acceptance must not pass through ClientHub"
             );
-        });
 
-        let ticket = {
-            let mut recorded = events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let position = recorded
-                .iter()
-                .position(|event| matches!(event, UserEvent::CommitAgentSelfClose { .. }))
-                .expect("accepted response attempt must schedule finalization");
-            match recorded.remove(position) {
-                UserEvent::CommitAgentSelfClose { ticket } => ticket,
-                _ => unreachable!("matched self-close finalizer"),
-            }
-        };
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let ticket = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded.iter().position(|event| {
+                            matches!(event, UserEvent::CommitAgentSelfClose { .. })
+                        });
+                        position.map(|position| match recorded.remove(position) {
+                            UserEvent::CommitAgentSelfClose { ticket } => ticket,
+                            _ => unreachable!("matched self-close finalizer"),
+                        })
+                    };
+                    if let Some(ticket) = ticket {
+                        break ticket;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("accepted response attempt must schedule finalization")
+        });
         assert!(issuer.finish_self_close(&ticket));
         server.shutdown();
     }

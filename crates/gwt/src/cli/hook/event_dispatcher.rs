@@ -8,10 +8,11 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    board_reminder, diagnostics, execution_completion_stop_check, execution_control_stop_check,
-    intake_completion_stop_check, skill_build_spec_stop_check, skill_discussion_stop_check,
-    skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
-    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    action_obligation_stop_check, board_reminder, diagnostics, execution_completion_stop_check,
+    execution_control_stop_check, intake_completion_stop_check, skill_build_spec_stop_check,
+    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+    work_event_settlement_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
+    IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -100,6 +101,11 @@ fn handle_user_prompt_submit(
     run_value(event, "intake-outcome-required-since", || {
         intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
+    // SPEC-3248 P11 (T-240 core): producing prompts in execution lanes arm
+    // typed action obligations. Fail-open state writer.
+    run_value(event, "action-obligation-record", || {
+        action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
+    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
@@ -168,7 +174,7 @@ fn handle_stop(
     // intake completion gate (SPEC-3248 P7A) has a persistent side effect
     // (self-improvement auto-capture) that must only fire for the block the
     // agent actually sees.
-    let stop_checks: [(&str, StopCheck<'_>); 8] = [
+    let stop_checks: [(&str, StopCheck<'_>); 9] = [
         (
             "skill-discussion-stop-check",
             Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
@@ -228,6 +234,19 @@ fn handle_stop(
             "execution-control-stop-check",
             Box::new(|| {
                 execution_control_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
+        ),
+        // SPEC-3248 P11 (T-242 core): open producing obligations from this
+        // session's prompts block Stop until settled by canonical
+        // operations or deferred via execution.blocked.
+        (
+            "action-obligation-stop-check",
+            Box::new(|| {
+                action_obligation_stop_check::handle_with_input(
                     worktree_root,
                     input,
                     current_session,

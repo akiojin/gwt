@@ -549,7 +549,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // short-circuit on a background tab leaves xterm with stale cell
     // metrics and dead scrollback wheel until the next OS resize.
     let snapshot_write = regex::Regex::new(
-            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*\);",
+            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
         )
         .expect("valid regex");
     let snapshot_activation = regex::Regex::new(
@@ -602,9 +602,9 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     assert!(
         html.contains("viewportRefreshPending: false")
             && html.contains("runtime.viewportRefreshPending = true")
-            && html.contains("rearmPendingTerminalViewportRefresh")
+            && html.contains("consumePendingTerminalViewportRefresh")
             && html.contains("rearmRefreshOnVisible({"),
-        "expected hidden viewport refreshes to stay pending and re-arm on visible transition",
+        "expected hidden viewport refreshes to stay pending, then be consumed before the shared activation scheduler runs",
     );
     assert!(
         html.contains("document.addEventListener(\"visibilitychange\"")
@@ -612,9 +612,10 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         "expected document visibility restore to re-arm visible terminal refreshes",
     );
     assert!(
-            html.contains("terminalOutputBatcher.clear(windowId);"),
-            "expected pending terminal output batches to be cleared on snapshot and removed-window cleanup",
-        );
+        html.contains("clearTerminalOutputBeforeSnapshot({")
+            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id)"),
+        "expected snapshot receipt to clear every pre-boundary terminal output queue",
+    );
     assert!(
         html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
         "expected terminal cleanup to clear pending shared viewport refreshes",
@@ -676,7 +677,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // is false so we do not flip isReady while hidden, and (b) only
     // mark the runtime ready after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -687,11 +688,11 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     let write_gate = regex::Regex::new(
-            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(\s*runtime\.isReady === false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) === true\s*\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     let snapshot_gate = regex::Regex::new(
-            r#"(?s)function replaceTerminalSnapshot\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*pendingSnapshotMap\.set\(windowId, base64\);\s*return;\s*\}"#,
+            r#"(?s)function replaceTerminalSnapshot\(windowId, base64\) \{[\s\S]*?pendingSnapshotMap\.set\(windowId, base64\);[\s\S]*?if \(!runtime \|\| runtime\.isReady === false\) \{\s*return;\s*\}[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);"#,
         )
         .expect("valid regex");
 
@@ -3781,10 +3782,15 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
         "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
     );
     assert!(
-        body.contains("scheduleTerminalFocusActivation(") && body.contains("terminalMap"),
-        "expected hidden->visible transition to schedule terminal focus activation \
-             (fit + viewport refresh + focus) so scrollback responds without a manual \
-             resize (SPEC-2008 FR-051); body: {body}",
+        body.contains("onReveal: () => activateTerminalOnReveal(windowData.id)"),
+        "expected hidden->visible transition to delegate to the single reveal activation router; body: {body}",
+    );
+    assert!(
+        js.contains("function activateTerminalOnReveal(windowId)")
+            && js.contains("runTerminalRevealActivation({")
+            && js.contains("scheduleTerminalFocusActivation(windowId, {")
+            && js.contains("reason: \"visibility_reveal\""),
+        "expected the reveal router to consume pending state and schedule one persisted terminal activation",
     );
     // SPEC-2008 camera-focus: the coalesced maximized-viewport sync scheduler
     // was removed entirely; no rAF fan-out for maximized windows remains.

@@ -167,7 +167,26 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             return Ok(2);
         }
+        // T-247: a Ready handoff with unsettled non-PR obligations is
+        // premature — draft creation and edits stay available mid-work.
+        if is_ready_handoff {
+            if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(refusal) = crate::cli::action_obligation::open_obligation_refusal(
+                    &worktree,
+                    &session_id,
+                    &[crate::cli::action_obligation::ObligationKind::Pr],
+                ) {
+                    out.push_str(&format!("PR handoff refused: {refusal}\n"));
+                    return Ok(2);
+                }
+            }
+        }
     }
+    let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -324,6 +343,22 @@ pub(super) fn run<E: CliEnv>(
             0
         }
     };
+    if cmd_settles_pr_obligation && code == 0 {
+        // P11: successful PR mutations settle open PR obligations.
+        if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            crate::cli::action_obligation::settle_kinds_best_effort(
+                &worktree,
+                &session_id,
+                &[crate::cli::action_obligation::ObligationKind::Pr],
+                "pr mutation",
+            );
+        }
+    }
     Ok(code)
 }
 
@@ -884,6 +919,7 @@ mod tests {
                 execution_binding: Some(identity),
                 commands: vec!["git --version".to_string()],
                 derived: false,
+                surfaces: Vec::new(),
                 worktree_fingerprint: String::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
@@ -1062,6 +1098,7 @@ mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },
@@ -1163,6 +1200,7 @@ mod tests {
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },

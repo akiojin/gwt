@@ -244,6 +244,12 @@ fn evaluate_github_mutation_sinks(command: &str) -> Option<HookOutput> {
             "curl" if is_mutating_github_curl(&tokens) => {
                 return Some(github_mutation_block_decision(command));
             }
+            "wget" if is_mutating_github_wget(&tokens) => {
+                return Some(github_mutation_block_decision(command));
+            }
+            "powershell" | "pwsh" if is_mutating_github_powershell(&segment) => {
+                return Some(github_mutation_block_decision(command));
+            }
             _ => {}
         }
     }
@@ -460,6 +466,90 @@ fn is_mutating_github_curl(tokens: &[&str]) -> bool {
         Some(_) => true,
         None => has_body && !forces_get,
     }
+}
+
+/// `wget` against a GitHub API host with a mutating method or body flag
+/// (P10 transport extension — same classification as curl).
+fn is_mutating_github_wget(tokens: &[&str]) -> bool {
+    let targets_github_api = tokens.iter().any(|token| {
+        let lowered = token.to_ascii_lowercase();
+        lowered.contains("api.github.com") || lowered.contains("uploads.github.com")
+    });
+    if !targets_github_api {
+        return false;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i];
+        if token == "--method" {
+            if let Some(method) = tokens.get(i + 1) {
+                if !matches!(normalize_method(method).as_str(), "GET" | "HEAD") {
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--method=") {
+            if !matches!(normalize_method(value).as_str(), "GET" | "HEAD") {
+                return true;
+            }
+        } else if ["--post-data", "--post-file", "--body-data", "--body-file"]
+            .iter()
+            .any(|flag| token == *flag || token.starts_with(&format!("{flag}=")))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// PowerShell (`powershell -Command …` / `pwsh -c …`) invoking
+/// Invoke-RestMethod / Invoke-WebRequest / irm / iwr against a GitHub API
+/// host with a mutation marker (`-Method` POST/PUT/PATCH/DELETE or a
+/// `-Body`/`-InFile` payload). Plain GET reads pass.
+fn is_mutating_github_powershell(segment: &str) -> bool {
+    let lowered = segment.to_ascii_lowercase();
+    if !lowered.contains("api.github.com") && !lowered.contains("uploads.github.com") {
+        return false;
+    }
+    let invokes_http = lowered.contains("invoke-restmethod")
+        || lowered.contains("invoke-webrequest")
+        || contains_word(&lowered, "irm")
+        || contains_word(&lowered, "iwr");
+    if !invokes_http {
+        return false;
+    }
+    if lowered.contains("-body") || lowered.contains("-infile") {
+        return true;
+    }
+    if let Some(index) = lowered.find("-method") {
+        let rest = lowered[index + "-method".len()..].trim_start_matches([' ', ':', '=']);
+        let verb: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        return !matches!(verb.as_str(), "get" | "head" | "");
+    }
+    false
+}
+
+/// True when `word` (ASCII) appears with word boundaries in `lowered`.
+fn contains_word(lowered: &str, word: &str) -> bool {
+    let bytes = lowered.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = lowered[start..].find(word) {
+        let begin = start + pos;
+        let end = begin + word.len();
+        let before_ok = begin == 0 || !bytes[begin - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 fn github_mutation_block_decision(command: &str) -> HookOutput {
@@ -716,6 +806,44 @@ mod tests {
             "curl -G https://api.github.com/search/code -d q=foo",
             "curl -Gd q=foo https://api.github.com/search/code",
             "curl -X 'GET' https://api.github.com/repos/o/r",
+        ] {
+            assert!(
+                evaluate_bash_command(command, Path::new("/worktree")).is_none(),
+                "must pass: {command}"
+            );
+        }
+    }
+
+    // P10 transport extension (T-217): wget and PowerShell mutations
+    // against the GitHub API are classified like curl; reads pass.
+    #[test]
+    fn blocks_wget_and_powershell_github_mutations_but_not_reads() {
+        for command in [
+            "wget --method=PUT https://api.github.com/repos/o/r/branches/main/protection",
+            "wget --method PUT https://api.github.com/repos/o/r/branches/main/protection",
+            "wget --post-data='{}' https://api.github.com/repos/o/r/merges",
+            "wget --post-file=body.json https://api.github.com/repos/o/r/issues",
+            "wget --body-data='{}' --method=PATCH https://api.github.com/repos/o/r/contents/x",
+            r#"powershell -Command "Invoke-RestMethod -Uri https://api.github.com/repos/o/r/merges -Method Put""#,
+            r#"pwsh -c "irm https://api.github.com/repos/o/r/forks -Method Post""#,
+            r#"powershell -Command "iwr -Uri https://uploads.github.com/repos/o/r/releases/1/assets -Body $b""#,
+        ] {
+            let decision = evaluate_bash_command(command, Path::new("/worktree"))
+                .unwrap_or_else(|| panic!("expected block: {command}"));
+            assert_eq!(
+                decision.summary(),
+                "\u{1F6AB} Direct GitHub API mutations are not allowed",
+                "{command}"
+            );
+        }
+
+        for command in [
+            "wget https://api.github.com/repos/o/r",
+            "wget https://example.com/file.tar.gz",
+            "wget --post-data='{}' https://internal.example.com/hook",
+            r#"powershell -Command "irm https://api.github.com/repos/o/r""#,
+            r#"powershell -Command "Get-Process | Sort-Object CPU""#,
+            r#"pwsh -c "Invoke-RestMethod -Uri https://internal.example.com/x -Method Post""#,
         ] {
             assert!(
                 evaluate_bash_command(command, Path::new("/worktree")).is_none(),
