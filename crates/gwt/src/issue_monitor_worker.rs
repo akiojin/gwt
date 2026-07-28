@@ -386,50 +386,63 @@ pub fn parse_default_base_branch(symbolic_ref_stdout: &str) -> String {
     }
 }
 
+/// Branch assumed when `origin/HEAD` cannot be read.
+const DEFAULT_BASE_BRANCH_FALLBACK: &str = "main";
+
 /// Resolve the repo's default base branch (the branch autonomous PRs merge
 /// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
 pub fn resolve_default_base_branch(repo_path: &Path) -> String {
     try_resolve_default_base_branch(repo_path).unwrap_or_else(|error| {
         tracing::warn!(error = %error, "issue monitor default base branch unavailable");
-        "main".to_string()
+        DEFAULT_BASE_BRANCH_FALLBACK.to_string()
     })
 }
 
 /// Checked default-base resolution used by deadline-integral scans.
+///
+/// The scan deadline is the only condition that may abort the caller here.
+/// `origin/HEAD` is an optional local hint — a repository that never configured
+/// it (a bare `git init` under a workspace home, for example) is a normal
+/// state, not a scan failure. Treating it as one disabled the whole autonomous
+/// progress loop before it could reach `gh` (Issue #3348), so every
+/// non-deadline outcome keeps the historical `main` fallback.
 pub fn try_resolve_default_base_branch(
     repo_path: &Path,
 ) -> Result<String, IssueMonitorScanFailure> {
-    let git_root = run_scan_stage(IssueMonitorScanStage::DefaultBaseBranch, || {
-        gwt_git::worktree::main_worktree_root(repo_path)
-    })?;
+    ensure_scan_deadline(IssueMonitorScanStage::DefaultBaseBranch)?;
+    // Mirrors the gh command root: a workspace home resolves to its child bare
+    // repo, anything else runs where the caller pointed us.
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
     let hub = gwt_core::process_console::global();
-    let output = run_scan_stage(IssueMonitorScanStage::DefaultBaseBranch, || {
-        gwt_core::process_console::spawn_logged_blocking(
-            &hub,
-            gwt_core::process_console::ProcessKind::Git,
-            "git",
-            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
-                .current_dir(&git_root),
-        )
-    })?;
-    if !output.success() {
-        return Err(IssueMonitorScanFailure::new(
-            IssueMonitorScanStage::DefaultBaseBranch,
-            format!(
-                "git symbolic-ref origin/HEAD failed: {}",
-                output.stderr.trim()
-            ),
-        ));
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
+            .current_dir(&git_root),
+    );
+    if let Err(error) = &output {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            return Err(IssueMonitorScanFailure::new(
+                IssueMonitorScanStage::DefaultBaseBranch,
+                format!("git symbolic-ref origin/HEAD exceeded the scan deadline: {error}"),
+            ));
+        }
     }
-    let branch = parse_default_base_branch(&output.stdout);
-    if output.stdout.trim().is_empty() || output.stdout.trim() == "origin/" {
-        return Err(IssueMonitorScanFailure::new(
-            IssueMonitorScanStage::DefaultBaseBranch,
-            "git symbolic-ref origin/HEAD returned an empty branch",
-        ));
+    ensure_scan_deadline(IssueMonitorScanStage::DefaultBaseBranch)?;
+    match output {
+        Ok(output) if output.success() && !output.stdout.trim().is_empty() => {
+            let branch = parse_default_base_branch(&output.stdout);
+            if branch.trim().is_empty() {
+                Ok(DEFAULT_BASE_BRANCH_FALLBACK.to_string())
+            } else {
+                Ok(branch)
+            }
+        }
+        _ => Ok(DEFAULT_BASE_BRANCH_FALLBACK.to_string()),
     }
-    Ok(branch)
 }
 
 /// SPEC #3200 T-041: apply the pre-launch autonomous eligibility gate to every
@@ -1591,6 +1604,56 @@ exit 1
         assert_eq!(resolve_default_base_branch(tmp.path()), "develop");
     }
 
+    /// Issue #3348: a repository that never configured `origin/HEAD` is a
+    /// normal state. Reporting it as a scan failure aborted the whole
+    /// autonomous progress loop before it could reach `gh`.
+    #[test]
+    fn unset_origin_head_falls_back_instead_of_failing_the_scan() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        assert_eq!(
+            try_resolve_default_base_branch(tmp.path())
+                .expect("unset origin/HEAD is not a failure"),
+            DEFAULT_BASE_BRANCH_FALLBACK,
+        );
+    }
+
+    /// Issue #3349: the scan deadline is still the one condition that aborts
+    /// this stage, so a hung `git symbolic-ref` can never freeze the driver.
+    #[test]
+    fn expired_scan_deadline_still_fails_default_base_resolution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        let failure = try_resolve_default_base_branch(tmp.path())
+            .expect_err("an expired deadline must abort the stage");
+
+        assert_eq!(failure.stage, IssueMonitorScanStage::DefaultBaseBranch);
+    }
+
     /// A `gh` stand-in that refuses to answer unless it was spawned from inside
     /// a bare repository (`HEAD` + `objects/` + `refs/` sit directly in the
     /// cwd). A container root holds none of those, so this is exactly the
@@ -1708,9 +1771,14 @@ exit 0
             body: Some("## Acceptance Criteria\n- [ ] AC-1: returns 200\n".to_string()),
             url: None,
         }];
+        // `enabled` is required as well as `autonomous_mode`: the global kill
+        // switch gates every autonomous remote call
+        // (`advance_autonomous_in_flight_is_noop_when_global_monitor_is_disabled`),
+        // and this test is about the gh command root, not the kill switch.
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
+                enabled: true,
                 autonomous_mode: true,
                 ..crate::IssueMonitorPrefs::default()
             },
