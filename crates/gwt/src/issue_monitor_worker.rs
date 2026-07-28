@@ -771,12 +771,19 @@ impl std::error::Error for GitHubRemoteResolutionError {}
 pub fn github_remote_owner_and_repo(
     repo_path: &Path,
 ) -> Result<(String, String), GitHubRemoteResolutionError> {
+    github_remote_owner_and_repo_with_program(repo_path, "git")
+}
+
+fn github_remote_owner_and_repo_with_program(
+    repo_path: &Path,
+    program: impl Into<std::ffi::OsString>,
+) -> Result<(String, String), GitHubRemoteResolutionError> {
     let git_root = gwt_git::worktree::main_worktree_root(repo_path)
         .unwrap_or_else(|_| repo_path.to_path_buf());
     let output = gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::global(),
         gwt_core::process_console::ProcessKind::Git,
-        "git",
+        program,
         &["remote", "get-url", "origin"],
         gwt_core::process_console::SpawnOptions::new("git remote get-url origin")
             .current_dir(&git_root)
@@ -1343,21 +1350,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn github_remote_owner_and_repo_stops_hanging_git_at_operation_deadline() {
+    fn github_remote_owner_and_repo_stops_hanging_program_at_operation_deadline() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let fake_git = temp.path().join("git");
         std::fs::write(
             &fake_git,
             r#"#!/bin/sh
-if [ "$1" = "rev-parse" ] && [ "$2" = "--path-format=absolute" ]; then
-  printf '%s/.git\n' "$PWD"
-  exit 0
-fi
 if [ "$1" = "remote" ] && [ "$2" = "get-url" ] && [ "$3" = "origin" ]; then
   sleep 2
   printf '%s\n' 'https://github.com/owner/repo.git'
@@ -1369,16 +1369,6 @@ exit 1
         .expect("write fake git");
         std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
             .expect("make fake git executable");
-        let path = std::env::join_paths(
-            std::iter::once(temp.path().to_path_buf()).chain(
-                std::env::var_os("PATH")
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(std::env::split_paths),
-            ),
-        )
-        .expect("compose PATH");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", path);
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo path");
         let started = std::time::Instant::now();
@@ -1386,7 +1376,7 @@ exit 1
             started + std::time::Duration::from_millis(150),
         );
 
-        let error = github_remote_owner_and_repo(&repo)
+        let error = github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str())
             .expect_err("ambient deadline must stop the hanging git remote lookup");
 
         assert!(error.to_string().contains("deadline"), "{error}");
