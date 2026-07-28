@@ -358,6 +358,33 @@ impl Grid {
         }
 
         let width = usize::from(cols);
+        if width == 1 {
+            let mut start = 0;
+            while start < logical_line.len() {
+                let mut cell = logical_line[start].clone();
+                let cell_width = if cell.is_wide()
+                    && logical_line
+                        .get(start + 1)
+                        .is_some_and(crate::Cell::is_wide_continuation)
+                {
+                    2
+                } else {
+                    1
+                };
+                cell.set_effective_width(1);
+                let end = (start + cell_width).min(logical_line.len());
+                let wrapped =
+                    end < logical_line.len() || continues_into_drawing_rows;
+                reflowed.push(crate::row::Row::from_snapshot_cells(
+                    std::slice::from_ref(&cell),
+                    cols,
+                    wrapped,
+                ));
+                start = end;
+            }
+            return;
+        }
+
         let mut start = 0;
         while start < logical_line.len() {
             let mut end = (start + width).min(logical_line.len());

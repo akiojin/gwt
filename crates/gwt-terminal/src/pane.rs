@@ -538,6 +538,70 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_snapshot_replays_wide_history_at_single_column() {
+        let mut source = vt100::Parser::new(3, 4, 32);
+        source.process("\x1b[31m漢\x1b[0mA\r\nx\r\ny\r\nz".as_bytes());
+        resize_parser_preserving_state(&mut source, 3, 1);
+
+        let snapshot = source.screen().snapshot_formatted(32);
+        let replay = std::panic::catch_unwind(|| {
+            let mut replay = vt100::Parser::new(3, 1, 32);
+            replay.process(&snapshot);
+            replay
+        });
+
+        assert!(
+            replay.is_ok(),
+            "a one-column snapshot must replay wide history without panicking"
+        );
+        let replay = replay.expect("one-column replay");
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+        let wide_cell = replay_oldest.cell(0, 0).expect("single-column wide cell");
+        assert_eq!(wide_cell.contents(), "漢");
+        assert_eq!(wide_cell.fgcolor(), vt100::Color::Idx(1));
+        assert!(
+            !wide_cell.is_wide(),
+            "a wide glyph must use one effective cell in a one-column terminal"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(1, 0)
+                .expect("ASCII cell following wide history")
+                .contents(),
+            "A",
+            "the ASCII cell following a collapsed wide glyph must be retained"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_normalizes_zero_terminal_size() {
+        let result = std::panic::catch_unwind(|| {
+            let mut source = vt100::Parser::new(0, 0, 8);
+            assert_eq!(source.screen().size(), (1, 1));
+            source.process(b"A");
+            source.screen_mut().set_size(0, 0);
+            assert_eq!(source.screen().size(), (1, 1));
+
+            let snapshot = source.screen().snapshot_formatted(8);
+            let mut replay = vt100::Parser::new(0, 0, 8);
+            replay.process(&snapshot);
+            replay
+        });
+
+        assert!(
+            result.is_ok(),
+            "zero-sized parser input must normalize and snapshot without panicking or stalling"
+        );
+        assert_eq!(
+            result
+                .expect("normalized zero-sized replay")
+                .screen()
+                .size(),
+            (1, 1)
+        );
+    }
+
+    #[test]
     fn test_semantic_snapshot_round_trips_active_alternate_screen_and_restore_state() {
         let mut source = vt100::Parser::new(3, 10, 32);
         source.process(b"\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b=\x1b[?25l");
