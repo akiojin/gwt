@@ -12,6 +12,7 @@ import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -1477,19 +1478,47 @@ class E5EmbeddingFunction:
             return [input_value]
         return list(input_value)
 
+    @staticmethod
+    def _native_finite_query_vectors(output: Any) -> List[List[float]]:
+        """Normalize model output at the Chroma API boundary.
+
+        SentenceTransformer returns NumPy float32 scalars. Chroma's public
+        embedding contract accepts native Python floats and rejects the NumPy
+        scalars before querying an otherwise healthy collection.
+        """
+        vectors: List[List[float]] = []
+        for vector_index, vector in enumerate(output):
+            normalized: List[float] = []
+            for value_index, value in enumerate(vector):
+                try:
+                    native_value = float(value)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError(
+                        "embedding value must be numeric "
+                        f"(vector={vector_index}, value={value_index})"
+                    ) from error
+                if not math.isfinite(native_value):
+                    raise ValueError(
+                        "embedding value must be finite "
+                        f"(vector={vector_index}, value={value_index})"
+                    )
+                normalized.append(native_value)
+            vectors.append(normalized)
+        return vectors
+
     def embed_documents(self, input: Any = None, **kwargs: Any) -> List[List[float]]:  # noqa: A002
         if input is None:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "passage")
         out = self._model_or_default().encode(prepared)
-        return [list(v) for v in out]
+        return [list(vector) for vector in out]
 
     def embed_query(self, input: Any = None, **kwargs: Any) -> List[List[float]]:  # noqa: A002
         if input is None:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "query")
         out = self._model_or_default().encode(prepared)
-        return [list(v) for v in out]
+        return self._native_finite_query_vectors(out)
 
     # Chroma EmbeddingFunction protocol: callable on a sequence of strings.
     # Default to passage mode (used during indexing).
@@ -4922,6 +4951,25 @@ def _search_scope_collection(
     return payload
 
 
+def _search_failed_payload(
+    affected_scopes: Sequence[str],
+    stage: str,
+    error: Exception,
+) -> Dict[str, Any]:
+    error_type = type(error).__name__[:64] or "Error"
+    scopes = list(dict.fromkeys(affected_scopes))
+    return {
+        "ok": False,
+        "error_code": "SEARCH_FAILED",
+        "retryable": False,
+        "error": (
+            f"semantic search {stage} failed for scopes "
+            f"[{', '.join(scopes)}] ({error_type})"
+        ),
+        "affected_scopes": scopes,
+    }
+
+
 def action_search_multi_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
@@ -4974,7 +5022,17 @@ def action_search_multi_v2(
             }
             continue
         if query_embedding is None:
-            query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+            try:
+                query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+            except Exception as error:
+                affected_scopes = [
+                    candidate for candidate in scopes if candidate in valid_scopes
+                ]
+                return _search_failed_payload(
+                    affected_scopes,
+                    "query embedding",
+                    error,
+                )
         try:
             result = _search_scope_collection(
                 repo_hash,
@@ -4986,9 +5044,24 @@ def action_search_multi_v2(
                 db_root,
                 query_embedding,
             )
-        except Exception as error:  # store broke between classify and query
-            scope_states[scope] = {"state": "corrupt", "reason": str(error)}
-            continue
+        except Exception as error:
+            # Phase 70a FR-400: query-contract failures (for example an
+            # unsupported embedding scalar type) do not prove the verified
+            # store is corrupt. Re-check the same canonical health source used
+            # by status; only an actually missing/corrupt store enters repair.
+            try:
+                current_state, current_health = _classify_scope_for_search(
+                    repo_hash, scope_worktree, scope, db_root=db_root
+                )
+            except Exception:
+                current_state, current_health = state, health
+            if current_state in ("missing", "corrupt"):
+                scope_states[scope] = {
+                    "state": current_state,
+                    "reason": current_health.get("reason", current_state),
+                }
+                continue
+            return _search_failed_payload([scope], "query", error)
         scope_states[scope] = {"state": state}
         if state == "stale":
             stale_scopes.append(scope)

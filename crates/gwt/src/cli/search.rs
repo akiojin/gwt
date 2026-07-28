@@ -138,6 +138,12 @@ pub fn run<E: CliEnv>(
             render_not_ready(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
+        Err(error @ crate::index_search::IndexSearchError::SearchFailed(_)) => {
+            // Phase 70a FR-400: a query-contract failure against a healthy
+            // scope is non-retryable and must never enter the repair wait.
+            render_search_failed(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
         Err(error) => {
             return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
         }
@@ -187,6 +193,29 @@ fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::I
         out.push('\n');
     } else {
         out.push_str(&format!("index not ready: {error}\n"));
+    }
+}
+
+fn render_search_failed(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchError,
+) {
+    let crate::index_search::IndexSearchError::SearchFailed(failed) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "SEARCH_FAILED",
+            "retryable": false,
+            "reason": failed.reason,
+            "affected_scopes": failed.affected_scopes,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("search failed: {error}\n"));
     }
 }
 
@@ -455,6 +484,28 @@ mod tests {
         assert_eq!(payload["waited_ms"], 30_100);
         assert_eq!(payload["retry_after_ms"], 5_000);
         assert_eq!(error.exit_code(), 75);
+    }
+
+    #[test]
+    fn render_search_failed_json_reports_non_retryable_error_contract() {
+        use crate::index_search::{IndexSearchError, IndexSearchFailed};
+        let mut out = String::new();
+        let error = IndexSearchError::SearchFailed(IndexSearchFailed {
+            reason: "issues query failed: query embedding rejected".to_string(),
+            affected_scopes: vec!["issues".to_string()],
+        });
+
+        render_search_failed(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "SEARCH_FAILED");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(false));
+        assert_eq!(payload["affected_scopes"][0], "issues");
+        assert!(payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("query embedding rejected")));
+        assert_eq!(error.exit_code(), 1);
     }
 
     #[test]
