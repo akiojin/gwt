@@ -2395,6 +2395,9 @@
               persist,
               canFit: () => canRefreshTerminalViewport(windowId),
               markPending: () => markTerminalViewportRefreshPending(windowId),
+              clearPending: () => {
+                runtime.viewportRefreshPending = false;
+              },
               activate: () =>
                 runTerminalActivationSequence({
                   runtime,
@@ -2587,14 +2590,6 @@
         clearLocalGeometryEdit(geometrySyncState, previous.id);
         resizeState = null;
         delete document.documentElement.dataset.opResizeActive;
-      }
-
-      function hasPendingTerminalViewportRefresh(windowId) {
-        const runtime = terminalMap.get(windowId);
-        return (
-          runtime?.viewportRefreshPending === true ||
-          terminalViewportRefreshScheduler?.hasPending?.(windowId) === true
-        );
       }
 
       function scheduleTerminalViewportRefresh(windowId) {
@@ -2813,7 +2808,11 @@
           // of giving up after one frame, so the focus path is not a
           // one-shot silent no-op (#2832 parity for the focus trigger).
           const pendingOutputCount = terminalOutputBatcher.pendingCount(windowId);
-          const hasPendingRefresh = hasPendingTerminalViewportRefresh(windowId);
+          const hasAuthoritativePendingRefresh =
+            activeRuntime.viewportRefreshPending === true;
+          const hasPendingRefresh =
+            hasAuthoritativePendingRefresh ||
+            terminalViewportRefreshScheduler?.hasPending?.(windowId) === true;
           const activation = runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
@@ -2835,7 +2834,7 @@
           const refreshSettlement = resolveTerminalViewportRefreshSettlement({
             activationRan: activation.ran,
             shouldPersistGeometry,
-            hasPendingRefresh,
+            hasAuthoritativePendingRefresh,
           });
           if (refreshSettlement.shouldUpdate) {
             activeRuntime.viewportRefreshPending = refreshSettlement.pending;

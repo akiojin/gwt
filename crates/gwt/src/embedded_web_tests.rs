@@ -781,12 +781,20 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
             "expected createTerminalRuntime to initialize activationAttempts so the focus-path retry has a bounded counter (Issue #2937)",
         );
     let refresh_settlement = regex::Regex::new(
-            r#"(?s)const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)"#,
+            r#"(?s)const hasAuthoritativePendingRefresh =\s*activeRuntime\.viewportRefreshPending === true;[\s\S]*?const hasPendingRefresh =\s*hasAuthoritativePendingRefresh \|\|[\s\S]*?terminalViewportRefreshScheduler\?\.hasPending\?\.\(windowId\) === true;[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasAuthoritativePendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)"#,
         )
         .expect("valid regex");
     assert!(
             refresh_settlement.is_match(html),
             "expected failed authoritative activation to rearm viewportRefreshPending before retry exhaustion and successful activation to clear it before the fast-path return (SPEC-2008 FR-122)",
+        );
+    let persisted_fit_settlement = regex::Regex::new(
+            r#"(?s)runTerminalFitRequest\(\{[\s\S]*?persist,[\s\S]*?markPending:[\s\S]*?clearPending:[\s\S]*?viewportRefreshPending = false[\s\S]*?activate:"#,
+        )
+        .expect("valid regex");
+    assert!(
+            persisted_fit_settlement.is_match(html),
+            "expected successful persisted fits to clear authoritative pending state while failed/hidden fits remain pending (SPEC-2008 FR-122)",
         );
     let retry_restart = regex::Regex::new(
             r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?restartRetryBudget\s*=\s*false[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{[\s\S]*?if \(restartRetryBudget\) \{\s*runtime\.activationAttempts = 0;\s*\}[\s\S]*?if \(runtime\.activationFrame !== null\) \{\s*return;"#,
