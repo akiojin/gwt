@@ -4,10 +4,9 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::repo_browser::{
@@ -63,7 +62,7 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{
-    build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
+    build_frontend_sync_events, AgentLaunchDisposition, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
@@ -74,35 +73,34 @@ pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
     docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_runtime, package_runner_version_spec,
-    resolve_docker_launch_plan, resolve_docker_shell_command, strip_package_runner_args,
+    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
+    resolve_docker_shell_command,
 };
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action,
-    resolved_test_docker_runtime, DockerLaunchServiceAction, PackageRunnerProgram,
+    mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
+    resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
-    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentDurableAuthority, AgentFrontendRequest,
     AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
     AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
-pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
-    build_shell_process_launch, ensure_docker_launch_runtime_ready_for_runtime,
-    install_launch_gwt_bin_env, prune_orphan_intake_worktrees, resolve_launch_worktree,
-    resolve_shell_launch_worktree,
-};
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
     resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+};
+pub(crate) use launch_runtime::{
+    apply_windows_host_shell_wrapper, build_shell_process_launch,
+    ensure_docker_launch_runtime_ready_for_runtime, install_launch_gwt_bin_env,
+    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -1013,6 +1011,12 @@ enum UserEvent {
     CommitAgentSelfClose {
         ticket: AgentSelfCloseCapabilityTicket,
     },
+    /// Candidate Continue work launches must return an authenticated
+    /// SessionStart receipt before this correlated deadline.
+    ContinueWorkReadyTimeout {
+        window_id: String,
+        operation_id: String,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -1287,9 +1291,10 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
-        AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
-        DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        AgentLaunchDisposition, AppEventProxy, AppRuntime, AttachmentUploadStore,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1315,10 +1320,30 @@ mod tests {
         assert!(
             matches!(
                 queue.try_next(),
-                Some(crate::embedded_server::DrainStep::Closed)
+                Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                    if frame.code == 1008
+                        && frame.reason == "execution binding is no longer current"
             ),
-            "a capability rotated while queued must close the agent socket"
+            "a capability rotated while queued must close the agent socket with a stable policy frame"
         );
+    }
+
+    #[test]
+    fn unavailable_agent_frontend_authority_closes_pane_client_without_raw_error() {
+        let clients = ClientHub::default();
+        let queue = clients.register("unknown-pane-client".to_string());
+
+        apply_agent_frontend_dispatch_outcome(
+            &clients,
+            "unknown-pane-client",
+            AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable,
+        );
+
+        assert!(matches!(
+            queue.try_next(),
+            Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                if frame.code == 1011 && frame.reason == "execution authority is unavailable"
+        ));
     }
 
     #[cfg(unix)]
@@ -1355,6 +1380,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some(project_root.display().to_string()),
             branch: Some("work/runtime".to_string()),
@@ -1871,6 +1897,25 @@ mod tests {
             }
             other => panic!("expected pane_send_result, got {other:?}"),
         }
+
+        runtime
+            .inspection_agent_windows
+            .insert("tab-1::claude-1".to_string());
+        let inspection_denied = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::PaneSendInput {
+                session_id: "session-a".to_string(),
+                text: "continue changing files\r".to_string(),
+            },
+        );
+        assert!(matches!(
+            inspection_denied.first().map(|event| &event.event),
+            Some(gwt::BackendEvent::PaneSendResult {
+                ok: false,
+                error: Some(error),
+                ..
+            }) if error.contains("inspection-only")
+        ));
     }
 
     #[test]
@@ -1885,6 +1930,7 @@ mod tests {
                 kind: RuntimeHookEventKind::RuntimeState,
                 source_event: Some("PreToolUse".to_string()),
                 gwt_session_id: Some("session-1".to_string()),
+                continuation_readiness_nonce: None,
                 agent_session_id: Some("agent-1".to_string()),
                 project_root: Some("E:/gwt/test-repo".to_string()),
                 branch: Some("feature/runtime".to_string()),
@@ -2552,10 +2598,15 @@ mod tests {
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_continue_work: HashMap::new(),
+            pending_fresh_execution_launches: HashMap::new(),
+            continue_work_outcomes: HashMap::new(),
+            continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            inspection_agent_windows: std::collections::HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
@@ -3270,7 +3321,6 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Work,
             WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
@@ -3295,6 +3345,37 @@ mod tests {
             assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
+
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_raw_id = runtime
+            .window_lookup
+            .get(&branches_id)
+            .expect("Branches lookup")
+            .raw_id
+            .clone();
+        let before_z = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("Branches window")
+            .z_index;
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Work, bounds.clone())
+                .len(),
+            1,
+            "Work must focus the existing legacy Branches singleton",
+        );
+        let reused_work = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("reused Work surface");
+        assert_eq!(reused_work.geometry.width, 720.0);
+        assert_eq!(reused_work.geometry.height, 420.0);
+        assert!(reused_work.z_index > before_z);
     }
 
     #[test]
@@ -3767,6 +3848,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: None,
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/test".to_string()),
@@ -3868,6 +3950,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -4829,6 +4912,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -4869,6 +4953,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -5109,26 +5194,25 @@ mod tests {
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
         config.remove_env = vec!["SECRET".to_string()];
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
         assert!(changed, "expected bunx failure to switch to npx");
+        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
+        assert_eq!(
+            probes[0],
+            ("bunx".to_string(), vec!["--version".to_string()])
+        );
         assert_eq!(config.command, "npx");
         assert_eq!(
             config.args,
@@ -5158,52 +5242,54 @@ mod tests {
     }
 
     #[test]
-    fn host_package_runner_fallback_switches_custom_bunx_to_npx_when_probe_fails() {
+    fn host_package_runner_fallback_does_not_probe_or_mutate_custom_bunx() {
         let mut config = sample_custom_bunx_launch_config();
+        let original = format!("{config:?}");
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, _remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
-        assert!(changed, "expected custom bunx failure to switch to npx");
-        assert_eq!(config.command, "npx");
+        assert!(!changed, "Custom Bunx must bypass built-in fallback policy");
+        assert!(probes.is_empty(), "Custom Bunx must not be probed");
         assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ]
+            format!("{config:?}"),
+            original,
+            "Custom Bunx launch must remain unchanged"
         );
     }
 
     #[test]
-    fn host_package_runner_fallback_ignores_direct_installed_command() {
+    fn host_runner_health_compatibility_preserves_healthy_direct_command() {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
             .version("installed")
             .build();
+        #[cfg(not(windows))]
+        {
+            config.command = "/opt/gwt-test/claude".to_string();
+        }
+        #[cfg(windows)]
+        {
+            config.command = "C:/gwt-test/claude.exe".to_string();
+        }
         let original_command = config.command.clone();
         let original_args = config.args.clone();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |_command, _args, _env, _remove_env, _cwd| {
-                panic!("installed command should not probe bunx");
+            |command, args, _env, _remove_env, _cwd| {
+                assert_eq!(command, original_command);
+                assert_eq!(args, vec!["--version".to_string()]);
+                true
             },
         );
 
@@ -7266,7 +7352,15 @@ fn apply_agent_frontend_dispatch_outcome(
 ) {
     match outcome {
         AgentFrontendDispatchOutcome::Dispatched(events) => clients.dispatch(events),
-        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister(client_id),
+        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister_with_close_frame(
+            client_id,
+            Some(crate::embedded_server::AGENT_STALE_BINDING_CLOSE),
+        ),
+        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => clients
+            .unregister_with_close_frame(
+                client_id,
+                Some(crate::embedded_server::AGENT_AUTHORITY_UNAVAILABLE_CLOSE),
+            ),
     }
 }
 
@@ -7779,6 +7873,17 @@ fn main() -> std::io::Result<()> {
                     agent_self_close_quit_deferred = false;
                     let _ = proxy.send_event(UserEvent::QuitApp);
                 }
+            }
+            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout {
+                window_id,
+                operation_id,
+            }) => {
+                clients.dispatch(
+                    app.handle_continue_work_ready_timeout(
+                        &window_id,
+                        &operation_id,
+                    ),
+                );
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

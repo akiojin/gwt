@@ -265,6 +265,14 @@ pub fn resolve_public_gwt_bin_with_lookup(
         return current_exe.to_path_buf();
     }
 
+    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
+        if let Some(candidate) =
+            sibling_daemon_binary(current_exe).filter(|candidate| candidate.is_file())
+        {
+            return candidate;
+        }
+    }
+
     if should_prefer_path_gwt(current_exe) {
         let path_candidate = lookup(INTERNAL_DAEMON_BINARY_NAME).filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
@@ -483,11 +491,65 @@ mod tests {
 
     #[test]
     fn gui_front_door_current_exe_prefers_daemon_sibling_when_path_lookup_is_missing() {
-        let current_exe = Path::new(r"C:\Program Files\GWT\gwt.exe");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
+        let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
+        let current_exe = temp.path().join("app").join(executable_name);
+        let sibling_daemon = current_exe.with_file_name(daemon_name);
+        std::fs::create_dir_all(current_exe.parent().expect("current exe parent"))
+            .expect("create current exe parent");
+        std::fs::write(&current_exe, b"gwt").expect("write current exe fixture");
+        std::fs::write(&sibling_daemon, b"gwtd").expect("write sibling daemon fixture");
 
-        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| None);
+        let resolved = resolve_public_gwt_bin_with_lookup(&current_exe, |_command| None);
 
-        assert_eq!(resolved, current_exe.with_file_name("gwtd.exe"));
+        assert_eq!(resolved, sibling_daemon);
+    }
+
+    #[test]
+    fn stable_gui_front_door_falls_back_to_path_when_daemon_sibling_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
+        let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
+        let current_exe = temp.path().join("app").join(executable_name);
+        let path_daemon = temp.path().join("path-bin").join(daemon_name);
+        std::fs::create_dir_all(current_exe.parent().expect("current exe parent"))
+            .expect("create current exe parent");
+        std::fs::create_dir_all(path_daemon.parent().expect("PATH daemon parent"))
+            .expect("create PATH daemon parent");
+        std::fs::write(&current_exe, b"gwt").expect("write current exe fixture");
+        std::fs::write(&path_daemon, b"gwtd").expect("write PATH daemon fixture");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(&current_exe, |command| {
+            assert_eq!(command, "gwtd");
+            Some(path_daemon.clone())
+        });
+
+        assert_eq!(resolved, path_daemon);
+    }
+
+    #[test]
+    fn stable_gui_front_door_prefers_matching_daemon_sibling_over_foreign_path_install() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
+        let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
+        let current_exe = temp.path().join("app").join(executable_name);
+        let sibling_daemon = current_exe.with_file_name(daemon_name);
+        let foreign_install = temp.path().join("foreign").join(daemon_name);
+        std::fs::create_dir_all(current_exe.parent().expect("current exe parent"))
+            .expect("create current exe parent");
+        std::fs::create_dir_all(foreign_install.parent().expect("foreign daemon parent"))
+            .expect("create foreign daemon parent");
+        std::fs::write(&current_exe, b"gwt").expect("write current exe fixture");
+        std::fs::write(&sibling_daemon, b"gwtd").expect("write sibling daemon fixture");
+        std::fs::write(&foreign_install, b"foreign gwtd").expect("write foreign daemon fixture");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(&current_exe, |command| {
+            assert_eq!(command, "gwtd");
+            Some(foreign_install)
+        });
+
+        assert_eq!(resolved, sibling_daemon);
     }
 
     #[test]
