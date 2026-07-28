@@ -1063,12 +1063,11 @@ impl AppRuntime {
                             .as_ref()
                             .and_then(|context| context.issue_monitor_issue_number)
                         {
-                            events.extend(
-                                self.issue_monitor_launch_succeeded_events(
-                                    issue_number,
-                                    &window_id,
-                                ),
-                            );
+                            events.extend(self.issue_monitor_launch_succeeded_events(
+                                &project_root,
+                                issue_number,
+                                &window_id,
+                            ));
                         }
                         events
                     }

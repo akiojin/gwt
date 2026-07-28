@@ -432,6 +432,9 @@ pub enum IssueMonitorIssueState {
 #[serde(rename_all = "snake_case")]
 pub enum IssueMonitorCandidateSource {
     Live,
+    /// Live GitHub data that reached the configured list cap. It is fresh but
+    /// cannot prove that an absent Issue is closed or belongs elsewhere.
+    LiveIncomplete,
     Cache,
 }
 
@@ -2870,6 +2873,49 @@ impl IssueMonitorState {
             .retain(|pending| pending.issue_number != issue_number);
     }
 
+    /// Reconcile persisted in-flight accounting against one complete live
+    /// repository snapshot. A qualified window owned by another project tab is
+    /// also stale for this GUI observer. Bare legacy window ids have no
+    /// trustworthy project provenance and are therefore retained.
+    fn prune_inflight_launches_for_live_snapshot(
+        &mut self,
+        live_issue_numbers: &BTreeSet<u64>,
+        expected_project_tab_id: Option<&str>,
+    ) {
+        let absent_issues = self
+            .active_launches
+            .iter()
+            .copied()
+            .filter(|issue_number| !live_issue_numbers.contains(issue_number))
+            .collect::<BTreeSet<_>>();
+        let foreign_window_issues = expected_project_tab_id
+            .map(|expected_tab_id| {
+                self.launched_windows
+                    .iter()
+                    .filter_map(|(issue_number, window_id)| {
+                        issue_monitor_qualified_window_id(window_id)
+                            .filter(|(tab_id, _)| *tab_id != expected_tab_id)
+                            .map(|_| *issue_number)
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let targets = absent_issues
+            .union(&foreign_window_issues)
+            .copied()
+            .collect::<Vec<_>>();
+
+        for issue_number in targets {
+            self.clear_active_tracking(issue_number);
+            if absent_issues.contains(&issue_number) {
+                self.queue.retain(|queued| *queued != issue_number);
+                self.inbox.retain(|item| item.issue.number != issue_number);
+            } else {
+                self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+            }
+        }
+    }
+
     fn set_inbox_state(&mut self, issue_number: u64, state: MonitorInboxState) {
         if let Some(item) = self
             .inbox
@@ -3093,12 +3139,45 @@ pub fn scan_issue_monitor_candidates_with_provenance(
     project_root: &Path,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    scan_issue_monitor_candidates_for_project_tab_with_provenance(
+        monitor,
+        issues,
+        source,
+        project_root,
+        None,
+        now,
+    )
+}
+
+/// Provenance-aware scan for a GUI observer bound to one project tab.
+///
+/// Destructive reconciliation is authorized only by a complete live snapshot.
+/// The optional tab id lets the GUI positively identify qualified window ids
+/// from another open project without guessing about legacy bare ids.
+pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    source: IssueMonitorCandidateSource,
+    project_root: &Path,
+    expected_project_tab_id: Option<&str>,
+    now: &str,
+) -> IssueMonitorScanSummary {
     if monitor.legacy_git_launch_failure_migration_version
         < LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
         && source == IssueMonitorCandidateSource::Live
         && crate::start_work::resolve_launch_agent_base_branch(project_root).is_ok()
     {
         monitor.apply_legacy_git_launch_failure_migration(project_root);
+    }
+    if source == IssueMonitorCandidateSource::Live {
+        let live_issue_numbers = issues
+            .iter()
+            .map(|issue| issue.number)
+            .collect::<BTreeSet<_>>();
+        monitor.prune_inflight_launches_for_live_snapshot(
+            &live_issue_numbers,
+            expected_project_tab_id,
+        );
     }
     scan_issue_monitor_candidates(monitor, issues, now)
 }
@@ -3117,9 +3196,22 @@ fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
     if stored == incoming {
         return true;
     }
-    let stored_raw = stored.rsplit("::").next().unwrap_or(stored);
-    let incoming_raw = incoming.rsplit("::").next().unwrap_or(incoming);
+    let stored_qualified = issue_monitor_qualified_window_id(stored);
+    let incoming_qualified = issue_monitor_qualified_window_id(incoming);
+    if let (Some((stored_tab, stored_raw)), Some((incoming_tab, incoming_raw))) =
+        (stored_qualified, incoming_qualified)
+    {
+        return stored_tab == incoming_tab && stored_raw == incoming_raw;
+    }
+    let stored_raw = stored_qualified.map(|(_, raw)| raw).unwrap_or(stored);
+    let incoming_raw = incoming_qualified.map(|(_, raw)| raw).unwrap_or(incoming);
     !stored_raw.is_empty() && stored_raw == incoming_raw
+}
+
+fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
+    let (project_tab_id, raw_window_id) = window_id.split_once("::")?;
+    (!project_tab_id.is_empty() && !raw_window_id.is_empty())
+        .then_some((project_tab_id, raw_window_id))
 }
 
 #[cfg(test)]
@@ -3292,6 +3384,161 @@ mod tests {
         assert_eq!(
             prefs.launching_issues[0].claimed_at.as_deref(),
             Some("2026-07-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn qualified_window_ids_require_the_same_project_tab_prefix() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "project-a::agent-1".to_string(),
+                }],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        assert_eq!(
+            monitor.launched_window_issue("project-a::agent-1"),
+            Some(42),
+            "the exact qualified id still matches"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("agent-1"),
+            Some(42),
+            "a legacy bare id remains compatible"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("project-b::agent-1"),
+            None,
+            "the same raw id in another project tab must not match"
+        );
+        assert_eq!(
+            monitor.record_agent_window_failed("project-b::agent-1", "foreign failure"),
+            None,
+            "failure reverse lookup must not consume another project tab's launch"
+        );
+        assert_eq!(
+            monitor.requeue_window("project-b::agent-1"),
+            None,
+            "close reverse lookup must not consume another project tab's launch"
+        );
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn live_candidate_snapshot_prunes_repo_absent_inflight_launches_but_cache_does_not() {
+        let stale_prefs = IssueMonitorPrefs {
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "project-a::agent-1".to_string(),
+            }],
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 43,
+                claimed_at: Some("2026-07-02T00:00:00Z".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        let project_root = Path::new(".");
+
+        let mut live =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut live,
+            &[issue(99)],
+            IssueMonitorCandidateSource::Live,
+            project_root,
+            "2026-07-28T00:00:00Z",
+        );
+        assert_eq!(
+            live.active_count(),
+            0,
+            "a complete live snapshot frees both slots"
+        );
+        assert!(live.prefs().launched_issues.is_empty());
+        assert!(live.prefs().launching_issues.is_empty());
+
+        let mut cache = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+        scan_issue_monitor_candidates_with_provenance(
+            &mut cache,
+            &[issue(99)],
+            IssueMonitorCandidateSource::Cache,
+            project_root,
+            "2026-07-28T00:00:00Z",
+        );
+        assert_eq!(
+            cache.active_count(),
+            2,
+            "a partial cache snapshot must never authorize destructive pruning"
+        );
+    }
+
+    #[test]
+    fn live_gui_snapshot_prunes_foreign_qualified_windows_after_disk_rebase() {
+        let stale_prefs = IssueMonitorPrefs {
+            launched_issues: vec![
+                IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "project-b::agent-1".to_string(),
+                },
+                IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "legacy-agent-1".to_string(),
+                },
+            ],
+            ..IssueMonitorPrefs::default()
+        };
+        let issues = [issue(42), issue(43)];
+        let project_root = Path::new(".");
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+
+        scan_issue_monitor_candidates_for_project_tab_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            project_root,
+            Some("project-a"),
+            "2026-07-28T00:00:00Z",
+        );
+        assert_eq!(monitor.launched_window_issue("project-b::agent-1"), None);
+        assert_eq!(
+            monitor.launched_window_issue("legacy-agent-1"),
+            Some(43),
+            "bare legacy ids have no positive foreign-project provenance"
+        );
+
+        monitor.rebase_gui_observer_prefs(&stale_prefs);
+        scan_issue_monitor_candidates_for_project_tab_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            project_root,
+            Some("project-a"),
+            "2026-07-28T00:00:01Z",
+        );
+        assert_eq!(
+            monitor.launched_window_issue("project-b::agent-1"),
+            None,
+            "the final post-rebase scan prevents union merge resurrection"
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        let mut cache = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+        scan_issue_monitor_candidates_for_project_tab_with_provenance(
+            &mut cache,
+            &issues,
+            IssueMonitorCandidateSource::Cache,
+            project_root,
+            Some("project-a"),
+            "2026-07-28T00:00:02Z",
+        );
+        assert_eq!(
+            cache.launched_window_issue("project-b::agent-1"),
+            Some(42),
+            "cache provenance cannot authorize foreign-prefix pruning"
         );
     }
 

@@ -246,6 +246,10 @@ impl AppRuntime {
         let issue_monitor_issue_number = launch_feedback_context
             .as_ref()
             .and_then(|context| context.issue_monitor_issue_number);
+        let issue_monitor_project_root = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_project_root.clone())
+            .or_else(|| self.issue_monitor_project_root_for_window(&window_id));
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
@@ -258,7 +262,11 @@ impl AppRuntime {
             );
             events.push(terminal_output);
             if let Some(issue_number) = issue_monitor_issue_number {
-                events.extend(self.issue_monitor_launch_failed_events(issue_number, &detail));
+                events.extend(self.issue_monitor_launch_failed_events(
+                    issue_monitor_project_root.as_deref(),
+                    issue_number,
+                    &detail,
+                ));
             }
             return events;
         }
@@ -278,7 +286,11 @@ impl AppRuntime {
             ));
         }
         if let Some(issue_number) = issue_monitor_issue_number {
-            events.extend(self.issue_monitor_launch_failed_events(issue_number, &detail));
+            events.extend(self.issue_monitor_launch_failed_events(
+                issue_monitor_project_root.as_deref(),
+                issue_number,
+                &detail,
+            ));
         }
         events
     }

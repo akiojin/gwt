@@ -6351,6 +6351,7 @@ No viable candidates found in PATH \
             client_id: "client-1".to_string(),
             title: "Launch failed".to_string(),
             issue_monitor_issue_number: None,
+            issue_monitor_project_root: None,
         }),
     );
 
@@ -6423,6 +6424,7 @@ No viable candidates found in PATH \
             client_id: "client-1".to_string(),
             title: "Launch failed".to_string(),
             issue_monitor_issue_number: None,
+            issue_monitor_project_root: None,
         }),
     );
 
@@ -6461,6 +6463,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_project_root: None,
         }),
     );
 
@@ -6505,6 +6508,7 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_project_root: None,
         }),
     );
 
@@ -6575,6 +6579,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_project_root: None,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -6696,6 +6701,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_project_root: None,
         },
     );
     let (command, args) = if cfg!(windows) {
@@ -17594,11 +17600,12 @@ fn app_runtime_agent_failed_full_scan_migrates_then_keeps_new_same_failure() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(43),
+            issue_monitor_project_root: None,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
 
-    let events = runtime.issue_monitor_agent_failed_events(&window_id, &failure);
+    let events = runtime.issue_monitor_agent_failed_events(&repo, &window_id, &failure);
 
     let inbox = events
         .iter()
@@ -17665,6 +17672,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(43),
+            issue_monitor_project_root: None,
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
@@ -17681,8 +17689,13 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let (done_tx, done_rx) = mpsc::channel();
     let writer_window = window_id.clone();
     let writer_failure = failure.clone();
+    let writer_repo = repo.clone();
     let writer = thread::spawn(move || {
-        let events = runtime.issue_monitor_agent_failed_events(&writer_window, &writer_failure);
+        let events = runtime.issue_monitor_agent_failed_events(
+            &writer_repo,
+            &writer_window,
+            &writer_failure,
+        );
         done_tx.send(events).expect("return GUI events");
     });
 
@@ -18194,7 +18207,11 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.auto_launch_issue_monitor_request_events(3165, LinkedIssueKind::Spec);
+    let events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3165,
+        LinkedIssueKind::Spec,
+    );
 
     assert!(events.iter().any(|event| {
         matches!(
@@ -18284,6 +18301,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
+            issue_monitor_project_root: None,
         },
     );
 
@@ -18353,7 +18371,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     previous.docker_service = None;
     previous.save(&sessions_dir).expect("save previous session");
 
-    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let profiles = runtime.issue_monitor_previous_profiles(&runtime.tabs[0].project_root);
@@ -18363,7 +18381,11 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         gwt_agent::LaunchRuntimeTarget::Host
     );
 
-    let _events = runtime.auto_launch_issue_monitor_request_events(3165, LinkedIssueKind::Spec);
+    let _events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3165,
+        LinkedIssueKind::Spec,
+    );
 
     wait_for_recorded_event(
         "issue monitor last settings runtime launch",
@@ -18792,7 +18814,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
         .expect("save issue monitor prefs");
 
-    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let mut agent_options = sample_agent_options();
@@ -18809,7 +18831,11 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
         agent_options,
     );
 
-    let _events = runtime.auto_launch_issue_monitor_request_events(3165, LinkedIssueKind::Spec);
+    let _events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3165,
+        LinkedIssueKind::Spec,
+    );
 
     assert!(
         runtime.launch_wizard.is_none(),
@@ -18848,11 +18874,15 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
-    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.auto_launch_issue_monitor_request_events(3165, LinkedIssueKind::Spec);
+    let events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3165,
+        LinkedIssueKind::Spec,
+    );
 
     assert!(
         runtime.launch_wizard.is_some(),
@@ -18897,12 +18927,15 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
-    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let _first_events =
-        runtime.auto_launch_issue_monitor_request_events(3165, LinkedIssueKind::Spec);
+    let _first_events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3165,
+        LinkedIssueKind::Spec,
+    );
     let first_wizard_id = runtime
         .launch_wizard
         .as_ref()
@@ -18910,8 +18943,11 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
         .wizard_id
         .clone();
 
-    let second_events =
-        runtime.auto_launch_issue_monitor_request_events(3166, LinkedIssueKind::Spec);
+    let second_events = runtime.auto_launch_issue_monitor_request_events_for_project(
+        &repo,
+        3166,
+        LinkedIssueKind::Spec,
+    );
 
     assert_eq!(
         runtime
@@ -24970,7 +25006,7 @@ fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
     let (mut runtime, _recorded) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.issue_monitor_launch_succeeded_events(42, "tab-1::agent-1");
+    let events = runtime.issue_monitor_launch_succeeded_events(&repo, 42, "tab-1::agent-1");
 
     // The ACK may scan for a fresh snapshot, but must NOT claim/launch: no
     // settings-required wizard, no "launch requested" toast.
@@ -25027,7 +25063,8 @@ fn issue_monitor_windows_closed_requeue_is_non_scanning() {
     let (mut runtime, _recorded) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.issue_monitor_windows_closed_events(&["tab-1::agent-1".to_string()]);
+    let events =
+        runtime.issue_monitor_windows_closed_events(&repo, &["tab-1::agent-1".to_string()]);
 
     // Close may scan for a fresh snapshot, but must NOT claim/launch — a
     // re-claim here could instantly respawn the just-closed window or
@@ -25049,4 +25086,313 @@ fn issue_monitor_windows_closed_requeue_is_non_scanning() {
         persisted.launched_issues.is_empty(),
         "closed window is released from the launched set"
     );
+}
+
+#[test]
+fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).expect("create repo A");
+    std::fs::create_dir_all(&repo_b).expect("create repo B");
+    init_repo_without_origin(&repo_a);
+    init_repo_without_origin(&repo_b);
+
+    let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
+    let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
+    gwt::save_issue_monitor_prefs(
+        &prefs_a_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 900,
+                window_id: "project-a::sentinel".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo A prefs");
+    gwt::save_issue_monitor_prefs(
+        &prefs_b_path,
+        &gwt::IssueMonitorPrefs {
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: None,
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo B prefs");
+
+    let tab_a = sample_project_tab_with_window_at(
+        "project-a",
+        "sentinel",
+        repo_a.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let tab_b = sample_project_tab_with_window_at(
+        "project-b",
+        "agent-1",
+        repo_b.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("project-a"));
+
+    assert_eq!(
+        runtime
+            .issue_monitor_tab_id_for_project_root(&repo_b)
+            .as_deref(),
+        Some("project-b"),
+        "daemon launch/review routing resolves the owner tab without switching active tabs"
+    );
+    let events = runtime.issue_monitor_launch_succeeded_events(&repo_b, 42, "project-b::agent-1");
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )),
+        "an inactive launch ACK must not replace the active project's UI"
+    );
+
+    assert_eq!(
+        runtime.issue_monitor_issue_number_for_window(&repo_b, "project-b::agent-1"),
+        Some(42),
+        "heartbeat routing resolves a launched mapping after pending feedback is consumed"
+    );
+    let prefs_a = gwt::load_issue_monitor_prefs(&prefs_a_path).expect("reload repo A");
+    assert_eq!(
+        prefs_a.launched_issues,
+        vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 900,
+            window_id: "project-a::sentinel".to_string(),
+        }],
+        "the active project must remain unchanged"
+    );
+    let prefs_b = gwt::load_issue_monitor_prefs(&prefs_b_path).expect("reload repo B");
+    assert_eq!(
+        prefs_b.launched_issues,
+        vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "project-b::agent-1".to_string(),
+        }],
+        "the launch ACK belongs to the window owner project"
+    );
+    assert!(prefs_b.launching_issues.is_empty());
+}
+
+#[test]
+fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).expect("create repo A");
+    std::fs::create_dir_all(&repo_b).expect("create repo B");
+    init_repo_without_origin(&repo_a);
+    init_repo_without_origin(&repo_b);
+
+    let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
+    let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
+    gwt::save_issue_monitor_prefs(
+        &prefs_a_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 900,
+                window_id: "project-a::agent-1".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo A prefs");
+    gwt::save_issue_monitor_prefs(
+        &prefs_b_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "project-b::agent-1".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo B prefs");
+
+    let tab_a = sample_project_tab_with_window_at(
+        "project-a",
+        "agent-1",
+        repo_a.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let tab_b = sample_project_tab_with_window_at(
+        "project-b",
+        "agent-1",
+        repo_b.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("project-a"));
+
+    let events = runtime.close_window_events("project-b::agent-1");
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )),
+        "an inactive owner's project-scoped snapshot must not replace the active project's UI"
+    );
+
+    let prefs_a = gwt::load_issue_monitor_prefs(&prefs_a_path).expect("reload repo A");
+    assert_eq!(
+        prefs_a.launched_issues,
+        vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 900,
+            window_id: "project-a::agent-1".to_string(),
+        }],
+        "closing another project's window must not consume the active project's slot"
+    );
+    let prefs_b = gwt::load_issue_monitor_prefs(&prefs_b_path).expect("reload repo B");
+    assert!(
+        prefs_b.launched_issues.is_empty(),
+        "the owner project's launched slot is released"
+    );
+}
+
+#[test]
+fn closing_an_inactive_project_tab_requeues_its_owned_monitor_windows() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).expect("create repo A");
+    std::fs::create_dir_all(&repo_b).expect("create repo B");
+    init_repo_without_origin(&repo_a);
+    init_repo_without_origin(&repo_b);
+
+    let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
+    gwt::save_issue_monitor_prefs(
+        &prefs_b_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "project-b::agent-1".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo B prefs");
+
+    let tab_a = sample_project_tab("project-a", "Repo A", repo_a, ProjectKind::Git, &[]);
+    let tab_b = sample_project_tab_with_window_at(
+        "project-b",
+        "agent-1",
+        repo_b,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("project-a"));
+
+    runtime.close_project_tab_events("project-b");
+
+    let prefs_b = gwt::load_issue_monitor_prefs(&prefs_b_path).expect("reload repo B");
+    assert!(
+        prefs_b.launched_issues.is_empty(),
+        "closing an inactive tab releases its own launched slot"
+    );
+}
+
+#[test]
+fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    std::fs::create_dir_all(&repo_a).expect("create repo A");
+    std::fs::create_dir_all(&repo_b).expect("create repo B");
+    init_repo_without_origin(&repo_a);
+    init_repo_without_origin(&repo_b);
+
+    let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
+    let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
+    gwt::save_issue_monitor_prefs(
+        &prefs_a_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 900,
+                window_id: "project-a::agent-1".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo A prefs");
+    gwt::save_issue_monitor_prefs(
+        &prefs_b_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "project-b::agent-1".to_string(),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed repo B prefs");
+
+    let tab_a = sample_project_tab_with_window_at(
+        "project-a",
+        "agent-1",
+        repo_a.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let tab_b = sample_project_tab_with_window_at(
+        "project-b",
+        "agent-1",
+        repo_b.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("project-a"));
+    runtime.pending_launch_feedback_contexts.insert(
+        "project-b::agent-1".to_string(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+            issue_monitor_project_root: Some(repo_b.clone()),
+        },
+    );
+
+    let events = runtime.handle_runtime_status(
+        "project-b::agent-1".to_string(),
+        WindowProcessStatus::Error,
+        Some("agent failed".to_string()),
+    );
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )),
+        "an inactive agent failure must not replace the active project's UI"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. })),
+        "the owner-routed failure still notifies the operator"
+    );
+
+    let prefs_a = gwt::load_issue_monitor_prefs(&prefs_a_path).expect("reload repo A");
+    assert!(
+        prefs_a.failed_issues.is_empty(),
+        "the active project must not receive another project's failure"
+    );
+    assert_eq!(prefs_a.launched_issues[0].issue_number, 900);
+    let prefs_b = gwt::load_issue_monitor_prefs(&prefs_b_path).expect("reload repo B");
+    assert_eq!(prefs_b.failed_issues.len(), 1);
+    assert_eq!(prefs_b.failed_issues[0].issue_number, 42);
+    assert_eq!(prefs_b.failed_issues[0].message, "agent failed");
 }

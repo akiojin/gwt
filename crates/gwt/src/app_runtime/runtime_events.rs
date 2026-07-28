@@ -117,7 +117,7 @@ impl AppRuntime {
         detail: Option<String>,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
-        let Some(_address) = self.window_lookup.get(&id).cloned() else {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
             self.remove_window_state_tracking(&id);
             self.mark_agent_session_stopped(&id);
             self.deregister_pty_writer(&id);
@@ -128,6 +128,9 @@ impl AppRuntime {
             // intake worktree.
             return self.take_ephemeral_worktree_cleanup_events();
         };
+        let issue_monitor_project_root = self
+            .tab(&address.tab_id)
+            .map(|tab| tab.project_root.clone());
         let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {
@@ -140,7 +143,9 @@ impl AppRuntime {
         // SPEC #3200 T-045/FR-025: a running agent on a monitored autonomous
         // issue is a liveness signal — refresh its stuck-detection window.
         if is_agent_window && matches!(status, WindowProcessStatus::Running) {
-            self.issue_monitor_heartbeat(&id);
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                self.issue_monitor_heartbeat(project_root, &id);
+            }
         }
 
         let keep_active_agent_session_for_recovery =
@@ -223,7 +228,9 @@ impl AppRuntime {
                 .as_deref()
                 .unwrap_or("Agent entered error state")
                 .to_string();
-            events.extend(self.issue_monitor_agent_failed_events(&id, &message));
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                events.extend(self.issue_monitor_agent_failed_events(project_root, &id, &message));
+            }
         }
         if matches!(
             status,
@@ -287,6 +294,7 @@ impl AppRuntime {
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
+        let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
         let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
@@ -342,7 +350,13 @@ impl AppRuntime {
                 .as_deref()
                 .unwrap_or("Agent entered error state")
                 .to_string();
-            events.extend(self.issue_monitor_agent_failed_events(&window_id, &message));
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                events.extend(self.issue_monitor_agent_failed_events(
+                    project_root,
+                    &window_id,
+                    &message,
+                ));
+            }
         }
         if matches!(
             composed_state,
