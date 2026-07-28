@@ -488,7 +488,12 @@ pub fn materialize_at_launch(
             entrypoint,
             resume,
         )
-    })
+    })?;
+    // T-181: launch is the cheap moment to sweep orphaned trusted entries
+    // (runs outside the lease; GC only touches sibling directories whose
+    // recorded worktree is gone).
+    crate::cli::trusted_store::gc_best_effort(worktree);
+    Ok(())
 }
 
 fn materialize_at_launch_locked(
@@ -508,6 +513,13 @@ fn materialize_at_launch_locked(
             && existing.owner_number == owner_number
             && existing.status != ExecutionControlStatus::Active
         {
+            // T-182 core: a settled record that only lives in the worktree
+            // mirror (pre-P9b) is promoted into the trusted store here —
+            // the resume path otherwise never rewrites it and the legacy
+            // fallback would linger past its sunset.
+            if crate::cli::trusted_store::read(worktree, "execution-control.json")?.is_none() {
+                save(worktree, &existing)?;
+            }
             return Ok(());
         }
         if existing.status == ExecutionControlStatus::Active
@@ -1773,6 +1785,52 @@ mod tests {
             load(dir.path()).unwrap().unwrap().status,
             ExecutionControlStatus::Active
         );
+    }
+
+    // T-182 core: resuming a settled pre-P9b worktree promotes the valid
+    // mirror-only record into the trusted store (the resume path otherwise
+    // never rewrites it).
+    #[test]
+    fn resume_imports_mirror_only_settled_record_into_trusted_store() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        // Pre-P9b shape: a settled record living only in the mirror.
+        let mut legacy = active_record("sess-old");
+        legacy.status = ExecutionControlStatus::Completed;
+        legacy.settled_at = Some(Utc::now());
+        legacy.content_hash = compute_content_hash(&legacy);
+        let serialized = serde_json::to_vec_pretty(&legacy).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert!(
+            crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+                .unwrap()
+                .is_none()
+        );
+
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Spec,
+            3248,
+            "sess-new",
+            "resume",
+            true,
+        )
+        .unwrap();
+        // The settled record is preserved AND now trusted-store resident.
+        let trusted = crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+            .unwrap()
+            .expect("trusted copy imported");
+        let record: ExecutionControlRecord = serde_json::from_str(&trusted).unwrap();
+        assert_eq!(record.status, ExecutionControlStatus::Completed);
+        assert_eq!(record.primary_session_id, "sess-old");
+        assert!(integrity_ok(&record));
     }
 
     // P9b: a mirror-only record (written before the trusted store existed)
