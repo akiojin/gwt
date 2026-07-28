@@ -989,10 +989,14 @@ where
             head_sha,
             auto_merge_requested,
         } => (head_sha, *auto_merge_requested),
-        PrAutoMergeRemoteState::Merged { .. } => {
-            return AutoMergeMutationOutcome::AuthorityMismatch(
-                "pull request is already merged".to_string(),
-            );
+        PrAutoMergeRemoteState::Merged { head_sha } => {
+            if head_sha != reviewed_head_sha {
+                return AutoMergeMutationOutcome::HeadChanged {
+                    expected: reviewed_head_sha.to_string(),
+                    actual: head_sha.clone(),
+                };
+            }
+            return AutoMergeMutationOutcome::AlreadyTargetState;
         }
         PrAutoMergeRemoteState::Closed { .. } => {
             return AutoMergeMutationOutcome::AuthorityMismatch(
@@ -1922,6 +1926,47 @@ mod tests {
         assert_eq!(already_armed, AutoMergeMutationOutcome::AlreadyTargetState);
         assert!(already_armed.is_success());
         assert_eq!(calls, 0, "already-armed readback must not re-submit");
+
+        let already_merged = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Merged {
+                head_sha: "abc123".to_string(),
+            },
+            |_p, _args| {
+                calls += 1;
+                unreachable!("already-merged readback must not re-submit")
+            },
+        );
+        assert_eq!(already_merged, AutoMergeMutationOutcome::AlreadyTargetState);
+        assert!(already_merged.is_success());
+        assert_eq!(
+            calls, 0,
+            "same-head merged readback is already the target state"
+        );
+
+        let merged_head_changed = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Merged {
+                head_sha: "def456".to_string(),
+            },
+            |_p, _args| {
+                calls += 1;
+                unreachable!("changed merged HEAD must reject before mutation")
+            },
+        );
+        assert_eq!(
+            merged_head_changed,
+            AutoMergeMutationOutcome::HeadChanged {
+                expected: "abc123".to_string(),
+                actual: "def456".to_string(),
+            }
+        );
+        assert!(!merged_head_changed.is_success());
+        assert_eq!(calls, 0, "changed merged HEAD must not re-submit");
 
         let head_changed = arm_pr_auto_merge_with(
             repo,

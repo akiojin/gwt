@@ -173,8 +173,18 @@ pub fn issue_monitor_daemon_payloads(
         }
     }
 
+    payloads.extend(issue_monitor_read_only_daemon_payloads(monitor));
+    payloads
+}
+
+/// Build the recovery-safe projection without consuming any delivery-bearing
+/// outbox. Recovery-blocked daemons use this path because they may expose
+/// status and inbox state, but cannot authorize launch/review/toast delivery.
+pub fn issue_monitor_read_only_daemon_payloads(
+    monitor: &IssueMonitorState,
+) -> Vec<IssueMonitorDaemonPayload> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    payloads.extend([
+    vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
             payload: serde_json::to_value(monitor.status_view_at(&now))
@@ -185,9 +195,7 @@ pub fn issue_monitor_daemon_payloads(
             payload: serde_json::to_value(monitor.inbox.clone())
                 .expect("issue monitor inbox serializes"),
         },
-    ]);
-
-    payloads
+    ]
 }
 
 pub fn load_open_issue_monitor_candidates(
@@ -1110,6 +1118,39 @@ mod tests {
             .any(|payload| payload.event == "launch_request"));
         assert_eq!(monitor.queue_len(), 1);
         assert_eq!(monitor.active_issue_number(), None);
+    }
+
+    #[test]
+    fn read_only_payloads_do_not_drain_recovery_blocked_deliveries() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        let read_only = issue_monitor_read_only_daemon_payloads(&monitor);
+
+        assert_eq!(
+            read_only
+                .iter()
+                .map(|payload| payload.event.as_str())
+                .collect::<Vec<_>>(),
+            vec!["status", "inbox"],
+        );
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+
+        let after_recovery = issue_monitor_daemon_payloads(&mut monitor, true);
+        assert!(after_recovery.iter().any(|payload| {
+            payload.event == "launch_request"
+                && payload.payload["delivery_id"] == "launch:effect-42"
+        }));
     }
 
     #[test]

@@ -40,7 +40,8 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
 /// version 0; fresh projects start at this current version and never replay a
 /// historical migration.
 pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
-const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
+const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
+const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
@@ -1378,6 +1379,22 @@ impl IssueMonitorAuthorityFence {
     }
 }
 
+/// Process-lifetime ownership of the Issue Monitor authority lock.
+///
+/// The stable sibling file stays on disk; ownership is the kernel lock held by
+/// this handle and is released automatically on process exit or lease drop.
+#[must_use = "dropping the lease releases Issue Monitor effect authority"]
+#[derive(Debug)]
+pub struct IssueMonitorAuthorityLease {
+    lock: fs::File,
+}
+
+impl Drop for IssueMonitorAuthorityLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueMonitorAuthorityFenceState {
     Missing,
@@ -1387,6 +1404,10 @@ pub enum IssueMonitorAuthorityFenceState {
 
 pub fn issue_monitor_authority_fence_path(prefs_path: &Path) -> std::path::PathBuf {
     prefs_path.with_extension("shutdown-revoke")
+}
+
+fn issue_monitor_authority_lock_path(prefs_path: &Path) -> std::path::PathBuf {
+    prefs_path.with_extension("authority.lock")
 }
 
 pub fn load_issue_monitor_authority_fence(
@@ -1409,7 +1430,11 @@ pub fn load_issue_monitor_authority_fence(
             format!("parse Issue Monitor authority fence failed: {error}"),
         )
     })?;
-    if fence.version != ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
+    if ![
+        LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+        ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+    ]
+    .contains(&fence.version)
         || fence.pid == 0
         || fence.instance_id.trim().is_empty()
     {
@@ -1436,22 +1461,58 @@ pub fn persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path: &Path) -> 
     )
 }
 
+/// Establish durable effect authority and hold its process-lifetime lease.
+///
+/// Current v2 fences use the kernel lock as their liveness identity, so a free
+/// lock makes even a same-PID fence stale and recoverable. Legacy v1 owners did
+/// not hold this lock; their PID probe therefore remains fail-closed until the
+/// old process exits.
 pub fn establish_issue_monitor_authority_fence(
     prefs_path: &Path,
     current: &IssueMonitorAuthorityFence,
     is_process_alive: impl Fn(u32) -> bool,
-) -> io::Result<IssueMonitorPrefs> {
+) -> io::Result<(IssueMonitorPrefs, IssueMonitorAuthorityLease)> {
+    if current.version != ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
+        || current.pid == 0
+        || current.instance_id.trim().is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "current Issue Monitor authority fence must use the current schema and a valid identity",
+        ));
+    }
     with_issue_monitor_prefs_lock(prefs_path, || {
+        let authority_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(issue_monitor_authority_lock_path(prefs_path))?;
+        if let Err(error) = FileExt::try_lock_exclusive(&authority_lock) {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor authority lifetime lease is already held by another daemon",
+                ));
+            }
+            return Err(error);
+        }
+        let lease = IssueMonitorAuthorityLease {
+            lock: authority_lock,
+        };
         let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
         match load_issue_monitor_authority_fence(prefs_path)? {
             IssueMonitorAuthorityFenceState::Missing => {
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
-            IssueMonitorAuthorityFenceState::Active(existing) if is_process_alive(existing.pid) => {
+            IssueMonitorAuthorityFenceState::Active(existing)
+                if existing.version == LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
+                    && is_process_alive(existing.pid) =>
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     format!(
-                        "Issue Monitor authority fence is owned by live daemon pid {}",
+                        "legacy Issue Monitor authority fence is owned by live daemon pid {}",
                         existing.pid
                     ),
                 ));
@@ -1465,7 +1526,7 @@ pub fn establish_issue_monitor_authority_fence(
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
         }
-        Ok(prefs)
+        Ok((prefs, lease))
     })
 }
 
@@ -2014,11 +2075,43 @@ impl IssueMonitorState {
     /// `Reviewing` again.
     ///
     /// Idempotent and safe to call once right after loading persisted prefs; it
-    /// only touches records already parked in `Reviewing`.
+    /// only touches records parked in `Reviewing` while still awaiting a verdict.
+    /// A durable pass/fail verdict must continue to the gate on the next scan.
     pub fn resume_inflight_reviews_after_restart(&mut self, now: &str) -> Vec<u64> {
+        let reviewing = self
+            .autonomous_records
+            .values()
+            .filter(|record| {
+                record.phase == AutonomousPhase::Reviewing && record.review_passed.is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.resume_inflight_reviews_after_restart_for(&reviewing, now)
+    }
+
+    /// Resume only the records observed in `Reviewing` at daemon startup.
+    ///
+    /// Durable effect reconciliation may finish after normal operation has
+    /// already begun. Binding recovery to the complete captured startup record
+    /// prevents an unrelated runtime effect from rewinding a newly-dispatched
+    /// live review for the same Issue.
+    pub fn resume_inflight_reviews_after_restart_for(
+        &mut self,
+        startup_reviews: &[AutonomousIssueRecord],
+        now: &str,
+    ) -> Vec<u64> {
+        let startup_reviews = startup_reviews
+            .iter()
+            .map(|record| (record.issue_number, record))
+            .collect::<BTreeMap<_, _>>();
         let mut resumed = Vec::new();
         for record in self.autonomous_records.values_mut() {
-            if record.phase == AutonomousPhase::Reviewing {
+            if record.phase == AutonomousPhase::Reviewing
+                && record.review_passed.is_none()
+                && startup_reviews
+                    .get(&record.issue_number)
+                    .is_some_and(|startup_record| &*record == *startup_record)
+            {
                 record.phase = AutonomousPhase::Implementing;
                 record.review_passed = None;
                 record.last_heartbeat = Some(now.to_string());
@@ -6737,6 +6830,141 @@ mod tests {
     }
 
     #[test]
+    fn current_authority_fence_recovers_under_a_reused_live_pid_when_lifetime_lock_is_free() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 7,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence {
+                version: ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+                pid: std::process::id(),
+                instance_id: "stale-owner".to_string(),
+            },
+        )
+        .expect("seed stale current fence");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let (prefs, lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |_| true)
+                .expect("free lifetime lock proves that the current fence is stale");
+
+        assert_eq!(prefs.effect_authority_epoch, 8);
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load replacement fence"),
+            IssueMonitorAuthorityFenceState::Active(current)
+        );
+        drop(lease);
+    }
+
+    #[test]
+    fn current_authority_fence_rejects_a_second_owner_until_the_lease_is_dropped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let first = IssueMonitorAuthorityFence::current_process();
+        let (_, first_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &first, |_| false)
+                .expect("first owner acquires lifetime lease");
+        let second = IssueMonitorAuthorityFence::current_process();
+
+        let overlap = establish_issue_monitor_authority_fence(&prefs_path, &second, |_| false)
+            .expect_err("live lifetime lease rejects a second owner");
+
+        assert_eq!(overlap.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("load prefs after rejected overlap")
+                .effect_authority_epoch,
+            0,
+            "rejected overlap must not advance authority"
+        );
+
+        drop(first_lease);
+        let (recovered, second_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &second, |_| true)
+                .expect("dropping the lease makes the persisted current fence recoverable");
+        assert_eq!(recovered.effect_authority_epoch, 1);
+        drop(second_lease);
+    }
+
+    #[test]
+    fn legacy_v1_authority_fence_fails_closed_for_a_live_pid_without_a_lifetime_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 11,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let legacy = IssueMonitorAuthorityFence {
+            version: LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+            pid: 4242,
+            instance_id: "legacy-live-owner".to_string(),
+        };
+        persist_issue_monitor_authority_fence(&prefs_path, &legacy).expect("seed v1 fence");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let overlap =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |pid| pid == legacy.pid)
+                .expect_err("a live v1 owner has no lock identity, so recovery stays fail-closed");
+
+        assert_eq!(overlap.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load preserved v1 fence"),
+            IssueMonitorAuthorityFenceState::Active(legacy)
+        );
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("load preserved prefs")
+                .effect_authority_epoch,
+            11
+        );
+    }
+
+    #[test]
+    fn legacy_v1_authority_fence_recovers_after_its_pid_is_dead() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 19,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let legacy = IssueMonitorAuthorityFence {
+            version: LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+            pid: 4242,
+            instance_id: "legacy-dead-owner".to_string(),
+        };
+        persist_issue_monitor_authority_fence(&prefs_path, &legacy).expect("seed v1 fence");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let (prefs, lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |_| false)
+                .expect("dead v1 owner is recoverable once the lifetime lock is free");
+
+        assert_eq!(prefs.effect_authority_epoch, 20);
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load upgraded fence"),
+            IssueMonitorAuthorityFenceState::Active(current)
+        );
+        drop(lease);
+    }
+
+    #[test]
     fn expired_deadline_rejects_durable_write_before_canonical_rename() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("issue-monitor.json");
@@ -7570,6 +7798,57 @@ mod tests {
             0,
             "a restart is not a failed attempt"
         );
+    }
+
+    #[test]
+    fn deferred_restart_resume_only_rewinds_the_startup_review_set() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 70, "old-sha");
+        monitor.begin_review(8, 80, "stable-sha");
+        let startup_reviews = vec![
+            monitor.autonomous_record(7).expect("review 7").clone(),
+            monitor.autonomous_record(8).expect("review 8").clone(),
+        ];
+        monitor.begin_review(7, 71, "new-sha");
+
+        let resumed = monitor
+            .resume_inflight_reviews_after_restart_for(&startup_reviews, "2026-06-29T00:00:00Z");
+
+        assert_eq!(resumed, vec![8]);
+        assert_eq!(
+            monitor.autonomous_record(7).map(|record| record.phase),
+            Some(AutonomousPhase::Reviewing),
+            "a newer review for the same Issue is not the startup-stranded review",
+        );
+        assert_eq!(
+            monitor.autonomous_record(8).map(|record| record.phase),
+            Some(AutonomousPhase::Implementing),
+        );
+    }
+
+    #[test]
+    fn resume_after_restart_preserves_durable_review_verdicts() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 70, "pending-sha");
+        monitor.begin_review(8, 80, "passed-sha");
+        monitor.record_review_verdict(8, true);
+        monitor.begin_review(9, 90, "failed-sha");
+        monitor.record_review_verdict(9, false);
+
+        let resumed = monitor.resume_inflight_reviews_after_restart("2026-06-29T00:00:00Z");
+
+        assert_eq!(resumed, vec![7], "only a verdict-pending review is lost");
+        for (issue_number, expected_verdict) in [(8, true), (9, false)] {
+            let record = monitor
+                .autonomous_record(issue_number)
+                .expect("review record retained");
+            assert_eq!(record.phase, AutonomousPhase::Reviewing);
+            assert_eq!(
+                record.review_passed,
+                Some(expected_verdict),
+                "a durable verdict must survive daemon restart",
+            );
+        }
     }
 
     #[test]
