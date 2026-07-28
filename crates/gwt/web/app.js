@@ -2578,18 +2578,11 @@
         console.warn(
           `[resize] force-reset resizeState (reason=${reason}, previousPointerId=${previous.pointerId}, windowId=${previous.id})`,
         );
-        if (previous.fitFrame != null) {
-          cancelAnimationFrame(previous.fitFrame);
-        }
-        if (previous.applyFrame != null) {
-          cancelAnimationFrame(previous.applyFrame);
-        }
-        if (previous.stalenessTimer != null) {
-          clearTimeout(previous.stalenessTimer);
-        }
-        clearLocalGeometryEdit(geometrySyncState, previous.id);
-        resizeState = null;
-        delete document.documentElement.dataset.opResizeActive;
+        // A replacement pointer id means the OS ended capture; it does not
+        // mean the user's latest resize coordinates are invalid. Finalize the
+        // original gesture so its queued pointermove is flushed, persisted,
+        // and guarded from an in-flight stale workspace snapshot.
+        finishWindowResize(previous.pointerId);
       }
 
       function scheduleTerminalViewportRefresh(windowId) {
@@ -4882,13 +4875,13 @@
 
           resizeHandle.addEventListener("pointerdown", (event) => {
             event.stopPropagation();
-            focusWindowRemotely(windowData.id);
             // SPEC-2014 Phase C1: Windows WebView2 occasionally fails to
             // deliver pointerup / pointercancel / lostpointercapture, leaving
             // the previous resizeState alive when the next gesture starts.
             // Force-clear the leaked state on every new pointerdown so the
             // user never has to restart the app to escape a stuck resize.
             forceResetResizeState("new resize started before previous one finished");
+            focusWindowRemotely(windowData.id);
             const currentWindow = workspaceWindowById(windowData.id);
             const baseGeometryRevision = localGeometryBaseRevision(
               geometrySyncState,
@@ -5060,7 +5053,6 @@
               // is driven locally (frameWindow), not per-render.
               return;
             }
-            renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
 
             const activeWindowIdSet = workspaceWindowIdSet(workspace);
             const visibility = classifyProjectWindowVisibility({
@@ -5155,6 +5147,11 @@
             } else {
               focusedId = null;
             }
+            // Commit only after every synchronous reconciliation step
+            // succeeds. If a renderer throws, the same workspace snapshot
+            // must remain retryable instead of being mistaken for an
+            // already-applied state.
+            renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
           },
         );
       }

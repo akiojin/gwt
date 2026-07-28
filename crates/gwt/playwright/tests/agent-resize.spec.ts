@@ -157,6 +157,110 @@ test.describe("Window controls: resize handle + click semantics", () => {
       .toEqual({ width: "420px", height: "260px" });
   });
 
+  test("a mismatched pointer end commits the latest size and rejects a stale workspace snapshot", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installAgentWindowBackend(page);
+    await page.goto(APP_URL);
+
+    const windowFrame = page.locator(".workspace-window[data-id='agent-1']");
+    const resizeHandle = windowFrame.locator(".resize-handle");
+    await expect(resizeHandle).toBeVisible();
+
+    const box = await windowFrame.boundingBox();
+    expect(box).not.toBeNull();
+    const startX = Math.round(box!.x + box!.width - 3);
+    const startY = Math.round(box!.y + box!.height - 3);
+
+    await resizeHandle.dispatchEvent("pointerdown", {
+      pointerId: 25,
+      pointerType: "mouse",
+      button: 0,
+      buttons: 1,
+      clientX: startX,
+      clientY: startY,
+    });
+    await page.evaluate(
+      ({ x, y }) => {
+        window.dispatchEvent(
+          new PointerEvent("pointermove", {
+            pointerId: 25,
+            pointerType: "mouse",
+            buttons: 1,
+            clientX: x,
+            clientY: y,
+            bubbles: true,
+          }),
+        );
+      },
+      { x: startX + 120, y: startY + 80 },
+    );
+    // Windows WebView2 can deliver the terminating event under a replacement
+    // pointer id after the OS releases pointer capture.
+    await page.evaluate(
+      ({ x, y }) => {
+        window.dispatchEvent(
+          new PointerEvent("pointerup", {
+            pointerId: 26,
+            pointerType: "mouse",
+            button: 0,
+            buttons: 0,
+            clientX: x,
+            clientY: y,
+            bubbles: true,
+          }),
+        );
+      },
+      { x: startX + 120, y: startY + 80 },
+    );
+
+    await expect
+      .poll(() =>
+        windowFrame.evaluate((element) => ({
+          width: element.style.width,
+          height: element.style.height,
+        })),
+      )
+      .toEqual({ width: "640px", height: "380px" });
+
+    const sentGeometry = await page.evaluate(() => {
+      const fixture = (window as any).__resizeFixture;
+      return fixture.socket.recordedSends.findLast(
+        (message) =>
+          message.kind === "update_window_geometry" && message.id === "agent-1",
+      );
+    });
+    expect(sentGeometry?.geometry).toEqual({
+      x: 900,
+      y: 700,
+      width: 640,
+      height: 380,
+    });
+    // Initial terminal fitting may have already published an optimistic
+    // geometry revision before this gesture. The resize must preserve that
+    // monotonic base instead of assuming the fixture's original revision.
+    expect(Number.isInteger(sentGeometry?.base_geometry_revision)).toBe(true);
+    expect(sentGeometry?.base_geometry_revision).toBeGreaterThanOrEqual(0);
+
+    // A focus broadcast can race the geometry update. Its unchanged geometry
+    // revision must not restore the pre-resize dimensions.
+    await page.evaluate(() => {
+      const fixture = (window as any).__resizeFixture;
+      const staleWorkspaceState = structuredClone(fixture.workspaceState);
+      staleWorkspaceState.workspace.tabs[0].workspace.windows[0].z_index = 2;
+      fixture.socket.emit(staleWorkspaceState);
+    });
+    await expect
+      .poll(() =>
+        windowFrame.evaluate((element) => ({
+          width: element.style.width,
+          height: element.style.height,
+        })),
+      )
+      .toEqual({ width: "640px", height: "380px" });
+  });
+
   test("a single titlebar click focuses the window without moving the camera", async ({
     page,
   }) => {
@@ -277,6 +381,10 @@ async function installAgentWindowBackend(page) {
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
         this.recordedSends = [];
+        (window as any).__resizeFixture = {
+          socket: this,
+          workspaceState,
+        };
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));

@@ -4228,10 +4228,14 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   const guardIndex = renderWorkspaceBody.indexOf(
     "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
   );
+  const commitWindowKeyIndex = renderWorkspaceBody.indexOf(
+    "renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;",
+  );
   const classifyIndex = renderWorkspaceBody.indexOf(
     "classifyProjectWindowVisibility",
   );
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
+  const telemetryIndex = renderWorkspaceBody.indexOf("recomputeOperatorTelemetry();");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
   const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
 
@@ -4272,6 +4276,12 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
     renderWorkspaceBody.slice(guardIndex, classifyIndex),
     /return\s*;/,
     "unchanged window key guard must return before reconciliation",
+  );
+  assert.ok(
+    commitWindowKeyIndex > ensureIndex &&
+      commitWindowKeyIndex > telemetryIndex &&
+      commitWindowKeyIndex > focusIndex,
+    "renderWorkspace must commit the window key only after reconciliation succeeds",
   );
 });
 

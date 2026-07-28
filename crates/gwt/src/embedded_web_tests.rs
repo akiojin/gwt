@@ -854,16 +854,16 @@ fn embedded_web_plain_redraw_does_not_clear_authoritative_pending_refresh() {
 }
 
 #[test]
-fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
+fn embedded_web_window_pointer_events_finalize_resize_on_mismatch() {
     // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
     // emits pointerup / pointercancel with a pointerId that does not
     // match the one captured at pointerdown. The previous handlers
     // gated finishWindowResize behind a strict pointerId equality
     // check, so a mismatched pointerup left resizeState alive until
     // the 30 second staleness guard finally cleaned it up. This
-    // contract pins the new fallback: any window-level pointerup or
-    // pointercancel that fires while a resize is pending must clean
-    // up resizeState immediately via forceResetResizeState.
+    // contract pins the fallback: any window-level pointerup or
+    // pointercancel that fires while a resize is pending must finalize
+    // the original gesture immediately via forceResetResizeState.
     let html = frontend_bundle_source();
     let pointerup_fallback = regex::Regex::new(
             r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
@@ -882,6 +882,23 @@ fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
             pointercancel_fallback.is_match(html),
             "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
         );
+
+    let force_reset_start = html
+        .find("function forceResetResizeState(reason)")
+        .expect("forceResetResizeState must exist");
+    let next_function_start = html[force_reset_start..]
+        .find("function scheduleTerminalViewportRefresh(")
+        .map(|offset| force_reset_start + offset)
+        .expect("scheduleTerminalViewportRefresh must follow forceResetResizeState");
+    let force_reset_body = &html[force_reset_start..next_function_start];
+    assert!(
+        force_reset_body.contains("finishWindowResize(previous.pointerId);"),
+        "pointerId mismatch must finalize and persist the latest resize geometry",
+    );
+    assert!(
+        !force_reset_body.contains("clearLocalGeometryEdit("),
+        "pointerId mismatch must not discard the local geometry guard before a stale snapshot arrives",
+    );
 }
 
 #[test]
