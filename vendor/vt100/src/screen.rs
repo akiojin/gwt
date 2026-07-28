@@ -252,6 +252,65 @@ impl Screen {
         contents
     }
 
+    /// Returns a semantic terminal snapshot with bounded normal-buffer
+    /// scrollback.
+    ///
+    /// Unlike [`contents_formatted`](Self::contents_formatted), this includes
+    /// parsed scrollback and both grids when the alternate screen is active.
+    /// The returned stream is intended for a freshly reset parser or terminal
+    /// emulator. It is derived only from parsed terminal state, so control
+    /// sequences with external side effects (such as OSC commands) are never
+    /// replayed.
+    ///
+    /// Terminal byte streams expose only one saved-cursor slot per active
+    /// buffer. When distinct saved cursor/attributes coexist with a
+    /// pending-wrap cursor over a blank cell, both states cannot be encoded at
+    /// once. Snapshots prioritize exact current cells, cursor, attributes, and
+    /// next-printable continuation; saved cursor/attributes are best effort in
+    /// that compound state. Representable saved states remain exact.
+    #[must_use]
+    pub fn snapshot_formatted(&self, max_scrollback: usize) -> Vec<u8> {
+        let mut contents = vec![];
+
+        if self.alternate_screen() {
+            let primary_attrs = self
+                .grid
+                .write_snapshot_formatted(&mut contents, max_scrollback);
+            self.grid.write_snapshot_continuation_formatted(
+                &mut contents,
+                self.saved_attrs,
+                self.saved_attrs,
+                primary_attrs,
+            );
+            contents.extend_from_slice(b"\x1b[?47h");
+
+            let alternate_attrs = self
+                .alternate_grid
+                .write_snapshot_formatted(&mut contents, 0);
+            self.alternate_grid.write_snapshot_continuation_formatted(
+                &mut contents,
+                self.attrs,
+                self.saved_attrs,
+                alternate_attrs,
+            );
+        } else {
+            let visible_attrs = self
+                .grid
+                .write_snapshot_formatted(&mut contents, max_scrollback);
+            self.grid.write_snapshot_continuation_formatted(
+                &mut contents,
+                self.attrs,
+                self.saved_attrs,
+                visible_attrs,
+            );
+        }
+
+        crate::term::HideCursor::new(self.hide_cursor())
+            .write_buf(&mut contents);
+        self.write_input_mode_formatted(&mut contents);
+        contents
+    }
+
     fn write_contents_formatted(&self, contents: &mut Vec<u8>) {
         crate::term::HideCursor::new(self.hide_cursor()).write_buf(contents);
         let prev_attrs = self.grid().write_contents_formatted(contents);

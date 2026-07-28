@@ -1,5 +1,8 @@
 import { test } from "node:test";
-import { createLaunchPendingController } from "../launch-pending-controller.js";
+import {
+  createContinueWorkDispatcher,
+  createLaunchPendingController,
+} from "../launch-pending-controller.js";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
@@ -497,6 +500,27 @@ test("Workspace detail Board refs can focus the matching Board entry", () => {
     sendFocus() {},
   });
 
+  const diagnostics = fixture.body.querySelector(
+    'details[data-section="board-diagnostics"]',
+  );
+  assert.ok(diagnostics, "raw Board ids belong in a diagnostics disclosure");
+  assert.equal(diagnostics.hasAttribute("open"), false, "diagnostics start collapsed");
+  assert.equal(diagnostics.querySelector("summary").textContent, "Diagnostics (1)");
+  assert.match(diagnostics.textContent, /board-claim-1/);
+
+  const lifecycle = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-section"),
+  ).find(
+    (section) => section.querySelector(".workspace-detail-section-title")?.textContent
+      === "Lifecycle",
+  );
+  assert.ok(lifecycle, "lifecycle section must remain available");
+  assert.doesNotMatch(
+    lifecycle.textContent,
+    /board-claim-1/,
+    "raw Board IDs stay out of event titles and lifecycle metadata",
+  );
+
   const boardRef = fixture.body.querySelector(
     "[data-action='focus-board-entry'][data-board-entry-id='board-claim-1']",
   );
@@ -716,15 +740,15 @@ test("Workspace list selection updates the detail pane", () => {
   assert.match(detailText, /Already merged/);
 });
 
-test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () => {
-  const projection = sampleProjection();
-  // A Paused (resumable) Work — the active/running Work has nothing to resume.
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
+test("each Work exposes one Continue work action with opaque Work identity (SPEC-2359 W-24)", () => {
+  const projection = continuationProjection();
   const fixture = createFixture();
-  const sent = [];
+  const continued = [];
   const surface = createSurface(fixture, projection, {
-    send: (message) => sent.push(message),
+    continueWork: (workId, bounds) => {
+      continued.push({ workId, bounds });
+      return true;
+    },
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
@@ -733,21 +757,288 @@ test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () 
     sendFocus() {},
   });
 
-  // Resume lives on the list elements, not on the Workspace header. A Work with
-  // no recorded conversation still exposes Resume on its placeholder row.
+  // Producing continuation is a single Work-level intent. It never derives
+  // authority from the nested gwt Session or provider conversation.
   assert.equal(
     fixture.body.querySelector("[data-action='resume-workspace']"),
     null,
     "Workspace header no longer carries a Resume button",
   );
-  const resume = fixture.body.querySelector("[data-action='resume-work']");
-  assert.ok(resume, "a session-less Work still exposes a Resume action");
-  assert.equal(resume.dataset.sessionId, "work-launch-1");
-  resume.click();
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "resume_workspace_agent");
-  assert.equal(sent[0].session_id, "work-launch-1");
-  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+  const actions = fixture.body.querySelectorAll("[data-action='continue-work']");
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].textContent, "Continue work");
+  assert.equal(actions[0].dataset.workId, "work-opaque-1");
+  assert.equal(actions[0].dataset.sessionId, undefined);
+  actions[0].click();
+  assert.deepEqual(continued, [{
+    workId: "work-opaque-1",
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+  }]);
+});
+
+test("Work without Session history keeps one Continue work action and renders one fresh-continuation explanation (SPEC-2359 AS-91.7)", () => {
+  const projection = continuationProjection();
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.equal(group.querySelectorAll('[data-action="continue-work"]').length, 1);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 1);
+  assert.equal(
+    group.querySelector(".workspace-detail-session-guidance").textContent,
+    "No previous session to inspect. Continue work can start a new one.",
+  );
+});
+
+test("Work with mixed Agent history renders real Sessions without empty guidance (SPEC-2359 AS-91.8)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "empty-session",
+      agent_id: "claude-code",
+      display_name: "Claude Code",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "usable-session",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "usable-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.equal(group.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 0);
+  assert.equal(
+    group.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "usable-session",
+  );
+});
+
+test("Task-first Work layout separates purpose, producing intent, and lifecycle actions (SPEC-2359 US-91)", () => {
+  const projection = continuationProjection({ sessions: [
+    {
+      agent_session_id: "conv-latest",
+      started_at: "2026-07-26T02:00:00Z",
+      is_active: true,
+      resumable: true,
+    },
+  ] });
+  const work = projection.active_works[0].works[0];
+  projection.active_works[0].branch = "work/issue-2359";
+  work.lifecycle_state = "paused";
+  work.manual_close_allowed = true;
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  const head = group.querySelector(".workspace-detail-work-head");
+  const rail = group.querySelector(".workspace-detail-work-action-rail");
+  assert.ok(head.querySelector(".workspace-detail-work-heading"));
+  assert.ok(head.querySelector(".workspace-overview-lifecycle"));
+  assert.equal(head.querySelector("button"), null, "purpose header is not an action row");
+  assert.ok(rail, "Work actions have a dedicated rail");
+  const continueWork = rail.querySelector('[data-action="continue-work"]');
+  assert.ok(continueWork.classList.contains("primary"));
+  assert.ok(rail.querySelector(".workspace-detail-work-actions"));
+  assert.ok(
+    rail.querySelector('[data-action="close-work-discard"]').classList.contains("destructive"),
+  );
+  assert.equal(
+    group.querySelector('[data-action="resume-session"]').textContent,
+    "Inspect session",
+    "Session history does not compete with the producing Continue work intent",
+  );
+  assert.deepEqual(
+    Array.from(
+      fixture.body.querySelectorAll(".workspace-overview-detail-pane .wizard-button.primary"),
+      (button) => button.dataset.action,
+    ),
+    ["continue-work"],
+    "Continue work is the detail's sole producing primary; Launch Agent stays secondary",
+  );
+});
+
+test("Work detail suppresses empty duplicates when the same Agent has a usable Session (SPEC-2359 AS-91.2)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "empty-newest",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "usable-session",
+      agent_id: "Codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "usable-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "empty-oldest",
+      agent_id: "codex",
+      display_name: "Codex",
+      updated_at: "2026-07-26T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "usable-session",
+  );
+});
+
+test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2359 FR-582)", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "custom-hyphen-session",
+      agent_id: "my-agent",
+      display_name: "my-agent",
+      updated_at: "2026-07-26T03:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "custom-hyphen-conversation",
+        started_at: "2026-07-26T03:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "custom-compact-session",
+      agent_id: "myagent",
+      display_name: "myagent",
+      updated_at: "2026-07-26T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "custom-compact-conversation",
+        started_at: "2026-07-26T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const group = fixture.body.querySelector('[data-work-id="work-opaque-1"]');
+  assert.deepEqual(
+    Array.from(
+      group.querySelectorAll('[data-action="resume-session"]'),
+      (button) => button.dataset.sessionId,
+    ),
+    ["custom-hyphen-session", "custom-compact-session"],
+    "unknown custom IDs keep their trimmed command spelling; punctuation is identity-significant",
+  );
+});
+
+test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-581)", () => {
+  const projection = continuationProjection({ sessions: [{
+    agent_session_id: "inspect-conversation",
+    started_at: "2026-07-26T03:00:00Z",
+    is_active: true,
+    resumable: true,
+  }] });
+  const fixture = createFixture();
+  const begins = [];
+  const launchPending = {
+    begin(key, label, operationId) {
+      begins.push({ key, label, operationId });
+      return true;
+    },
+    isPending() {
+      return false;
+    },
+  };
+  const surface = createSurface(fixture, projection, {
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  fixture.body.querySelector('[data-action="resume-session"]').click();
+
+  assert.equal(begins.length, 1);
+  assert.equal(
+    begins[0].label,
+    "Inspect session",
+    "timeout notices must not regress to the old Resume wording",
+  );
+});
+
+test("discarded Work never exposes Continue work even when a legacy lifecycle is stale", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].lifecycle_state = "active";
+  projection.active_works[0].works[0].discarded = true;
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(
+    fixture.body.querySelectorAll("[data-action='continue-work']").length,
+    0,
+  );
 });
 
 test("Each Session row carries its own Resume that resumes that conversation (SPEC-2359)", () => {
@@ -786,26 +1077,24 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   resumes[0].click();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.match(sent[0].operation_id, /^resume-/);
   assert.equal(sent[0].session_id, "work-launch-1");
   assert.equal(sent[0].agent_session_id, "conv-latest2222");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
-test("Non-resumable Sessions are history-only; a Start Fresh control keeps the Work launchable (SPEC-2359)", () => {
-  const projection = sampleProjection();
-  // A Paused Work whose only conversations cannot be resumed here (e.g. pruned
-  // or placeholder handles). Each Session row must render without a Resume, and
-  // the Work must still expose a way to launch a fresh conversation.
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
-  projection.works[0].agents[0].sessions = [
+test("Non-resumable Sessions stay Inspection-only while Continue work owns fallback (SPEC-2359)", () => {
+  const projection = continuationProjection({ sessions: [
     { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
     { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },
-  ];
+  ] });
   const fixture = createFixture();
-  const sent = [];
+  const continued = [];
   const surface = createSurface(fixture, projection, {
-    send: (message) => sent.push(message),
+    continueWork: (workId, bounds) => {
+      continued.push({ workId, bounds });
+      return true;
+    },
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
@@ -819,17 +1108,16 @@ test("Non-resumable Sessions are history-only; a Start Fresh control keeps the W
   assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
   assert.equal(fixture.body.querySelector("[data-action='resume-session']"), null);
 
-  // A single Start Fresh fallback launches a new conversation on the Work.
-  const fresh = fixture.body.querySelector(".workspace-detail-session-fresh [data-action='resume-work']");
-  assert.ok(fresh, "Start Fresh control appears when no Session is resumable");
-  assert.equal(fresh.textContent, "Start Fresh");
-  assert.equal(fresh.dataset.sessionId, "work-launch-1");
-  fresh.click();
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "resume_workspace_agent");
-  assert.equal(sent[0].session_id, "work-launch-1");
-  // Start Fresh carries no specific conversation → backend resolves latest/fresh.
-  assert.equal(sent[0].agent_session_id, undefined);
+  assert.equal(
+    fixture.body.querySelector("[data-action='resume-work']"),
+    null,
+    "fallback is not exposed as a second producing intent",
+  );
+  const continueButton = fixture.body.querySelector("[data-action='continue-work']");
+  assert.ok(continueButton);
+  continueButton.click();
+  assert.equal(continued.length, 1);
+  assert.equal(continued[0].workId, "work-opaque-1");
 });
 
 test("Workspace surface is a single fused view with no Work/Git Branches tab toggle (SPEC-2359)", () => {
@@ -1262,6 +1550,35 @@ function sampleProjection() {
         branch: "work/20260511-0100",
       },
     ],
+  };
+}
+
+function continuationProjection({ sessions = [] } = {}) {
+  return {
+    id: "continuation-projection",
+    title: "Continuation projection",
+    status_category: "idle",
+    active_work_count: 1,
+    active_works: [{
+      id: "workspace-continuation",
+      title: "Continuation workspace",
+      status_category: "idle",
+      lifecycle_state: "paused",
+      agents: [],
+      works: [{
+        id: "work-opaque-1",
+        title: "Continuation Work",
+        status_category: "idle",
+        lifecycle_state: "done",
+        agents: [{
+          session_id: "work-launch-1",
+          display_name: "Codex",
+          status_category: "idle",
+          sessions,
+        }],
+      }],
+    }],
+    agents: [],
   };
 }
 
@@ -2771,20 +3088,23 @@ test("cleanup-candidate Workspace shows the safe-to-delete detail signal", () =>
   );
 });
 
-// SPEC-2359 W-17 (FR-398): Resume entry points show pending state and guard
-// against double-sends via the shared launch-pending controller.
-test("Resume click marks the Work pending and a re-click does not re-send", () => {
-  const projection = sampleProjection();
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
+// SPEC-2359 W-24 (FR-578): Continue work owns one correlated in-flight
+// operation and preserves its operation id across an idempotent retry.
+test("Continue work click marks the Work pending and a re-click does not re-send", () => {
+  const projection = continuationProjection();
   const fixture = createFixture();
   const sent = [];
   const launchPending = createLaunchPendingController({
     setTimeoutFn: () => 1,
     clearTimeoutFn: () => {},
   });
-  const surface = createSurface(fixture, projection, {
+  const dispatcher = createContinueWorkDispatcher({
+    launchPending,
     send: (message) => sent.push(message),
+    createOperationId: () => "continue-operation-1",
+  });
+  const surface = createSurface(fixture, projection, {
+    continueWork: dispatcher.dispatch,
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
   });
@@ -2794,29 +3114,85 @@ test("Resume click marks the Work pending and a re-click does not re-send", () =
     sendFocus() {},
   });
 
-  const resume = fixture.body.querySelector("[data-action='resume-work']");
-  resume.click();
+  const continueButton = fixture.body.querySelector("[data-action='continue-work']");
+  continueButton.click();
   assert.equal(sent.length, 1);
   assert.equal(
-    launchPending.isPending("session:work-launch-1"),
+    launchPending.isPending("continue:work-opaque-1"),
     true,
     "click registers the Work as pending",
   );
+  const pendingButton = fixture.body.querySelector("[data-action='continue-work']");
+  assert.equal(
+    pendingButton.disabled,
+    false,
+    "the pending replacement stays natively focusable",
+  );
+  assert.equal(pendingButton.getAttribute("aria-disabled"), "true");
+  assert.equal(pendingButton.getAttribute("aria-busy"), "true");
+  assert.match(pendingButton.textContent, /Continuing/);
 
-  resume.click();
+  pendingButton.click();
   assert.equal(sent.length, 1, "re-click while pending must not re-send");
 });
 
-test("a pending Work renders its Resume button disabled with progress label", () => {
-  const projection = sampleProjection();
-  projection.works[0].agents[0].status_category = "idle";
-  projection.works[0].agents[0].session_id = "work-launch-1";
+test("Continue work keeps keyboard focus on the pending replacement action", () => {
+  const projection = continuationProjection();
+  const fixture = createFixture();
+  let activeElement = null;
+  Object.defineProperty(fixture.document, "activeElement", {
+    configurable: true,
+    get: () => activeElement,
+  });
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  const dispatcher = createContinueWorkDispatcher({
+    launchPending,
+    send() {},
+    createOperationId: () => "continue-operation-focus",
+  });
+  const surface = createSurface(fixture, projection, {
+    continueWork: dispatcher.dispatch,
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+    createNode: (tag, className, text) => {
+      const node = createNode(fixture.document, tag, className, text);
+      node.focus = () => {
+        activeElement = node;
+      };
+      return node;
+    },
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  const button = fixture.body.querySelector("[data-action='continue-work']");
+  button.focus();
+  button.click();
+
+  assert.equal(activeElement?.dataset?.action, "continue-work");
+  assert.equal(activeElement?.dataset?.workId, "work-opaque-1");
+  assert.equal(activeElement?.disabled, false);
+  assert.equal(activeElement?.getAttribute("aria-disabled"), "true");
+});
+
+test("a pending Work renders focusable disabled semantics with progress label", () => {
+  const projection = continuationProjection();
   const fixture = createFixture();
   const launchPending = createLaunchPendingController({
     setTimeoutFn: () => 1,
     clearTimeoutFn: () => {},
   });
-  launchPending.begin("session:work-launch-1", "Resume");
+  launchPending.beginCorrelated(
+    "continue:work-opaque-1",
+    "continue-operation-1",
+    "work-opaque-1",
+    "Continue work",
+  );
   const surface = createSurface(fixture, projection, {
     getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     launchPending,
@@ -2827,8 +3203,10 @@ test("a pending Work renders its Resume button disabled with progress label", ()
     sendFocus() {},
   });
 
-  const resume = fixture.body.querySelector("[data-action='resume-work']");
-  assert.ok(resume, "Resume control still renders while pending");
-  assert.equal(resume.disabled, true, "pending Work disables its Resume");
-  assert.match(resume.textContent, /Resuming/);
+  const continueButton = fixture.body.querySelector("[data-action='continue-work']");
+  assert.ok(continueButton, "Continue work control still renders while pending");
+  assert.equal(continueButton.disabled, false, "pending Work remains focusable");
+  assert.equal(continueButton.getAttribute("aria-disabled"), "true");
+  assert.equal(continueButton.getAttribute("aria-busy"), "true");
+  assert.match(continueButton.textContent, /Continuing/);
 });

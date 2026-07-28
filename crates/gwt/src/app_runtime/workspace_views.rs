@@ -1533,9 +1533,9 @@ fn collapse_active_work_agents_by_conversation(
     dropped
 }
 
-fn retain_latest_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWorkAgentView>) {
+fn retain_summary_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWorkAgentView>) {
     let mut sorted = std::mem::take(agents);
-    sorted.sort_by(compare_active_work_agents_newest_first);
+    sorted.sort_by(compare_active_work_agents_for_summary);
     let mut seen_identities: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
     for agent in sorted {
@@ -1550,12 +1550,22 @@ fn retain_latest_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWork
     *agents = kept;
 }
 
+fn compare_active_work_agents_for_summary(
+    left: &gwt::ActiveWorkAgentView,
+    right: &gwt::ActiveWorkAgentView,
+) -> std::cmp::Ordering {
+    left.sessions
+        .is_empty()
+        .cmp(&right.sessions.is_empty())
+        .then_with(|| compare_active_work_agents_newest_first(left, right))
+}
+
 fn active_work_payload_agents(
     agents: &[gwt::ActiveWorkAgentView],
     cap: usize,
 ) -> Vec<gwt::ActiveWorkAgentView> {
     let mut summary_agents = agents.to_vec();
-    retain_latest_active_work_agent_per_identity(&mut summary_agents);
+    retain_summary_active_work_agent_per_identity(&mut summary_agents);
     summary_agents.truncate(cap);
 
     let mut selected_session_ids: HashSet<String> = summary_agents
@@ -1770,10 +1780,15 @@ pub(super) fn attach_registry_sessions_to_active_works(
         // distinct conversations visible in their owning child Work.
         let payload_agents = active_work_payload_agents(&work.agents, cap);
         sync_active_workspace_child_agents(work, &payload_agents);
+        for child in &mut work.works {
+            retain_summary_active_work_agent_per_identity(&mut child.agents);
+        }
         // User verification 2026-06-17 (follow-up): Workspace detail is a
         // session summary, not a live process inventory. Per agent identity
-        // only the latest history entry stays; live duplicates collapse too.
-        retain_latest_active_work_agent_per_identity(&mut work.agents);
+        // only one history entry stays; a usable conversation wins before
+        // recency so empty replacement records cannot hide it. Child Works use
+        // the same rule to avoid rendering Current beside "No session yet".
+        retain_summary_active_work_agent_per_identity(&mut work.agents);
         recompute_active_work_agent_counters(work);
         // The cap applies to the row's TOTAL agents: a decomposed legacy row
         // can carry hundreds of record agents, and the workspace payload feeds

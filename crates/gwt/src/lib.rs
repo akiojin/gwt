@@ -1,5 +1,7 @@
 pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
+#[doc(hidden)]
+pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod backend_service;
 pub mod board_audience;
 pub mod board_provider;
@@ -55,11 +57,15 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 #[doc(hidden)]
 pub use agent_project_state::{
     apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
-    observe_agent_runtime, AgentRuntimeObservation, AgentWorkTerminalKind,
+    apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
+    observe_agent_runtime, probe_authenticated_execution_binding,
+    probe_authenticated_prepared_execution_binding, AgentExecutionBindingProbeReceipt,
+    AgentExecutionBindingProbeRequest, AgentRuntimeObservation, AgentWorkTerminalKind,
     AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
     AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
     AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
-    AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+    AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
@@ -153,15 +159,15 @@ pub use preset::{
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
     ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, ArrangeMode,
-    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FileAttachment, FileContentErrorKind, FileContentMode, FileContentSaveErrorKind,
-    FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView, IndexSearchMatchMode,
-    IndexSearchResult, IndexSearchScope, IndexSearchTarget, ManagedHookHealthView,
-    ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
-    ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
-    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
-    WorkspaceResumeSource, WorkspaceView,
+    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContinueWorkOutcomeKind,
+    CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
+    FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
+    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
+    ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
+    ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
+    WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

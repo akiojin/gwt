@@ -430,7 +430,11 @@ mod tests {
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
-        assert!(view.skip_permissions);
+        assert!(
+            !view.skip_permissions,
+            "inspection Continue must not advertise a permission bypass"
+        );
+        assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
@@ -438,7 +442,10 @@ mod tests {
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
         assert!(config.codex_fast_mode);
-        assert!(config.skip_permissions);
+        assert!(
+            !config.skip_permissions,
+            "the preference stays visible but Automatic Continue launches as inspection"
+        );
         assert_eq!(config.working_dir.as_deref(), Some(current_repo.as_path()));
     }
 
@@ -483,7 +490,8 @@ mod tests {
         assert_eq!(view.selected_model, "gpt-5.4");
         assert_eq!(view.selected_reasoning, "xhigh");
         assert_eq!(view.selected_execution_mode, "continue");
-        assert!(view.skip_permissions);
+        assert!(!view.skip_permissions);
+        assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("api"));

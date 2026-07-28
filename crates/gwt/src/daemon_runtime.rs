@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::hook::{
     coordination_event, forward, resolve_hook_agent_session_id, runtime_state, HookAgentSessionId,
-    HookError, RawHookEvent,
+    HookError, HookEvent, HookOutput, RawHookEvent,
 };
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
@@ -30,6 +30,10 @@ pub struct RuntimeHookEvent {
     pub source_event: Option<String>,
     #[serde(default)]
     pub gwt_session_id: Option<String>,
+    /// Internal one-time Continue work readiness challenge. AppRuntime strips
+    /// this field before broadcasting a runtime event to browser clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_readiness_nonce: Option<String>,
     #[serde(default)]
     pub agent_session_id: Option<String>,
     #[serde(default)]
@@ -153,6 +157,116 @@ impl HookForwardTarget {
         url.set_fragment(None);
         Ok(url)
     }
+
+    pub fn execution_binding_probe_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/execution-binding-probe");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+}
+
+pub fn send_execution_binding_probe_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentExecutionBindingProbeRequest,
+) -> Result<crate::AgentExecutionBindingProbeReceipt, String> {
+    let url = target.execution_binding_probe_url()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|_| "failed to build the Host execution binding probe client".to_string())?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| {
+            "Host execution binding probe is unavailable; no local authorization fallback was attempted"
+                .to_string()
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "Host execution binding probe rejected the current authority with HTTP {status}; no local authorization fallback was attempted"
+        ));
+    }
+    let receipt = response
+        .json::<crate::AgentExecutionBindingProbeReceipt>()
+        .map_err(|_| {
+            "Host execution binding probe returned an invalid success response; no local authorization fallback was attempted"
+                .to_string()
+        })?;
+    let identity = &receipt.execution_binding;
+    if receipt.schema_version != crate::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION
+        || receipt.operation_id != request.operation_id
+        || receipt.nonce != request.nonce
+        || receipt.host_instance_id.trim().is_empty()
+        || identity.generation_id.trim().is_empty()
+        || identity.binding_id.trim().is_empty()
+        || identity.ledger_head_hash.trim().is_empty()
+        || receipt.capability_generation == 0
+    {
+        return Err(
+            "Host execution binding probe returned a mismatched authority receipt; no local authorization fallback was attempted"
+                .to_string(),
+        );
+    }
+    Ok(receipt)
+}
+
+pub(crate) fn authorize_managed_mutating_hook(input: &str) -> Result<HookOutput, HookError> {
+    authorize_managed_mutating_hook_with(
+        input,
+        HookForwardTarget::from_env_strict(),
+        send_execution_binding_probe_via_agent_bridge,
+    )
+}
+
+fn authorize_managed_mutating_hook_with(
+    input: &str,
+    target: Result<Option<HookForwardTarget>, String>,
+    probe: impl FnOnce(
+        &HookForwardTarget,
+        &crate::AgentExecutionBindingProbeRequest,
+    ) -> Result<crate::AgentExecutionBindingProbeReceipt, String>,
+) -> Result<HookOutput, HookError> {
+    let Some(event) = HookEvent::read_from_str(input)? else {
+        return Ok(HookOutput::Silent);
+    };
+    if !crate::cli::hook::workflow_policy::is_mutating_work_event(&event) {
+        return Ok(HookOutput::Silent);
+    }
+
+    let target = match target {
+        Ok(Some(target)) => target,
+        Ok(None)
+            if std::env::var_os(GWT_SESSION_ID_ENV).is_some()
+                || std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_some() =>
+        {
+            return Ok(managed_execution_binding_denial())
+        }
+        Ok(None) => return Ok(HookOutput::Silent),
+        Err(_) => return Ok(managed_execution_binding_denial()),
+    };
+    let request = crate::AgentExecutionBindingProbeRequest {
+        schema_version: crate::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        nonce: uuid::Uuid::new_v4().to_string(),
+    };
+    if probe(&target, &request).is_err() {
+        return Ok(managed_execution_binding_denial());
+    }
+    Ok(HookOutput::Silent)
+}
+
+fn managed_execution_binding_denial() -> HookOutput {
+    HookOutput::pre_tool_use_permission(
+        "Current Execution binding is required for managed mutation",
+        "The authenticated Host could not prove that this Session owns the current producing Execution generation. Use `Continue work` to establish a new generation, or relaunch the current Session if its binding should still be active. No local authorization fallback was attempted.",
+    )
 }
 
 pub fn send_workspace_update_via_agent_bridge(
@@ -325,6 +439,10 @@ impl RuntimeHookEvent {
             kind,
             source_event: source_event.map(str::to_string),
             gwt_session_id: std::env::var(GWT_SESSION_ID_ENV).ok(),
+            continuation_readiness_nonce: std::env::var(
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+            )
+            .ok(),
             agent_session_id,
             project_root,
             branch,
@@ -452,7 +570,17 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use super::*;
+    use crate::cli::hook::HookOutput;
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::env_test_lock()
@@ -461,6 +589,111 @@ mod tests {
     }
 
     use gwt_core::test_support::ScopedEnvVar;
+    use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
+
+    struct BindingProbeServer {
+        runtime: Runtime,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
+        forward_url: String,
+    }
+
+    #[derive(Clone)]
+    struct BindingProbeState {
+        tx: mpsc::Sender<(HeaderMap, serde_json::Value)>,
+        status: StatusCode,
+        body: String,
+    }
+
+    impl BindingProbeServer {
+        fn start(status: StatusCode, body: serde_json::Value) -> Self {
+            let runtime = Runtime::new().expect("binding probe runtime");
+            let listener = runtime
+                .block_on(TcpListener::bind(("127.0.0.1", 0)))
+                .expect("binding probe listener");
+            let address = listener.local_addr().expect("binding probe address");
+            let (tx, rx) = mpsc::channel();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let app = Router::new()
+                .route(
+                    "/internal/execution-binding-probe",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture binding probe request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .with_state(BindingProbeState {
+                    tx,
+                    status,
+                    body: body.to_string(),
+                });
+            runtime.spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("binding probe server");
+            });
+            Self {
+                runtime,
+                shutdown_tx: Some(shutdown_tx),
+                rx,
+                forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
+            }
+        }
+
+        fn receive(&self) -> (HeaderMap, serde_json::Value) {
+            self.rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("binding probe request")
+        }
+    }
+
+    impl Drop for BindingProbeServer {
+        fn drop(&mut self) {
+            if let Some(shutdown_tx) = self.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+            self.runtime
+                .block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        }
+    }
+
+    #[test]
+    fn runtime_hook_event_captures_continue_work_readiness_only_for_internal_delivery() {
+        let _env_lock = env_test_lock();
+        let _nonce = ScopedEnvVar::set(
+            gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+            "continue-ready-private",
+        );
+
+        let event = RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some("SessionStart"),
+            Some("Running".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            event.continuation_readiness_nonce.as_deref(),
+            Some("continue-ready-private")
+        );
+    }
 
     #[test]
     fn loopback_target_rejects_remote_hosts() {
@@ -535,6 +768,13 @@ mod tests {
                     .as_str(),
                 format!("http://{host}:45123/internal/work-terminalization")
             );
+            assert_eq!(
+                target
+                    .execution_binding_probe_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/execution-binding-probe")
+            );
         }
 
         for url in [
@@ -557,7 +797,166 @@ mod tests {
             .work_terminalization_url()
             .expect_err("non-canonical terminal bridge target must fail closed");
             assert!(!error.contains("secret"));
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .execution_binding_probe_url()
+            .expect_err("non-canonical binding probe target must fail closed");
+            assert!(!error.contains("secret"));
         }
+    }
+
+    #[test]
+    fn execution_binding_probe_client_requires_exact_correlation_and_redacts_failures() {
+        const TOKEN: &str = "binding-probe-token-secret";
+        const OPERATION: &str = "binding-probe-operation-secret";
+        const NONCE: &str = "binding-probe-nonce-secret";
+        const HOST: &str = "binding-probe-host-secret";
+        let request = crate::AgentExecutionBindingProbeRequest {
+            schema_version: crate::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+            operation_id: OPERATION.to_string(),
+            nonce: NONCE.to_string(),
+        };
+        let identity = gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-current".to_string(),
+            binding_id: "binding-current".to_string(),
+            ledger_head_hash: "ledger-head-current".to_string(),
+        };
+        let success = serde_json::to_value(crate::AgentExecutionBindingProbeReceipt {
+            schema_version: crate::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+            operation_id: OPERATION.to_string(),
+            nonce: NONCE.to_string(),
+            host_instance_id: HOST.to_string(),
+            execution_binding: identity.clone(),
+            capability_generation: 7,
+        })
+        .expect("serialize binding probe receipt");
+        let server = BindingProbeServer::start(StatusCode::OK, success);
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: TOKEN.to_string(),
+        };
+
+        let receipt = send_execution_binding_probe_via_agent_bridge(&target, &request)
+            .expect("exact binding probe response");
+        assert_eq!(receipt.execution_binding, identity);
+        assert_eq!(receipt.capability_generation, 7);
+        let (headers, body) = server.receive();
+        assert_eq!(
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("Bearer {TOKEN}").as_str())
+        );
+        assert_eq!(
+            body,
+            serde_json::to_value(&request).expect("serialize binding probe request")
+        );
+
+        let mut mismatch =
+            serde_json::to_value(receipt).expect("serialize mismatched binding probe receipt");
+        mismatch["nonce"] = serde_json::json!("foreign-nonce");
+        let mismatch_server = BindingProbeServer::start(StatusCode::OK, mismatch);
+        let mismatch_target = HookForwardTarget {
+            url: mismatch_server.forward_url.clone(),
+            token: TOKEN.to_string(),
+        };
+        let error = send_execution_binding_probe_via_agent_bridge(&mismatch_target, &request)
+            .expect_err("mismatched correlation must fail closed");
+        for secret in [TOKEN, OPERATION, NONCE, HOST] {
+            assert!(
+                !error.contains(secret),
+                "probe failure must not reflect correlation or capability secrets"
+            );
+        }
+        mismatch_server.receive();
+    }
+
+    #[test]
+    fn managed_mutating_hook_gate_probes_once_and_preserves_read_only_access() {
+        let target = HookForwardTarget {
+            url: "http://127.0.0.1:45123/internal/hook-live".to_string(),
+            token: "hook-gate-token-secret".to_string(),
+        };
+        let read_only = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "rg generation crates/gwt/src" }
+        })
+        .to_string();
+        let output =
+            authorize_managed_mutating_hook_with(&read_only, Ok(Some(target.clone())), |_, _| {
+                panic!("read-only hook must not probe producing authority")
+            })
+            .expect("read-only hook classification");
+        assert_eq!(output, HookOutput::Silent);
+
+        let mutating = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "crates/gwt/src/lib.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }
+        })
+        .to_string();
+        let output =
+            authorize_managed_mutating_hook_with(&mutating, Ok(Some(target)), |_, request| {
+                assert_eq!(
+                    request.schema_version,
+                    crate::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION
+                );
+                assert!(!request.operation_id.trim().is_empty());
+                assert!(!request.nonce.trim().is_empty());
+                Ok(crate::AgentExecutionBindingProbeReceipt {
+                    schema_version: crate::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+                    operation_id: request.operation_id.clone(),
+                    nonce: request.nonce.clone(),
+                    host_instance_id: "host-current".to_string(),
+                    execution_binding: gwt_agent::ExecutionBindingIdentity {
+                        generation_id: "generation-current".to_string(),
+                        binding_id: "binding-current".to_string(),
+                        ledger_head_hash: "head-current".to_string(),
+                    },
+                    capability_generation: 1,
+                })
+            })
+            .expect("mutating hook authority");
+        assert_eq!(output, HookOutput::Silent);
+    }
+
+    #[test]
+    fn managed_mutating_hook_gate_denies_partial_or_failed_authority_without_reflection() {
+        const SECRET: &str = "hook-gate-error-secret";
+        let mutating = serde_json::json!({
+            "tool_name": "apply_patch",
+            "tool_input": { "patch": "*** Begin Patch" }
+        })
+        .to_string();
+        let partial = authorize_managed_mutating_hook_with(
+            &mutating,
+            Err(format!("partial bridge {SECRET}")),
+            |_, _| panic!("invalid bridge environment must not reach the probe"),
+        )
+        .expect("partial bridge denial");
+        let HookOutput::PreToolUsePermission { detail, .. } = partial else {
+            panic!("partial bridge must deny mutating tools");
+        };
+        assert!(!detail.contains(SECRET));
+
+        let target = HookForwardTarget {
+            url: "http://127.0.0.1:45123/internal/hook-live".to_string(),
+            token: SECRET.to_string(),
+        };
+        let failed = authorize_managed_mutating_hook_with(&mutating, Ok(Some(target)), |_, _| {
+            Err(format!("stale binding {SECRET}"))
+        })
+        .expect("stale binding denial");
+        let HookOutput::PreToolUsePermission { detail, .. } = failed else {
+            panic!("failed Host probe must deny mutating tools");
+        };
+        assert!(!detail.contains(SECRET));
+        assert!(detail.contains("Continue work"), "{detail}");
     }
 
     #[test]
