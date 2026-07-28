@@ -2681,8 +2681,9 @@ fn repair_resume_owner_bleed_paths_locked(
         all_events.sort_by_key(|event| event.updated_at);
         let mut rebuilt = WorkItemsProjection::empty(projection_updated_at);
         for event in all_events {
-            rebuilt.apply_event(event);
+            rebuilt.apply_event_for_batch(event);
         }
+        rebuilt.finalize_event_batch();
         rebuilt.work_items.extend(eventless_items);
         if projection_updated_at > rebuilt.updated_at {
             rebuilt.updated_at = projection_updated_at;

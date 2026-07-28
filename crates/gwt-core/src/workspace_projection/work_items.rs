@@ -320,6 +320,24 @@ impl WorkItemsProjection {
     }
 
     pub fn apply_event(&mut self, event: WorkEvent) -> WorkEventApplyOutcome {
+        self.apply_event_inner(event, false)
+    }
+
+    /// Apply one event inside an already globally ordered bulk fold.
+    ///
+    /// The caller must invoke [`Self::finalize_event_batch`] exactly once
+    /// after the batch. Deferring only derived-summary synthesis and stable
+    /// collection sorting keeps the state transition semantics identical
+    /// while avoiding a full growing-history rescan for every event.
+    pub(crate) fn apply_event_for_batch(&mut self, event: WorkEvent) -> WorkEventApplyOutcome {
+        self.apply_event_inner(event, true)
+    }
+
+    fn apply_event_inner(
+        &mut self,
+        event: WorkEvent,
+        defer_derived_and_sort: bool,
+    ) -> WorkEventApplyOutcome {
         let existing_index = self
             .work_items
             .iter()
@@ -398,7 +416,10 @@ impl WorkItemsProjection {
                 }
             }
             item.events.push(event);
-            refresh_work_item_progress_summary(item);
+            if !defer_derived_and_sort {
+                item.events.sort_by_key(|event| event.updated_at);
+                refresh_work_item_progress_summary(item);
+            }
             return WorkEventApplyOutcome::Applied;
         }
         if let Some(title) = non_empty_clone(event.title.as_deref()) {
@@ -494,14 +515,27 @@ impl WorkItemsProjection {
         }
         let event_updated_at = event.updated_at;
         item.events.push(event);
-        item.events.sort_by_key(|event| event.updated_at);
-        refresh_work_item_progress_summary(item);
+        if !defer_derived_and_sort {
+            item.events.sort_by_key(|event| event.updated_at);
+            refresh_work_item_progress_summary(item);
+        }
         if event_updated_at > self.updated_at {
             self.updated_at = event_updated_at;
         }
+        if !defer_derived_and_sort {
+            self.work_items
+                .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+        }
+        WorkEventApplyOutcome::Applied
+    }
+
+    pub(crate) fn finalize_event_batch(&mut self) {
+        for item in &mut self.work_items {
+            item.events.sort_by_key(|event| event.updated_at);
+            refresh_work_item_progress_summary(item);
+        }
         self.work_items
             .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
-        WorkEventApplyOutcome::Applied
     }
 
     pub(crate) fn would_reject_session_attach(&self, event: &WorkEvent) -> bool {
@@ -892,6 +926,186 @@ mod tests {
             progress.contains("User confirmed the Project Tabs UX"),
             "{progress}"
         );
+    }
+
+    #[test]
+    fn batch_apply_defers_derived_progress_until_one_finalization() {
+        let work_item_id = "test-item-batch-progress";
+        let started_at = Utc.with_ymd_and_hms(2026, 7, 28, 10, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(started_at);
+
+        for index in 0..256 {
+            let mut event = WorkEvent::new(
+                if index == 0 {
+                    WorkEventKind::Start
+                } else {
+                    WorkEventKind::Update
+                },
+                work_item_id,
+                started_at + chrono::Duration::seconds(index),
+            );
+            event.title = (index == 0).then(|| "Batch progress".to_string());
+            event.summary = Some(format!("Completed batch step {index}"));
+            assert_eq!(
+                projection.apply_event_for_batch(event),
+                WorkEventApplyOutcome::Applied
+            );
+        }
+
+        let pending = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("pending work");
+        assert_eq!(
+            pending.progress_summary, None,
+            "batch apply must not rescan the growing event history per event"
+        );
+
+        projection.finalize_event_batch();
+
+        let finalized = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("finalized work");
+        let progress = finalized
+            .progress_summary
+            .as_deref()
+            .expect("batch finalization synthesizes progress");
+        assert!(progress.contains("Completed batch step 255"), "{progress}");
+        assert_eq!(finalized.events.len(), 256);
+        assert!(
+            finalized
+                .events
+                .windows(2)
+                .all(|events| events[0].updated_at <= events[1].updated_at),
+            "batch finalization restores stable event ordering"
+        );
+    }
+
+    #[test]
+    fn batch_apply_matches_sequential_apply_for_mixed_lifecycle_events() {
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 1, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 2, 0).unwrap();
+        let t4 = Utc.with_ymd_and_hms(2026, 7, 28, 10, 3, 0).unwrap();
+
+        // Seed an existing Work with a newer event so a later incremental
+        // Backfill exercises the same out-of-order history repair as intake.
+        let mut alpha_start = WorkEvent::new(WorkEventKind::Start, "work-alpha", t1);
+        alpha_start.title = Some("Alpha".to_string());
+        alpha_start.execution_container =
+            Some(container_for_test("work/alpha", "/repo/work/alpha"));
+        let mut alpha_update = WorkEvent::new(WorkEventKind::Update, "work-alpha", t3);
+        alpha_update.summary = Some("Alpha is already newer than backfill".to_string());
+
+        let mut sequential = WorkItemsProjection::empty(t1);
+        sequential.apply_event(alpha_start.clone());
+        sequential.apply_event(alpha_update.clone());
+        let mut batched = sequential.clone();
+
+        let mut owner_start = WorkEvent::new(WorkEventKind::Start, "work-owner", t1);
+        owner_start.agent_session_id = Some("session-conflict".to_string());
+        owner_start.execution_container =
+            Some(container_for_test("work/owner", "/repo/work/owner"));
+
+        let mut beta_start = WorkEvent::new(WorkEventKind::Start, "work-beta", t1);
+        beta_start.title = Some("Beta".to_string());
+        beta_start.agent_session_id = Some("session-beta".to_string());
+        beta_start.execution_container = Some(container_for_test("work/beta", "/repo/work/beta"));
+
+        let mut alpha_backfill = WorkEvent::new(WorkEventKind::Backfill, "work-alpha", t2);
+        alpha_backfill.execution_container = Some(container_for_test(
+            "work/alpha",
+            "/repo/work/alpha-backfill",
+        ));
+
+        let mut beta_done = WorkEvent::new(WorkEventKind::Done, "work-beta", t2);
+        beta_done.status_category = Some(WorkspaceStatusCategory::Done);
+
+        let mut conflicting_attach = WorkEvent::new(WorkEventKind::Update, "work-beta", t2);
+        conflicting_attach.agent_session_id = Some("session-conflict".to_string());
+        conflicting_attach.execution_container =
+            Some(container_for_test("work/beta", "/repo/work/beta"));
+
+        let mut beta_resume = WorkEvent::new(WorkEventKind::Resume, "work-beta", t3);
+        beta_resume.status_category = Some(WorkspaceStatusCategory::Active);
+
+        let mut duplicate_first = WorkEvent::new(WorkEventKind::Start, "work-duplicate", t4);
+        duplicate_first.id = "event-same-time-duplicate".to_string();
+        duplicate_first.execution_container = Some(container_for_test(
+            "work/duplicate",
+            "/repo/work/duplicate-one",
+        ));
+        let mut duplicate_second = duplicate_first.clone();
+        duplicate_second.execution_container = Some(container_for_test(
+            "work/duplicate-copy",
+            "/repo/work/duplicate-two",
+        ));
+
+        let events = vec![
+            owner_start,
+            beta_start,
+            alpha_backfill,
+            beta_done,
+            conflicting_attach,
+            beta_resume,
+            duplicate_first,
+            duplicate_second,
+        ];
+        let sequential_outcomes = events
+            .iter()
+            .cloned()
+            .map(|event| sequential.apply_event(event))
+            .collect::<Vec<_>>();
+        let batched_outcomes = events
+            .into_iter()
+            .map(|event| batched.apply_event_for_batch(event))
+            .collect::<Vec<_>>();
+        batched.finalize_event_batch();
+
+        assert_eq!(
+            batched_outcomes, sequential_outcomes,
+            "batch application must preserve acceptance and session-conflict decisions"
+        );
+        assert_eq!(
+            batched, sequential,
+            "one batch finalization must produce the exact sequential projection"
+        );
+
+        let alpha = batched
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-alpha")
+            .expect("alpha");
+        assert!(
+            alpha
+                .events
+                .windows(2)
+                .all(|events| events[0].updated_at <= events[1].updated_at),
+            "incremental Backfill history remains chronological"
+        );
+        let beta = batched
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-beta")
+            .expect("beta");
+        assert_eq!(beta.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(beta.completed_at, None);
+        assert!(
+            beta.agents
+                .iter()
+                .all(|agent| agent.session_id != "session-conflict"),
+            "the conflicting session attach remains rejected"
+        );
+        let duplicate = batched
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-duplicate")
+            .expect("same-time duplicate");
+        assert_eq!(duplicate.events.len(), 2);
+        assert_eq!(duplicate.execution_containers.len(), 2);
     }
 
     #[test]
