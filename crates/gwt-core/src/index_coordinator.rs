@@ -26,6 +26,9 @@ pub const COORDINATOR_SCHEMA_VERSION: u32 = 1;
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How long a lockable registration file is treated as "still being
+/// registered" rather than crash residue.
+const REGISTRATION_RESIDUE_GRACE: Duration = Duration::from_secs(60);
 
 /// Coordinator root under an explicit gwt home (`<gwt_home>/runtime/index-coordinator`).
 pub fn coordinator_root_from(gwt_home: &Path) -> PathBuf {
@@ -337,20 +340,26 @@ impl IndexCoordinator {
                     let waiters_dir = self.target_waiters_dir(key);
                     fs::create_dir_all(&waiters_dir)?;
                     let waiter_path = waiters_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-                    // Create and shared-lock the registration BEFORE writing
-                    // content so a concurrent stale sweep never deletes a
-                    // just-registered live waiter.
+                    // Write the payload BEFORE taking the liveness lock: a
+                    // Windows shared lock denies writes through the owning
+                    // handle too. The sweep leaves any registration younger
+                    // than `REGISTRATION_RESIDUE_GRACE` alone, so the window
+                    // between the write and the lock is never mistaken for
+                    // crash residue.
                     let waiter_file = open_lock_file(&waiter_path)?;
-                    waiter_file.lock_shared()?;
                     let registration = Registration {
                         schema_version: COORDINATOR_SCHEMA_VERSION,
                         owner: OwnerIdentity::current(),
                         priority,
                         registered_at_ms: now_ms(),
                     };
-                    let mut handle = &waiter_file;
-                    handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
-                    handle.flush()?;
+                    {
+                        let mut handle = &waiter_file;
+                        handle
+                            .write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
+                        handle.flush()?;
+                    }
+                    waiter_file.lock_shared()?;
                     return Ok(JobAdmission::Joined(JobWaiter {
                         state_path: self.target_state_path(key),
                         lock_path,
@@ -408,18 +417,20 @@ impl TargetJobGuard {
         fs::create_dir_all(&pending_dir)?;
         let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
         let pending_file = open_lock_file(&pending_path)?;
-        pending_file.lock_shared()?;
         let registration = Registration {
             schema_version: COORDINATOR_SCHEMA_VERSION,
             owner: OwnerIdentity::current(),
             priority: self.priority,
             registered_at_ms: now_ms(),
         };
+        // Payload first, liveness lock second — see the waiter registration
+        // above for why a Windows shared lock cannot come first.
         {
             let mut handle = &pending_file;
             handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
             handle.flush()?;
         }
+        pending_file.lock_shared()?;
         let cleanup_pending = |file: File, path: &Path| {
             drop(file);
             let _ = fs::remove_file(path);
@@ -732,22 +743,17 @@ fn sweep_live_registrations_excluding(
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
                 // No live holder. A freshly created registration is briefly
-                // lockable (and still empty) before its owner takes the
-                // shared lock and writes the payload — leave it alone so a
-                // concurrent sweep never unlinks a live claimant. Anything
-                // empty for longer than a minute is a real crash residue.
-                let (len, age) = file
+                // lockable while its owner writes the payload and then takes
+                // the shared lock — leave it alone so a concurrent sweep
+                // never unlinks a live claimant. Anything still lockable
+                // after the grace window is a real crash residue.
+                let age = file
                     .metadata()
-                    .map(|meta| {
-                        let age = meta
-                            .modified()
-                            .ok()
-                            .and_then(|modified| modified.elapsed().ok())
-                            .unwrap_or_default();
-                        (meta.len(), age)
-                    })
-                    .unwrap_or((0, Duration::ZERO));
-                if len > 0 || age > Duration::from_secs(60) {
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .unwrap_or_default();
+                if age > REGISTRATION_RESIDUE_GRACE {
                     drop(file);
                     let _ = fs::remove_file(&path);
                 }
