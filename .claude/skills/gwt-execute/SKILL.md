@@ -87,8 +87,12 @@ When resuming or recovering another session's execution (crash, closed
 window), take over the record explicitly with JSON operation
 `execution.adopt` and a non-empty `params.reason` — takeovers are audited as
 an ownership transfer chain. Adopt requires a valid integrity record. An
-integrity-failed record cannot be repaired in the same execution lifetime
-without risking audit loss; use a fresh linked-owner launch instead.
+integrity-failed record is repaired in place with JSON operation
+`execution.repair`: it quarantines the corrupt record under a unique
+`.corrupt-*` path with a trusted audit entry and atomically materializes a
+fresh Active record, so the same execution lifetime can continue. Diagnose
+first with `execution.status` — its `available_recoveries` names the exact
+operation to run.
 
 ## Mode detection
 

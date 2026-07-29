@@ -870,8 +870,8 @@ mod tests {
                 "execution.reopen",
                 "temporary question",
                 "params.derive:true",
-                "cannot be repaired in the same execution lifetime",
-                "fresh linked-owner launch",
+                "execution.repair",
+                "execution.status",
             ] {
                 assert!(
                     execute_skill.contains(required),
