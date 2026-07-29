@@ -1485,11 +1485,23 @@ Coverage requirements.
     // that could still expand elsewhere fails closed.
     #[test]
     fn gwt_bookkeeping_target_accepts_only_literal_worktree_paths() {
-        let root = Path::new("/worktree");
-        for target in [
-            ".gwt/work/register-spec/envelope.json",
-            "/worktree/.gwt/work/out.json",
-        ] {
+        // `Path::is_absolute` needs a drive prefix on Windows, so the roots
+        // (and the absolute fixtures derived from them) are platform-shaped.
+        // Forward slashes are kept because the allowance rejects backslashes.
+        let (root, inside, outside) = if cfg!(windows) {
+            (
+                Path::new("C:/worktree"),
+                "C:/worktree/.gwt/work/out.json",
+                "C:/elsewhere/.gwt/out.json",
+            )
+        } else {
+            (
+                Path::new("/worktree"),
+                "/worktree/.gwt/work/out.json",
+                "/elsewhere/.gwt/out.json",
+            )
+        };
+        for target in [".gwt/work/register-spec/envelope.json", inside] {
             assert!(
                 is_worktree_gwt_bookkeeping_target(target, root),
                 "{target} is worktree-local bookkeeping"
@@ -1506,7 +1518,7 @@ Coverage requirements.
             ".gwt/*.json",
             "~/.gwt/out.json",
             "src/generated.rs",
-            "/elsewhere/.gwt/out.json",
+            outside,
             ".gwt/skill-state/execution-control.json",
             super::super::segments::UNRESOLVED_REDIRECT_TARGET,
         ] {
