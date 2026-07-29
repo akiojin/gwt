@@ -373,6 +373,56 @@ pub fn save_workspace_state(
     atomic_write(path, content.as_bytes())
 }
 
+/// Persist a workspace snapshot with a crash-durable acceptance boundary.
+/// Unlike [`save_workspace_state`], scratch-file and parent-directory sync
+/// failures are returned so callers cannot ACK a durable launch delivery
+/// before the exact window is recoverable after restart.
+pub fn save_workspace_state_durable(
+    path: &Path,
+    state: &PersistedWindowCanvasState,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        gwt_core::paths::ensure_dir(parent)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    let content = serde_json::to_string_pretty(state)?;
+    durable_atomic_write_with_parent_sync(path, content.as_bytes(), sync_parent_directory)
+}
+
+fn durable_atomic_write_with_parent_sync(
+    target: &Path,
+    bytes: &[u8],
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "durable workspace target has no parent directory",
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(target).map_err(|error| error.error)?;
+    sync_parent(target)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    // std::fs::File cannot open directory handles portably on Windows. The
+    // scratch file itself is still sync_all'd before the atomic replacement.
+    Ok(())
+}
+
 /// Write `bytes` to `target` via a sibling temp file + rename so callers never
 /// observe a partial file. Used by [`save_session_state`] /
 /// [`save_workspace_state`] so the async persist worker (Issue #2694 Phase B)
@@ -638,6 +688,25 @@ mod tests {
         save_workspace_state(&path, &state).expect("save should succeed");
         let loaded = load_workspace_state(&path).expect("load");
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn durable_workspace_write_surfaces_post_rename_parent_sync_failure() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let state = default_workspace_state();
+        let content = serde_json::to_string_pretty(&state).expect("serialize workspace");
+
+        let error = durable_atomic_write_with_parent_sync(&path, content.as_bytes(), |_| {
+            Err(std::io::Error::other("injected parent sync failure"))
+        })
+        .expect_err("post-rename durability failure must remain visible");
+
+        assert!(error.to_string().contains("injected parent sync failure"));
+        assert_eq!(
+            load_workspace_state(&path).expect("rename completed before sync failure"),
+            state
+        );
     }
 
     #[test]

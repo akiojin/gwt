@@ -1055,7 +1055,12 @@ pub(crate) fn workspace_work_item_view_from_item(
         execution_containers: item
             .execution_containers
             .iter()
-            .map(workspace_execution_container_view_from_ref)
+            .map(|container| {
+                workspace_execution_container_view_from_ref(
+                    container,
+                    item.agents.first().map(|agent| agent.session_id.as_str()),
+                )
+            })
             .collect(),
         board_refs: item.board_refs.clone(),
         related_workspace_ids: item.related_work_item_ids.clone(),
@@ -1155,6 +1160,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
 
 fn workspace_execution_container_view_from_ref(
     container: &gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
+    session_id: Option<&str>,
 ) -> gwt::WorkspaceExecutionContainerView {
     gwt::WorkspaceExecutionContainerView {
         branch: container.branch.clone(),
@@ -1165,6 +1171,72 @@ fn workspace_execution_container_view_from_ref(
         pr_number: container.pr_number,
         pr_url: container.pr_url.clone(),
         pr_state: container.pr_state.clone(),
+        diagnosis: container.worktree_path.as_deref().map(|worktree| {
+            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose(
+                worktree, session_id,
+            ))
+        }),
+    }
+}
+
+pub(super) fn workspace_execution_diagnosis_view(
+    snapshot: gwt::cli::execution_state::ExecutionDiagnosisSnapshot,
+) -> gwt::WorkspaceExecutionDiagnosisView {
+    let ecr_status = match snapshot.ecr_status {
+        gwt::cli::execution_state::ExecutionDiagnosisState::Active => "active",
+        gwt::cli::execution_state::ExecutionDiagnosisState::Completed => "completed",
+        gwt::cli::execution_state::ExecutionDiagnosisState::Blocked => "blocked",
+        gwt::cli::execution_state::ExecutionDiagnosisState::Missing => "missing",
+        gwt::cli::execution_state::ExecutionDiagnosisState::Corrupt => "corrupt",
+    };
+    let binding_state = match snapshot.binding_state {
+        gwt::cli::execution_state::ExecutionBindingState::Bound => "bound",
+        gwt::cli::execution_state::ExecutionBindingState::Missing => "missing",
+        gwt::cli::execution_state::ExecutionBindingState::Stale => "stale",
+        gwt::cli::execution_state::ExecutionBindingState::Terminal => "terminal",
+        gwt::cli::execution_state::ExecutionBindingState::HostUnreachable => "host_unreachable",
+        gwt::cli::execution_state::ExecutionBindingState::Unknown => "unknown",
+        gwt::cli::execution_state::ExecutionBindingState::Corrupt => "corrupt",
+    };
+    gwt::WorkspaceExecutionDiagnosisView {
+        schema_version: snapshot.schema_version,
+        ecr_status: ecr_status.to_string(),
+        owner_kind: snapshot.owner_kind.map(|kind| kind.as_str().to_string()),
+        owner_number: snapshot.owner_number,
+        blocked_reason: snapshot.blocked_reason,
+        missing_verification: snapshot.missing_verification,
+        generation_id: snapshot.generation_id,
+        binding_state: binding_state.to_string(),
+        binding_cause: snapshot.binding_cause,
+        verification_state: snapshot.verification_state,
+        trivial_reason: snapshot.trivial_reason,
+        generated_outputs: snapshot.generated_outputs,
+        capability_generation: snapshot.capability_generation,
+        continuation: snapshot
+            .continuation
+            .map(|value| serde_json::to_value(value).expect("continuation serializes")),
+        workspace_update_applicable: snapshot.workspace_update_applicable,
+        workspace_update_applicability_reason: snapshot.workspace_update_applicability_reason,
+        obligation_revival: snapshot
+            .obligation_revival
+            .map(|value| serde_json::to_value(value).expect("obligation revival serializes")),
+        binding_repair: snapshot
+            .binding_repair
+            .map(|value| serde_json::to_value(value).expect("binding repair serializes")),
+        repair: snapshot
+            .repair
+            .map(|value| serde_json::to_value(value).expect("repair serializes")),
+        work_event_receipt_generation_id: snapshot.work_event_receipt_generation_id,
+        work_event_receipt_matches_current_generation: snapshot
+            .work_event_receipt_matches_current_generation,
+        settlement: snapshot
+            .settlement
+            .map(|status| serde_json::to_value(status).expect("settlement status serializes")),
+        settlement_severity: snapshot.settlement_severity,
+        settlement_obligation_open: snapshot.settlement_obligation_open,
+        open_obligations: snapshot.open_obligations,
+        available_recoveries: snapshot.available_recoveries,
+        warnings: snapshot.warnings,
     }
 }
 
@@ -1533,9 +1605,9 @@ fn collapse_active_work_agents_by_conversation(
     dropped
 }
 
-fn retain_latest_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWorkAgentView>) {
+fn retain_summary_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWorkAgentView>) {
     let mut sorted = std::mem::take(agents);
-    sorted.sort_by(compare_active_work_agents_newest_first);
+    sorted.sort_by(compare_active_work_agents_for_summary);
     let mut seen_identities: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
     for agent in sorted {
@@ -1550,12 +1622,22 @@ fn retain_latest_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWork
     *agents = kept;
 }
 
+fn compare_active_work_agents_for_summary(
+    left: &gwt::ActiveWorkAgentView,
+    right: &gwt::ActiveWorkAgentView,
+) -> std::cmp::Ordering {
+    left.sessions
+        .is_empty()
+        .cmp(&right.sessions.is_empty())
+        .then_with(|| compare_active_work_agents_newest_first(left, right))
+}
+
 fn active_work_payload_agents(
     agents: &[gwt::ActiveWorkAgentView],
     cap: usize,
 ) -> Vec<gwt::ActiveWorkAgentView> {
     let mut summary_agents = agents.to_vec();
-    retain_latest_active_work_agent_per_identity(&mut summary_agents);
+    retain_summary_active_work_agent_per_identity(&mut summary_agents);
     summary_agents.truncate(cap);
 
     let mut selected_session_ids: HashSet<String> = summary_agents
@@ -1770,10 +1852,15 @@ pub(super) fn attach_registry_sessions_to_active_works(
         // distinct conversations visible in their owning child Work.
         let payload_agents = active_work_payload_agents(&work.agents, cap);
         sync_active_workspace_child_agents(work, &payload_agents);
+        for child in &mut work.works {
+            retain_summary_active_work_agent_per_identity(&mut child.agents);
+        }
         // User verification 2026-06-17 (follow-up): Workspace detail is a
         // session summary, not a live process inventory. Per agent identity
-        // only the latest history entry stays; live duplicates collapse too.
-        retain_latest_active_work_agent_per_identity(&mut work.agents);
+        // only one history entry stays; a usable conversation wins before
+        // recency so empty replacement records cannot hide it. Child Works use
+        // the same rule to avoid rendering Current beside "No session yet".
+        retain_summary_active_work_agent_per_identity(&mut work.agents);
         recompute_active_work_agent_counters(work);
         // The cap applies to the row's TOTAL agents: a decomposed legacy row
         // can carry hundreds of record agents, and the workspace payload feeds
@@ -1927,6 +2014,12 @@ fn active_workspace_child_work(work: &gwt::ActiveWorkItemView) -> gwt::ActiveWor
         manual_close_allowed,
         close_blocked_reason,
         agents: work.agents.clone(),
+        execution_diagnosis: work.worktree_path.as_deref().map(|worktree| {
+            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose(
+                Path::new(worktree),
+                work.agents.first().map(|agent| agent.session_id.as_str()),
+            ))
+        }),
         updated_at: work.updated_at.clone(),
     }
 }

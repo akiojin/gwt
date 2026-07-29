@@ -15,6 +15,50 @@ use crate::cli::hook::{
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentBridgeFailureReason {
+    TransportFailure,
+    AuthorityMismatch,
+    ReceiptMismatch,
+    OperationRejected,
+}
+
+impl AgentBridgeFailureReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TransportFailure => "transport_failure",
+            Self::AuthorityMismatch => "authority_mismatch",
+            Self::ReceiptMismatch => "receipt_mismatch",
+            Self::OperationRejected => "operation_rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentBridgeFailure {
+    reason: AgentBridgeFailureReason,
+    message: &'static str,
+}
+
+impl AgentBridgeFailure {
+    fn new(reason: AgentBridgeFailureReason, message: &'static str) -> Self {
+        Self { reason, message }
+    }
+}
+
+impl std::fmt::Display for AgentBridgeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "[{}] {}", self.reason.as_str(), self.message)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentBridgeErrorResponse {
+    code: crate::AgentWorkspaceUpdateErrorCode,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeHookEventKind {
@@ -30,6 +74,10 @@ pub struct RuntimeHookEvent {
     pub source_event: Option<String>,
     #[serde(default)]
     pub gwt_session_id: Option<String>,
+    /// Internal one-time Continue work readiness challenge. AppRuntime strips
+    /// this field before broadcasting a runtime event to browser clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_readiness_nonce: Option<String>,
     #[serde(default)]
     pub agent_session_id: Option<String>,
     #[serde(default)]
@@ -153,46 +201,162 @@ impl HookForwardTarget {
         url.set_fragment(None);
         Ok(url)
     }
+
+    pub fn execution_continuation_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/execution-continuation");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
 }
 
-pub fn send_workspace_update_via_agent_bridge(
+pub fn send_execution_continuation_via_agent_bridge(
     target: &HookForwardTarget,
-    request: &crate::AgentWorkspaceUpdateRequest,
-) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
-    let url = target.workspace_update_url()?;
+    request: &crate::AgentExecutionContinuationRequest,
+) -> Result<crate::AgentExecutionContinuationReceipt, String> {
+    let url = target.execution_continuation_url().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host continuation bridge target is invalid",
+        )
+        .to_string()
+    })?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|_| "failed to build the Host workspace bridge client".to_string())?;
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "failed to build the Host continuation bridge client",
+            )
+            .to_string()
+        })?;
     let response = client
         .post(url)
         .bearer_auth(&target.token)
         .json(request)
         .send()
         .map_err(|_| {
-            "Host workspace bridge is unavailable; the update was not retried locally and its outcome may be unknown"
-                .to_string()
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "Host continuation bridge is unavailable; no local fallback was attempted",
+            )
+            .to_string()
+        })?;
+    if !response.status().is_success() {
+        let reason = response
+            .json::<AgentBridgeErrorResponse>()
+            .map(|error| {
+                if error.code == crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                    || error.reason.as_deref() == Some("authority_mismatch")
+                {
+                    AgentBridgeFailureReason::AuthorityMismatch
+                } else {
+                    AgentBridgeFailureReason::OperationRejected
+                }
+            })
+            .unwrap_or(AgentBridgeFailureReason::OperationRejected);
+        return Err(AgentBridgeFailure::new(
+            reason,
+            "Host continuation bridge rejected the operation; no local fallback was attempted",
+        )
+        .to_string());
+    }
+    let receipt = response
+        .json::<crate::AgentExecutionContinuationReceipt>()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::ReceiptMismatch,
+                "Host continuation bridge returned an invalid success response",
+            )
+            .to_string()
+        })?;
+    if receipt.schema_version != crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION
+        || receipt.operation_id != request.operation_id
+        || receipt.generation_id != receipt.execution_binding.generation_id
+        || receipt.capability_generation == 0
+        || !receipt.validated
+    {
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host continuation bridge returned mismatched authority evidence",
+        )
+        .to_string());
+    }
+    Ok(receipt)
+}
+
+pub fn send_workspace_update_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceUpdateRequest,
+) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
+    let url = target.workspace_update_url().map_err(|_| {
+        AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host workspace bridge target is invalid",
+        )
+        .to_string()
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "failed to build the Host workspace bridge client",
+            )
+            .to_string()
+        })?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| {
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::TransportFailure,
+                "Host workspace bridge is unavailable; the update was not retried locally and its outcome may be unknown",
+            )
+            .to_string()
         })?;
     let status = response.status();
     if !status.is_success() {
-        return match response.json::<crate::AgentWorkspaceUpdateError>() {
-            Ok(error) => Err(error.message),
-            Err(_) => Err(format!(
-                "Host workspace bridge rejected the update with HTTP {status}; no local fallback was attempted"
-            )),
-        };
+        let reason = response
+            .json::<AgentBridgeErrorResponse>()
+            .map(|error| {
+                if error.code == crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                    || error.reason.as_deref() == Some("authority_mismatch")
+                {
+                    AgentBridgeFailureReason::AuthorityMismatch
+                } else {
+                    AgentBridgeFailureReason::OperationRejected
+                }
+            })
+            .unwrap_or(AgentBridgeFailureReason::OperationRejected);
+        return Err(AgentBridgeFailure::new(
+            reason,
+            "Host workspace bridge rejected the update; no local fallback was attempted",
+        )
+        .to_string());
     }
     let receipt = response
         .json::<crate::AgentWorkspaceUpdateReceipt>()
         .map_err(|_| {
-            "Host workspace bridge returned an invalid success response; no local fallback was attempted"
-                .to_string()
+            AgentBridgeFailure::new(
+                AgentBridgeFailureReason::ReceiptMismatch,
+                "Host workspace bridge returned an invalid success response; no local fallback was attempted",
+            )
+            .to_string()
         })?;
     if receipt.schema_version != crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION {
-        return Err(
-            "Host workspace bridge returned an unsupported response schema; no local fallback was attempted"
-                .to_string(),
-        );
+        return Err(AgentBridgeFailure::new(
+            AgentBridgeFailureReason::ReceiptMismatch,
+            "Host workspace bridge returned an unsupported response schema; no local fallback was attempted",
+        )
+        .to_string());
     }
     Ok(receipt)
 }
@@ -325,6 +489,10 @@ impl RuntimeHookEvent {
             kind,
             source_event: source_event.map(str::to_string),
             gwt_session_id: std::env::var(GWT_SESSION_ID_ENV).ok(),
+            continuation_readiness_nonce: std::env::var(
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+            )
+            .ok(),
             agent_session_id,
             project_root,
             branch,
@@ -452,7 +620,16 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use super::*;
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::env_test_lock()
@@ -461,6 +638,130 @@ mod tests {
     }
 
     use gwt_core::test_support::ScopedEnvVar;
+    use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
+
+    struct BindingProbeServer {
+        runtime: Runtime,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
+        forward_url: String,
+    }
+
+    #[derive(Clone)]
+    struct BindingProbeState {
+        tx: mpsc::Sender<(HeaderMap, serde_json::Value)>,
+        status: StatusCode,
+        body: String,
+    }
+
+    impl BindingProbeServer {
+        fn start(status: StatusCode, body: serde_json::Value) -> Self {
+            let runtime = Runtime::new().expect("binding probe runtime");
+            let listener = runtime
+                .block_on(TcpListener::bind(("127.0.0.1", 0)))
+                .expect("binding probe listener");
+            let address = listener.local_addr().expect("binding probe address");
+            let (tx, rx) = mpsc::channel();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let app = Router::new()
+                .route(
+                    "/internal/execution-binding-probe",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture binding probe request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/internal/workspace-update",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture workspace update request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .with_state(BindingProbeState {
+                    tx,
+                    status,
+                    body: body.to_string(),
+                });
+            runtime.spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("binding probe server");
+            });
+            Self {
+                runtime,
+                shutdown_tx: Some(shutdown_tx),
+                rx,
+                forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
+            }
+        }
+
+        fn receive(&self) -> (HeaderMap, serde_json::Value) {
+            self.rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("binding probe request")
+        }
+    }
+
+    impl Drop for BindingProbeServer {
+        fn drop(&mut self) {
+            if let Some(shutdown_tx) = self.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+            self.runtime
+                .block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        }
+    }
+
+    #[test]
+    fn runtime_hook_event_captures_continue_work_readiness_only_for_internal_delivery() {
+        let _env_lock = env_test_lock();
+        let _nonce = ScopedEnvVar::set(
+            gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+            "continue-ready-private",
+        );
+
+        let event = RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some("SessionStart"),
+            Some("Running".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            event.continuation_readiness_nonce.as_deref(),
+            Some("continue-ready-private")
+        );
+    }
 
     #[test]
     fn loopback_target_rejects_remote_hosts() {
@@ -535,6 +836,13 @@ mod tests {
                     .as_str(),
                 format!("http://{host}:45123/internal/work-terminalization")
             );
+            assert_eq!(
+                target
+                    .execution_continuation_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/execution-continuation")
+            );
         }
 
         for url in [
@@ -558,6 +866,63 @@ mod tests {
             .expect_err("non-canonical terminal bridge target must fail closed");
             assert!(!error.contains("secret"));
         }
+    }
+
+    #[test]
+    fn operation_local_bridge_failures_have_stable_reason_codes() {
+        let request = crate::AgentWorkspaceUpdateRequest {
+            schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+            claimed_session_id: "session-reason-codes".to_string(),
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/workspace/repo".to_string(),
+                git_toplevel: "/workspace/repo".to_string(),
+                repo_hash: "repo-hash".to_string(),
+                branch: "work/reason-codes".to_string(),
+            },
+            intent: crate::AgentWorkspaceUpdateIntent::default(),
+        };
+
+        let unavailable = HookForwardTarget {
+            url: "http://127.0.0.1:1/internal/hook-live".to_string(),
+            token: "transport-secret".to_string(),
+        };
+        let transport = send_workspace_update_via_agent_bridge(&unavailable, &request)
+            .expect_err("unreachable Host must be typed");
+        assert!(transport.contains("transport_failure"), "{transport}");
+
+        let authority_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "execution_binding_mismatch",
+                "reason": "authority_mismatch",
+                "message": "current authority does not match"
+            }),
+        );
+        let authority_target = HookForwardTarget {
+            url: authority_server.forward_url.clone(),
+            token: "authority-secret".to_string(),
+        };
+        let authority = send_workspace_update_via_agent_bridge(&authority_target, &request)
+            .expect_err("authority mismatch must be typed");
+        assert!(authority.contains("authority_mismatch"), "{authority}");
+        authority_server.receive();
+
+        let receipt_server = BindingProbeServer::start(
+            StatusCode::OK,
+            serde_json::json!({
+                "schema_version": crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION + 1,
+                "work_id": "work-receipt",
+                "journal_entry_id": "journal-receipt"
+            }),
+        );
+        let receipt_target = HookForwardTarget {
+            url: receipt_server.forward_url.clone(),
+            token: "receipt-secret".to_string(),
+        };
+        let receipt = send_workspace_update_via_agent_bridge(&receipt_target, &request)
+            .expect_err("mismatched receipt must be typed");
+        assert!(receipt.contains("receipt_mismatch"), "{receipt}");
+        receipt_server.receive();
     }
 
     #[test]

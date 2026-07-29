@@ -3,7 +3,7 @@
 //! pushes a banner line to the ProcessConsoleHub under the
 //! `AgentBootstrap` kind so the Console window surfaces the launch
 //! pipeline before the PTY pane takes over.
-use super::{emit_agent_launch_stage, next_agent_launch_stage_id};
+use super::{emit_agent_launch_stage, launch_argv_summary, next_agent_launch_stage_id};
 use gwt_core::process_console::{ProcessConsoleHub, ProcessKind, ProcessStream};
 
 fn drain_lines(hub: &ProcessConsoleHub) -> Vec<String> {
@@ -19,6 +19,27 @@ fn launch_stage_ids_are_unique_per_caller() {
     let a = next_agent_launch_stage_id(&counter);
     let b = next_agent_launch_stage_id(&counter);
     assert!(b > a, "stage ids must strictly increase: {a} -> {b}");
+}
+
+#[test]
+fn launch_argv_summary_never_reflects_provider_ids_prompts_or_paths() {
+    let args = vec![
+        "--resume".to_string(),
+        "provider-conversation-private".to_string(),
+        "/Users/private/project".to_string(),
+        "handoff prompt private".to_string(),
+    ];
+
+    let summary = launch_argv_summary(&args);
+
+    assert_eq!(summary, "argc=4");
+    for secret in [
+        "provider-conversation-private",
+        "/Users/private/project",
+        "handoff prompt private",
+    ] {
+        assert!(!summary.contains(secret));
+    }
 }
 
 #[test]

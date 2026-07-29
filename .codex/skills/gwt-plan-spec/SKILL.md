@@ -119,6 +119,15 @@ Design the solution using Software Design Document methodology before decomposin
    between components. Write stable contracts to `contracts/*` when interfaces cross
    module or crate boundaries.
 
+   A new or changed blocking gate is not implementation-ready unless the plan
+   and tasks name all four required acceptance elements:
+   - an **agent-reachable recovery operation**
+   - **diagnostic visibility** for both the requirement and current state
+   - a **positive test** proving the invalid state is rejected
+   - a **false-positive negative test** proving legitimate work is not rejected
+   Missing any element is a quality-gate failure; a warning-only policy is not
+   a blocking gate.
+
 3. **Data model.** Document entities, their shapes, lifecycle states, and invariants.
    Write to `data-model.md`.
 

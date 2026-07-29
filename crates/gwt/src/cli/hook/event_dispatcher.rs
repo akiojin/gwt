@@ -8,7 +8,7 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    board_reminder, diagnostics, execution_completion_stop_check, execution_control_stop_check,
+    action_obligation_stop_check, board_reminder, diagnostics, execution_control_stop_check,
     intake_completion_stop_check, skill_build_spec_stop_check, skill_discussion_stop_check,
     skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
     workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
@@ -21,12 +21,44 @@ pub fn handle_with_input(
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
+    handle_with_optional_capture(event, input, worktree_root, current_session, None)
+}
+
+pub(crate) fn handle_with_input_and_managed_capture(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+    current_session: Option<&str>,
+    managed_hook_capture: &mut intake_completion_stop_check::ManagedHookCapture<'_>,
+) -> Result<HookOutput, HookError> {
+    handle_with_optional_capture(
+        event,
+        input,
+        worktree_root,
+        current_session,
+        Some(managed_hook_capture),
+    )
+}
+
+fn handle_with_optional_capture(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+    current_session: Option<&str>,
+    managed_hook_capture: Option<&mut intake_completion_stop_check::ManagedHookCapture<'_>>,
+) -> Result<HookOutput, HookError> {
     match event {
         "SessionStart" => handle_session_start(event, input, worktree_root),
         "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
         "PreToolUse" => handle_pre_tool_use(event, input),
         "PostToolUse" => handle_post_tool_use(event, input),
-        "Stop" => handle_stop(event, input, worktree_root, current_session),
+        "Stop" => handle_stop(
+            event,
+            input,
+            worktree_root,
+            current_session,
+            managed_hook_capture,
+        ),
         other => Err(HookError::InvalidEvent(other.to_string())),
     }
 }
@@ -100,6 +132,11 @@ fn handle_user_prompt_submit(
     run_value(event, "intake-outcome-required-since", || {
         intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
+    // SPEC-3248 P11 (T-240 core): producing prompts in execution lanes arm
+    // typed action obligations. Fail-open state writer.
+    run_value(event, "action-obligation-record", || {
+        action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
+    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
@@ -143,6 +180,7 @@ fn handle_stop(
     input: &str,
     worktree_root: &Path,
     current_session: Option<&str>,
+    managed_hook_capture: Option<&mut intake_completion_stop_check::ManagedHookCapture<'_>>,
 ) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
@@ -197,12 +235,21 @@ fn handle_stop(
         // completed-stop recording like every entry in this chain.
         (
             "intake-completion-stop-check",
-            Box::new(|| {
-                intake_completion_stop_check::handle_with_input(
-                    worktree_root,
-                    input,
-                    current_session,
-                )
+            Box::new(move || {
+                if let Some(capture) = managed_hook_capture {
+                    intake_completion_stop_check::handle_with_managed_capture(
+                        worktree_root,
+                        input,
+                        current_session,
+                        capture,
+                    )
+                } else {
+                    intake_completion_stop_check::handle_with_input(
+                        worktree_root,
+                        input,
+                        current_session,
+                    )
+                }
             }),
         ),
         (
@@ -228,9 +275,18 @@ fn handle_stop(
                 )
             }),
         ),
+        // SPEC-3248 P11 (T-242 core): open producing obligations from this
+        // session's prompts block Stop until settled by canonical
+        // operations or deferred via execution.blocked.
         (
-            "execution-completion-stop-check",
-            Box::new(|| execution_completion_stop_check::handle_with_input(worktree_root, input)),
+            "action-obligation-stop-check",
+            Box::new(|| {
+                action_obligation_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
         ),
     ];
     for (handler, check) in stop_checks {
@@ -330,6 +386,7 @@ After a successful start, run JSON operation `discuss.goal_started` with `params
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::TestEnv;
     use crate::discussion_resume::PendingDiscussionGoal;
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
     use gwt_core::test_support::ScopedEnvVar;
@@ -418,6 +475,153 @@ mod tests {
     }
 
     #[test]
+    fn pre_tool_use_keeps_recovery_reachable_for_stale_binding_without_a_host_bridge() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let remote_status = gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/stale-policy.git",
+            ])
+            .current_dir(worktree.path())
+            .status()
+            .expect("git remote add");
+        assert!(remote_status.success(), "git remote add failed");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let sessions_dir = home.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "work/issue-3394", AgentId::Codex);
+        session.linked_issue_number = Some(3394);
+        let session_id = session.id.clone();
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3394,
+        };
+        session.save(&sessions_dir).unwrap();
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            &session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let current =
+            crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
+                .unwrap()
+                .unwrap();
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session_id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity: current,
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&sessions_dir).unwrap();
+        let takeover = crate::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: "stale-policy-fixture".to_string(),
+            principal_id: "test-host".to_string(),
+            work_id: Some(format!("work-session-{session_id}")),
+            source: Some("continue-work:resume".to_string()),
+            from_session_id: session_id.clone(),
+            to_session_id: "replacement-session".to_string(),
+            reason: "test stale predecessor".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        crate::cli::execution_state::prepare_generation_takeover(worktree.path(), owner, &takeover)
+            .unwrap();
+        crate::cli::execution_state::activate_generation_takeover(
+            worktree.path(),
+            owner,
+            &takeover,
+        )
+        .unwrap();
+        assert!(
+            !crate::cli::execution_state::current_active_execution_binding_matches(
+                worktree.path(),
+                owner,
+                &session_id,
+                &session.execution_binding.as_ref().unwrap().identity,
+            )
+            .unwrap()
+        );
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path =
+            ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, runtime_path.as_os_str());
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+
+        for input in [
+            serde_json::json!({
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": "crates/gwt/src/lib.rs",
+                    "old_string": "old",
+                    "new_string": "new"
+                }
+            }),
+            serde_json::json!({
+                "tool_name": "Write",
+                "tool_input": {
+                    "file_path": "crates/gwt/src/lib.rs",
+                    "content": "replacement"
+                }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "git add crates/gwt/src/lib.rs" }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "cargo test -p gwt --lib" }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+                }
+            }),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.continue\",\"params\":{\"operation_id\":\"recover-stale-binding\"}}\nJSON"
+                }
+            }),
+        ] {
+            let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+                .expect("PreToolUse output");
+            assert_eq!(
+                output,
+                HookOutput::Silent,
+                "general issue-owned work must not depend on Host binding availability: {input}"
+            );
+        }
+        assert!(
+            runtime_path.exists(),
+            "removing the binding step must preserve later runtime-state handling"
+        );
+    }
+
+    #[test]
     fn user_prompt_submit_appends_legacy_pending_goal_when_started_from_subdirectory() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -469,7 +673,8 @@ mod tests {
     // gate — a curation prompt marks the requirement dirty, Stop blocks while
     // no fresh outcome exists (auto-capturing one self-improvement
     // candidate), a valid outcome clears the block, and the next prompt makes
-    // that outcome stale so Stop blocks again (updating the same candidate).
+    // that outcome stale so Stop blocks again (adding a distinct typed
+    // occurrence to the same fingerprint).
     #[test]
     fn intake_artifact_gate_lifecycle_blocks_until_fresh_outcome() {
         let _env_lock = crate::env_test_lock()
@@ -490,6 +695,8 @@ mod tests {
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
         gwt_skills::write_lane_file(worktree.path(), &gwt_skills::INTAKE_PROFILE).unwrap();
+        let mut env = TestEnv::new(worktree.path().join("cache"));
+        env.repo_path = worktree.path().to_path_buf();
 
         let prompt_input = serde_json::json!({
             "prompt": "このバグ報告を Issue に登録して",
@@ -512,8 +719,19 @@ mod tests {
         .expect("prompt hook output");
 
         // 2. Stop without an outcome blocks and captures one candidate.
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
+        let output = {
+            let mut capture = |event| {
+                crate::cli::improvement_contract::capture_managed_hook_failure(&mut env, event)
+            };
+            handle_with_input_and_managed_capture(
+                "Stop",
+                &stop_input,
+                worktree.path(),
+                Some(&session_id),
+                &mut capture,
+            )
+            .expect("stop hook output")
+        };
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected intake artifact gate StopBlock, got {output:?}");
         };
@@ -522,15 +740,19 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(
             candidates[0].get("occurrences").and_then(|v| v.as_u64()),
-            Some(0),
-            "legacy intake capture must not fabricate a typed occurrence"
+            Some(1),
+            "first deterministic managed-hook event must be eligible"
         );
         assert_eq!(
             candidates[0]
-                .get("legacy_occurrence_count")
-                .and_then(|v| v.as_u64()),
-            Some(1)
+                .get("target_artifact")
+                .and_then(|v| v.as_str()),
+            Some("issue-spec-workflow")
         );
+        assert!(candidates[0]
+            .get("fingerprint")
+            .and_then(|v| v.as_str())
+            .is_some_and(|value| value.starts_with("v2:")));
 
         // 3. A valid Issue/SPEC outcome clears the block.
         crate::cli::intake_outcome::record_outcome(
@@ -545,8 +767,19 @@ mod tests {
             },
         )
         .unwrap();
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
+        let output = {
+            let mut capture = |event| {
+                crate::cli::improvement_contract::capture_managed_hook_failure(&mut env, event)
+            };
+            handle_with_input_and_managed_capture(
+                "Stop",
+                &stop_input,
+                worktree.path(),
+                Some(&session_id),
+                &mut capture,
+            )
+            .expect("stop hook output")
+        };
         assert!(
             !matches!(output, HookOutput::StopBlock { .. }),
             "fresh valid outcome must pass Stop, got {output:?}"
@@ -562,8 +795,19 @@ mod tests {
             Some(&session_id),
         )
         .expect("prompt hook output");
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
+        let output = {
+            let mut capture = |event| {
+                crate::cli::improvement_contract::capture_managed_hook_failure(&mut env, event)
+            };
+            handle_with_input_and_managed_capture(
+                "Stop",
+                &stop_input,
+                worktree.path(),
+                Some(&session_id),
+                &mut capture,
+            )
+            .expect("stop hook output")
+        };
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected stale-outcome StopBlock, got {output:?}");
         };
@@ -575,14 +819,8 @@ mod tests {
         assert_eq!(candidates.len(), 1, "dedupe must keep one candidate");
         assert_eq!(
             candidates[0].get("occurrences").and_then(|v| v.as_u64()),
-            Some(0),
-            "legacy intake recapture must not fabricate typed occurrences"
-        );
-        assert_eq!(
-            candidates[0]
-                .get("legacy_occurrence_count")
-                .and_then(|v| v.as_u64()),
-            Some(2)
+            Some(2),
+            "a later prompt is a distinct deterministic event"
         );
     }
 
@@ -699,8 +937,18 @@ mod tests {
             "stop_hook_active": false,
         })
         .to_string();
-        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
-            .expect("stop hook output");
+        let mut capture_called = false;
+        let output = handle_with_input_and_managed_capture(
+            "Stop",
+            &stop_input,
+            worktree.path(),
+            Some(&session_id),
+            &mut |_event| {
+                capture_called = true;
+                panic!("an earlier StopBlock must skip the intake producer")
+            },
+        )
+        .expect("stop hook output");
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected discussion StopBlock, got {output:?}");
         };
@@ -712,6 +960,7 @@ mod tests {
             !reason.contains("Intake artifact gate"),
             "intake gate must not contribute: {reason}"
         );
+        assert!(!capture_called, "intake producer must remain lazy");
         assert!(
             crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
             "intake auto-capture must not fire when an earlier gate blocks"
@@ -719,11 +968,13 @@ mod tests {
     }
 
     #[test]
-    fn stop_blocks_push_only_completion_claim_without_pr_evidence() {
+    fn stop_allows_legitimate_completion_report_without_scanning_prose() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let worktree = tempfile::tempdir().unwrap();
+        gwt_skills::write_lane_file(worktree.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let sessions_dir = worktree.path().join(".gwt").join("sessions");
         let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
         session.agent_session_id = Some("agent-123".to_string());
@@ -751,11 +1002,9 @@ mod tests {
         let output = handle_with_input("Stop", &input, worktree.path(), Some(&session_id))
             .expect("hook output");
 
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected push-only completion StopBlock, got {output:?}");
-        };
-        assert!(reason.contains("PR"), "{reason}");
-        assert!(reason.contains("push-only"), "{reason}");
-        assert!(reason.contains("gwt-manage-pr"), "{reason}");
+        assert!(
+            !matches!(output, HookOutput::StopBlock { .. }),
+            "legitimate completion prose must not be interpreted as gate state: {output:?}"
+        );
     }
 }

@@ -2121,6 +2121,7 @@ kbd.op-kbd {
 }
 
 .workspace-overview-root {
+  container-type: inline-size;
   font-family: var(--font-body);
   color: var(--color-text);
   background: var(--color-surface);
@@ -2475,14 +2476,35 @@ kbd.op-kbd {
     color-mix(in oklab, var(--current-agent, var(--color-border-strong)) 55%, var(--color-border));
 }
 
-/* Per-Work head: optional Work label on the left, the per-Work Resume control
-   on the right. Resume is a Work (launch) operation, not a Workspace one. */
+/* Per-Work identity header. Producing and lifecycle controls live in the
+   separate task-first action rail below so a long purpose never crowds them. */
 .workspace-detail-work-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+}
+
+.workspace-detail-work-action-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.workspace-detail-work-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.workspace-detail-work-action-rail .wizard-button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .workspace-detail-work-heading {
@@ -2514,13 +2536,19 @@ kbd.op-kbd {
   font-size: var(--type-xs);
 }
 
-/* Each Session row is a list element: label + meta on the left, its own Resume
-   control on the right, so any conversation can be resumed directly. */
+/* Each Session row is a list element: label + meta on the left, its own
+   inspection control on the right. Producing continuation stays on the Work. */
 .workspace-detail-session {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.workspace-detail-session > .wizard-button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .workspace-detail-session-main {
@@ -2535,7 +2563,7 @@ kbd.op-kbd {
   box-shadow: inset 2px 0 0 0 var(--color-accent);
 }
 
-/* No-session placeholder still carries a Resume control on the right. */
+/* No-session placeholder remains a quiet history state. */
 .workspace-detail-session-empty {
   display: flex;
   align-items: center;
@@ -2777,6 +2805,81 @@ kbd.op-kbd {
   font-size: var(--type-xs);
 }
 
+.workspace-execution-diagnosis {
+  --workspace-execution-accent: var(--color-state-idle);
+  padding-inline-start: var(--space-3);
+  border-inline-start: 2px solid var(--workspace-execution-accent);
+}
+
+.workspace-execution-diagnosis.is-clear {
+  --workspace-execution-accent: var(--color-state-done);
+}
+
+.workspace-execution-diagnosis.is-warning {
+  --workspace-execution-accent: var(--color-state-needs-input);
+}
+
+.workspace-execution-diagnosis.is-blocked {
+  --workspace-execution-accent: var(--color-state-blocked);
+}
+
+.workspace-execution-severity {
+  display: inline-flex;
+  align-items: center;
+  margin-block-end: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--workspace-execution-accent);
+  border-radius: var(--radius-pill);
+  color: var(--workspace-execution-accent);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.workspace-execution-alert {
+  margin-block-start: var(--space-2);
+  padding: var(--space-2);
+  border-inline-start: 2px solid var(--color-state-needs-input);
+  background: var(--color-surface-elevated);
+}
+
+.workspace-execution-alert.is-blocked {
+  border-inline-start-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.workspace-execution-list-group {
+  margin-block-start: var(--space-3);
+}
+
+.workspace-execution-list-label {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.workspace-execution-obligation-list,
+.workspace-execution-recovery-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-execution-obligation-list li,
+.workspace-execution-recovery-list li {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+/* Execution diagnosis extends the existing detail section; it is not an overlay. */
+
 .workspace-hook-issue-list,
 .workspace-hook-slow-list {
   display: flex;
@@ -2818,6 +2921,58 @@ kbd.op-kbd {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.workspace-linked-diagnostics {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.workspace-linked-diagnostics-summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.workspace-linked-diagnostics[open] .workspace-linked-diagnostics-summary {
+  margin-bottom: var(--space-2);
+  color: var(--color-text);
+}
+
+@container (max-width: 760px) {
+  .workspace-overview-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(140px, 42%) minmax(0, 1fr);
+  }
+
+  .workspace-overview-list-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .workspace-detail-work-action-rail {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace-detail-work-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .workspace-detail-work-action-rail .wizard-button {
+    width: 100%;
+  }
+
+  .workspace-detail-session {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .workspace-board-ref {
