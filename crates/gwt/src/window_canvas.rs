@@ -353,6 +353,10 @@ impl WindowCanvasState {
         self.push_window_with_geometry(preset, title, persist, geometry)
     }
 
+    pub fn next_window_id_preview(&self, preset: WindowPreset) -> String {
+        self.next_window_id(preset)
+    }
+
     fn push_window_with_geometry(
         &mut self,
         preset: WindowPreset,

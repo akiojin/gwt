@@ -135,6 +135,9 @@ pub fn spawn_logged_blocking(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
 ) -> std::io::Result<SpawnOutput> {
+    if let Some(deadline) = crate::operation_deadline::current() {
+        return spawn_logged_blocking_with_deadline(hub, kind, program, args, options, deadline);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -954,6 +957,41 @@ mod tests {
         .expect("command before deadline");
         assert!(out.success());
         assert!(out.stdout.contains("hello world"));
+    }
+
+    #[test]
+    fn spawn_logged_blocking_stops_finite_sleep_at_scoped_deadline() {
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "ping -n 3 127.0.0.1 >NUL".to_string()],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "sleep 2".to_string()],
+            )
+        };
+        let started = std::time::Instant::now();
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(150),
+        );
+
+        let error = spawn_logged_blocking(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Gh,
+            program,
+            &args,
+            SpawnOptions::new("test scoped deadline sleep"),
+        )
+        .expect_err("scoped deadline must stop a finite sleep before completion");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_millis(1_500),
+            "finite sleep outlived the scoped deadline: {:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]
