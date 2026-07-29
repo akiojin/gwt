@@ -2588,8 +2588,8 @@ async fn execution_binding_probe_handler(
     };
     // This route authorizes agent-initiated producing mutation. Prepared
     // authority is observation-only until the coordinator commits and
-    // promotes the bearer, so it must never receive a successful receipt
-    // through the same endpoint used by PreToolUse.
+    // promotes the bearer, so this probe must never hand it a successful
+    // receipt.
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
         return execution_binding_error_response(
             "execution_binding_probe_requires_active_execution_authority",

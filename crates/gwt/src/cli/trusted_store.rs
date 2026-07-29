@@ -424,8 +424,9 @@ pub fn store_health_error(context: &str, err: &std::io::Error) -> String {
         "trusted state unhealthy while {context}: {err}. The execution/verification records \
          under the repo-scoped trusted store (`~/.gwt/projects/<repo-hash>/trusted/<worktree-key>/`) \
          or their worktree mirrors (`.gwt/skill-state/`) could not be read or parsed. Repair by \
-         rerunning the canonical writer: `execution.adopt` with a non-empty `params.reason` rewrites \
-         the execution control record; `verify.plan` / `verify.run` rewrite verification state; \
+         rerunning the canonical writer: `execution.repair` quarantines an unreadable execution \
+         control record and materializes a fresh Active one (`execution.adopt` takes over only \
+         records that still pass integrity); `verify.plan` / `verify.run` rewrite verification state; \
          `intake.outcome.record` rewrites the intake outcome. If the failure persists, inspect the \
          store directory for filesystem problems."
     )
