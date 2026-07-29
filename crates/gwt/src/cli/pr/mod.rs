@@ -91,6 +91,26 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
     }
 }
 
+fn dispatch_pr_mutation<T>(
+    expected: Option<&gwt_agent::SessionExecutionBinding>,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let Some(expected) = expected else {
+        return operation();
+    };
+    match crate::cli::execution_state::with_current_pr_mutation_execution_binding_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        expected,
+        operation,
+    )? {
+        Some(result) => result,
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "PR mutation refused: the owning Session or execution generation changed before external dispatch; retry from the current owning Session",
+        )),
+    }
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: PrCommand,
@@ -109,7 +129,23 @@ pub(super) fn run<E: CliEnv>(
             | PrCommand::EditBody { .. }
             | PrCommand::Ready { .. }
     );
+    let mut mutation_binding = None;
     if is_pr_mutation {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        mutation_binding = match crate::cli::execution_state::snapshot_pr_mutation_execution_binding(
+            &worktree,
+            session_id.as_deref(),
+        ) {
+            Ok(binding) => binding,
+            Err(_) => {
+                out.push_str("PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.\n");
+                return Ok(2);
+            }
+        };
         let is_ready_handoff = matches!(
             cmd,
             PrCommand::Create { draft: false, .. }
@@ -123,7 +159,33 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             return Ok(2);
         }
+        if let Some(refusal) =
+            crate::cli::verification_record::work_event_settlement_refusal(&worktree)
+        {
+            out.push_str(&refusal);
+            out.push('\n');
+            return Ok(2);
+        }
+        // T-247: a Ready handoff with unsettled non-PR obligations is
+        // premature — draft creation and edits stay available mid-work.
+        if is_ready_handoff {
+            if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(refusal) = crate::cli::action_obligation::open_obligation_refusal(
+                    &worktree,
+                    &session_id,
+                    &[crate::cli::action_obligation::ObligationKind::Pr],
+                ) {
+                    out.push_str(&format!("PR handoff refused: {refusal}\n"));
+                    return Ok(2);
+                }
+            }
+        }
     }
+    let cmd_settles_pr_obligation = is_pr_mutation;
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -144,9 +206,10 @@ pub(super) fn run<E: CliEnv>(
             draft,
         } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            let pr = env
-                .create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
-                .map_err(super::io_as_api_error)?;
+            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
+            })
+            .map_err(super::io_as_api_error)?;
             sync_workspace_pr_metadata(env, &pr, head.as_deref());
             out.push_str("created pull request\n");
             render_pr(out, &pr);
@@ -160,9 +223,10 @@ pub(super) fn run<E: CliEnv>(
             labels,
             draft,
         } => {
-            let pr = env
-                .create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
-                .map_err(super::io_as_api_error)?;
+            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
+            })
+            .map_err(super::io_as_api_error)?;
             sync_workspace_pr_metadata(env, &pr, head.as_deref());
             out.push_str("created pull request\n");
             render_pr(out, &pr);
@@ -178,9 +242,10 @@ pub(super) fn run<E: CliEnv>(
                 .as_deref()
                 .map(|path| env.read_file(path).map_err(super::io_as_api_error))
                 .transpose()?;
-            let pr = env
-                .edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
-                .map_err(super::io_as_api_error)?;
+            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
             render_pr(out, &pr);
             0
@@ -191,9 +256,10 @@ pub(super) fn run<E: CliEnv>(
             body,
             add_labels,
         } => {
-            let pr = env
-                .edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
-                .map_err(super::io_as_api_error)?;
+            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                env.edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
+            })
+            .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
             render_pr(out, &pr);
             0
@@ -208,7 +274,8 @@ pub(super) fn run<E: CliEnv>(
             // sync workspace PR metadata (that path is reserved for current/create
             // where the PR is provably the workspace's own). Draft↔Ready also does
             // not change pr.state (OPEN→OPEN), so there is no metadata to refresh.
-            let pr = env.mark_pr_ready(number).map_err(super::io_as_api_error)?;
+            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || env.mark_pr_ready(number))
+                .map_err(super::io_as_api_error)?;
             out.push_str(&format!("marked pull request #{number} ready for review\n"));
             render_pr(out, &pr);
             0
@@ -275,6 +342,22 @@ pub(super) fn run<E: CliEnv>(
             0
         }
     };
+    if cmd_settles_pr_obligation && code == 0 {
+        // P11: successful PR mutations settle open PR obligations.
+        if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            crate::cli::action_obligation::settle_kinds_best_effort(
+                &worktree,
+                &session_id,
+                &[crate::cli::action_obligation::ObligationKind::Pr],
+                "pr mutation",
+            );
+        }
+    }
     Ok(code)
 }
 
@@ -587,6 +670,424 @@ mod tests {
         }
     }
 
+    fn persist_pr_generation_session(
+        worktree: &std::path::Path,
+        session_id: &str,
+        identity: gwt_agent::ExecutionBindingIdentity,
+    ) {
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let mut session =
+            gwt_agent::Session::new(worktree, "work/pr-authority", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.project_state_root = Some(worktree.to_path_buf());
+        session.linked_issue_number = Some(owner.number);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            repo_hash: session.repo_hash.clone().expect("fixture repository hash"),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity,
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding))
+            .expect("bind PR authority Session");
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("persist PR authority Session");
+    }
+
+    fn initialize_pr_generation_authority(
+        worktree: &std::path::Path,
+        session_id: &str,
+    ) -> gwt_agent::ExecutionBindingIdentity {
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            session_id,
+            "launch",
+            false,
+        )
+        .expect("materialize PR execution authority");
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize PR generation ledger");
+        crate::cli::execution_state::current_execution_binding(worktree, owner)
+            .expect("read PR generation authority")
+            .expect("current PR generation binding")
+    }
+
+    fn assert_pr_mutations_refuse_without_caller_authority(
+        worktree: &std::path::Path,
+        session_id: Option<&str>,
+    ) {
+        let _session = match session_id {
+            Some(session_id) => {
+                gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id)
+            }
+            None => gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+        };
+        let mut env = crate::cli::TestEnv::new(worktree.to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        let mutations = [
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("ready"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("draft"),
+                body: s("body"),
+                labels: vec![],
+                draft: true,
+            },
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("updated")),
+                body: None,
+                add_labels: vec![],
+            },
+            PrCommand::Ready { number: 7 },
+        ];
+        for mutation in mutations {
+            let mut out = String::new();
+            let code = run(&mut env, mutation, &mut out).expect("run PR mutation gate");
+            assert_eq!(code, 2, "unauthorized PR mutation was not refused: {out}");
+            assert!(
+                out.contains("authority"),
+                "refusal must describe the caller authority requirement without reflecting identity: {out}"
+            );
+        }
+        assert!(env.pr_create_call_log.is_empty(), "create reached GitHub");
+        assert!(env.pr_edit_call_log.is_empty(), "edit reached GitHub");
+        assert!(env.pr_ready_call_log.is_empty(), "ready reached GitHub");
+    }
+
+    #[test]
+    fn pr_mutations_fail_closed_for_missing_or_foreign_generation_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
+        persist_pr_generation_session(worktree.path(), "session-current", identity.clone());
+        persist_pr_generation_session(worktree.path(), "session-foreign-secret", identity);
+
+        assert_pr_mutations_refuse_without_caller_authority(worktree.path(), None);
+        assert_pr_mutations_refuse_without_caller_authority(
+            worktree.path(),
+            Some("session-foreign-secret"),
+        );
+    }
+
+    #[test]
+    fn pr_mutations_fail_closed_for_missing_or_stale_durable_session_binding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let mut identity = initialize_pr_generation_authority(worktree.path(), "session-current");
+
+        assert_pr_mutations_refuse_without_caller_authority(
+            worktree.path(),
+            Some("session-current"),
+        );
+
+        identity.binding_id.push_str("-stale");
+        persist_pr_generation_session(worktree.path(), "session-current", identity);
+        assert_pr_mutations_refuse_without_caller_authority(
+            worktree.path(),
+            Some("session-current"),
+        );
+    }
+
+    #[test]
+    fn pr_mutations_fail_closed_when_execution_authority_is_unreadable() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
+        persist_pr_generation_session(worktree.path(), "session-current", identity);
+        let trusted_record = crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path())
+            .expect("trusted worktree directory")
+            .join("execution-control.json");
+        std::fs::remove_file(&trusted_record).expect("remove readable trusted authority");
+        std::fs::create_dir(&trusted_record).expect("replace authority with unreadable directory");
+        assert!(
+            crate::cli::execution_state::pr_handoff_refusal(worktree.path(), false).is_some(),
+            "the PR-specific mutation gate itself must fail closed on an authority read error",
+        );
+
+        assert_pr_mutations_refuse_without_caller_authority(
+            worktree.path(),
+            Some("session-current"),
+        );
+    }
+
+    #[test]
+    fn pr_mutations_allow_the_exact_current_generation_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
+        persist_pr_generation_session(worktree.path(), "session-current", identity.clone());
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-current",
+        );
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("draft"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: true,
+                },
+                &mut out,
+            )
+            .expect("create draft as exact current Session"),
+            0,
+            "{out}",
+        );
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::EditBody {
+                    number: 7,
+                    title: Some(s("updated")),
+                    body: None,
+                    add_labels: vec![],
+                },
+                &mut out,
+            )
+            .expect("edit as exact current Session"),
+            0,
+            "{out}",
+        );
+
+        crate::cli::verification_record::save_plan(
+            worktree.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "session-current".to_string(),
+                owner_number: Some(42),
+                execution_binding: Some(identity),
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                surfaces: Vec::new(),
+                worktree_fingerprint: String::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save generation-bound verification plan");
+        crate::cli::verification_record::run_verification(
+            worktree.path(),
+            "session-current",
+            &["git --version".to_string()],
+        )
+        .expect("run generation-bound verification");
+
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("ready"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut out,
+            )
+            .expect("create ready PR as exact current Session"),
+            0,
+            "{out}",
+        );
+        out.clear();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+                .expect("mark PR ready as exact current Session"),
+            0,
+            "{out}",
+        );
+
+        assert_eq!(env.pr_create_call_log.len(), 2);
+        assert_eq!(env.pr_edit_call_log.len(), 1);
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
+    #[test]
+    fn pr_mutations_allow_the_exact_completed_generation_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("completed PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-completed");
+        persist_pr_generation_session(worktree.path(), "session-completed", identity);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-completed",
+        );
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                worktree.path(),
+                "session-completed",
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle completed PR generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("completed handoff"),
+                    body: s("body"),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut out,
+            )
+            .expect("create PR from completed generation"),
+            0,
+            "{out}",
+        );
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::EditBody {
+                    number: 7,
+                    title: Some(s("completed update")),
+                    body: None,
+                    add_labels: vec![],
+                },
+                &mut out,
+            )
+            .expect("edit PR from completed generation"),
+            0,
+            "{out}",
+        );
+        out.clear();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+                .expect("mark PR ready from completed generation"),
+            0,
+            "{out}",
+        );
+
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert_eq!(env.pr_edit_call_log.len(), 1);
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
+    #[test]
+    fn pr_mutation_refuses_capability_rotation_before_external_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
+        persist_pr_generation_session(worktree.path(), "session-current", identity);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-current",
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            gwt_agent::rotate_session_execution_capability(&sessions_dir, "session-current")
+                .expect("rotate capability after the PR gate snapshot");
+        });
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        env.seed_created_pr(seeded_pr());
+        let mut out = String::new();
+
+        let error = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("draft"),
+                body: s("body"),
+                labels: vec![],
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect_err("a rotated capability must refuse dispatch");
+
+        assert!(error
+            .to_string()
+            .contains("changed before external dispatch"));
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "authority loss must be detected before the GitHub mutation",
+        );
+    }
+
     #[test]
     fn pr_family_parse_directly_handles_current() {
         let cmd = parse(&[s("current")]).expect("parse pr family command");
@@ -669,9 +1170,11 @@ mod tests {
             &crate::cli::verification_record::VerificationPlanRecord {
                 session_id: "sess-pr".to_string(),
                 owner_number: Some(42),
+                execution_binding: None,
                 commands: vec!["git --version".to_string()],
                 derived: false,
                 worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },
@@ -743,6 +1246,111 @@ mod tests {
         .expect("run pr edit while blocked");
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+    }
+
+    #[test]
+    fn work_event_settlement_gate_blocks_pr_mutations_but_keeps_recovery_surfaces() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-pr-settlement");
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        crate::cli::execution_state::materialize_at_launch(
+            &fixture.repo,
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr-settlement",
+            "launch",
+            false,
+        )
+        .unwrap();
+        crate::cli::verification_record::save_plan(
+            &fixture.repo,
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "sess-pr-settlement".to_string(),
+                owner_number: Some(42),
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        crate::cli::verification_record::run_verification(
+            &fixture.repo,
+            "sess-pr-settlement",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        fixture.append_event("terminal-update-awaiting-delivery");
+
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        let blocked_commands = [
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("ready"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("draft"),
+                body: s("body"),
+                labels: vec![],
+                draft: true,
+            },
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("updated")),
+                body: Some(s("updated body")),
+                add_labels: vec![],
+            },
+            PrCommand::Ready { number: 7 },
+        ];
+        for command in blocked_commands {
+            let mut out = String::new();
+            let code = run(&mut env, command, &mut out).expect("run PR settlement gate");
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
+            assert!(out.contains("commit"), "{out}");
+            assert!(out.contains("push"), "{out}");
+        }
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "create must not reach gh"
+        );
+        assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+        assert!(env.pr_ready_call_log.is_empty(), "ready must not reach gh");
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Draft { number: 7 }, &mut out)
+            .expect("run PR draft recovery surface");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_draft_call_log, vec![7]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CommentBody {
+                number: 7,
+                body: s("Work delivery is blocked; keeping the PR in Draft."),
+            },
+            &mut out,
+        )
+        .expect("run PR blocker comment recovery surface");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_comments.len(), 1);
     }
 
     #[test]

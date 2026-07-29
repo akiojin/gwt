@@ -12,7 +12,7 @@
 //! - Restoring open-project windows / paused placeholders
 //!   ([`AppRuntime::restore_open_project_windows`],
 //!   [`AppRuntime::spawn_restored_agent_session`])
-//! - Late runtime wiring setters ([`AppRuntime::set_hook_forward_target`],
+//! - Late runtime wiring setters ([`AppRuntime::set_agent_capability_issuer`],
 //!   [`AppRuntime::set_server_url`], [`AppRuntime::set_usage_refresh`])
 //!
 //! Behavior-preserving move: `AppRuntime::new` and
@@ -23,8 +23,8 @@ use std::path::Path;
 use super::{
     combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees,
     same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
-    AppRuntime, HookForwardTarget, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    AgentCapabilityIssuer, AppRuntime, OutboundEvent, PendingStartupAutoResumeSession,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -96,6 +96,12 @@ pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id:
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
+        // Fresh linked-owner launch authority is durable in the Session and
+        // owner ledger, while readiness capabilities are intentionally
+        // process-local. Reconcile that durable pair before startup migrations
+        // or auto-resume can observe a partial Activated/Aborted transaction.
+        self.reconcile_durable_fresh_execution_launches();
+
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
         // Workspace Overview Completed column reflects past completions on the
@@ -550,7 +556,7 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
-    fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+    pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
             return Vec::new();
         };
@@ -560,8 +566,9 @@ impl AppRuntime {
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
             .filter_map(|path| {
                 let session_id = path.file_stem()?.to_str()?;
-                gwt_agent::update_session(&self.sessions_dir, session_id, |session| {
-                    if session.worktree_path.exists()
+                gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
+                    if session.status != gwt_agent::AgentStatus::Interrupted
+                        && session.worktree_path.exists()
                         && session.should_mark_interrupted_from_lifecycle()
                     {
                         session.update_status(gwt_agent::AgentStatus::Interrupted);
@@ -573,8 +580,8 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
-        self.hook_forward_target = Some(target);
+    pub(crate) fn set_agent_capability_issuer(&mut self, issuer: AgentCapabilityIssuer) {
+        self.agent_capability_issuer = Some(issuer);
     }
 
     /// SPEC-2785 FR-E: capture the embedded server URL after the axum bind

@@ -215,6 +215,203 @@ fn work_items_loader_classifies_malformed_and_incompatible_json() {
     }
 }
 
+// ---------------------------------------------------------------------
+// SPEC-2359 T-820/T-821 (US-88 / FR-557): release A is a reader-first
+// compatibility boundary. Direct Work-event JSONL records may carry a future
+// kind or additive top-level fields and must roundtrip opaquely, while every
+// projection / transaction / identity-container schema stays strict.
+// ---------------------------------------------------------------------
+
+const T820_MIXED_EVENT_LOG: &str = concat!(
+    r#"{ "id":"event-known-start", "work_item_id":"work-mixed-version", "kind":"start", "title":"Known title", "status_category":"active", "updated_at":"2026-07-22T02:00:00Z" }"#,
+    "\n",
+    r#"{"id":"event-known-additive","work_item_id":"work-mixed-version","kind":"update","summary":"Known update with a future field","updated_at":"2026-07-22T02:01:00Z","future_event_field":{"nested":[1,"two",true]}}"#,
+    "\n",
+    r#"{ "id":"event-future-correction", "work_item_id":"work-mixed-version", "kind":"correction", "corrects_event_ids":["event-known-start"], "patch":{"title":"Corrected by release B"}, "updated_at":"2026-07-22T02:02:00Z" }"#,
+    "\n",
+);
+
+fn t820_roundtrip_work_event_log(source: &Path, destination: &Path) -> Result<()> {
+    let records = read_workspace_work_event_records_from_path(source)?;
+    append_workspace_work_event_records_to_path(destination, &records)
+}
+
+#[test]
+fn mixed_version_event_log_roundtrips_unknown_kind_and_fields_byte_exact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let destination = temp.path().join("roundtrip.jsonl");
+    fs::write(&source, T820_MIXED_EVENT_LOG.as_bytes()).expect("write mixed event log");
+
+    t820_roundtrip_work_event_log(&source, &destination)
+        .expect("release A must roundtrip future event records opaquely");
+
+    let roundtripped = fs::read(&destination).expect("read roundtripped log");
+    assert_eq!(
+        roundtripped,
+        T820_MIXED_EVENT_LOG.as_bytes(),
+        "unknown kind, unknown field values, key order, and original event bytes must survive"
+    );
+    let source_values = T820_MIXED_EVENT_LOG
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("source JSON value"))
+        .collect::<Vec<_>>();
+    let roundtrip_values = String::from_utf8(roundtripped)
+        .expect("roundtrip UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("roundtrip JSON value"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roundtrip_values, source_values,
+        "JSON values must be lossless"
+    );
+}
+
+#[test]
+fn mixed_version_event_reader_keeps_identity_and_container_schemas_strict() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        (
+            "identity",
+            concat!(
+                r#"{"id":"event-bad-identity","work_item_id":{"future":"shape"},"kind":"update","updated_at":"2026-07-22T02:03:00Z"}"#,
+                "\n"
+            ),
+        ),
+        (
+            "container",
+            concat!(
+                r#"{"id":"event-bad-container","work_item_id":"work-mixed-version","kind":"update","execution_container":{"branch":"work/mixed","future_container_field":true},"updated_at":"2026-07-22T02:04:00Z"}"#,
+                "\n"
+            ),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let source = temp.path().join(format!("{label}-source.jsonl"));
+        let destination = temp.path().join(format!("{label}-roundtrip.jsonl"));
+        fs::write(&source, body).expect("write incompatible event");
+
+        assert!(
+            t820_roundtrip_work_event_log(&source, &destination).is_err(),
+            "unknown {label} schema must fail closed instead of becoming opaque"
+        );
+        assert!(
+            !destination.exists(),
+            "unknown {label} schema must not partially write a destination log"
+        );
+    }
+}
+
+#[test]
+fn mixed_version_event_log_keeps_known_projection_stable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let events = temp.path().join("events.jsonl");
+    let works = temp.path().join("works.json");
+    let marker = temp.path().join("work-items-rebuild.json");
+    fs::write(&events, T820_MIXED_EVENT_LOG.as_bytes()).expect("write mixed event log");
+    let original = fs::read(&events).expect("snapshot mixed event log");
+
+    assert_eq!(
+        rebuild_work_items_from_events_paths(&works, &events, &marker)
+            .expect("release A must safely read a mixed-version event log"),
+        WorkItemsRebuildOutcome::Applied
+    );
+
+    let projection = load_workspace_work_items_from_path(&works)
+        .expect("load rebuilt projection")
+        .expect("rebuilt projection");
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-mixed-version")
+        .expect("known Work");
+    assert_eq!(item.title, "Known title");
+    assert_eq!(
+        item.summary.as_deref(),
+        Some("Known update with a future field")
+    );
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    assert_eq!(
+        item.events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["event-known-start", "event-known-additive"],
+        "known event data is projected and an unknown kind remains opaque"
+    );
+    assert_eq!(
+        fs::read(&events).expect("read preserved mixed event log"),
+        original,
+        "projection rebuild must never rewrite opaque event bytes"
+    );
+}
+
+#[test]
+fn tracked_event_rebuild_never_repairs_or_truncates_source_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let known_event = r#"{"id":"event-byte-preserving","work_item_id":"work-byte-preserving","kind":"start","updated_at":"2026-07-22T02:00:00Z"}"#;
+
+    let unterminated_events = temp.path().join("unterminated-events.jsonl");
+    let unterminated_works = temp.path().join("unterminated-works.json");
+    let unterminated_marker = temp.path().join("unterminated-marker.json");
+    fs::write(&unterminated_events, known_event.as_bytes()).expect("write unterminated event");
+    let unterminated_original = fs::read(&unterminated_events).expect("snapshot unterminated log");
+
+    assert_eq!(
+        rebuild_work_items_from_events_paths(
+            &unterminated_works,
+            &unterminated_events,
+            &unterminated_marker,
+        )
+        .expect("a complete final JSON record does not require a newline"),
+        WorkItemsRebuildOutcome::Applied
+    );
+    assert_eq!(
+        fs::read(&unterminated_events).expect("read unterminated log"),
+        unterminated_original,
+        "a projection rebuild must not append a newline to tracked input"
+    );
+
+    let partial_events = temp.path().join("partial-events.jsonl");
+    let partial_works = temp.path().join("partial-works.json");
+    let partial_marker = temp.path().join("partial-marker.json");
+    let partial_body = format!("{known_event}\n{{\"id\":\"partial-tail\"");
+    fs::write(&partial_events, partial_body.as_bytes()).expect("write partial event log");
+    let partial_original = fs::read(&partial_events).expect("snapshot partial log");
+
+    assert!(
+        rebuild_work_items_from_events_paths(&partial_works, &partial_events, &partial_marker)
+            .is_err(),
+        "a partial tracked record must fail without silently discarding evidence"
+    );
+    assert_eq!(
+        fs::read(&partial_events).expect("read partial log"),
+        partial_original,
+        "a failed projection rebuild must preserve the partial tracked record byte-for-byte"
+    );
+    assert!(!partial_works.exists());
+    assert!(!partial_marker.exists());
+}
+
+#[test]
+fn release_a_typed_writer_cannot_construct_a_correction_event() {
+    const {
+        assert!(
+            !WORK_EVENT_CORRECTION_WRITER_ENABLED,
+            "release A must keep every production Correction writer disabled"
+        );
+    }
+    assert!(
+        serde_json::from_str::<WorkEventKind>(r#""correction""#).is_err(),
+        "Correction must not become a release A WorkEventKind writer variant"
+    );
+    assert!(
+        serde_json::from_str::<WorkEvent>(T820_MIXED_EVENT_LOG.lines().nth(2).unwrap()).is_err(),
+        "the production typed writer must not accept opaque Correction JSON as a WorkEvent"
+    );
+}
+
 #[test]
 fn work_items_cache_never_caches_synthesized_fallback() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -665,6 +862,743 @@ fn workspace_state_transaction_does_not_publish_current_when_event_append_fails(
 }
 
 #[test]
+fn external_workspace_operation_lock_uses_portable_contention_detection() {
+    assert!(
+        is_external_workspace_operation_lock_contended(&fs2::lock_contended_error()),
+        "operation lock contention must recognize fs2's platform-specific error"
+    );
+    assert!(!is_external_workspace_operation_lock_contended(
+        &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not contention")
+    ));
+}
+
+#[test]
+fn workspace_state_transaction_commit_refusal_blocks_until_explicit_rejection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    assert_eq!(
+        external_workspace_operation_directory(),
+        home_root
+            .join(".gwt")
+            .join(WORKSPACE_STATE_TRANSACTION_RECEIPT_DIR),
+        "external commit receipts must stay inside the test GWT_HOME"
+    );
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 0, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-commit-refused".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/commit-refused".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+    let commit_called = std::cell::Cell::new(0_u8);
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-refused",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-commit-refused",
+                "work-commit-refused",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-commit-refused", now);
+            event.agent_session_id = Some("session-commit-refused".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || {
+            commit_called.set(commit_called.get() + 1);
+            assert_eq!(
+                fs::read(&current).expect("read current during commit"),
+                current_before,
+                "the staged Work projection must not be visible before the external CAS"
+            );
+            assert!(!works.exists());
+            assert!(!events.exists());
+            Err(GwtError::Other("generation CAS refused".to_string()))
+        },
+    );
+
+    assert!(result.is_err(), "the external CAS refusal must propagate");
+    assert_eq!(commit_called.get(), 1, "the external CAS runs exactly once");
+    assert_eq!(
+        fs::read(&current).expect("read current after refusal"),
+        current_before
+    );
+    assert!(!works.exists());
+    assert!(!events.exists());
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "an ambiguous external error must retain a discoverable Prepared marker"
+    );
+
+    let blocked = transact_workspace_state_at(&current, &works, &events, &root, |_, _, _| {
+        Ok(((), Vec::new()))
+    });
+    assert!(
+        blocked.is_err(),
+        "ordinary writers must fail closed while external commit state is unresolved"
+    );
+    assert_eq!(
+        fs::read(&current).expect("read current while blocked"),
+        current_before
+    );
+
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-refused",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .expect("discard definitely rejected external transaction"),
+        ExternalWorkspaceCommitResolution::Rejected
+    );
+    assert!(!pending_workspace_state_transaction_path(&current).exists());
+    assert!(!pending_workspace_state_transaction_path_for_work_items(&works).exists());
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-refused",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .expect("matching terminal receipt is idempotent"),
+        ExternalWorkspaceCommitResolution::Rejected
+    );
+    assert!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-refused",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .is_err(),
+        "an opposite decision must conflict with the durable Rejected receipt"
+    );
+}
+
+#[test]
+fn workspace_state_transaction_reject_reports_busy_during_in_flight_external_commit() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 15, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-in-flight-commit".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/in-flight-commit".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+
+    let (commit_entered_tx, commit_entered_rx) = std::sync::mpsc::channel();
+    let (release_commit_tx, release_commit_rx) = std::sync::mpsc::channel();
+    let transaction_current = current.clone();
+    let transaction_works = works.clone();
+    let transaction_events = events.clone();
+    let transaction_root = root.clone();
+    let transaction_home_root = home_root.clone();
+    let transaction = std::thread::spawn(move || {
+        let _home = ScopedHome::set(&transaction_home_root);
+        transact_workspace_state_at_with_commit(
+            &transaction_current,
+            &transaction_works,
+            &transaction_events,
+            &transaction_root,
+            "continue-operation-in-flight",
+            |projection, _, _| {
+                assert!(projection.assign_agent(
+                    "session-in-flight-commit",
+                    "work-in-flight-commit",
+                    None,
+                    None,
+                    now,
+                ));
+                let mut event = WorkEvent::new(WorkEventKind::Resume, "work-in-flight-commit", now);
+                event.agent_session_id = Some("session-in-flight-commit".to_string());
+                event.status_category = Some(WorkspaceStatusCategory::Active);
+                Ok(((), vec![event]))
+            },
+            || {
+                commit_entered_tx
+                    .send(())
+                    .expect("signal external commit entry");
+                release_commit_rx
+                    .recv()
+                    .expect("wait until concurrent resolver is blocked");
+                Ok(())
+            },
+        )
+    });
+    commit_entered_rx
+        .recv()
+        .expect("external commit must start");
+
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-in-flight",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .expect("in-flight resolution must be non-blocking"),
+        ExternalWorkspaceCommitResolution::Busy,
+        "an inverse owner→operation-lock path must release its owner lease and retry"
+    );
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "Busy must not mutate the discoverable Prepared transaction"
+    );
+    release_commit_tx.send(()).expect("release external commit");
+    transaction
+        .join()
+        .expect("join transaction")
+        .expect("external commit and Work publication succeed");
+    assert!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-in-flight",
+            ExternalWorkspaceCommitDecision::Reject,
+        )
+        .is_err(),
+        "the durable Committed receipt must reject an opposite terminal decision"
+    );
+
+    let saved = load_workspace_projection_from_path(&current)
+        .expect("load current")
+        .expect("current exists");
+    assert_eq!(
+        workspace_assignment_for_session(&saved, "session-in-flight-commit"),
+        WorkspaceSessionAssignment::Assigned("work-in-flight-commit".to_string())
+    );
+}
+
+#[test]
+fn workspace_state_transaction_resolver_rejects_a_cross_pair_operation_match() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let actual_works = temp.path().join("actual/works.json");
+    let wrong_works = temp.path().join("wrong/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let initial = WorkspaceProjection::default_for_project(&root);
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+
+    let (commit_entered_tx, commit_entered_rx) = std::sync::mpsc::channel();
+    let (release_commit_tx, release_commit_rx) = std::sync::mpsc::channel();
+    let transaction_current = current.clone();
+    let transaction_works = actual_works.clone();
+    let transaction_events = events.clone();
+    let transaction_root = root.clone();
+    let transaction_home_root = home_root.clone();
+    let transaction = std::thread::spawn(move || {
+        let _home = ScopedHome::set(&transaction_home_root);
+        transact_workspace_state_at_with_commit(
+            &transaction_current,
+            &transaction_works,
+            &transaction_events,
+            &transaction_root,
+            "continue-operation-cross-pair",
+            |projection, _, _| {
+                projection.title = "cross-pair transaction".to_string();
+                Ok(((), Vec::new()))
+            },
+            || {
+                commit_entered_tx
+                    .send(())
+                    .expect("signal external commit entry");
+                release_commit_rx
+                    .recv()
+                    .expect("wait for mismatched resolver");
+                Ok(())
+            },
+        )
+    });
+    commit_entered_rx
+        .recv()
+        .expect("external commit must start");
+
+    let mismatched = resolve_workspace_state_external_commit_at(
+        &current,
+        &wrong_works,
+        "continue-operation-cross-pair",
+        ExternalWorkspaceCommitDecision::Reject,
+    );
+    assert!(
+        mismatched.is_err(),
+        "sharing one path and operation id must not authorize another path pair"
+    );
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&actual_works).exists(),
+        "a mismatched resolver must not remove the real transaction"
+    );
+
+    release_commit_tx.send(()).expect("release external commit");
+    transaction
+        .join()
+        .expect("join transaction")
+        .expect("real path pair still commits");
+    assert_eq!(
+        load_workspace_projection_from_path(&current)
+            .expect("load current")
+            .expect("current exists")
+            .title,
+        "cross-pair transaction"
+    );
+}
+
+#[test]
+fn workspace_state_transaction_never_reports_success_after_staged_markers_disappear() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let initial = WorkspaceProjection::default_for_project(&root);
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-lost-stage",
+        |projection, _, _| {
+            projection.title = "must remain staged".to_string();
+            Ok(((), Vec::new()))
+        },
+        || {
+            for marker in [
+                pending_workspace_state_transaction_path(&current),
+                pending_workspace_state_transaction_path_for_work_items(&works),
+            ] {
+                match fs::remove_file(marker) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("remove local staged marker: {error}"),
+                }
+            }
+            let coordinator_dir =
+                crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+            for entry in fs::read_dir(coordinator_dir).expect("read coordinator directory") {
+                let path = entry.expect("coordinator entry").path();
+                if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    fs::remove_file(path).expect("remove global staged marker");
+                }
+            }
+            Ok(())
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "Missing staged evidence must never be promoted to UI success"
+    );
+    assert_eq!(fs::read(&current).expect("read current"), current_before);
+    assert!(!works.exists());
+    assert!(!events.exists());
+}
+
+#[test]
+fn workspace_state_transaction_recovers_publish_failure_after_commit_without_recommitting() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("events-is-a-directory");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&events).expect("create failing events directory");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 30, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-post-commit-recovery".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/post-commit-recovery".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let commit_called = std::cell::Cell::new(0_u8);
+    let event_id = "event-post-commit-recovery";
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-publish-recovery",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-post-commit-recovery",
+                "work-post-commit-recovery",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-post-commit-recovery", now);
+            event.id = event_id.to_string();
+            event.agent_session_id = Some("session-post-commit-recovery".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || {
+            commit_called.set(commit_called.get() + 1);
+            Ok(())
+        },
+    );
+    assert!(
+        result.is_err(),
+        "the first publish must fail after the external commit"
+    );
+    assert_eq!(commit_called.get(), 1);
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "a committed transaction must leave a recovery marker on publish failure"
+    );
+
+    fs::remove_file(external_workspace_commit_receipt_path(
+        &current,
+        &works,
+        "continue-operation-publish-recovery",
+    ))
+    .expect("simulate a legacy committed marker whose receipt was lost");
+    fs::remove_dir(&events).expect("remove failing events directory");
+    let retry_update_called = std::cell::Cell::new(false);
+    let retry_commit_called = std::cell::Cell::new(false);
+    let retry = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-publish-recovery",
+        |_, _, _| {
+            retry_update_called.set(true);
+            Ok(((), Vec::new()))
+        },
+        || {
+            retry_commit_called.set(true);
+            Ok(())
+        },
+    );
+    assert!(
+        retry.is_err(),
+        "recovery-created terminal receipt must stop same-operation re-entry"
+    );
+    assert!(!retry_update_called.get());
+    assert!(!retry_commit_called.get());
+
+    transact_workspace_state_at(&current, &works, &events, &root, |projection, items, _| {
+        assert_eq!(
+            workspace_assignment_for_session(projection, "session-post-commit-recovery",),
+            WorkspaceSessionAssignment::Assigned("work-post-commit-recovery".to_string())
+        );
+        assert!(items
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-post-commit-recovery"));
+        Ok(((), Vec::new()))
+    })
+    .expect("recover committed Work transaction");
+
+    assert_eq!(
+        fs::read_to_string(&events)
+            .expect("read recovered events")
+            .lines()
+            .filter(|line| line.contains(event_id))
+            .count(),
+        1,
+        "recovery must append the Work activation exactly once"
+    );
+    assert_eq!(
+        commit_called.get(),
+        1,
+        "recovery must not rerun the external generation CAS"
+    );
+    assert!(!pending_workspace_state_transaction_path(&current).exists());
+    assert!(!pending_workspace_state_transaction_path_for_work_items(&works).exists());
+}
+
+#[test]
+fn workspace_state_transaction_validates_terminal_receipt_before_recovery_side_effects() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("events-is-a-directory");
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&events).expect("create failing events directory");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 10, 45, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-receipt-conflict".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/receipt-conflict".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+
+    let first = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-receipt-conflict",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-receipt-conflict",
+                "work-receipt-conflict",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-receipt-conflict", now);
+            event.agent_session_id = Some("session-receipt-conflict".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || Ok(()),
+    );
+    assert!(
+        first.is_err(),
+        "event append failure must leave recovery state"
+    );
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "first failure was {first:?}"
+    );
+
+    let receipt_path = external_workspace_commit_receipt_path(
+        &current,
+        &works,
+        "continue-operation-receipt-conflict",
+    );
+    let mut receipt: ExternalWorkspaceCommitReceipt =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read committed receipt"))
+            .expect("decode committed receipt");
+    receipt.resolution = ExternalWorkspaceCommitResolution::Rejected;
+    write_atomic(
+        &receipt_path,
+        &serde_json::to_vec_pretty(&receipt).expect("encode conflicting receipt"),
+    )
+    .expect("write conflicting receipt");
+    fs::remove_dir(&events).expect("remove failing events directory");
+
+    let recovery = transact_workspace_state_at(&current, &works, &events, &root, |_, _, _| {
+        Ok(((), Vec::new()))
+    });
+    assert!(
+        recovery.is_err(),
+        "Committed marker plus Rejected receipt must fail closed"
+    );
+    assert_eq!(fs::read(&current).expect("read current"), current_before);
+    assert!(!works.exists());
+    assert!(!events.exists());
+    assert!(
+        pending_workspace_state_transaction_path(&current).exists()
+            || pending_workspace_state_transaction_path_for_work_items(&works).exists(),
+        "failed validation must preserve recovery evidence"
+    );
+}
+
+#[test]
+fn workspace_state_transaction_reconciles_post_commit_error_without_rerunning_commit() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 11, 0, 0).unwrap();
+    let mut initial = WorkspaceProjection::default_for_project(&root);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-post-commit-error".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(root.clone()),
+        branch: Some("work/post-commit-error".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    let current_before = fs::read(&current).expect("read initial current");
+    let commit_called = std::cell::Cell::new(0_u8);
+    let external_committed = std::cell::Cell::new(false);
+    let event_id = "event-post-commit-error";
+
+    let result = transact_workspace_state_at_with_commit(
+        &current,
+        &works,
+        &events,
+        &root,
+        "continue-operation-response-lost",
+        |projection, _, _| {
+            assert!(projection.assign_agent(
+                "session-post-commit-error",
+                "work-post-commit-error",
+                None,
+                None,
+                now,
+            ));
+            let mut event = WorkEvent::new(WorkEventKind::Resume, "work-post-commit-error", now);
+            event.id = event_id.to_string();
+            event.agent_session_id = Some("session-post-commit-error".to_string());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            Ok(((), vec![event]))
+        },
+        || {
+            commit_called.set(commit_called.get() + 1);
+            external_committed.set(true);
+            Err(GwtError::Other(
+                "external commit response was lost".to_string(),
+            ))
+        },
+    );
+    assert!(result.is_err());
+    assert!(external_committed.get());
+    assert_eq!(commit_called.get(), 1);
+    assert_eq!(
+        fs::read(&current).expect("current remains staged"),
+        current_before
+    );
+    assert!(!works.exists());
+    assert!(!events.exists());
+
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-response-lost",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .expect("ledger readback reconciles the committed operation"),
+        ExternalWorkspaceCommitResolution::Committed
+    );
+
+    assert_eq!(commit_called.get(), 1);
+    assert_eq!(
+        fs::read_to_string(&events)
+            .expect("read reconciled events")
+            .lines()
+            .filter(|line| line.contains(event_id))
+            .count(),
+        1
+    );
+    assert_eq!(
+        workspace_assignment_for_session(
+            &load_workspace_projection_from_path(&current)
+                .expect("load current")
+                .expect("current exists"),
+            "session-post-commit-error",
+        ),
+        WorkspaceSessionAssignment::Assigned("work-post-commit-error".to_string())
+    );
+    assert!(!pending_workspace_state_transaction_path(&current).exists());
+    assert!(!pending_workspace_state_transaction_path_for_work_items(&works).exists());
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &current,
+            &works,
+            "continue-operation-response-lost",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .expect("matching Committed receipt is idempotent"),
+        ExternalWorkspaceCommitResolution::Committed
+    );
+}
+
+#[test]
 fn workspace_state_transaction_recovers_partial_commit_exactly_once() {
     let temp = tempfile::tempdir().unwrap();
     let current = temp.path().join("state/current.json");
@@ -712,6 +1646,7 @@ fn workspace_state_transaction_recovers_partial_commit_exactly_once() {
         events: vec![event.clone()],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     write_atomic(
         &pending_workspace_state_transaction_path(&current),
@@ -752,10 +1687,322 @@ fn workspace_state_transaction_recovers_partial_commit_exactly_once() {
     );
 }
 
+#[test]
+fn pending_workspace_state_transaction_can_be_recovered_without_a_followup_mutation() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home);
+    let repo = temp.path().join("repo");
+    init_test_git_repo(&repo);
+    let current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let events = gwt_workspace_work_events_path_for_repo_path(&repo);
+    let now = Utc.with_ymd_and_hms(2026, 7, 27, 10, 30, 0).unwrap();
+
+    let mut initial = WorkspaceProjection::default_for_project(&repo);
+    initial.agents.push(WorkspaceAgentSummary {
+        session_id: "session-recovery-only".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(repo.clone()),
+        branch: Some("work/recovery-only".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
+    });
+    save_workspace_projection_to_path(&current, &initial).expect("save initial current");
+    save_workspace_work_items_projection_to_path(&works, &WorkItemsProjection::empty(now))
+        .expect("save initial works");
+
+    let mut recovered_current = initial;
+    assert!(recovered_current.assign_agent(
+        "session-recovery-only",
+        "work-recovery-only",
+        None,
+        None,
+        now,
+    ));
+    let mut event = WorkEvent::new(WorkEventKind::Start, "work-recovery-only", now);
+    event.id = "event-recovery-only".to_string();
+    event.agent_session_id = Some("session-recovery-only".to_string());
+    let mut recovered_works = WorkItemsProjection::empty(now);
+    recovered_works.apply_event(event.clone());
+    let pending = PendingWorkspaceStateTransaction {
+        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        transaction_id: Some("transaction-recovery-only".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some(workspace_state_file_fingerprint(&current).unwrap()),
+        work_items_precondition: Some(workspace_state_file_fingerprint(&works).unwrap()),
+        projection: recovered_current,
+        work_items: Some(recovered_works),
+        events_path: Some(events.clone()),
+        events: vec![event],
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: None,
+    };
+    write_pending_transaction_markers(&pending);
+
+    recover_pending_workspace_state_transaction(&repo)
+        .expect("recover pending transaction without another mutation");
+
+    let saved_current = load_workspace_projection_from_path(&current)
+        .expect("load recovered current")
+        .expect("recovered current");
+    assert_eq!(
+        workspace_assignment_for_session(&saved_current, "session-recovery-only"),
+        WorkspaceSessionAssignment::Assigned("work-recovery-only".to_string()),
+    );
+    let saved_works = load_workspace_work_items_from_path(&works)
+        .expect("load recovered works")
+        .expect("recovered works");
+    assert!(saved_works
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-recovery-only"));
+    assert!(pending_workspace_state_transaction_paths(&pending)
+        .iter()
+        .all(|path| !path.exists()));
+}
+
 fn write_pending_transaction_markers(transaction: &PendingWorkspaceStateTransaction) {
     let bytes = serde_json::to_vec_pretty(transaction).unwrap();
     for marker_path in pending_workspace_state_transaction_paths(transaction) {
         write_atomic(&marker_path, &bytes).unwrap();
+    }
+}
+
+#[test]
+fn workspace_state_transaction_preserves_conflicting_transaction_marker_sets() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("current-state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 11, 15, 0).unwrap();
+    let projection = WorkspaceProjection::default_for_project(&root);
+    let transaction_one = PendingWorkspaceStateTransaction {
+        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        transaction_id: Some("conflicting-transaction-one".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
+        projection: projection.clone(),
+        work_items: Some(WorkItemsProjection::empty(now)),
+        events_path: Some(events.clone()),
+        events: Vec::new(),
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: None,
+    };
+    let mut transaction_two = transaction_one.clone();
+    transaction_two.transaction_id = Some("conflicting-transaction-two".to_string());
+    transaction_two.projection.title = "second transaction".to_string();
+
+    let coordinator =
+        pending_workspace_state_transaction_coordinator_path(&transaction_one).unwrap();
+    let current_marker = pending_workspace_state_transaction_path(&current);
+    let works_marker = pending_workspace_state_transaction_path_for_work_items(&works);
+    let transaction_one_bytes = serde_json::to_vec_pretty(&transaction_one).unwrap();
+    let transaction_two_bytes = serde_json::to_vec_pretty(&transaction_two).unwrap();
+    write_atomic(&coordinator, &transaction_one_bytes).unwrap();
+    write_atomic(&current_marker, &transaction_two_bytes).unwrap();
+    write_atomic(&works_marker, &transaction_two_bytes).unwrap();
+
+    let result = transact_workspace_state_at(&current, &works, &events, &root, |_, _, _| {
+        Ok(((), Vec::new()))
+    });
+    assert!(
+        result.is_err(),
+        "mixed transaction ids targeting one path pair must fail closed"
+    );
+    assert_eq!(fs::read(&coordinator).unwrap(), transaction_one_bytes);
+    assert_eq!(fs::read(&current_marker).unwrap(), transaction_two_bytes);
+    assert_eq!(fs::read(&works_marker).unwrap(), transaction_two_bytes);
+    assert!(!current.exists());
+    assert!(!works.exists());
+    assert!(!events.exists());
+}
+
+#[test]
+fn workspace_state_transaction_recovers_committed_copy_from_mixed_external_phases() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("gwt-home");
+    let _home = ScopedHome::set(&home_root);
+    let current = temp.path().join("current-state/current.json");
+    let works = temp.path().join("work-state/works.json");
+    let events = temp.path().join("repo/.gwt/work/events.jsonl");
+    let root = temp.path().join("repo");
+    let now = Utc.with_ymd_and_hms(2026, 7, 25, 11, 45, 0).unwrap();
+    let operation_id = "mixed-phase-committed-operation";
+    let mut projection = WorkspaceProjection::default_for_project(&root);
+    projection.summary = Some("committed before phase-copy convergence".to_string());
+    let mut event = WorkEvent::new(WorkEventKind::Resume, "work-mixed-phase", now);
+    event.id = "event-mixed-phase".to_string();
+    let mut work_items = WorkItemsProjection::empty(now);
+    work_items.apply_event(event.clone());
+    let prepared = PendingWorkspaceStateTransaction {
+        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        transaction_id: Some("mixed-phase-transaction".to_string()),
+        current_path: current.clone(),
+        work_items_path: works.clone(),
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
+        projection,
+        work_items: Some(work_items),
+        events_path: Some(events.clone()),
+        events: vec![event],
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: Some(ExternalWorkspaceCommit {
+            operation_id: operation_id.to_string(),
+            phase: ExternalWorkspaceCommitPhase::Prepared,
+        }),
+    };
+    let mut committed = prepared.clone();
+    committed
+        .external_commit
+        .as_mut()
+        .expect("external commit")
+        .phase = ExternalWorkspaceCommitPhase::Committed;
+    let coordinator =
+        pending_workspace_state_transaction_coordinator_path(&prepared).expect("coordinator");
+    write_atomic(&coordinator, &serde_json::to_vec_pretty(&prepared).unwrap()).unwrap();
+    write_atomic(
+        &pending_workspace_state_transaction_path(&current),
+        &serde_json::to_vec_pretty(&committed).unwrap(),
+    )
+    .unwrap();
+    write_atomic(
+        &pending_workspace_state_transaction_path_for_work_items(&works),
+        &serde_json::to_vec_pretty(&prepared).unwrap(),
+    )
+    .unwrap();
+
+    mutate_workspace_projection_at(&current, &root, |projection| {
+        projection.status_text = "ordinary writer followed recovery".to_string();
+        Ok(())
+    })
+    .expect("a Committed copy is authoritative over matching Prepared copies");
+
+    let saved = load_workspace_projection_from_path(&current)
+        .unwrap()
+        .expect("recovered projection");
+    assert_eq!(
+        saved.summary.as_deref(),
+        Some("committed before phase-copy convergence")
+    );
+    assert_eq!(saved.status_text, "ordinary writer followed recovery");
+    assert!(load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .expect("recovered Work projection")
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-mixed-phase"));
+    assert_eq!(
+        std::fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("event-mixed-phase"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        load_external_workspace_commit_receipt(&current, &works, operation_id)
+            .unwrap()
+            .expect("durable terminal receipt")
+            .resolution,
+        ExternalWorkspaceCommitResolution::Committed
+    );
+    for path in pending_workspace_state_transaction_paths(&prepared) {
+        assert!(
+            !path.exists(),
+            "recovered marker remained: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn workspace_state_transaction_recovers_raw_v1_and_v2_markers() {
+    for version in [1_u32, 2_u32] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join(format!("v{version}/current.json"));
+        let works = current.with_file_name("works.json");
+        let events = temp
+            .path()
+            .join(format!("v{version}/repo/.gwt/work/events.jsonl"));
+        let root = temp.path().join(format!("v{version}/repo"));
+        let now = Utc.with_ymd_and_hms(2026, 7, 25, 12, version, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(&root);
+        projection.summary = Some(format!("recovered raw v{version} marker"));
+        let work_id = format!("work-raw-v{version}");
+        let event_id = format!("event-raw-v{version}");
+        let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, now);
+        event.id = event_id.clone();
+        let mut work_items = WorkItemsProjection::empty(now);
+        work_items.apply_event(event.clone());
+        let mut raw = serde_json::json!({
+            "version": version,
+            "current_path": current,
+            "work_items_path": works,
+            "projection": projection,
+            "work_items": work_items,
+            "events_path": events,
+            "events": [event],
+            "journal_entries": [],
+        });
+        if version == 2 {
+            raw["transaction_id"] =
+                serde_json::Value::String(format!("raw-v{version}-transaction"));
+            raw["current_precondition"] = serde_json::Value::String("missing".to_string());
+            raw["work_items_precondition"] = serde_json::Value::String("missing".to_string());
+        }
+        let marker = pending_workspace_state_transaction_path(&current);
+        write_atomic(&marker, &serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        mutate_workspace_projection_at(&current, &root, |projection| {
+            projection.status_text = format!("ordinary writer after v{version}");
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("raw v{version} recovery failed: {error}"));
+
+        let saved = load_workspace_projection_from_path(&current)
+            .unwrap()
+            .expect("recovered projection");
+        assert_eq!(
+            saved.summary.as_deref(),
+            Some(format!("recovered raw v{version} marker").as_str())
+        );
+        assert!(load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .expect("recovered Work projection")
+            .work_items
+            .iter()
+            .any(|item| item.id == work_id));
+        assert_eq!(
+            std::fs::read_to_string(&events)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(&event_id))
+                .count(),
+            1
+        );
+        assert!(!marker.exists());
     }
 }
 
@@ -803,6 +2050,7 @@ fn ordinary_current_writer_recovers_pending_transaction_before_mutating() {
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     });
 
     mutate_workspace_projection_at(&current, &root, |projection| {
@@ -859,6 +2107,7 @@ fn ordinary_work_event_writer_recovers_pending_transaction_before_appending() {
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     });
 
     let mut newer_event = WorkEvent::new(
@@ -931,6 +2180,7 @@ fn one_sided_pending_marker_never_overwrites_a_later_work_event() {
         events: vec![committed_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     write_pending_transaction_markers(&pending);
     std::fs::remove_file(works.with_file_name("pending-state-transaction.json")).unwrap();
@@ -1004,6 +2254,7 @@ fn coordinator_only_pending_transaction_is_discovered_by_work_writer() {
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&pending).unwrap();
     write_atomic(&coordinator, &serde_json::to_vec_pretty(&pending).unwrap()).unwrap();
@@ -1117,6 +2368,7 @@ fn coordinator_created_while_writer_waits_for_lock_is_recovered_before_operation
         events: vec![pending_event],
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&pending).unwrap();
     write_atomic(&coordinator, &serde_json::to_vec_pretty(&pending).unwrap()).unwrap();
@@ -1168,6 +2420,7 @@ fn coordinator_only_incompatible_transaction_is_preserved_and_blocks_writer() {
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction).unwrap();
     let mut value = serde_json::to_value(&transaction).unwrap();
@@ -1215,6 +2468,7 @@ fn incompatible_global_coordinator_does_not_block_an_unrelated_project_writer() 
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction).unwrap();
     let mut value = serde_json::to_value(&transaction).unwrap();
@@ -1280,14 +2534,15 @@ fn split_root_coordinator_uses_writable_gwt_state_and_is_discoverable_by_both_wr
         transaction_id: Some("split-root-writable-coordinator".to_string()),
         current_path: current.clone(),
         work_items_path: works.clone(),
-        current_precondition: None,
-        work_items_precondition: None,
+        current_precondition: Some("missing".to_string()),
+        work_items_precondition: Some("missing".to_string()),
         projection: WorkspaceProjection::default_for_project(current.parent().unwrap()),
         work_items: Some(WorkItemsProjection::empty(now)),
         events_path: None,
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction)
         .expect("split roots still require a coordinator");
@@ -1357,6 +2612,7 @@ fn pending_recovery_repairs_partial_jsonl_tails_before_exact_once_append() {
         events: vec![event],
         journal_path: Some(journal.clone()),
         journal_entries: vec![journal_entry],
+        external_commit: None,
     });
     std::fs::create_dir_all(events.parent().unwrap()).unwrap();
     std::fs::write(&events, br#"{"id":"event-partial"#).unwrap();
@@ -1452,6 +2708,7 @@ fn future_pending_transaction_is_preserved_and_blocks_writer() {
         events: Vec::new(),
         journal_path: None,
         journal_entries: Vec::new(),
+        external_commit: None,
     };
     write_atomic(&marker, &serde_json::to_vec_pretty(&transaction).unwrap()).unwrap();
     let original = std::fs::read(&marker).unwrap();
@@ -1494,6 +2751,15 @@ fn nested_unknown_pending_transaction_payload_is_preserved_and_blocks_writer() {
         url: None,
         state: Some("merged".to_string()),
     });
+    let mut transaction_event = WorkEvent::new(WorkEventKind::Update, "work-nested", now);
+    transaction_event.agent_session_id = Some("session-nested".to_string());
+    transaction_event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/nested".to_string()),
+        worktree_path: Some(root.join("work/nested")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
     let transaction = PendingWorkspaceStateTransaction {
         version: WORKSPACE_STATE_TRANSACTION_VERSION,
         transaction_id: Some("nested-incompatible".to_string()),
@@ -1504,7 +2770,7 @@ fn nested_unknown_pending_transaction_payload_is_preserved_and_blocks_writer() {
         projection,
         work_items: Some(WorkItemsProjection::empty(now)),
         events_path: None,
-        events: Vec::new(),
+        events: vec![transaction_event],
         journal_path: Some(temp.path().join("state/journal.jsonl")),
         journal_entries: vec![WorkspaceJournalEntry {
             id: "journal-nested".to_string(),
@@ -1521,6 +2787,7 @@ fn nested_unknown_pending_transaction_payload_is_preserved_and_blocks_writer() {
             agent_title_summary: None,
             updated_at: now,
         }],
+        external_commit: None,
     };
 
     for (label, path) in [
@@ -1540,6 +2807,19 @@ fn nested_unknown_pending_transaction_payload_is_preserved_and_blocks_writer() {
         (
             "linked PR",
             vec!["projection", "linked_prs", "0", "future_pr_field"],
+        ),
+        (
+            "transaction event",
+            vec!["events", "0", "future_event_field"],
+        ),
+        (
+            "transaction event container",
+            vec![
+                "events",
+                "0",
+                "execution_container",
+                "future_container_field",
+            ],
         ),
     ] {
         let mut value = serde_json::to_value(&transaction).unwrap();
@@ -1716,6 +2996,7 @@ fn legacy_journal_copy_waits_for_workspace_transaction_lock() {
                 agent_current_focus: None,
                 agent_title_summary: None,
             },
+            TrackedWorkEventPolicy::Persist,
         )
     });
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1855,6 +3136,7 @@ fn workspace_journal_event_records_to_agent_worktree_log() {
             agent_current_focus: Some("修正中".to_string()),
             agent_title_summary: Some("Workspace detail content".to_string()),
         },
+        TrackedWorkEventPolicy::Persist,
     )
     .expect("workspace update");
 
@@ -1883,6 +3165,747 @@ fn workspace_journal_event_records_to_agent_worktree_log() {
     assert!(
         !project_state_events.exists(),
         "session-authored Work event must not be written to the project-state root"
+    );
+}
+
+// ---------------------------------------------------------------------
+// SPEC-2359 T-812 (US-86 / FR-550 / FR-551): a Session-bound sparse
+// mutation is authorized against one resolved Work target. The shared
+// current projection is ambient state and must never supply that target's
+// identity or omitted mutable fields.
+// ---------------------------------------------------------------------
+
+const T812_SESSION_ID: &str = "session-bound-update";
+const T812_TARGET_WORK_ID: &str = "work-session-bound-target";
+const T812_TARGET_BRANCH: &str = "work/session-bound-target";
+const T812_TARGET_TITLE: &str = "Target Work title";
+const T812_TARGET_INTENT: &str = "Target Work intent";
+const T812_TARGET_SUMMARY: &str = "Target Work status";
+const T812_TARGET_PROGRESS: &str = "Target Work cumulative progress";
+const T812_TARGET_OWNER: &str = "SPEC-target-owner";
+
+const T812_FOREIGN_TITLE: &str = "Foreign shared-current title";
+const T812_FOREIGN_SUMMARY: &str = "Foreign shared-current summary";
+const T812_FOREIGN_PROGRESS: &str = "Foreign shared-current progress";
+const T812_FOREIGN_OWNER: &str = "SPEC-foreign-owner";
+
+type T812ResolvedMutationTarget = SessionBoundWorkspaceMutationTarget;
+
+#[derive(Debug)]
+struct T812Fixture {
+    target: T812ResolvedMutationTarget,
+    current_path: PathBuf,
+    work_items_path: PathBuf,
+    events_path: PathBuf,
+    journal_path: PathBuf,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct T812WorkspaceStateBytes {
+    current: Option<Vec<u8>>,
+    work_items: Option<Vec<u8>>,
+    events: Option<Vec<u8>>,
+    journal: Option<Vec<u8>>,
+}
+
+impl T812Fixture {
+    fn state_bytes(&self) -> T812WorkspaceStateBytes {
+        T812WorkspaceStateBytes {
+            current: t812_optional_file_bytes(&self.current_path),
+            work_items: t812_optional_file_bytes(&self.work_items_path),
+            events: t812_optional_file_bytes(&self.events_path),
+            journal: t812_optional_file_bytes(&self.journal_path),
+        }
+    }
+}
+
+fn t812_optional_file_bytes(path: &Path) -> Option<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read {}: {error}", path.display()),
+    }
+}
+
+fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
+    let project_state_root = temp.join("workspace-home");
+    let work_event_root = temp.join("worktree");
+    fs::create_dir_all(&project_state_root).expect("project-state root");
+    init_test_git_repo(&work_event_root);
+
+    let seeded_at = Utc.with_ymd_and_hms(2026, 7, 22, 1, 0, 0).unwrap();
+    let mut current = WorkspaceProjection::default_for_project(&project_state_root);
+    current.id = "work-foreign-shared-current".to_string();
+    current.title = T812_FOREIGN_TITLE.to_string();
+    current.status_category = WorkspaceStatusCategory::Blocked;
+    current.status_text = "Foreign shared-current blocked status".to_string();
+    current.summary = Some(T812_FOREIGN_SUMMARY.to_string());
+    current.progress_summary = Some(T812_FOREIGN_PROGRESS.to_string());
+    current.owner = Some(T812_FOREIGN_OWNER.to_string());
+    current.next_action = Some("Foreign shared-current next action".to_string());
+    current.agents.push(WorkspaceAgentSummary {
+        session_id: T812_SESSION_ID.to_string(),
+        window_id: Some("parent-window".to_string()),
+        agent_id: "codex".to_string(),
+        display_name: "Codex parent".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(work_event_root.clone()),
+        branch: Some(T812_TARGET_BRANCH.to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some(T812_TARGET_WORK_ID.to_string()),
+        updated_at: seeded_at,
+    });
+    save_workspace_projection(&project_state_root, &current).expect("seed shared current");
+
+    let target_container = WorkspaceExecutionContainerRef {
+        branch: Some(T812_TARGET_BRANCH.to_string()),
+        worktree_path: Some(work_event_root.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    let mut target_start = WorkEvent::new(
+        WorkEventKind::Start,
+        T812_TARGET_WORK_ID,
+        seeded_at - chrono::Duration::minutes(1),
+    );
+    target_start.title = Some(T812_TARGET_TITLE.to_string());
+    target_start.intent = Some(T812_TARGET_INTENT.to_string());
+    target_start.summary = Some(T812_TARGET_SUMMARY.to_string());
+    target_start.progress_summary = Some(T812_TARGET_PROGRESS.to_string());
+    target_start.status_category = Some(WorkspaceStatusCategory::Idle);
+    target_start.owner = Some(T812_TARGET_OWNER.to_string());
+    target_start.execution_container = Some(target_container);
+
+    let mut work_items = WorkItemsProjection::empty(target_start.updated_at);
+    assert_eq!(
+        work_items.apply_event(target_start.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    save_workspace_work_items_projection_to_path(&work_items_path, &work_items)
+        .expect("seed target Work");
+
+    let events_path =
+        repo_local_work_events_path_with_migration(&work_event_root).expect("resolve event log");
+    append_workspace_work_event_to_path(&events_path, &target_start).expect("seed target event");
+
+    let journal_path = gwt_workspace_journal_path_for_repo_path(&project_state_root);
+    append_workspace_journal_entry_to_path(
+        &journal_path,
+        &WorkspaceJournalEntry {
+            id: "journal-foreign-shared-current".to_string(),
+            project_root: project_state_root.clone(),
+            title: Some(T812_FOREIGN_TITLE.to_string()),
+            status_category: Some(WorkspaceStatusCategory::Blocked),
+            status_text: Some("Foreign shared-current blocked status".to_string()),
+            owner: Some(T812_FOREIGN_OWNER.to_string()),
+            next_action: Some("Foreign shared-current next action".to_string()),
+            summary: Some(T812_FOREIGN_SUMMARY.to_string()),
+            progress_summary: Some(T812_FOREIGN_PROGRESS.to_string()),
+            agent_session_id: None,
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at: seeded_at,
+        },
+    )
+    .expect("seed shared-current journal");
+
+    T812Fixture {
+        current_path: gwt_workspace_projection_path_for_repo_path(&project_state_root),
+        target: T812ResolvedMutationTarget {
+            project_state_root,
+            work_event_root: work_event_root.clone(),
+            session_id: T812_SESSION_ID.to_string(),
+            branch_identity: T812_TARGET_BRANCH.to_string(),
+            worktree_identity: work_event_root,
+            work_id: T812_TARGET_WORK_ID.to_string(),
+        },
+        work_items_path,
+        events_path,
+        journal_path,
+    }
+}
+
+/// Keep the T-812 scenarios focused on persistence semantics; the gwt-layer
+/// Session-ledger/runtime revalidation callback is covered at its integration
+/// boundary and is intentionally a no-op in these core fixtures.
+fn t812_apply_resolved_workspace_update(
+    target: &T812ResolvedMutationTarget,
+    update: WorkspaceProjectionUpdate,
+) -> Result<WorkspaceJournalEntry> {
+    update_workspace_projection_with_journal_for_resolved_work_target(
+        target,
+        update,
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+        |_, _| Ok(()),
+    )
+}
+
+fn t812_read_events(path: &Path) -> Vec<WorkEvent> {
+    fs::read_to_string(path)
+        .expect("read Work event log")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("parse Work event"))
+        .collect()
+}
+
+fn t812_assert_rejected_without_mutation(
+    result: &Result<WorkspaceJournalEntry>,
+    before: &T812WorkspaceStateBytes,
+    after: &T812WorkspaceStateBytes,
+    scenario: &str,
+) {
+    assert!(
+        result.is_err(),
+        "{scenario} must reject the complete transaction, got {result:?}"
+    );
+    assert_eq!(
+        after, before,
+        "{scenario} must leave current, works, event log, and journal byte-equivalent"
+    );
+}
+
+#[test]
+fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: Some("Run target-only verification".to_string()),
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("valid Session-bound sparse update");
+
+    let events = t812_read_events(&fixture.events_path);
+    let event = events.last().expect("sparse Work event");
+    assert_eq!(event.work_item_id, T812_TARGET_WORK_ID);
+    assert_eq!(event.kind, WorkEventKind::Update);
+    assert_eq!(event.title, None, "omitted title must remain sparse");
+    assert_eq!(
+        event.intent, None,
+        "foreign shared-current summary must not become target intent"
+    );
+    assert_eq!(event.summary, None, "omitted summary must remain sparse");
+    assert_eq!(
+        event.progress_summary, None,
+        "omitted progress must remain sparse"
+    );
+    assert_eq!(
+        event.status_category, None,
+        "omitted status must remain sparse"
+    );
+    assert_eq!(
+        event.owner.as_deref(),
+        Some(T812_TARGET_OWNER),
+        "owner is target-owned identity, never shared-current metadata"
+    );
+    assert_eq!(
+        event.next_action.as_deref(),
+        Some("Run target-only verification")
+    );
+    assert_eq!(event.agent_session_id.as_deref(), Some(T812_SESSION_ID));
+    assert_eq!(
+        event
+            .execution_container
+            .as_ref()
+            .and_then(|container| container.branch.as_deref()),
+        Some(T812_TARGET_BRANCH)
+    );
+
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load Work projection")
+        .expect("Work projection");
+    let target = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work");
+    assert_eq!(target.title, T812_TARGET_TITLE);
+    assert_eq!(target.intent.as_deref(), Some(T812_TARGET_INTENT));
+    assert_eq!(target.summary.as_deref(), Some(T812_TARGET_SUMMARY));
+    assert_eq!(
+        target.progress_summary.as_deref(),
+        Some(T812_TARGET_PROGRESS)
+    );
+    assert_eq!(target.status_category, WorkspaceStatusCategory::Idle);
+    assert_eq!(target.owner.as_deref(), Some(T812_TARGET_OWNER));
+}
+
+#[test]
+fn session_bound_foreign_terminal_update_never_enters_legacy_current_journal() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let journal_before = fs::read(&fixture.journal_path).expect("snapshot current journal");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("Target Work is complete".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("valid foreign-target terminal update");
+
+    let persisted = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load updated target Work")
+        .expect("updated target Work projection");
+    assert!(
+        persisted
+            .work_items
+            .iter()
+            .find(|item| item.id == T812_TARGET_WORK_ID)
+            .expect("target Work")
+            .is_terminal(),
+        "skipping the legacy journal must not skip the target Work mutation"
+    );
+    let target_event = t812_read_events(&fixture.events_path)
+        .pop()
+        .expect("target terminal event");
+    assert_eq!(target_event.work_item_id, T812_TARGET_WORK_ID);
+    assert_eq!(target_event.kind, WorkEventKind::Done);
+
+    fs::remove_file(&fixture.work_items_path).expect("simulate lost works projection");
+    let synthesized = load_or_synthesize_workspace_work_items_from_paths(
+        &fixture.work_items_path,
+        &fixture.current_path,
+        &fixture.journal_path,
+        &fixture.target.project_state_root,
+    )
+    .expect("synthesize current Work from legacy state");
+    let replayed =
+        crate::work_events_intake::refold_work_events_projection(&synthesized, Vec::new())
+            .expect("refold synthesized legacy events");
+    let current = replayed
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-foreign-shared-current")
+        .expect("shared current Work");
+
+    assert_eq!(
+        current.status_category,
+        WorkspaceStatusCategory::Blocked,
+        "a foreign target Done must not replay onto the shared current Work"
+    );
+    assert!(!current.is_terminal());
+    assert_eq!(
+        fs::read(&fixture.journal_path).expect("read preserved current journal"),
+        journal_before,
+        "the identity-less legacy journal must contain only shared-current updates"
+    );
+}
+
+#[test]
+fn session_bound_foreign_current_agent_refresh_advances_projection_timestamp() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let before = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load shared current before update")
+        .expect("shared current before update");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: Some("Verify the target Work only".to_string()),
+            agent_title_summary: None,
+        },
+    )
+    .expect("valid Session-bound Agent refresh");
+
+    let after = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load shared current after update")
+        .expect("shared current after update");
+    let agent = after
+        .latest_agent_for_session(T812_SESSION_ID)
+        .expect("target Session Agent row");
+
+    assert_eq!(
+        agent.current_focus.as_deref(),
+        Some("Verify the target Work only")
+    );
+    assert_eq!(
+        after.updated_at, agent.updated_at,
+        "a persisted Agent refresh must advance the parent projection timestamp"
+    );
+    assert!(
+        after.updated_at > before.updated_at,
+        "the parent projection timestamp must make the Agent refresh observable"
+    );
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.title, before.title);
+    assert_eq!(after.status_category, before.status_category);
+    assert_eq!(after.owner, before.owner);
+}
+
+#[test]
+fn session_bound_update_rejects_explicit_owner_conflict_without_mutation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let before = fixture.state_bytes();
+
+    let result = t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: Some("SPEC-conflicting-explicit-owner".to_string()),
+            next_action: None,
+            summary: Some("must not commit".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    );
+    let after = fixture.state_bytes();
+
+    t812_assert_rejected_without_mutation(&result, &before, &after, "explicit owner conflict");
+}
+
+#[test]
+fn session_bound_update_runs_pre_persist_hook_before_any_surface_mutation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let before = fixture.state_bytes();
+
+    let result = update_workspace_projection_with_journal_for_resolved_work_target(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("must remain in memory only".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+        |event, entry| {
+            assert_eq!(event.kind, WorkEventKind::Done);
+            assert_eq!(event.work_item_id, T812_TARGET_WORK_ID);
+            assert_eq!(event.agent_session_id.as_deref(), Some(T812_SESSION_ID));
+            assert_eq!(entry.status_category, Some(WorkspaceStatusCategory::Done));
+            Err(GwtError::Other(
+                "synthetic write-ahead reservation failure".to_string(),
+            ))
+        },
+    );
+    let after = fixture.state_bytes();
+
+    t812_assert_rejected_without_mutation(
+        &result,
+        &before,
+        &after,
+        "pre-persist reservation failure",
+    );
+}
+
+#[test]
+fn session_bound_update_accepts_same_session_subordinate_helper() {
+    const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-86";
+
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load shared current")
+        .expect("shared current");
+    let mut helper = current.agents[0].clone();
+    helper.window_id = Some(RAW_PROVIDER_ACTOR_ID.to_string());
+    helper.display_name = "Codex subordinate helper".to_string();
+    helper.updated_at += chrono::Duration::seconds(1);
+    current.agents.push(helper);
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("seed same-Session helper");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("Same-Session helper status".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("same-Session subordinate helper must be authorized");
+
+    let events = t812_read_events(&fixture.events_path);
+    let event = events.last().expect("helper Work event");
+    assert_eq!(event.work_item_id, T812_TARGET_WORK_ID);
+    assert_eq!(event.agent_session_id.as_deref(), Some(T812_SESSION_ID));
+    assert!(
+        !serde_json::to_string(event)
+            .expect("serialize helper event")
+            .contains(RAW_PROVIDER_ACTOR_ID),
+        "provider actor id is inspection-only and must not enter tracked Work events"
+    );
+}
+
+#[test]
+fn session_bound_update_revalidates_assignment_after_lock_wait_without_mutation() {
+    use fs2::FileExt;
+
+    const REASSIGNED_WORK_ID: &str = "work-reassigned-while-waiting";
+    const REASSIGNED_BRANCH: &str = "work/reassigned-while-waiting";
+
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let reassigned_worktree = temp.path().join("reassigned-worktree");
+    fs::create_dir_all(&reassigned_worktree).expect("reassigned worktree");
+
+    let reassigned_at = Utc.with_ymd_and_hms(2026, 7, 22, 1, 5, 0).unwrap();
+    let reassigned_container = WorkspaceExecutionContainerRef {
+        branch: Some(REASSIGNED_BRANCH.to_string()),
+        worktree_path: Some(reassigned_worktree.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
+    let mut reassigned_start = WorkEvent::new(
+        WorkEventKind::Start,
+        REASSIGNED_WORK_ID,
+        reassigned_at - chrono::Duration::seconds(1),
+    );
+    reassigned_start.title = Some("Reassigned Work".to_string());
+    reassigned_start.owner = Some("SPEC-reassigned-owner".to_string());
+    reassigned_start.status_category = Some(WorkspaceStatusCategory::Active);
+    reassigned_start.execution_container = Some(reassigned_container);
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load Work projection")
+        .expect("Work projection");
+    assert_eq!(
+        work_items.apply_event(reassigned_start.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+        .expect("seed reassignment target");
+    append_workspace_work_event_to_path(&fixture.events_path, &reassigned_start)
+        .expect("seed reassignment event");
+
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(fixture.work_items_path.with_extension("lock"))
+        .expect("open Work transaction lock");
+    lock.lock_exclusive().expect("hold Work transaction lock");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let thread_home = home.path().to_path_buf();
+    let target = fixture.target.clone();
+    let handle = std::thread::spawn(move || {
+        let _home = ScopedHome::set(&thread_home);
+        started_tx.send(()).expect("signal mutation start");
+        t812_apply_resolved_workspace_update(
+            &target,
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: Some("must not land on reassigned Work".to_string()),
+                progress_summary: None,
+                agent_session_id: Some(T812_SESSION_ID.to_string()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+        )
+    });
+    started_rx.recv().expect("mutation thread started");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        !handle.is_finished(),
+        "mutation must be waiting on the Work transaction lock"
+    );
+
+    let mut reassigned_current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current for reassignment")
+        .expect("current for reassignment");
+    let agent = reassigned_current
+        .latest_agent_for_session_mut(T812_SESSION_ID)
+        .expect("assigned Session");
+    agent.workspace_id = Some(REASSIGNED_WORK_ID.to_string());
+    agent.branch = Some(REASSIGNED_BRANCH.to_string());
+    agent.worktree_path = Some(reassigned_worktree);
+    agent.updated_at = reassigned_at;
+    reassigned_current.updated_at = reassigned_at;
+    save_workspace_projection_to_path_unlocked(&fixture.current_path, &reassigned_current)
+        .expect("commit concurrent reassignment");
+    let after_reassignment = fixture.state_bytes();
+
+    FileExt::unlock(&lock).expect("release Work transaction lock");
+    let result = handle.join().expect("join mutation thread");
+    let after_attempt = fixture.state_bytes();
+
+    t812_assert_rejected_without_mutation(
+        &result,
+        &after_reassignment,
+        &after_attempt,
+        "stale resolved target after lock-time reassignment",
+    );
+}
+
+/// Issue #3278: `TrackedWorkEventPolicy::SkipTracked` must leave the git-tracked
+/// `events.jsonl` byte-for-byte unchanged (so a settled/merged worktree stays
+/// clean) while the machine-local projection still records the coordination
+/// update.
+#[test]
+fn skip_tracked_policy_leaves_committed_events_log_untouched() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_state_root = temp.path().join("workspace-home");
+    let worktree = temp.path().join("workspace-home/work/20260722-0100");
+    init_test_git_repo(&worktree);
+
+    let mut projection = WorkspaceProjection::default_for_project(&project_state_root);
+    projection.id = canonical_work_id(&project_state_root, Some("develop"), None).unwrap();
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-current".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(worktree.clone()),
+        branch: Some("work/20260722-0100".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: Utc::now(),
+    });
+    save_workspace_projection(&project_state_root, &projection).expect("seed projection");
+
+    let update = |focus: &str| WorkspaceProjectionUpdate {
+        title: None,
+        status_category: None,
+        status_text: None,
+        owner: None,
+        next_action: None,
+        summary: None,
+        progress_summary: None,
+        agent_session_id: Some("session-current".to_string()),
+        agent_current_focus: Some(focus.to_string()),
+        agent_title_summary: None,
+    };
+
+    // Active work: the event is appended to the tracked log (bundled into commits).
+    update_workspace_projection_with_journal_for_work_event_root(
+        &project_state_root,
+        &worktree,
+        update("active focus"),
+        TrackedWorkEventPolicy::Persist,
+    )
+    .expect("persist update");
+
+    let events_path = gwt_repo_local_work_events_path(&worktree);
+    let after_persist = fs::read_to_string(&events_path).expect("events log");
+    assert_eq!(
+        after_persist.lines().count(),
+        1,
+        "active update appends one tracked event"
+    );
+
+    // Settled work: a coordination-only update must not touch the tracked log.
+    update_workspace_projection_with_journal_for_work_event_root(
+        &project_state_root,
+        &worktree,
+        update("post-completion focus"),
+        TrackedWorkEventPolicy::SkipTracked,
+    )
+    .expect("skip-tracked update");
+
+    assert_eq!(
+        fs::read_to_string(&events_path).expect("events log"),
+        after_persist,
+        "SkipTracked must leave the committed events.jsonl byte-for-byte unchanged"
+    );
+
+    let saved = load_workspace_projection(&project_state_root)
+        .expect("load projection")
+        .expect("projection exists");
+    let agent = saved
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == "session-current")
+        .expect("agent row");
+    assert_eq!(
+        agent.current_focus.as_deref(),
+        Some("post-completion focus"),
+        "machine-local projection must still reflect the coordination update"
     );
 }
 
@@ -2687,6 +4710,63 @@ fn terminal_retry_refolds_durable_close_before_a_later_saved_heartbeat() {
                 .count(),
             1,
             "retry must not append a replacement {label}"
+        );
+    }
+}
+
+#[test]
+fn terminal_retry_rejects_unknown_or_additive_machine_local_event_schema() {
+    let cases = [
+        (
+            "unknown-kind",
+            concat!(
+                r#"{"id":"evt-local-correction","work_item_id":"work-local-strict","kind":"correction","updated_at":"2026-07-22T02:00:00Z"}"#,
+                "\n"
+            ),
+        ),
+        (
+            "additive-field",
+            concat!(
+                r#"{"id":"evt-local-done","work_item_id":"work-local-strict","kind":"done","future_event_field":true,"updated_at":"2026-07-22T02:01:00Z"}"#,
+                "\n"
+            ),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/works.json");
+        let shared_events_path = temp.path().join("shared/events.jsonl");
+        let close_events_path = temp.path().join("local/work-events-closed.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 7, 22, 1, 0, 0).unwrap();
+        let retry_at = Utc.with_ymd_and_hms(2026, 7, 22, 3, 0, 0).unwrap();
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-local-strict", started_at);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &shared_events_path, start).unwrap();
+        fs::create_dir_all(close_events_path.parent().unwrap()).expect("create local state dir");
+        fs::write(&close_events_path, body.as_bytes()).expect("write future lifecycle event");
+        let original_projection = fs::read(&work_items_path).expect("snapshot projection");
+        let original_close_log = fs::read(&close_events_path).expect("snapshot close log");
+
+        assert!(
+            emit_workspace_done_event_if_absent_paths(
+                &work_items_path,
+                &close_events_path,
+                "work-local-strict",
+                retry_at,
+            )
+            .is_err(),
+            "machine-local {label} schema must fail closed during terminal recovery"
+        );
+        assert_eq!(
+            fs::read(&work_items_path).expect("read preserved projection"),
+            original_projection,
+            "failed recovery must not mutate the saved projection"
+        );
+        assert_eq!(
+            fs::read(&close_events_path).expect("read preserved close log"),
+            original_close_log,
+            "failed recovery must not append a conflicting terminal event"
         );
     }
 }
@@ -6081,4 +8161,539 @@ fn board_entry_title_summary_is_the_work_identity() {
     assert_eq!(event.title.as_deref(), Some("認証機能の実装"));
     assert_eq!(event.intent.as_deref(), Some("認証機能の実装"));
     assert_eq!(event.summary.as_deref(), Some("現在の状態: テスト実行中。"));
+}
+
+// SPEC-2359 T-814 (US-86 / FR-551 / FR-552): Board history is durable on its
+// own, but a Board entry may mutate Work state only after its origin resolves
+// to one existing, current project+Session target. These fixtures stay at the
+// end of this file so T-812 can evolve its independent transaction tests.
+const SESSION_BOUND_BOARD_CURRENT_WORK_ID: &str = "work-session-bound-board-current";
+const SESSION_BOUND_BOARD_TARGET_WORK_ID: &str = "work-session-bound-board-target";
+const SESSION_BOUND_BOARD_VALID_SESSION_ID: &str = "session-bound-board-valid";
+const SESSION_BOUND_BOARD_STALE_SESSION_ID: &str = "session-bound-board-stale";
+const SESSION_BOUND_BOARD_FOREIGN_SESSION_ID: &str = "session-bound-board-foreign";
+
+struct SessionBoundBoardFixture {
+    project_root: PathBuf,
+    current_path: PathBuf,
+    work_items_path: PathBuf,
+    events_path: PathBuf,
+    journal_path: PathBuf,
+    base_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionBoundBoardWorkBytes {
+    current: Option<Vec<u8>>,
+    work_items: Option<Vec<u8>>,
+    events: Option<Vec<u8>>,
+    journal: Option<Vec<u8>>,
+}
+
+fn session_bound_board_optional_bytes(path: &Path) -> Option<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read {}: {error}", path.display()),
+    }
+}
+
+fn session_bound_board_work_bytes(
+    fixture: &SessionBoundBoardFixture,
+) -> SessionBoundBoardWorkBytes {
+    SessionBoundBoardWorkBytes {
+        current: session_bound_board_optional_bytes(&fixture.current_path),
+        work_items: session_bound_board_optional_bytes(&fixture.work_items_path),
+        events: session_bound_board_optional_bytes(&fixture.events_path),
+        journal: session_bound_board_optional_bytes(&fixture.journal_path),
+    }
+}
+
+fn session_bound_board_container(
+    project_root: &Path,
+    branch: &str,
+) -> WorkspaceExecutionContainerRef {
+    WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(project_root.join(branch.replace('/', "-"))),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    }
+}
+
+fn session_bound_board_assigned_agent(
+    project_root: &Path,
+    session_id: &str,
+    work_id: &str,
+    branch: &str,
+    updated_at: DateTime<Utc>,
+) -> WorkspaceAgentSummary {
+    let mut agent = assigned_agent(session_id, "codex", work_id);
+    agent.branch = Some(branch.to_string());
+    agent.worktree_path = Some(project_root.join(branch.replace('/', "-")));
+    agent.updated_at = updated_at;
+    agent
+}
+
+fn session_bound_board_seed_fixture(temp: &Path) -> SessionBoundBoardFixture {
+    let project_root = temp.join("repo");
+    let current_path = temp.join("state/current.json");
+    let work_items_path = temp.join("state/works.json");
+    let events_path = project_root.join(".gwt/work/events.jsonl");
+    let journal_path = temp.join("state/journal.jsonl");
+    let base_at = Utc.with_ymd_and_hms(2026, 7, 22, 8, 0, 0).unwrap();
+    fs::create_dir_all(&project_root).expect("create Board test project root");
+
+    let current_branch = "work/session-bound-board-current";
+    let target_branch = "work/session-bound-board-target";
+    let foreign_branch = "work/session-bound-board-foreign";
+    let mut current = WorkspaceProjection::default_for_project(&project_root);
+    current.id = SESSION_BOUND_BOARD_CURRENT_WORK_ID.to_string();
+    current.title = "Unrelated shared current Work".to_string();
+    current.summary = Some("Shared current summary must stay unchanged".to_string());
+    current.owner = Some("SPEC-shared-current".to_string());
+    current.updated_at = base_at;
+    current.git_details = Some(GitDetails {
+        branch: Some(current_branch.to_string()),
+        worktree_path: Some(project_root.join("current-worktree")),
+        base_branch: Some("develop".to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        pr_created_at: None,
+        created_by_start_work: false,
+        created_at: base_at,
+    });
+    current.agents = vec![
+        session_bound_board_assigned_agent(
+            &project_root,
+            SESSION_BOUND_BOARD_VALID_SESSION_ID,
+            SESSION_BOUND_BOARD_TARGET_WORK_ID,
+            target_branch,
+            base_at,
+        ),
+        session_bound_board_assigned_agent(
+            &project_root,
+            SESSION_BOUND_BOARD_STALE_SESSION_ID,
+            SESSION_BOUND_BOARD_TARGET_WORK_ID,
+            target_branch,
+            base_at + chrono::Duration::hours(2),
+        ),
+        session_bound_board_assigned_agent(
+            &project_root,
+            SESSION_BOUND_BOARD_FOREIGN_SESSION_ID,
+            "work-session-bound-board-foreign-missing",
+            foreign_branch,
+            base_at,
+        ),
+    ];
+    save_workspace_projection_to_path(&current_path, &current).expect("seed shared current");
+
+    let mut current_start = WorkEvent::new(
+        WorkEventKind::Start,
+        SESSION_BOUND_BOARD_CURRENT_WORK_ID,
+        base_at,
+    );
+    current_start.id = "event-session-bound-board-current".to_string();
+    current_start.title = Some("Unrelated shared current Work".to_string());
+    current_start.execution_container =
+        Some(session_bound_board_container(&project_root, current_branch));
+
+    let mut target_start = WorkEvent::new(
+        WorkEventKind::Start,
+        SESSION_BOUND_BOARD_TARGET_WORK_ID,
+        base_at,
+    );
+    target_start.id = "event-session-bound-board-target".to_string();
+    target_start.title = Some("Board target Work".to_string());
+    target_start.agent_session_id = Some(SESSION_BOUND_BOARD_VALID_SESSION_ID.to_string());
+    target_start.execution_container =
+        Some(session_bound_board_container(&project_root, target_branch));
+
+    let mut stale_agent_attach = WorkEvent::new(
+        WorkEventKind::Update,
+        SESSION_BOUND_BOARD_TARGET_WORK_ID,
+        base_at,
+    );
+    stale_agent_attach.id = "event-session-bound-board-stale-agent".to_string();
+    stale_agent_attach.agent_session_id = Some(SESSION_BOUND_BOARD_STALE_SESSION_ID.to_string());
+    stale_agent_attach.execution_container =
+        Some(session_bound_board_container(&project_root, target_branch));
+
+    record_workspace_work_events_paths(
+        &work_items_path,
+        &events_path,
+        vec![current_start, target_start, stale_agent_attach],
+    )
+    .expect("seed Board Work targets");
+
+    SessionBoundBoardFixture {
+        project_root,
+        current_path,
+        work_items_path,
+        events_path,
+        journal_path,
+        base_at,
+    }
+}
+
+fn session_bound_board_entry(
+    id: &str,
+    origin_session_id: Option<&str>,
+    origin_branch: &str,
+    updated_at: DateTime<Utc>,
+) -> crate::coordination::BoardEntry {
+    let mut entry = crate::coordination::BoardEntry::new(
+        crate::coordination::AuthorKind::Agent,
+        "agent-board-origin",
+        crate::coordination::BoardEntryKind::Status,
+        format!("Board milestone {id}"),
+        None,
+        None,
+        Vec::new(),
+        vec!["SPEC-board-target".to_string()],
+    );
+    entry.id = id.to_string();
+    entry.created_at = updated_at;
+    entry.updated_at = updated_at;
+    entry.origin_session_id = origin_session_id.map(str::to_string);
+    entry.origin_branch = Some(origin_branch.to_string());
+    entry.origin_agent_id = Some("agent-board-origin".to_string());
+    entry
+}
+
+fn session_bound_board_origin_cases(
+    fixture: &SessionBoundBoardFixture,
+) -> Vec<(&'static str, crate::coordination::BoardEntry)> {
+    let target_branch = "work/session-bound-board-target";
+    vec![
+        (
+            "valid",
+            session_bound_board_entry(
+                "board-session-bound-valid",
+                Some(SESSION_BOUND_BOARD_VALID_SESSION_ID),
+                target_branch,
+                fixture.base_at + chrono::Duration::hours(3),
+            ),
+        ),
+        (
+            "missing",
+            session_bound_board_entry(
+                "board-session-bound-missing",
+                None,
+                target_branch,
+                fixture.base_at + chrono::Duration::hours(3),
+            ),
+        ),
+        (
+            "invalid",
+            session_bound_board_entry(
+                "board-session-bound-invalid",
+                Some("../unsafe-session"),
+                target_branch,
+                fixture.base_at + chrono::Duration::hours(3),
+            ),
+        ),
+        (
+            "foreign",
+            session_bound_board_entry(
+                "board-session-bound-foreign",
+                Some(SESSION_BOUND_BOARD_FOREIGN_SESSION_ID),
+                "work/session-bound-board-foreign",
+                fixture.base_at + chrono::Duration::hours(3),
+            ),
+        ),
+        (
+            "stale",
+            session_bound_board_entry(
+                "board-session-bound-stale",
+                Some(SESSION_BOUND_BOARD_STALE_SESSION_ID),
+                target_branch,
+                fixture.base_at + chrono::Duration::hours(1),
+            ),
+        ),
+    ]
+}
+
+fn session_bound_board_candidate_work_event(
+    projection: &WorkspaceProjection,
+    work_items: &WorkItemsProjection,
+    entry: &crate::coordination::BoardEntry,
+) -> Option<WorkEvent> {
+    resolve_workspace_work_event_from_board_entry(projection, work_items, entry)
+}
+
+fn session_bound_board_apply_entry(
+    fixture: &SessionBoundBoardFixture,
+    entry: &crate::coordination::BoardEntry,
+) -> Result<()> {
+    transact_workspace_state_at(
+        &fixture.current_path,
+        &fixture.work_items_path,
+        &fixture.events_path,
+        &fixture.project_root,
+        |projection, work_items, _| {
+            let Some(event) =
+                session_bound_board_candidate_work_event(projection, work_items, entry)
+            else {
+                return Ok(((), Vec::new()));
+            };
+            let state_cutoff = work_items
+                .work_items
+                .iter()
+                .find(|item| item.id == event.work_item_id)
+                .map(|item| item.updated_at);
+            if event.work_item_id == projection.id {
+                projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
+            }
+            Ok(((), vec![event]))
+        },
+    )
+}
+
+#[test]
+fn session_bound_board_origin_matrix_resolves_only_valid_target() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current exists");
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load Work items")
+        .expect("Work items exist");
+
+    let actual = session_bound_board_origin_cases(&fixture)
+        .iter()
+        .map(|(case, entry)| {
+            (
+                *case,
+                session_bound_board_candidate_work_event(&projection, &work_items, entry)
+                    .map(|event| event.work_item_id),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            (
+                "valid",
+                Some(SESSION_BOUND_BOARD_TARGET_WORK_ID.to_string())
+            ),
+            ("missing", None),
+            ("invalid", None),
+            ("foreign", None),
+            ("stale", None),
+        ],
+        "only a current origin resolving to an existing target Work may produce a Work event"
+    );
+}
+
+#[test]
+fn session_bound_board_origin_without_target_container_remains_board_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current exists");
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load Work items")
+        .expect("Work items exist");
+    let target = work_items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == SESSION_BOUND_BOARD_TARGET_WORK_ID)
+        .expect("target Work item");
+    target.execution_containers.clear();
+    let entry = session_bound_board_origin_cases(&fixture).remove(0).1;
+
+    assert!(
+        session_bound_board_candidate_work_event(&projection, &work_items, &entry).is_none(),
+        "a target without a matching execution container must remain Board-only"
+    );
+}
+
+#[test]
+fn session_bound_board_invalid_origins_remain_board_only_with_byte_equivalent_work_state() {
+    for (case, entry_index) in [("missing", 1), ("invalid", 2), ("foreign", 3), ("stale", 4)] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = session_bound_board_seed_fixture(temp.path());
+        let entry = session_bound_board_origin_cases(&fixture)
+            .remove(entry_index)
+            .1;
+        let before = session_bound_board_work_bytes(&fixture);
+
+        let result = session_bound_board_apply_entry(&fixture, &entry);
+        let after = session_bound_board_work_bytes(&fixture);
+
+        assert!(result.is_ok(), "{case} Board-only route must be a no-op");
+        assert!(
+            after == before,
+            "{case} Board origin must stay Board-only without a Work event, projection mutation, or partial ref"
+        );
+    }
+}
+
+#[test]
+fn session_bound_board_valid_origin_updates_target_work_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let entry = session_bound_board_origin_cases(&fixture).remove(0).1;
+    let current_before = fs::read(&fixture.current_path).expect("current before");
+
+    session_bound_board_apply_entry(&fixture, &entry).expect("valid Board origin");
+
+    assert!(
+        fs::read(&fixture.current_path).expect("current after") == current_before,
+        "a valid origin targeting another Work must not mutate shared current"
+    );
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load Work items")
+        .expect("Work items exist");
+    let current = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == SESSION_BOUND_BOARD_CURRENT_WORK_ID)
+        .expect("shared current Work item");
+    let target = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == SESSION_BOUND_BOARD_TARGET_WORK_ID)
+        .expect("target Work item");
+    assert!(!current.board_refs.contains(&entry.id));
+    assert!(target.board_refs.contains(&entry.id));
+}
+
+#[test]
+fn session_bound_board_store_rejects_cross_work_non_attach_mutation_byte_equivalent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let before = session_bound_board_work_bytes(&fixture);
+    let result = transact_workspace_state_at(
+        &fixture.current_path,
+        &fixture.work_items_path,
+        &fixture.events_path,
+        &fixture.project_root,
+        |_projection, _work_items, _| {
+            let mut event = WorkEvent::new(
+                WorkEventKind::Update,
+                SESSION_BOUND_BOARD_TARGET_WORK_ID,
+                fixture.base_at + chrono::Duration::hours(4),
+            );
+            event.id = "event-session-bound-board-cross-work".to_string();
+            event.title = Some("Cross-Work contamination".to_string());
+            event.board_entry_id = Some("board-session-bound-cross-work".to_string());
+            // Deliberately no agent_session_id: this is a non-attach mutation
+            // and therefore bypasses the existing stray-attach guard.
+            Ok(((), vec![event]))
+        },
+    );
+    let after = session_bound_board_work_bytes(&fixture);
+
+    assert!(
+        result.is_err(),
+        "the store must reject a non-attach event targeting a Work other than the transaction principal"
+    );
+    assert!(
+        after == before,
+        "a rejected cross-Work mutation must preserve current/work/event/journal bytes"
+    );
+}
+
+#[test]
+fn session_bound_board_store_rejects_orphan_board_ref_byte_equivalent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let before = session_bound_board_work_bytes(&fixture);
+    let result = transact_workspace_state_at(
+        &fixture.current_path,
+        &fixture.work_items_path,
+        &fixture.events_path,
+        &fixture.project_root,
+        |projection, _work_items, _| {
+            projection
+                .board_refs
+                .push("board-session-bound-orphan".to_string());
+            Ok(((), Vec::new()))
+        },
+    );
+    let after = session_bound_board_work_bytes(&fixture);
+
+    assert!(
+        result.is_err(),
+        "a Board ref without its authorized Work event must reject atomically"
+    );
+    assert!(
+        after == before,
+        "a rejected orphan Board ref must preserve current/work/event/journal bytes"
+    );
+}
+
+#[test]
+fn session_bound_board_event_uses_canonical_agent_metadata_without_provider_actor_id() {
+    const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-board-86";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current exists");
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load Work items")
+        .expect("Work items exist");
+    let mut entry = session_bound_board_origin_cases(&fixture).remove(0).1;
+    entry.origin_agent_id = Some(RAW_PROVIDER_ACTOR_ID.to_string());
+
+    let event = session_bound_board_candidate_work_event(&projection, &work_items, &entry)
+        .expect("valid Board origin");
+
+    assert_eq!(event.agent_id.as_deref(), Some("codex"));
+    assert_eq!(event.display_name.as_deref(), Some("codex"));
+    assert!(
+        !serde_json::to_string(&event)
+            .expect("serialize Board Work event")
+            .contains(RAW_PROVIDER_ACTOR_ID),
+        "untrusted provider actor metadata must not enter the tracked Work event"
+    );
+}
+
+#[test]
+fn session_bound_board_store_rejects_reassignment_then_update_authority_escalation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let before = session_bound_board_work_bytes(&fixture);
+    let foreign_work_id = "work-session-bound-board-reassigned-in-closure";
+    let result = transact_workspace_state_at(
+        &fixture.current_path,
+        &fixture.work_items_path,
+        &fixture.events_path,
+        &fixture.project_root,
+        |projection, _work_items, _| {
+            assert!(projection.assign_agent(
+                SESSION_BOUND_BOARD_VALID_SESSION_ID,
+                foreign_work_id,
+                None,
+                None,
+                fixture.base_at + chrono::Duration::hours(4),
+            ));
+            let mut event = WorkEvent::new(
+                WorkEventKind::Update,
+                foreign_work_id,
+                fixture.base_at + chrono::Duration::hours(4),
+            );
+            event.agent_session_id = Some(SESSION_BOUND_BOARD_VALID_SESSION_ID.to_string());
+            event.summary = Some("post-update assignment must not grant authority".to_string());
+            Ok(((), vec![event]))
+        },
+    );
+    let after = session_bound_board_work_bytes(&fixture);
+
+    assert!(
+        result.is_err(),
+        "an Update must use pre-transaction assignment authority"
+    );
+    assert!(
+        after == before,
+        "rejected in-closure reassignment must preserve current/work/event/journal bytes"
+    );
 }

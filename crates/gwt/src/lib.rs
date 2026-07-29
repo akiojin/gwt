@@ -1,5 +1,7 @@
 pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
+#[doc(hidden)]
+pub use agent_project_state::validated_project_state_root_for_session_recovery;
 pub mod backend_service;
 pub mod board_audience;
 pub mod board_provider;
@@ -52,6 +54,19 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
     gwt_core::test_support::env_lock()
 }
 
+#[doc(hidden)]
+pub use agent_project_state::{
+    apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
+    apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
+    observe_agent_runtime, probe_authenticated_execution_binding,
+    probe_authenticated_prepared_execution_binding, AgentExecutionBindingProbeReceipt,
+    AgentExecutionBindingProbeRequest, AgentRuntimeObservation, AgentWorkTerminalKind,
+    AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
+    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
+    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+    AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+};
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
     cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
@@ -89,15 +104,25 @@ pub use index_worker::{
     ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
-    is_auto_improve_candidate, issue_monitor_launch_plan, issue_monitor_launch_profile_summary,
-    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path, load_issue_monitor_prefs,
-    save_issue_monitor_prefs, scan_issue_monitor_candidates, AutonomousIssueRecord,
-    AutonomousPhase, AutonomousReviewDispatch, EligibilityDecision, FailureClass,
-    IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue,
-    IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
-    IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue,
-    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, MonitorInboxState,
+    clear_issue_monitor_authority_fence, establish_issue_monitor_authority_fence,
+    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
+    issue_monitor_authority_fence_path, issue_monitor_launch_plan,
+    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
+    issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
+    load_issue_monitor_prefs, mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
+    persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
+    save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    scan_issue_monitor_candidates_with_provenance, try_mutate_issue_monitor_prefs,
+    try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousIssueRecord, AutonomousPhase,
+    AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAuthorityFence,
+    IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
+    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
+    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchPlan,
+    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest,
+    IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue, IssueMonitorPrefs,
+    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, MonitorInboxState,
+    PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
@@ -130,10 +155,11 @@ pub use persistence::{
     default_session_state, default_workspace_state, empty_workspace_state,
     legacy_workspace_state_path, load_restored_workspace_state, load_session_state,
     load_workspace_state, migrate_legacy_workspace_state, pause_process_windows_for_restore,
-    project_title_from_path, save_session_state, save_workspace_state, workspace_state_path,
-    AgentKanbanLane, CanvasViewport, PersistedSessionState, PersistedSessionTabState,
-    PersistedWindowCanvasState, PersistedWindowState, ProjectKind, RecentProjectEntry,
-    WindowGeometry, WindowLaneKind, WindowPlacement, WindowProcessStatus, WindowState,
+    project_title_from_path, save_session_state, save_workspace_state,
+    save_workspace_state_durable, workspace_state_path, AgentKanbanLane, CanvasViewport,
+    PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
+    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowLaneKind,
+    WindowPlacement, WindowProcessStatus, WindowState,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -142,15 +168,15 @@ pub use preset::{
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
     ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, ArrangeMode,
-    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FileAttachment, FileContentErrorKind, FileContentMode, FileContentSaveErrorKind,
-    FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView, IndexSearchMatchMode,
-    IndexSearchResult, IndexSearchScope, IndexSearchTarget, ManagedHookHealthView,
-    ManagedHookPendingDiscussionView, ManagedHookPendingGoalView, ManagedHookSlowHandlerView,
-    ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView, WorkEventView, WorkItemView,
-    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
-    WorkspaceResumeSource, WorkspaceView,
+    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContinueWorkOutcomeKind,
+    CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
+    FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
+    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
+    ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
+    ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
+    WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

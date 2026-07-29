@@ -114,6 +114,16 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Whether this repository has an `origin` remote configured.
+    pub fn has_origin_remote(&self) -> Result<bool> {
+        let output = gwt_core::process::run_git_logged(
+            &["remote", "get-url", "origin"],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("remote get-url origin: {e}")))?;
+        Ok(output.status.success())
+    }
+
     /// Prepare `origin/develop` as the canonical Start Work base.
     ///
     /// Fresh bare clones can lack both `remote.origin.fetch` and

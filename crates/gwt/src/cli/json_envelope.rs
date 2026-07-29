@@ -366,10 +366,7 @@ fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         super::validate_title_summary_work_name("params.purpose", value)?;
     }
     let current_focus = optional_string(params, "current_focus")?;
-    let agent_session = agent_session_or_env(params)?;
-    if agent_session.is_none() && (purpose.is_some() || current_focus.is_some()) {
-        return Err(CliParseError::MissingFlag("agent_session"));
-    }
+    let agent_session = Some(workspace_update_session(params)?);
     Ok(CliCommand::Workspace(WorkspaceCommand::Update {
         title: optional_string(params, "title")?,
         status: optional_string(params, "status")?,
@@ -903,6 +900,28 @@ fn agent_session_or_env(params: &Map<String, Value>) -> Result<Option<String>, C
         .filter(|value| !value.trim().is_empty()))
 }
 
+fn workspace_update_session(params: &Map<String, Value>) -> Result<String, CliParseError> {
+    let ambient = std::env::var(GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(CliParseError::MissingFlag("GWT_SESSION_ID"))?;
+    gwt_agent::validate_session_id_path_component(&ambient).map_err(|_| {
+        CliParseError::InvalidValue {
+            flag: "GWT_SESSION_ID",
+            reason: "must be a safe Session id path component",
+        }
+    })?;
+    if let Some(explicit) = optional_string(params, "agent_session")? {
+        if explicit != ambient {
+            return Err(CliParseError::InvalidValue {
+                flag: "agent_session",
+                reason: "must exactly match ambient GWT_SESSION_ID",
+            });
+        }
+    }
+    Ok(ambient)
+}
+
 fn reject_key(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1197,6 +1216,13 @@ mod tests {
 
     #[test]
     fn workspace_update_maps_purpose_to_title_summary() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-1",
+        );
         let command = ok(
             "workspace.update",
             json!({
@@ -1219,6 +1245,160 @@ mod tests {
                 assert_eq!(current_focus.as_deref(), Some("writing tests"));
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_requires_ambient_session_even_with_explicit_session() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+
+        match err(
+            "workspace.update",
+            json!({
+                "agent_session": "explicit-session",
+                "summary": "session-bound mutation",
+            }),
+        ) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "GWT_SESSION_ID"),
+            other => panic!("expected missing ambient Session error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_rejects_explicit_session_mismatch_with_ambient_session() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "ambient-session",
+        );
+
+        match err(
+            "workspace.update",
+            json!({
+                "agent_session": "foreign-explicit-session",
+                "summary": "session-bound mutation",
+            }),
+        ) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "agent_session");
+                assert!(reason.contains("GWT_SESSION_ID"), "{reason}");
+                assert!(reason.contains("match"), "{reason}");
+            }
+            other => panic!("expected explicit/ambient Session mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_rejects_unsafe_ambient_session_before_dispatch() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "../escaped-session",
+        );
+
+        match err(
+            "workspace.update",
+            json!({
+                "summary": "unsafe Session must not reach proxy or ledger lookup",
+            }),
+        ) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "GWT_SESSION_ID");
+                assert!(
+                    reason.contains("unsafe") || reason.contains("path component"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected unsafe ambient Session error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_accepts_matching_explicit_and_ambient_session() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "ambient-session",
+        );
+
+        let command = ok(
+            "workspace.update",
+            json!({
+                "agent_session": "ambient-session",
+                "summary": "matching explicit Session",
+            }),
+        );
+        match command {
+            CliCommand::Workspace(WorkspaceCommand::Update { agent_session, .. }) => {
+                assert_eq!(agent_session.as_deref(), Some("ambient-session"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_rejects_provider_actor_without_ambient_session() {
+        const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-86";
+
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+        let _provider_actor =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", RAW_PROVIDER_ACTOR_ID);
+
+        match err(
+            "workspace.update",
+            json!({
+                "summary": "provider actor must not authorize mutation",
+            }),
+        ) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "GWT_SESSION_ID"),
+            other => panic!("expected missing ambient Session error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_uses_ambient_session_independent_of_provider_actor_id() {
+        const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-86";
+
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "ambient-session",
+        );
+
+        for provider_actor_id in [None, Some(RAW_PROVIDER_ACTOR_ID)] {
+            let _provider_actor = match provider_actor_id {
+                Some(value) => gwt_core::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", value),
+                None => gwt_core::test_support::ScopedEnvVar::unset("CODEX_THREAD_ID"),
+            };
+            let command = ok(
+                "workspace.update",
+                json!({
+                    "summary": "provider-neutral mutation principal",
+                }),
+            );
+
+            match command {
+                CliCommand::Workspace(WorkspaceCommand::Update { agent_session, .. }) => {
+                    assert_eq!(agent_session.as_deref(), Some("ambient-session"));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
         }
     }
 
@@ -1258,6 +1438,11 @@ mod tests {
     /// being a bare activity label stay valid purposes.
     #[test]
     fn workspace_update_accepts_work_purpose_mentioning_activity_domain() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::session::GWT_SESSION_ID_ENV, "s");
         for label in [
             "browser-check purpose overwrite guard",
             "Fix browser check",
@@ -1289,16 +1474,14 @@ mod tests {
     }
 
     #[test]
-    fn workspace_update_requires_agent_session_when_setting_purpose() {
-        // No agent_session in params; rely on env being unset for the work fields.
-        // When purpose/current_focus omitted, agent_session is optional, so test the
-        // explicit error path by providing current_focus without agent_session only
-        // when the env var is absent.
-        if std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV).is_ok() {
-            return;
-        }
+    fn workspace_update_requires_ambient_session_when_setting_purpose() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
         match err("workspace.update", json!({"current_focus": "x"})) {
-            CliParseError::MissingFlag(flag) => assert_eq!(flag, "agent_session"),
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "GWT_SESSION_ID"),
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -2118,6 +2301,11 @@ mod tests {
     #[test]
     fn null_values_fall_back_to_defaults() {
         // Null optionals should behave as absent.
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::session::GWT_SESSION_ID_ENV, "s");
         let command = ok(
             "workspace.update",
             json!({"agent_session": "s", "summary": Value::Null, "status": Value::Null}),

@@ -28,7 +28,30 @@ use super::{
     Read as _, RuntimeStopThreads, UserEvent, WindowProcessStatus,
 };
 
+/// Complete the stop phase for every runtime before any join can block.
+fn stop_all_before_joining<I, T>(
+    ids: I,
+    mut stop: impl FnMut(I::Item) -> T,
+    mut join: impl FnMut(T),
+) where
+    I: IntoIterator,
+{
+    let stopped = ids.into_iter().map(&mut stop).collect::<Vec<_>>();
+    for threads in stopped {
+        join(threads);
+    }
+}
+
 impl AppRuntime {
+    pub(crate) fn inspection_input_denied_events(&self, window_id: &str) -> Vec<OutboundEvent> {
+        let message =
+            "\r\n[gwt] This Session is inspection-only. Use Continue work before sending input.\r\n";
+        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
+            id: window_id.to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(message),
+        })]
+    }
+
     /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
     /// streamed output was dropped under client queue pressure, restoring
     /// display consistency for the affected client only.
@@ -89,7 +112,33 @@ impl AppRuntime {
             )];
         };
 
-        let write_result = match self.runtimes.get(&window_id) {
+        self.pane_send_input_to_window_events(client_id, &window_id, text)
+    }
+
+    /// Inject input into one already-authorized pane identity. Capability
+    /// callers resolve this exact combined window id inside their authenticated
+    /// project before reaching the PTY; this helper never performs a
+    /// process-global Session lookup.
+    pub(crate) fn pane_send_input_to_window_events(
+        &mut self,
+        client_id: ClientId,
+        window_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        if self.inspection_agent_windows.contains(window_id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id.to_string()),
+                    error: Some(
+                        "the target Session is inspection-only; use Continue work before sending input"
+                            .to_string(),
+                    ),
+                },
+            )];
+        }
+        let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
             Some(runtime) => runtime
                 .pane
@@ -106,7 +155,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: true,
-                    window_id: Some(window_id),
+                    window_id: Some(window_id.to_string()),
                     error: None,
                 },
             )],
@@ -114,7 +163,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: false,
-                    window_id: Some(window_id),
+                    window_id: Some(window_id.to_string()),
                     error: Some(error),
                 },
             )],
@@ -122,14 +171,16 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let data_len = data.len();
+        if self.inspection_agent_windows.contains(id) {
+            return self.inspection_input_denied_events(id);
+        }
         let write_result = {
             let Some(runtime) = self.runtimes.get(id) else {
                 tracing::debug!(
                     target: "gwt_input_trace",
                     stage = "event_loop_runtime_missing",
                     window_id = %id,
-                    data_len,
+                    outcome = "runtime_missing",
                     "terminal_input dropped: no runtime for window"
                 );
                 return Vec::new();
@@ -149,7 +200,6 @@ impl AppRuntime {
                         target: "gwt_input_trace",
                         stage = "pty_write",
                         window_id = %id,
-                        data_len,
                         lock_wait_us,
                         write_us = write_started.elapsed().as_micros() as u64,
                         ok = result.is_ok(),
@@ -162,9 +212,8 @@ impl AppRuntime {
                         target: "gwt_input_trace",
                         stage = "pane_lock_failed",
                         window_id = %id,
-                        data_len,
                         lock_wait_us,
-                        error = %error,
+                        outcome = "lock_failed",
                         "terminal_input dropped: pane mutex poisoned"
                     );
                     Err(error)
@@ -181,6 +230,14 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+        if self.inspection_agent_windows.contains(id) {
+            // Inspection panes must always return through `terminal_input_events`,
+            // where the immutable inspection boundary is enforced. Publishing
+            // their raw PTY handle here would let the WebSocket fast path bypass
+            // that check.
+            self.deregister_pty_writer(id);
+            return;
+        }
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -196,12 +253,12 @@ impl AppRuntime {
             Ok(mut guard) => {
                 guard.insert(id.to_string(), pty);
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "registry_write_poisoned",
                     window_id = %id,
-                    error = %error,
+                    outcome = "registry_lock_failed",
                     "failed to register PTY writer: registry poisoned"
                 );
             }
@@ -213,12 +270,12 @@ impl AppRuntime {
             Ok(mut guard) => {
                 guard.remove(id);
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "registry_deregister_poisoned",
                     window_id = %id,
-                    error = %error,
+                    outcome = "registry_lock_failed",
                     "failed to deregister PTY writer: registry poisoned"
                 );
             }
@@ -227,6 +284,10 @@ impl AppRuntime {
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
         self.stop_window_runtime_inner(window_id, true);
+    }
+
+    pub(crate) fn stop_window_runtime_without_session_projection(&mut self, window_id: &str) {
+        self.stop_window_runtime_inner(window_id, false);
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
@@ -293,13 +354,11 @@ impl AppRuntime {
     }
 
     pub(super) fn stop_runtimes_in_shutdown_order(&mut self, ids: Vec<String>) {
-        let mut threads = Vec::new();
-        for id in ids {
-            threads.push(self.start_window_runtime_stop(&id, false));
-        }
-        for runtime_threads in threads {
-            Self::join_runtime_stop_threads(runtime_threads);
-        }
+        stop_all_before_joining(
+            ids,
+            |id| self.start_window_runtime_stop(&id, false),
+            Self::join_runtime_stop_threads,
+        );
     }
 
     pub(crate) fn spawn_output_thread(
@@ -360,7 +419,6 @@ impl AppRuntime {
                                     target: "gwt_input_trace",
                                     stage = "reader_pane_lock",
                                     window_id = %id,
-                                    chunk_len = read,
                                     lock_wait_us,
                                     parse_us,
                                     "reader thread held pane mutex (output parsing)"
@@ -463,5 +521,31 @@ impl AppRuntime {
                 Some(message.clone()),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_order_tests {
+    use std::cell::RefCell;
+
+    use super::stop_all_before_joining;
+
+    #[test]
+    fn stops_every_runtime_before_joining_any_runtime() {
+        let events = RefCell::new(Vec::new());
+
+        stop_all_before_joining(
+            ["a", "b"],
+            |id| {
+                events.borrow_mut().push(format!("stop:{id}"));
+                id
+            },
+            |id| events.borrow_mut().push(format!("join:{id}")),
+        );
+
+        assert_eq!(
+            events.into_inner(),
+            ["stop:a", "stop:b", "join:a", "join:b"]
+        );
     }
 }

@@ -564,7 +564,7 @@ impl AppRuntime {
 
         let tab_id = address.tab_id.clone();
         let project_root = tab.project_root.clone();
-        let branch_name = match current_branch_name_for_launch_agent(&project_root) {
+        let branch_name = match gwt::start_work::resolve_launch_agent_base_branch(&project_root) {
             Ok(branch_name) => branch_name,
             Err(error) => return launch_agent_open_error(client_id, error),
         };
@@ -728,12 +728,14 @@ impl AppRuntime {
     pub(crate) fn list_resumable_agents_events(
         &mut self,
         client_id: &str,
+        operation_id: String,
         workspace_id: Option<String>,
     ) -> Vec<OutboundEvent> {
         let agents = self.collect_resumable_agents(workspace_id.as_deref());
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::WorkspaceResumableAgents {
+                operation_id,
                 agents,
                 workspace_id,
             },
@@ -743,6 +745,7 @@ impl AppRuntime {
     pub(crate) fn resume_workspace_agent_events(
         &mut self,
         client_id: &str,
+        operation_id: String,
         session_id: String,
         agent_session_id: Option<String>,
         bounds: WindowGeometry,
@@ -751,6 +754,7 @@ impl AppRuntime {
             vec![OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentError {
+                    operation_id: operation_id.clone(),
                     session_id: session_id.clone(),
                     message,
                 },
@@ -762,6 +766,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentStarted {
+                    operation_id: operation_id.clone(),
                     session_id: session_id.to_string(),
                     branch,
                 },
@@ -884,9 +889,6 @@ impl AppRuntime {
         if let Some(level) = session.reasoning_level.clone() {
             builder = builder.reasoning_level(level);
         }
-        if session.skip_permissions {
-            builder = builder.skip_permissions(true);
-        }
         if session.fast_mode_enabled() {
             builder = builder.fast_mode(true);
         }
@@ -917,11 +919,12 @@ impl AppRuntime {
             );
         } else if session.agent_id.supports_resume_picker() {
             builder = builder.session_mode(gwt_agent::SessionMode::Resume);
+        } else if session.agent_id.supports_continue_latest() {
+            builder = builder.session_mode(gwt_agent::SessionMode::Continue);
         } else {
-            // Legacy metadata-only rows for agents without a native resume
-            // picker remain a fresh start fallback. Claude Code / Codex use
-            // their provider-native picker instead of silently losing Resume.
-            builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+            return reply_error(
+                "No saved conversation is available for this Session; use Continue work to start a linked execution with handoff context.".to_string(),
+            );
         }
 
         let mut config = builder.build();
@@ -1043,6 +1046,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id.to_string(),
                 BackendEvent::WorkspaceResumeAgentStarted {
+                    operation_id: String::new(),
                     session_id,
                     branch: Some(branch),
                 },
@@ -1481,7 +1485,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
@@ -1491,7 +1495,22 @@ impl AppRuntime {
                 },
             )];
         };
-        let Some(tab) = self.tab(&tab_id) else {
+        self.open_issue_monitor_launch_wizard_events_for_project(
+            client_id,
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+        )
+    }
+
+    fn open_issue_monitor_launch_wizard_events_for_project(
+        &mut self,
+        client_id: &str,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(project_root) else {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
@@ -1500,6 +1519,9 @@ impl AppRuntime {
                     issue_number: Some(issue_number),
                 },
             )];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return Vec::new();
         };
         if tab.kind != gwt::ProjectKind::Git {
             return vec![OutboundEvent::reply(
@@ -1524,19 +1546,20 @@ impl AppRuntime {
         }
 
         let project_root = tab.project_root.clone();
-        let base_branch_name = match current_branch_name_for_launch_agent(&project_root) {
-            Ok(branch) => branch,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::IssueMonitorToast {
-                        level: "error".to_string(),
-                        message: error,
-                        issue_number: Some(issue_number),
-                    },
-                )];
-            }
-        };
+        let base_branch_name =
+            match gwt::start_work::resolve_launch_agent_base_branch(&project_root) {
+                Ok(branch) => branch,
+                Err(error) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorToast {
+                            level: "error".to_string(),
+                            message: error,
+                            issue_number: Some(issue_number),
+                        },
+                    )];
+                }
+            };
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
         match self.open_knowledge_launch_wizard_for_base_branch_with_previous_profiles(
             &tab_id,
@@ -1587,8 +1610,31 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        let events = self.open_issue_monitor_launch_wizard_events(
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return self.open_issue_monitor_launch_wizard_events(
+                client_id,
+                issue_number,
+                linked_issue_kind,
+            );
+        };
+        self.open_issue_monitor_configure_wizard_events_for_project(
             client_id,
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+        )
+    }
+
+    fn open_issue_monitor_configure_wizard_events_for_project(
+        &mut self,
+        client_id: &str,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        let events = self.open_issue_monitor_launch_wizard_events_for_project(
+            client_id,
+            project_root,
             issue_number,
             linked_issue_kind,
         );
@@ -1757,37 +1803,237 @@ impl AppRuntime {
         profiles.with_repo_local(fallback_profile)
     }
 
-    pub(crate) fn auto_launch_issue_monitor_request_events(
+    #[cfg(test)]
+    pub(crate) fn auto_launch_issue_monitor_request_events_for_project(
         &mut self,
+        project_root: &Path,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind, None, None) {
-            Ok(Some(events)) => events,
+        self.auto_launch_issue_monitor_delivery_events_for_project(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auto_launch_issue_monitor_delivery_events(
+        &mut self,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return self.issue_monitor_launch_failed_delivery_events(
+                None,
+                issue_number,
+                "Project tab not found",
+                delivery_id.as_deref(),
+            );
+        };
+        self.auto_launch_issue_monitor_delivery_events_for_project(
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+            delivery_id,
+        )
+    }
+
+    pub(crate) fn auto_launch_issue_monitor_delivery_events_for_project(
+        &mut self,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let mut recovery_events = Vec::new();
+        if let Some(delivery_id) = delivery_id.as_deref() {
+            match self
+                .issue_monitor_launch_deliveries
+                .get(delivery_id)
+                .cloned()
+            {
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id,
+                    started_at,
+                }) => {
+                    let window_exists = self.tracked_window_exists(&window_id);
+                    if window_exists
+                        && started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL
+                    {
+                        return Vec::new();
+                    }
+                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                    self.pending_launch_feedback_contexts.remove(&window_id);
+                    self.inflight_launches
+                        .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+                    if window_exists {
+                        recovery_events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { window_id }) => {
+                    return self.issue_monitor_launch_completed_delivery_events(
+                        project_root,
+                        issue_number,
+                        &window_id,
+                        Some(delivery_id),
+                    );
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::Launched { window_id }) => {
+                    return self.issue_monitor_launch_succeeded_delivery_events(
+                        project_root,
+                        issue_number,
+                        &window_id,
+                        Some(delivery_id),
+                    );
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message }) => {
+                    return self.issue_monitor_launch_failed_delivery_events(
+                        Some(project_root),
+                        issue_number,
+                        &message,
+                        Some(delivery_id),
+                    );
+                }
+                None => {}
+            }
+            if let Some((window_id, was_materialized, _)) =
+                self.existing_issue_monitor_delivery_window(project_root, issue_number, delivery_id)
+            {
+                match self.claim_issue_monitor_launch_delivery(
+                    project_root,
+                    issue_number,
+                    delivery_id,
+                    &window_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return recovery_events,
+                    Err(error) => {
+                        recovery_events.extend(self.issue_monitor_control_error_events(
+                            None,
+                            error,
+                            "reclaim-launch-delivery-window",
+                            Some(issue_number),
+                        ));
+                        return recovery_events;
+                    }
+                }
+                if !was_materialized {
+                    recovery_events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                } else {
+                    let Some((window_id, materialized, workspace_durable)) = self
+                        .existing_issue_monitor_delivery_window(
+                            project_root,
+                            issue_number,
+                            delivery_id,
+                        )
+                    else {
+                        return recovery_events;
+                    };
+                    return if materialized && workspace_durable {
+                        self.issue_monitor_launch_succeeded_delivery_events(
+                            project_root,
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    } else {
+                        self.issue_monitor_launch_completed_delivery_events(
+                            project_root,
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    };
+                }
+            }
+        }
+        match self.silent_issue_monitor_launch_events_for_project(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            None,
+            None,
+            delivery_id.clone(),
+        ) {
+            Ok(Some(events)) => {
+                recovery_events.extend(events);
+                recovery_events
+            }
             Ok(None) => {
                 if self.launch_wizard.is_some() {
-                    return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                        level: "info".to_string(),
-                        message: "Issue Monitor settings are already open".to_string(),
-                        issue_number: Some(issue_number),
-                    })];
+                    recovery_events.push(OutboundEvent::broadcast(
+                        BackendEvent::IssueMonitorToast {
+                            level: "info".to_string(),
+                            message: "Issue Monitor settings are already open".to_string(),
+                            issue_number: Some(issue_number),
+                        },
+                    ));
+                    return recovery_events;
                 }
-                self.open_issue_monitor_configure_wizard_events(
-                    "__issue_monitor__",
-                    issue_number,
-                    linked_issue_kind,
-                )
-                .into_iter()
-                .map(|mut event| {
-                    if matches!(event.target, DispatchTarget::Client(_)) {
-                        event.target = DispatchTarget::Broadcast;
-                    }
-                    event
-                })
-                .collect()
+                recovery_events.extend(
+                    self.open_issue_monitor_configure_wizard_events_for_project(
+                        "__issue_monitor__",
+                        project_root,
+                        issue_number,
+                        linked_issue_kind,
+                    )
+                    .into_iter()
+                    .map(|mut event| {
+                        if matches!(event.target, DispatchTarget::Client(_)) {
+                            event.target = DispatchTarget::Broadcast;
+                        }
+                        event
+                    })
+                    .collect::<Vec<_>>(),
+                );
+                recovery_events
             }
-            Err(error) => self.issue_monitor_launch_failed_events(issue_number, &error),
+            Err(error) => {
+                recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
+                    Some(project_root),
+                    issue_number,
+                    &error,
+                    delivery_id.as_deref(),
+                ));
+                recovery_events
+            }
         }
+    }
+
+    fn existing_issue_monitor_delivery_window(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: &str,
+    ) -> Option<(String, bool, bool)> {
+        let tab_id = self.issue_monitor_tab_id_for_project_root(project_root)?;
+        let tab = self.tab(&tab_id)?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &tab.project_root,
+        ))
+        .ok()?;
+        let delivery = prefs.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        })?;
+        let bound_window_id = delivery.materializer_window_id.as_deref()?;
+        let window_id = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .map(|window| combined_window_id(&tab_id, &window.id))
+            .find(|window_id| window_id == bound_window_id)?;
+        Some((
+            window_id,
+            delivery.materialized_window_id.as_deref() == Some(bound_window_id),
+            delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
+        ))
     }
 
     /// SPEC #3200 Option A: handle a daemon `review_dispatch` — prepare the
@@ -1796,8 +2042,9 @@ impl AppRuntime {
     /// dispatched. Spawning the review agent in an isolated worktree on a
     /// different model, and bridging its verdict back via the `ReviewVerdict`
     /// control, is the live-integration step verified against a real PR.
-    pub(crate) fn auto_dispatch_issue_monitor_review_events(
+    pub(crate) fn auto_dispatch_issue_monitor_review_events_for_project(
         &mut self,
+        project_root: &Path,
         dispatch: gwt::AutonomousReviewDispatch,
     ) -> Vec<OutboundEvent> {
         let prompt = build_review_dispatch_prompt(&dispatch);
@@ -1815,18 +2062,18 @@ impl AppRuntime {
         // unattended.
         // SPEC #3200 FR-015: the configured review model (if any) is forced for
         // the review agent so it differs from the implementer's.
-        let review_model =
-            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
-                self.active_project_root()
-                    .unwrap_or(std::path::Path::new(".")),
-            ))
-            .ok()
-            .and_then(|prefs| prefs.autonomous_tuning.review_model);
-        match self.silent_issue_monitor_launch_events(
+        let review_model = gwt::load_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| prefs.autonomous_tuning.review_model);
+        match self.silent_issue_monitor_launch_events_for_project(
+            project_root,
             dispatch.issue_number,
             dispatch.linked_issue_kind,
             Some(prompt),
             review_model,
+            None,
         ) {
             Ok(Some(events)) => events,
             Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
@@ -1837,34 +2084,70 @@ impl AppRuntime {
                 ),
                 issue_number: Some(dispatch.issue_number),
             })],
-            Err(error) => self.issue_monitor_launch_failed_events(dispatch.issue_number, &error),
+            Err(error) => self.issue_monitor_launch_failed_events(
+                Some(project_root),
+                dispatch.issue_number,
+                &error,
+            ),
         }
     }
 
-    fn silent_issue_monitor_launch_events(
+    fn silent_issue_monitor_launch_events_for_project(
         &mut self,
+        requested_project_root: &Path,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         review_prompt: Option<String>,
         review_model: Option<String>,
+        delivery_id: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return Err("Open a project before launching monitored Issue work".to_string());
-        };
-        let Some(tab) = self.tab(&tab_id) else {
+        let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
+        else {
             return Err("Project tab not found".to_string());
         };
-        if tab.kind != gwt::ProjectKind::Git {
+        let (project_kind, migration_pending, project_root, proposed_window_id) = {
+            let Some(tab) = self.tab(&tab_id) else {
+                return Err("Project tab not found".to_string());
+            };
+            (
+                tab.kind,
+                tab.migration_pending,
+                tab.project_root.clone(),
+                combined_window_id(
+                    &tab_id,
+                    &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+                ),
+            )
+        };
+        if let Some(delivery_id) = delivery_id.as_deref() {
+            match self.claim_issue_monitor_launch_delivery(
+                &project_root,
+                issue_number,
+                delivery_id,
+                &proposed_window_id,
+            ) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Some(Vec::new())),
+                Err(error) => {
+                    return Ok(Some(self.issue_monitor_control_error_events(
+                        None,
+                        error,
+                        "claim-launch-delivery",
+                        Some(issue_number),
+                    )));
+                }
+            }
+        }
+        if project_kind != gwt::ProjectKind::Git {
             return Err("Issue Monitor launch requires a Git project".to_string());
         }
-        if tab.migration_pending {
+        if migration_pending {
             return Err(
                 "Complete the project migration before launching monitored Issue work".to_string(),
             );
         }
 
-        let project_root = tab.project_root.clone();
-        let base_branch_name = current_branch_name_for_launch_agent(&project_root)?;
+        let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
         if previous_profiles.preferred_profile().is_none() {
             return Ok(None);
@@ -1894,6 +2177,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                delivery_id.clone(),
             )? {
                 return Ok(Some(events));
             }
@@ -1964,6 +2248,8 @@ impl AppRuntime {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
+            issue_monitor_delivery_id: delivery_id,
+            issue_monitor_project_root: Some(project_root.clone()),
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -2000,6 +2286,7 @@ impl AppRuntime {
         project_root: &Path,
         target_branch: &str,
         issue_number: u64,
+        delivery_id: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
         else {
@@ -2041,6 +2328,8 @@ impl AppRuntime {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
+            issue_monitor_delivery_id: delivery_id,
+            issue_monitor_project_root: Some(project_root.to_path_buf()),
         };
         let mut events = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
@@ -2356,6 +2645,10 @@ impl AppRuntime {
             self.launch_wizard = Some(session);
             return Vec::new();
         }
+        let issue_monitor_project_root = session
+            .issue_monitor_launch_issue_number
+            .and_then(|_| self.tab(&session.tab_id))
+            .map(|tab| tab.project_root.clone());
 
         match config {
             LaunchWizardLaunchRequest::Agent(config) => {
@@ -2369,6 +2662,8 @@ impl AppRuntime {
                         "Launch Agent".to_string()
                     },
                     issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+                    issue_monitor_delivery_id: None,
+                    issue_monitor_project_root: issue_monitor_project_root.clone(),
                 });
                 let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
                     self.spawn_agent_window_in_agent_kanban(
@@ -2439,7 +2734,7 @@ impl AppRuntime {
         }
     }
 
-    fn save_issue_monitor_profile_from_launch_request(
+    pub(super) fn save_issue_monitor_profile_from_launch_request(
         &mut self,
         mut session: LaunchWizardSession,
         save_context: IssueMonitorProfileSaveContext,
@@ -2464,12 +2759,37 @@ impl AppRuntime {
             return vec![self.launch_wizard_state_outbound()];
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
-        prefs.launch_profile = Some(gwt::IssueMonitorLaunchProfile::from(config.as_ref()));
-        if let Err(error) = gwt::save_issue_monitor_prefs(&prefs_path, &prefs) {
-            session.wizard.error = Some(format!("Failed to save Issue Monitor settings: {error}"));
-            self.launch_wizard = Some(session);
-            return vec![self.launch_wizard_state_outbound()];
+        let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
+        let saved = gwt::mutate_issue_monitor_prefs_recovering(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs::recovery_default(),
+            |prefs| {
+                if prefs.advance_effect_authority_epoch().is_some() {
+                    prefs.launch_profile = Some(launch_profile);
+                    true
+                } else {
+                    false
+                }
+            },
+        );
+        match saved {
+            Ok((_, true)) => {}
+            Ok((_, false)) => {
+                session.wizard.error = Some(
+                    "Failed to save Issue Monitor settings: authority epoch overflow".to_string(),
+                );
+                self.launch_wizard = Some(session);
+                return vec![self.launch_wizard_state_outbound()];
+            }
+            Err(error) => {
+                session.wizard.error =
+                    Some(format!("Failed to save Issue Monitor settings: {error}"));
+                self.launch_wizard = Some(session);
+                return vec![self.launch_wizard_state_outbound()];
+            }
         }
         let mut events = vec![
             self.launch_wizard_state_broadcast(None),
@@ -2577,164 +2897,6 @@ fn launch_runtime_context_paths(
         return (default_worktree_path, None);
     }
     (project_root.to_path_buf(), None)
-}
-
-fn current_branch_name_for_launch_agent(project_root: &Path) -> Result<String, String> {
-    const NO_BRANCHES_ERROR: &str =
-        "No branches exist in this repository; create an initial commit first";
-    const NO_SELECTED_BRANCH_ERROR: &str = "Current branch is unavailable: repository has local \
-        branches, but no current or checked-out develop/main base branch could be resolved";
-
-    let existing_branch = |repo_path: &Path, branch: &str| -> Result<Option<String>, String> {
-        let branch = normalize_branch_name(branch);
-        if branch.is_empty() || !local_branch_resolves_to_commit(repo_path, &branch)? {
-            Ok(None)
-        } else {
-            Ok(Some(branch))
-        }
-    };
-    let mut deferred_error = None;
-
-    if project_root_is_git_worktree(project_root) {
-        match symbolic_head_branch(project_root) {
-            Ok(Some(branch)) => match existing_branch(project_root, &branch) {
-                Ok(Some(branch)) => return Ok(branch),
-                Ok(None) => {}
-                Err(error) => {
-                    deferred_error = Some(error);
-                }
-            },
-            Ok(None) => {}
-            Err(error) => deferred_error = Some(error),
-        }
-    }
-
-    let remember_error = |slot: &mut Option<String>, error: String| {
-        if slot.is_none() {
-            *slot = Some(error);
-        }
-    };
-
-    let main_repo_path = gwt_git::worktree::main_worktree_root(project_root)
-        .map_err(|error| format!("Current branch is unavailable: {error}"))?;
-    let worktrees = gwt_git::WorktreeManager::new(&main_repo_path)
-        .list()
-        .map_err(|error| format!("Current branch is unavailable: {error}"))?;
-    for branch in ["develop", "main"] {
-        if usable_worktree_path_for_branch(&worktrees, branch).is_none() {
-            continue;
-        }
-        match existing_branch(&main_repo_path, branch) {
-            Ok(Some(branch)) => return Ok(branch),
-            Ok(None) => {}
-            Err(error) => remember_error(&mut deferred_error, error),
-        }
-    }
-
-    match symbolic_head_branch(&main_repo_path) {
-        Ok(Some(branch)) => match existing_branch(&main_repo_path, &branch) {
-            Ok(Some(branch)) => return Ok(branch),
-            Ok(None) => {}
-            Err(error) => remember_error(&mut deferred_error, error),
-        },
-        Ok(None) => {}
-        Err(error) => remember_error(&mut deferred_error, error),
-    }
-
-    match local_branches_resolving_to_commits(&main_repo_path, "refs/heads/") {
-        Ok(branches) if branches.is_empty() => {
-            if let Some(error) = deferred_error {
-                Err(error)
-            } else {
-                Err(NO_BRANCHES_ERROR.to_string())
-            }
-        }
-        Ok(_) => Err(deferred_error.unwrap_or_else(|| NO_SELECTED_BRANCH_ERROR.to_string())),
-        Err(error) => Err(error),
-    }
-}
-
-fn local_branch_resolves_to_commit(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
-    let ref_name = format!("refs/heads/{branch_name}");
-    Ok(local_branches_resolving_to_commits(repo_path, &ref_name)?
-        .iter()
-        .any(|branch| branch == branch_name))
-}
-
-fn symbolic_head_branch(repo_path: &Path) -> Result<Option<String>, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|error| format!("git symbolic-ref HEAD: {error}"))?;
-    match output.status.code() {
-        Some(0) => {
-            let raw_branch = String::from_utf8_lossy(&output.stdout);
-            let branch = normalize_branch_name(raw_branch.trim());
-            if branch.is_empty() {
-                Err(format!(
-                    "git symbolic-ref HEAD in {} returned an empty branch",
-                    repo_path.display()
-                ))
-            } else {
-                Ok(Some(branch))
-            }
-        }
-        Some(1) => Ok(None),
-        _ => Err(format!(
-            "git symbolic-ref HEAD in {} failed with status {}: {}",
-            repo_path.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-    }
-}
-
-fn local_branches_resolving_to_commits(
-    repo_path: &Path,
-    pattern: &str,
-) -> Result<Vec<String>, String> {
-    let format = "--format=%(refname)\t%(objecttype)\t%(*objecttype)";
-    let output = gwt_core::process::hidden_command("git")
-        .args(["for-each-ref", format, pattern])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|error| format!("git for-each-ref {pattern}: {error}"))?;
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() || !stderr.is_empty() {
-        return Err(format!(
-            "git for-each-ref {pattern} in {} failed with status {}: {}",
-            repo_path.display(),
-            output.status,
-            stderr
-        ));
-    }
-
-    let mut branches = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut fields = line.splitn(3, '\t');
-        let (Some(ref_name), Some(object_type), Some(peeled_object_type)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            return Err(format!(
-                "git for-each-ref {pattern} in {} returned malformed output",
-                repo_path.display()
-            ));
-        };
-        let Some(branch) = ref_name.strip_prefix("refs/heads/") else {
-            return Err(format!(
-                "git for-each-ref {pattern} in {} returned non-local ref {ref_name}",
-                repo_path.display()
-            ));
-        };
-        if object_type == "commit" || peeled_object_type == "commit" {
-            branches.push(branch.to_string());
-        }
-    }
-    Ok(branches)
 }
 
 fn launch_runtime_worktrees(project_root: &Path) -> Option<Vec<gwt_git::WorktreeInfo>> {
@@ -2946,7 +3108,7 @@ mod launch_agent_branch_resolution_tests {
 
     use tempfile::tempdir;
 
-    use super::current_branch_name_for_launch_agent;
+    use gwt::start_work::resolve_launch_agent_base_branch;
 
     const NO_BRANCHES_ERROR: &str =
         "No branches exist in this repository; create an initial commit first";
@@ -3035,7 +3197,7 @@ mod launch_agent_branch_resolution_tests {
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace),
+            resolve_launch_agent_base_branch(&workspace),
             Ok("develop".to_string())
         );
     }
@@ -3047,7 +3209,7 @@ mod launch_agent_branch_resolution_tests {
         init_bare_workspace(&workspace, "main", &[], Some("main"));
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace),
+            resolve_launch_agent_base_branch(&workspace),
             Ok("main".to_string())
         );
     }
@@ -3059,7 +3221,7 @@ mod launch_agent_branch_resolution_tests {
         init_committed_repo(&repo, "feature/current");
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&repo),
+            resolve_launch_agent_base_branch(&repo),
             Ok("feature/current".to_string())
         );
     }
@@ -3071,7 +3233,7 @@ mod launch_agent_branch_resolution_tests {
         init_bare_workspace(&workspace, "master", &[], None);
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace),
+            resolve_launch_agent_base_branch(&workspace),
             Ok("master".to_string())
         );
     }
@@ -3083,7 +3245,7 @@ mod launch_agent_branch_resolution_tests {
         init_empty_bare_workspace(&workspace);
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace),
+            resolve_launch_agent_base_branch(&workspace),
             Err(NO_BRANCHES_ERROR.to_string())
         );
     }
@@ -3096,7 +3258,7 @@ mod launch_agent_branch_resolution_tests {
         run_git(&repo, &["init", "-q", "-b", "future"]);
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&repo),
+            resolve_launch_agent_base_branch(&repo),
             Err(NO_BRANCHES_ERROR.to_string())
         );
     }
@@ -3113,7 +3275,7 @@ mod launch_agent_branch_resolution_tests {
         run_git(&repo, &["checkout", "-q", "--detach", "HEAD"]);
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&repo),
+            resolve_launch_agent_base_branch(&repo),
             Ok("develop".to_string())
         );
     }
@@ -3126,7 +3288,7 @@ mod launch_agent_branch_resolution_tests {
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace),
+            resolve_launch_agent_base_branch(&workspace),
             Ok("master".to_string())
         );
     }
@@ -3138,7 +3300,7 @@ mod launch_agent_branch_resolution_tests {
         init_bare_workspace(&workspace, "main", &["develop"], Some("develop"));
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace.join("repo.git")),
+            resolve_launch_agent_base_branch(&workspace.join("repo.git")),
             Ok("develop".to_string())
         );
     }
@@ -3156,7 +3318,7 @@ mod launch_agent_branch_resolution_tests {
         .expect("replace main ref with blob");
 
         assert_eq!(
-            current_branch_name_for_launch_agent(&workspace),
+            resolve_launch_agent_base_branch(&workspace),
             Ok("master".to_string())
         );
     }
@@ -3168,7 +3330,7 @@ mod launch_agent_branch_resolution_tests {
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join(".git"), "gitdir: missing\n").expect("write broken gitdir");
 
-        let error = current_branch_name_for_launch_agent(&workspace).expect_err("reject metadata");
+        let error = resolve_launch_agent_base_branch(&workspace).expect_err("reject metadata");
         assert_ne!(error, NO_BRANCHES_ERROR);
         assert!(
             error.contains("rev-parse --git-common-dir"),
@@ -3184,7 +3346,7 @@ mod launch_agent_branch_resolution_tests {
         fs::write(repo.join(".git/refs/heads/main"), "not-an-object-id\n")
             .expect("corrupt main ref");
 
-        let error = current_branch_name_for_launch_agent(&repo).expect_err("reject broken ref");
+        let error = resolve_launch_agent_base_branch(&repo).expect_err("reject broken ref");
         assert_ne!(error, NO_BRANCHES_ERROR);
         assert!(
             error.contains("symbolic-ref") || error.contains("broken ref"),
@@ -3199,7 +3361,7 @@ mod launch_agent_branch_resolution_tests {
         init_committed_repo(&repo, "feature/current");
         run_git(&repo, &["checkout", "-q", "--detach", "HEAD"]);
 
-        let error = current_branch_name_for_launch_agent(&repo).expect_err("require base branch");
+        let error = resolve_launch_agent_base_branch(&repo).expect_err("require base branch");
         assert_ne!(error, NO_BRANCHES_ERROR);
         assert!(
             error.contains("current or checked-out develop/main"),

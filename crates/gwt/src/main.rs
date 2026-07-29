@@ -4,10 +4,9 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::repo_browser::{
@@ -23,9 +22,8 @@ use gwt::{
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
     workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
     BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset,
-    WindowProcessStatus, APP_NAME,
+    FrontendEvent, KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
+    UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -64,41 +62,45 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{
-    build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
+    build_frontend_sync_events, AgentLaunchDisposition, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
-    ActiveAgentSession, AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner,
-    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
-    ProjectTabRuntime, WindowAddress,
+    ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
+    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
+    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
-    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_gwt_binary_setup,
-    ensure_docker_launch_service_ready, finalize_docker_agent_launch_config,
-    package_runner_version_spec, resolve_docker_launch_plan, resolve_docker_shell_command,
-    strip_package_runner_args,
+    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
+    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
+    resolve_docker_shell_command,
 };
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action, DockerLaunchServiceAction,
-    PackageRunnerProgram,
+    mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
+    resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
-use embedded_server::{ClientHub, EmbeddedServer};
-pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
-    build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
-    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
+pub(crate) use embedded_server::{
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentDurableAuthority, AgentFrontendRequest,
+    AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
+    AgentSessionPrincipal,
 };
+use embedded_server::{ClientHub, EmbeddedServer};
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
     resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+};
+pub(crate) use launch_runtime::{
+    apply_windows_host_shell_wrapper, build_shell_process_launch,
+    ensure_docker_launch_runtime_ready_for_runtime, install_launch_gwt_bin_env,
+    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -347,6 +349,25 @@ enum GuiShutdownOutcome {
 #[derive(Debug, Default)]
 struct GuiShutdownCoordinator {
     started: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSelfCloseQuitAction {
+    Defer,
+    Shutdown,
+}
+
+fn agent_self_close_quit_action(
+    deferred: &mut bool,
+    has_pending_agent_self_closes: bool,
+) -> AgentSelfCloseQuitAction {
+    if has_pending_agent_self_closes {
+        *deferred = true;
+        AgentSelfCloseQuitAction::Defer
+    } else {
+        *deferred = false;
+        AgentSelfCloseQuitAction::Shutdown
+    }
 }
 
 fn request_gui_shutdown(
@@ -870,13 +891,16 @@ fn daemon_broadcast_user_event(
             Some(UserEvent::DaemonRuntimeHook(event))
         }
         gwt::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
-            issue_monitor_daemon_user_event(event)
+            issue_monitor_daemon_user_event(event, project_root)
         }
     }
 }
 
 #[cfg(unix)]
-fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent> {
+fn issue_monitor_daemon_user_event(
+    event: serde_json::Value,
+    project_root: &Path,
+) -> Option<UserEvent> {
     let event_name = event.get("event")?.as_str()?;
     let payload = event
         .get("payload")
@@ -920,16 +944,25 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or(gwt::LinkedIssueKind::Issue);
+            let delivery_id = payload
+                .get("delivery_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             Some(UserEvent::IssueMonitorLaunchRequest {
+                project_root: project_root.to_path_buf(),
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             })
         }
         "review_dispatch" => {
             // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
             // review agent for a PR-ready autonomous issue.
             let dispatch: gwt::AutonomousReviewDispatch = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::IssueMonitorReviewDispatch { dispatch })
+            Some(UserEvent::IssueMonitorReviewDispatch {
+                project_root: project_root.to_path_buf(),
+                dispatch,
+            })
         }
         _ => None,
     }
@@ -976,6 +1009,25 @@ enum UserEvent {
     Frontend {
         client_id: ClientId,
         event: FrontendEvent,
+    },
+    /// Internal request from the capability-authenticated pane bridge. The
+    /// server-side principal is the only project/Session routing authority.
+    AgentFrontend {
+        client_id: ClientId,
+        grant: AgentCapabilityGrant,
+        request: AgentFrontendRequest,
+    },
+    /// Finalize one self-close that has already transitioned its exact
+    /// capability generation to Closing and attempted a direct origin-socket
+    /// acknowledgement.
+    CommitAgentSelfClose {
+        ticket: AgentSelfCloseCapabilityTicket,
+    },
+    /// Candidate Continue work launches must return an authenticated
+    /// SessionStart receipt before this correlated deadline.
+    ContinueWorkReadyTimeout {
+        window_id: String,
+        operation_id: String,
     },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
@@ -1063,12 +1115,15 @@ enum UserEvent {
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     IssueMonitorLaunchRequest {
+        project_root: PathBuf,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
     },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
+        project_root: PathBuf,
         dispatch: gwt::AutonomousReviewDispatch,
     },
     LaunchProgress {
@@ -1242,17 +1297,19 @@ mod tests {
     use gwt_terminal::PaneStatus;
 
     use super::{
-        app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        apply_windows_host_shell_wrapper, broadcast_log_entry, broadcast_runtime_hook_event,
-        build_frontend_sync_events, build_shell_process_launch, close_window_from_workspace,
-        combined_window_id, current_git_branch, docker_bundle_mounts_for_home,
-        docker_bundle_override_content, gui_front_door_launch_surface, hook_forward_authorized,
+        app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
+        apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
+        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
-        should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
-        AttachmentUploadStore, BlockingTaskSpawner, ClientHub, DispatchTarget,
-        KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
-        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
+        AgentLaunchDisposition, AppEventProxy, AppRuntime, AttachmentUploadStore,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1262,6 +1319,46 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[test]
+    fn stale_agent_frontend_outcome_unregisters_and_closes_pane_client() {
+        let clients = ClientHub::default();
+        let queue = clients.register("stale-pane-client".to_string());
+
+        apply_agent_frontend_dispatch_outcome(
+            &clients,
+            "stale-pane-client",
+            AgentFrontendDispatchOutcome::StaleCapability,
+        );
+
+        assert!(
+            matches!(
+                queue.try_next(),
+                Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                    if frame.code == 1008
+                        && frame.reason == "execution binding is no longer current"
+            ),
+            "a capability rotated while queued must close the agent socket with a stable policy frame"
+        );
+    }
+
+    #[test]
+    fn unavailable_agent_frontend_authority_closes_pane_client_without_raw_error() {
+        let clients = ClientHub::default();
+        let queue = clients.register("unknown-pane-client".to_string());
+
+        apply_agent_frontend_dispatch_outcome(
+            &clients,
+            "unknown-pane-client",
+            AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable,
+        );
+
+        assert!(matches!(
+            queue.try_next(),
+            Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                if frame.code == 1011 && frame.reason == "execution authority is unavailable"
+        ));
     }
 
     #[cfg(unix)]
@@ -1298,6 +1395,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some(project_root.display().to_string()),
             branch: Some("work/runtime".to_string()),
@@ -1411,7 +1509,11 @@ mod tests {
 
         let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "launch_request",
-            serde_json::json!({"issue_number": 42, "linked_issue_kind": "spec"}),
+            serde_json::json!({
+                "issue_number": 42,
+                "linked_issue_kind": "spec",
+                "delivery_id": "launch:effect-42",
+            }),
             42,
         );
         match super::daemon_broadcast_user_event(
@@ -1421,13 +1523,46 @@ mod tests {
             99,
         ) {
             Some(UserEvent::IssueMonitorLaunchRequest {
+                project_root: actual_project_root,
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             }) => {
+                assert_eq!(actual_project_root, project_root);
                 assert_eq!(issue_number, 42);
                 assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
+                assert_eq!(delivery_id.as_deref(), Some("launch:effect-42"));
             }
             other => panic!("unexpected issue monitor launch event: {other:?}"),
+        }
+
+        let dispatch = gwt::AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 84,
+            reviewed_sha: "abc123".to_string(),
+            required_criteria: vec!["tests pass".to_string()],
+            diff: "diff --git a/a b/a".to_string(),
+            linked_issue_kind: gwt::LinkedIssueKind::Issue,
+        };
+        let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "review_dispatch",
+            serde_json::to_value(&dispatch).expect("dispatch serializes"),
+            42,
+        );
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            review_payload,
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::IssueMonitorReviewDispatch {
+                project_root: actual_project_root,
+                dispatch: actual_dispatch,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(actual_dispatch, dispatch);
+            }
+            other => panic!("unexpected issue monitor review event: {other:?}"),
         }
     }
 
@@ -1470,6 +1605,45 @@ mod tests {
             2,
             "duplicate shutdown must not rerun cleanup"
         );
+    }
+
+    #[test]
+    fn pending_agent_self_close_does_not_consume_gui_shutdown_backstop_grace() {
+        let mut deferred = false;
+        let mut coordinator = super::GuiShutdownCoordinator::default();
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        assert_eq!(
+            super::agent_self_close_quit_action(&mut deferred, true),
+            super::AgentSelfCloseQuitAction::Defer
+        );
+        assert!(
+            calls.borrow().is_empty(),
+            "the cleanup backstop must not start while ACK delivery is pending"
+        );
+
+        assert_eq!(
+            super::agent_self_close_quit_action(&mut deferred, false),
+            super::AgentSelfCloseQuitAction::Shutdown
+        );
+        let outcome = super::request_gui_shutdown(
+            &mut coordinator,
+            super::GuiShutdownReason::QuitApp,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("cleanup".to_string()),
+        );
+
+        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            vec!["backstop:QuitApp:5s".to_string(), "cleanup".to_string()].as_slice(),
+            "the full cleanup grace must begin only after pending ACK delivery finishes"
+        );
+        assert!(!deferred);
     }
 
     #[test]
@@ -1775,6 +1949,25 @@ mod tests {
             }
             other => panic!("expected pane_send_result, got {other:?}"),
         }
+
+        runtime
+            .inspection_agent_windows
+            .insert("tab-1::claude-1".to_string());
+        let inspection_denied = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::PaneSendInput {
+                session_id: "session-a".to_string(),
+                text: "continue changing files\r".to_string(),
+            },
+        );
+        assert!(matches!(
+            inspection_denied.first().map(|event| &event.event),
+            Some(gwt::BackendEvent::PaneSendResult {
+                ok: false,
+                error: Some(error),
+                ..
+            }) if error.contains("inspection-only")
+        ));
     }
 
     #[test]
@@ -1789,6 +1982,7 @@ mod tests {
                 kind: RuntimeHookEventKind::RuntimeState,
                 source_event: Some("PreToolUse".to_string()),
                 gwt_session_id: Some("session-1".to_string()),
+                continuation_readiness_nonce: None,
                 agent_session_id: Some("agent-1".to_string()),
                 project_root: Some("E:/gwt/test-repo".to_string()),
                 branch: Some("feature/runtime".to_string()),
@@ -2455,11 +2649,18 @@ mod tests {
             launch_wizard_cache,
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
+            issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_materializer_id: "main-test-materializer".to_string(),
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_continue_work: HashMap::new(),
+            pending_fresh_execution_launches: HashMap::new(),
+            continue_work_outcomes: HashMap::new(),
+            continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            inspection_agent_windows: std::collections::HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
@@ -2476,7 +2677,9 @@ mod tests {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
-            hook_forward_target: None,
+            agent_capability_issuer: None,
+            agent_capability_tokens: HashMap::new(),
+            pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
@@ -3172,7 +3375,6 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Work,
             WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
@@ -3197,6 +3399,37 @@ mod tests {
             assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
+
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_raw_id = runtime
+            .window_lookup
+            .get(&branches_id)
+            .expect("Branches lookup")
+            .raw_id
+            .clone();
+        let before_z = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("Branches window")
+            .z_index;
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Work, bounds.clone())
+                .len(),
+            1,
+            "Work must focus the existing legacy Branches singleton",
+        );
+        let reused_work = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("reused Work surface");
+        assert_eq!(reused_work.geometry.width, 720.0);
+        assert_eq!(reused_work.geometry.height, 420.0);
+        assert!(reused_work.z_index > before_z);
     }
 
     #[test]
@@ -3669,6 +3902,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: None,
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/test".to_string()),
@@ -3770,6 +4004,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -4138,7 +4373,10 @@ mod tests {
             runtime
                 .handle_frontend_event(
                     "client-1".to_string(),
-                    gwt::FrontendEvent::CloseWindow { id: settings_id },
+                    gwt::FrontendEvent::CloseWindow {
+                        id: settings_id,
+                        request_id: None,
+                    },
                 )
                 .len(),
             1
@@ -4728,6 +4966,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -4768,6 +5007,7 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                AgentLaunchDisposition::WorkProducing,
                 repo.display().to_string(),
             )),
         );
@@ -5008,26 +5248,25 @@ mod tests {
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
         config.remove_env = vec!["SECRET".to_string()];
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
         assert!(changed, "expected bunx failure to switch to npx");
+        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
+        assert_eq!(
+            probes[0],
+            ("bunx".to_string(), vec!["--version".to_string()])
+        );
         assert_eq!(config.command, "npx");
         assert_eq!(
             config.args,
@@ -5057,52 +5296,54 @@ mod tests {
     }
 
     #[test]
-    fn host_package_runner_fallback_switches_custom_bunx_to_npx_when_probe_fails() {
+    fn host_package_runner_fallback_does_not_probe_or_mutate_custom_bunx() {
         let mut config = sample_custom_bunx_launch_config();
+        let original = format!("{config:?}");
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, _remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
-        assert!(changed, "expected custom bunx failure to switch to npx");
-        assert_eq!(config.command, "npx");
+        assert!(!changed, "Custom Bunx must bypass built-in fallback policy");
+        assert!(probes.is_empty(), "Custom Bunx must not be probed");
         assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ]
+            format!("{config:?}"),
+            original,
+            "Custom Bunx launch must remain unchanged"
         );
     }
 
     #[test]
-    fn host_package_runner_fallback_ignores_direct_installed_command() {
+    fn host_runner_health_compatibility_preserves_healthy_direct_command() {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
             .version("installed")
             .build();
+        #[cfg(not(windows))]
+        {
+            config.command = "/opt/gwt-test/claude".to_string();
+        }
+        #[cfg(windows)]
+        {
+            config.command = "C:/gwt-test/claude.exe".to_string();
+        }
         let original_command = config.command.clone();
         let original_args = config.args.clone();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |_command, _args, _env, _remove_env, _cwd| {
-                panic!("installed command should not probe bunx");
+            |command, args, _env, _remove_env, _cwd| {
+                assert_eq!(command, original_command);
+                assert_eq!(args, vec!["--version".to_string()]);
+                true
             },
         );
 
@@ -5380,11 +5621,13 @@ mod tests {
     fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
-        let content = docker_bundle_override_content("app", &bundle);
+        let content = docker_bundle_override_content("app", &bundle, "docker")
+            .expect("Docker managed override");
 
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+        assert!(content.contains("host.docker.internal:host-gateway"));
 
         let parsed: serde_yaml::Value =
             serde_yaml::from_str(&content).expect("override must parse as YAML");
@@ -5979,6 +6222,96 @@ mod tests {
         assert_ne!(
             second_dir, intake_dir,
             "collision avoided for concurrent intake"
+        );
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_fetches_origin_for_remote_base_ref() {
+        // #3374: an intake worktree must be based on the FRESH origin state,
+        // not the remote-tracking ref as of the last fetch. Advance origin
+        // develop after the clone; the resolved intake worktree must contain
+        // the new commit.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let origin = init_git_clone_with_origin(&repo);
+
+        // Advance origin: new commit in the seed repo, pushed to the bare
+        // origin. The clone's remote-tracking origin/develop stays stale.
+        let seed = temp.path().join("seed");
+        fs::write(seed.join("fresh.txt"), "fresh\n").expect("write fresh file");
+        for args in [
+            vec!["add", "fresh.txt"],
+            vec!["commit", "-qm", "advance develop"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&seed)
+                .status()
+                .expect("git seed advance");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+        let status = gwt_core::process::hidden_command("git")
+            .arg("push")
+            .arg("-q")
+            .arg(&origin)
+            .arg("develop:develop")
+            .current_dir(&seed)
+            .status()
+            .expect("git push origin");
+        assert!(status.success(), "git push to origin failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("origin/develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("ephemeral intake worktree resolves");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(
+            intake_dir.join("fresh.txt").exists(),
+            "intake worktree is based on the fetched origin tip, not the stale remote-tracking ref"
+        );
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_falls_back_to_head_without_origin_remote() {
+        // #3374: a repo with no origin remote cannot fetch; an `origin/*` base
+        // must fall back to HEAD instead of failing the intake launch.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        for args in [
+            vec!["init", "-q", "-b", "develop"],
+            vec!["config", "user.name", "Codex Test"],
+            vec!["config", "user.email", "codex@example.com"],
+            vec!["commit", "-qm", "init", "--allow-empty"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&repo)
+                .status()
+                .expect("git local repo setup");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("origin/develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("intake in a remote-less repo falls back to HEAD");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(
+            intake_dir.exists(),
+            "intake worktree materialized from HEAD"
         );
     }
 
@@ -6745,11 +7078,18 @@ mod tests {
         config
             .env_vars
             .insert("EXTRA_FLAG".to_string(), "1".to_string());
+        let runtime = super::resolved_test_docker_runtime(temp.path());
 
-        super::finalize_docker_agent_launch_config(&project, &mut config)
-            .expect("finalize docker launch");
+        let runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
+            &project,
+            &mut config,
+            Some(&runtime),
+        )
+        .expect("finalize docker launch")
+        .expect("Docker runtime worktree");
 
-        assert_eq!(config.command, super::docker_binary_for_launch());
+        assert_eq!(config.command, runtime.binary());
+        assert_eq!(runtime_worktree, "/workspace/app");
         assert_eq!(
             config.args,
             vec![
@@ -6794,10 +7134,16 @@ mod tests {
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
+        let runtime = super::resolved_test_docker_runtime(temp.path());
 
-        super::finalize_docker_agent_launch_config(&project, &mut config)
-            .expect("finalize docker launch");
+        let _runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
+            &project,
+            &mut config,
+            Some(&runtime),
+        )
+        .expect("finalize docker launch");
 
+        assert_eq!(config.command, runtime.binary());
         assert_eq!(
             config.args[..6],
             [
@@ -7050,6 +7396,25 @@ mod tests {
             Ok(true)
         );
         assert_eq!(super::local_branch_exists(&repo, "missing"), Ok(false));
+    }
+}
+
+fn apply_agent_frontend_dispatch_outcome(
+    clients: &ClientHub,
+    client_id: &str,
+    outcome: AgentFrontendDispatchOutcome,
+) {
+    match outcome {
+        AgentFrontendDispatchOutcome::Dispatched(events) => clients.dispatch(events),
+        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister_with_close_frame(
+            client_id,
+            Some(crate::embedded_server::AGENT_STALE_BINDING_CLOSE),
+        ),
+        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => clients
+            .unregister_with_close_frame(
+                client_id,
+                Some(crate::embedded_server::AGENT_AUTHORITY_UNAVAILABLE_CLOSE),
+            ),
     }
 }
 
@@ -7316,7 +7681,7 @@ fn main() -> std::io::Result<()> {
             server.bound_port()
         );
     }
-    app.set_hook_forward_target(server.hook_forward_target());
+    app.set_agent_capability_issuer(server.agent_capability_issuer());
     // SPEC #2920 Phase 4: own the browser URL so it can survive the
     // tao event_loop closure's 'static requirement (the closure moves
     // `server`, which the previous `&str` borrow blocked).
@@ -7451,6 +7816,8 @@ fn main() -> std::io::Result<()> {
     // so always arm it (the legacy headless-only gate is gone).
     let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
+    let mut agent_self_close_quit_deferred = false;
+    let mut gui_shutdown_backstop_armed = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -7469,12 +7836,27 @@ fn main() -> std::io::Result<()> {
             // (`UserEvent::QuitApp`), SIGINT/SIGTERM, or
             // `Event::LoopDestroyed` instead.
             Event::UserEvent(UserEvent::QuitApp) => {
+                let self_close_was_deferred = agent_self_close_quit_deferred;
+                if agent_self_close_quit_action(
+                    &mut agent_self_close_quit_deferred,
+                    app.has_pending_agent_self_closes(),
+                ) == AgentSelfCloseQuitAction::Defer
+                {
+                    if !self_close_was_deferred {
+                        tracing::info!(
+                            target: "gwt::shutdown",
+                            "deferring GUI shutdown until accepted agent self-close ACK attempts finish"
+                        );
+                    }
+                    return;
+                }
                 request_gui_shutdown(
                     &mut gui_shutdown,
                     GuiShutdownReason::QuitApp,
                     |reason, grace| {
-                        if !is_headless {
+                        if !is_headless && !gui_shutdown_backstop_armed {
                             spawn_gui_exit_backstop(reason, grace);
+                            gui_shutdown_backstop_armed = true;
                         }
                     },
                     || {
@@ -7528,6 +7910,34 @@ fn main() -> std::io::Result<()> {
                         app.active_project_root().map(Path::to_path_buf),
                     );
                 }
+            }
+            Event::UserEvent(UserEvent::AgentFrontend {
+                client_id,
+                grant,
+                request,
+            }) => {
+                let outcome =
+                    app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
+                apply_agent_frontend_dispatch_outcome(&clients, &client_id, outcome);
+            }
+            Event::UserEvent(UserEvent::CommitAgentSelfClose { ticket }) => {
+                let events = app.commit_agent_self_close(ticket);
+                clients.dispatch(events);
+                if agent_self_close_quit_deferred && !app.has_pending_agent_self_closes() {
+                    agent_self_close_quit_deferred = false;
+                    let _ = proxy.send_event(UserEvent::QuitApp);
+                }
+            }
+            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout {
+                window_id,
+                operation_id,
+            }) => {
+                clients.dispatch(
+                    app.handle_continue_work_ready_timeout(
+                        &window_id,
+                        &operation_id,
+                    ),
+                );
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the
@@ -7614,15 +8024,28 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
+                project_root,
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             }) => {
-                let events =
-                    app.auto_launch_issue_monitor_request_events(issue_number, linked_issue_kind);
+                let events = app.auto_launch_issue_monitor_delivery_events_for_project(
+                    &project_root,
+                    issue_number,
+                    linked_issue_kind,
+                    delivery_id,
+                );
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch { dispatch }) => {
-                let events = app.auto_dispatch_issue_monitor_review_events(dispatch);
+            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {
+                project_root,
+                dispatch,
+            }) => {
+                let events =
+                    app.auto_dispatch_issue_monitor_review_events_for_project(
+                        &project_root,
+                        dispatch,
+                    );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {

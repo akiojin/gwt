@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{GwtError, JsonDecodeKind, Result};
 use crate::workspace_projection::{
-    load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path,
+    decode_workspace_work_event_line, load_workspace_work_items_from_path,
+    save_workspace_work_items_projection_to_path, DecodedWorkspaceWorkEvent,
     DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem,
     WorkItemsProjection, WorkspaceExecutionContainerRef,
 };
@@ -37,6 +38,7 @@ pub struct WorkEventsIntakeReport {
     pub applied: usize,
     pub skipped_duplicate: usize,
     pub skipped_close_kind: usize,
+    pub skipped_opaque: usize,
     pub skipped_invalid: usize,
     pub skipped_terminal: usize,
 }
@@ -484,17 +486,25 @@ fn collect_work_events<'a>(
             if line.is_empty() {
                 continue;
             }
-            let event: WorkEvent = match serde_json::from_str(line) {
-                Ok(event) => event,
-                Err(error) if content_kind == WorkEventContentKind::Shared => {
-                    report.skipped_invalid += 1;
-                    tracing::warn!(%error, "work events intake: skipping malformed line");
-                    continue;
+            let event = match content_kind {
+                WorkEventContentKind::Shared => {
+                    match decode_workspace_work_event_line(line.as_bytes()) {
+                        Ok(DecodedWorkspaceWorkEvent::Known(event)) => *event,
+                        Ok(DecodedWorkspaceWorkEvent::Opaque) => {
+                            report.skipped_opaque += 1;
+                            continue;
+                        }
+                        Err(error) => {
+                            report.skipped_invalid += 1;
+                            tracing::warn!(%error, "work events intake: skipping malformed line");
+                            continue;
+                        }
+                    }
                 }
-                Err(error) => {
-                    return Err(GwtError::Other(format!(
-                        "machine-local close event json: {error}"
-                    )));
+                WorkEventContentKind::MachineLocalLifecycle => {
+                    serde_json::from_str(line).map_err(|error| {
+                        GwtError::Other(format!("machine-local close event json: {error}"))
+                    })?
                 }
             };
             match content_kind {
@@ -1138,6 +1148,158 @@ mod tests {
         let report = ingest_work_events_content(&works, &content).expect("ingest");
         assert_eq!(report.applied, 1);
         assert_eq!(report.skipped_invalid, 2);
+    }
+
+    // SPEC-2359 T-820/T-821 (US-88 / FR-557): shared checkout logs use the
+    // release-A compatible reader, while machine-local lifecycle state keeps
+    // its strict fail-closed contract.
+    #[test]
+    fn shared_intake_applies_known_event_with_additive_fields_without_rewriting_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        let source = tmp.path().join("events.jsonl");
+        let content = concat!(
+            r#"{ "id":"evt-additive", "work_item_id":"work-reader-a", "kind":"start", "title":"Release A compatible", "status_category":"active", "updated_at":"2026-07-22T02:00:00Z", "future_event_field":{"nested":[1,"two",true]} }"#,
+            "\n"
+        );
+        std::fs::write(&source, content.as_bytes()).expect("write shared source");
+        let original = std::fs::read(&source).expect("snapshot shared source");
+        let shared = std::fs::read_to_string(&source).expect("read shared source");
+
+        let report = ingest_work_events_content(&works, &shared)
+            .expect("additive event fields must remain reader-compatible");
+
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.skipped_opaque, 0);
+        assert_eq!(report.skipped_invalid, 0);
+        let projection = load_workspace_work_items_from_path(&works)
+            .expect("load")
+            .expect("projection");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-reader-a")
+            .expect("known event projection");
+        assert_eq!(item.title, "Release A compatible");
+        assert_eq!(item.events.len(), 1);
+        assert_eq!(
+            std::fs::read(&source).expect("read preserved shared source"),
+            original,
+            "intake must never normalize or rewrite opaque source bytes"
+        );
+    }
+
+    #[test]
+    fn shared_intake_skips_unknown_kind_and_continues_with_subsequent_known_event() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        let source = tmp.path().join("events.jsonl");
+        let content = concat!(
+            r#"{"id":"evt-known-start","work_item_id":"work-reader-a","kind":"start","title":"Known title","status_category":"active","updated_at":"2026-07-22T02:00:00Z"}"#,
+            "\n",
+            r#"{ "id":"evt-future-correction", "work_item_id":"work-reader-a", "kind":"correction", "corrects_event_ids":["evt-known-start"], "patch":{"title":"Future title"}, "updated_at":"2026-07-22T02:01:00Z" }"#,
+            "\n",
+            r#"{"id":"evt-known-update","work_item_id":"work-reader-a","kind":"update","summary":"Known update survives","updated_at":"2026-07-22T02:02:00Z"}"#,
+            "\n"
+        );
+        std::fs::write(&source, content.as_bytes()).expect("write shared source");
+        let original = std::fs::read(&source).expect("snapshot shared source");
+        let shared = std::fs::read_to_string(&source).expect("read shared source");
+
+        let report = ingest_work_events_content(&works, &shared)
+            .expect("unknown shared kind must not abort known event intake");
+
+        assert_eq!(report.applied, 2);
+        assert_eq!(report.skipped_opaque, 1);
+        assert_eq!(report.skipped_invalid, 0);
+        let projection = load_workspace_work_items_from_path(&works)
+            .expect("load")
+            .expect("projection");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-reader-a")
+            .expect("known event projection");
+        assert_eq!(item.title, "Known title");
+        assert_eq!(item.summary.as_deref(), Some("Known update survives"));
+        assert_eq!(
+            item.events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt-known-start", "evt-known-update"],
+            "opaque future kinds must not mutate the release-A projection"
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("read preserved shared source"),
+            original
+        );
+    }
+
+    #[test]
+    fn shared_intake_keeps_identity_and_container_extensions_invalid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        let content = concat!(
+            r#"{"id":"evt-bad-identity","work_item_id":{"future":"shape"},"kind":"update","updated_at":"2026-07-22T02:00:00Z"}"#,
+            "\n",
+            r#"{"id":"evt-bad-container","work_item_id":"work-reader-a","kind":"update","execution_container":{"branch":"work/reader-a","future_container_field":true},"updated_at":"2026-07-22T02:01:00Z"}"#,
+            "\n",
+            r#"{"id":"evt-known","work_item_id":"work-reader-a","kind":"start","title":"Strict nested schema","updated_at":"2026-07-22T02:02:00Z"}"#,
+            "\n"
+        );
+
+        let report = ingest_work_events_content(&works, content).expect("lenient shared intake");
+
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.skipped_opaque, 0);
+        assert_eq!(report.skipped_invalid, 2);
+    }
+
+    #[test]
+    fn machine_local_lifecycle_reader_rejects_unknown_or_additive_event_schema() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cases = [
+            (
+                "unknown-kind",
+                concat!(
+                    r#"{"id":"evt-local-correction","work_item_id":"work-local","kind":"correction","updated_at":"2026-07-22T02:00:00Z"}"#,
+                    "\n"
+                ),
+            ),
+            (
+                "additive-field",
+                concat!(
+                    r#"{"id":"evt-local-done","work_item_id":"work-local","kind":"done","future_event_field":true,"updated_at":"2026-07-22T02:01:00Z"}"#,
+                    "\n"
+                ),
+            ),
+        ];
+
+        for (label, body) in cases {
+            let works = tmp.path().join(format!("{label}-works.json"));
+            let local = tmp.path().join(format!("{label}-close.jsonl"));
+            std::fs::write(&local, body.as_bytes()).expect("write local lifecycle log");
+            let original = std::fs::read(&local).expect("snapshot local lifecycle log");
+
+            assert!(
+                ingest_work_events_with_local_path(
+                    &works,
+                    std::iter::empty::<&str>(),
+                    Some(&local),
+                )
+                .is_err(),
+                "machine-local {label} schema must fail closed"
+            );
+            assert!(
+                !works.exists(),
+                "failed local intake must not write projection"
+            );
+            assert_eq!(
+                std::fs::read(&local).expect("read preserved local lifecycle log"),
+                original
+            );
+        }
     }
 
     #[test]

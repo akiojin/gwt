@@ -101,22 +101,35 @@ pub fn classify_branch_protection_fetch(
     stdout: &str,
     stderr: &str,
 ) -> BranchProtectionStatus {
+    try_classify_branch_protection_fetch(success, stdout, stderr).unwrap_or_else(|error| {
+        BranchProtectionStatus::Unreadable(format!("branch protection could not be read: {error}"))
+    })
+}
+
+/// Checked classifier for scan transactions. Authoritative GitHub responses
+/// such as 403/404 remain domain statuses; transport, timeout, and unexpected
+/// command failures remain errors so a scan proposal can be discarded whole.
+pub fn try_classify_branch_protection_fetch(
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> gwt_core::Result<BranchProtectionStatus> {
     if success {
-        return parse_branch_protection(stdout);
+        return Ok(parse_branch_protection(stdout));
     }
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("404") || lower.contains("not found") {
-        BranchProtectionStatus::Absent
+        Ok(BranchProtectionStatus::Absent)
     } else if lower.contains("403") {
-        BranchProtectionStatus::Unreadable(format!(
+        Ok(BranchProtectionStatus::Unreadable(format!(
             "branch protection not readable with this token: {}",
             stderr.trim()
-        ))
+        )))
     } else {
-        BranchProtectionStatus::Unreadable(format!(
-            "branch protection could not be read: {}",
+        Err(gwt_core::GwtError::Git(format!(
+            "gh branch protection: {}",
             stderr.trim()
-        ))
+        )))
     }
 }
 
@@ -125,6 +138,16 @@ pub fn classify_branch_protection_fetch(
 /// errors: a failure to spawn `gh`, or any non-200 response, yields a
 /// gate-unavailable status rather than an `Err` (SPEC #3200 FR-010).
 pub fn fetch_branch_protection(repo_slug: &str, branch: &str) -> BranchProtectionStatus {
+    try_fetch_branch_protection(repo_slug, branch).unwrap_or_else(|error| {
+        BranchProtectionStatus::Unreadable(format!("branch protection could not be read: {error}"))
+    })
+}
+
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_branch_protection(
+    repo_slug: &str,
+    branch: &str,
+) -> gwt_core::Result<BranchProtectionStatus> {
     let hub = gwt_core::process_console::global();
     let endpoint = format!("repos/{repo_slug}/branches/{branch}/protection");
     let args = [
@@ -133,21 +156,19 @@ pub fn fetch_branch_protection(repo_slug: &str, branch: &str) -> BranchProtectio
         "Accept: application/vnd.github+json",
         &endpoint,
     ];
-    let output = match gwt_core::process_console::spawn_logged_blocking(
+    let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
         &args,
         gwt_core::process_console::SpawnOptions::new(format!("gh api {endpoint}")),
-    ) {
-        Ok(output) => output,
-        Err(error) => {
-            return BranchProtectionStatus::Unreadable(format!(
-                "could not run gh api for branch protection: {error}"
-            ));
-        }
-    };
-    classify_branch_protection_fetch(output.success(), &output.stdout, &output.stderr)
+    )
+    .map_err(|error| {
+        gwt_core::GwtError::Git(format!(
+            "could not run gh api for branch protection: {error}"
+        ))
+    })?;
+    try_classify_branch_protection_fetch(output.success(), &output.stdout, &output.stderr)
 }
 
 #[cfg(test)]
@@ -268,5 +289,31 @@ mod tests {
         // as Absent — fail closed to Unreadable so the gate stays unavailable.
         let status = classify_branch_protection_fetch(false, "", "could not resolve host");
         assert!(matches!(status, BranchProtectionStatus::Unreadable(_)));
+    }
+
+    #[test]
+    fn checked_fetch_classifier_preserves_transport_failure() {
+        let error = try_classify_branch_protection_fetch(
+            false,
+            "",
+            "operation deadline expired during gh api",
+        )
+        .expect_err("transport/deadline failure must remain typed");
+        assert!(error.to_string().contains("deadline"));
+
+        assert_eq!(
+            try_classify_branch_protection_fetch(false, "", "gh: Not Found (HTTP 404)")
+                .expect("404 is an authoritative absent result"),
+            BranchProtectionStatus::Absent
+        );
+        assert!(matches!(
+            try_classify_branch_protection_fetch(
+                false,
+                "",
+                "gh: Resource not accessible by integration (HTTP 403)",
+            )
+            .expect("403 is an authoritative unreadable result"),
+            BranchProtectionStatus::Unreadable(_)
+        ));
     }
 }

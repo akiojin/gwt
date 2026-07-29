@@ -114,6 +114,22 @@ purpose and status as distinct fields;
 do not fold a status snapshot into the purpose, and do not rely on the
 Board body to convey what the Work is.
 
+### Terminal Work delivery
+
+Make the final Work update before terminal operations, then converge in this
+exact order: `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`. After the final Work update or a
+terminal lifecycle transition, do not issue another `workspace.update`; keep
+blocker/recovery coordination on the Board or in a Draft PR comment instead.
+Set `params.status:"done"` on that explicit final update; its successful event
+append opens the machine-local delivery obligation used by Stop and final gates.
+
+Include `.gwt/work/events.jsonl` in the related source commit. If no source
+change remains and the event log is the only bookkeeping change, use a scoped
+Conventional Commit whose subject starts with the exact `chore(work):` prefix.
+gwt never commits or pushes this event automatically. Completion and PR
+mutations remain blocked until the current HEAD is confirmed on the configured
+upstream, and verification must be run fresh after that commit/push.
+
 ## Git environment
 
 Do not manually create, switch, or delete branches/worktrees:
@@ -270,6 +286,24 @@ Work detail は purpose と status を別レイヤーで表示します — purp
 されます。purpose と status は別フィールドとして更新し、状態スナップ
 ショットを purpose に混ぜたり、Work が何かを Board body で伝えようと
 したりしないでください。
+
+### Terminal Work delivery
+
+terminal operation の前に final Work update を行い、以後は exact
+`final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`
+の順で収束します。final Work update または terminal lifecycle transition
+の後は、別の `workspace.update` を実行しません。blocker / recovery coordination
+は Board または Draft PR comment に残します。
+explicit final update では `params.status:"done"` を設定します。event append
+が成功すると、Stop と final gate が使用する machine-local delivery obligation
+が開きます。
+
+`.gwt/work/events.jsonl` は関連 source commit に含めます。source change が残らず
+event log だけが bookkeeping change の場合は、subject が exact `chore(work):`
+prefix で始まる scoped Conventional Commit を使用します。gwt は event を自動
+commit / push しません。current HEAD が configured upstream に存在することを
+確認するまで completion / PR mutation は block され、その commit / push 後に
+fresh verification を実行します。
 
 ## Git environment
 
@@ -527,6 +561,11 @@ mod tests {
             "fixing bug",
             "purpose = work scope",
             "purpose and status as distinct fields",
+            "final Work update -> commit/push -> fresh verification -> PR",
+            "do not issue another `workspace.update`",
+            "`params.status:\"done\"`",
+            "exact `chore(work):` prefix",
+            "gwt never commits or pushes",
         ]
     }
 
@@ -538,6 +577,22 @@ mod tests {
                 rendered.contains(phrase),
                 "rendered SKILL.md is missing required canonical phrase: {phrase}\n\n--- rendered (first 4kB) ---\n{}",
                 rendered.chars().take(4096).collect::<String>()
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_delivery_guidance_keeps_english_japanese_and_generated_outputs_in_sync() {
+        for phrase in [
+            "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion",
+            "`chore(work):`",
+            ".gwt/work/events.jsonl",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
+            assert!(
+                render_skill_md(SessionKind::Execution).contains(phrase),
+                "generated guidance: {phrase}"
             );
         }
     }

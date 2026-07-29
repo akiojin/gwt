@@ -85,7 +85,7 @@ impl CaptureServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let app = Router::new()
-            .route("/hook-live", post(capture_hook_live))
+            .route("/internal/hook-live", post(capture_hook_live))
             .with_state(CaptureState { tx });
 
         runtime.spawn(async move {
@@ -99,7 +99,7 @@ impl CaptureServer {
             runtime,
             shutdown_tx: Some(shutdown_tx),
             rx,
-            url: format!("http://127.0.0.1:{}/hook-live", addr.port()),
+            url: format!("http://127.0.0.1:{}/internal/hook-live", addr.port()),
         }
     }
 
@@ -366,7 +366,7 @@ fn forward_owner_is_fail_open_when_live_target_is_unreachable() {
     drop(listener);
     env.set(
         "GWT_HOOK_FORWARD_URL",
-        format!("http://127.0.0.1:{port}/hook-live"),
+        format!("http://127.0.0.1:{port}/internal/hook-live"),
     );
     env.set("GWT_HOOK_FORWARD_TOKEN", "secret-token");
 

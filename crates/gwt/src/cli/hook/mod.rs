@@ -11,6 +11,7 @@
 //! Individual hook handlers (runtime-state, block-*, forward) will live in
 //! sibling files and consume these types.
 
+pub mod action_obligation_stop_check;
 pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;
@@ -37,6 +38,7 @@ pub mod skill_discussion_stop_check;
 pub mod skill_plan_spec_stop_check;
 pub mod skill_register_spec_stop_check;
 pub mod state_file_stop_check;
+pub mod work_event_settlement_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
 pub mod worktree;
@@ -202,8 +204,6 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
     }
 
     refresh_managed_assets_for_hook_front_door(project_root)?;
-
-    crate::index_worker::bootstrap_project_index_for_path(project_root)?;
 
     let scope = gwt_core::daemon::RuntimeScope::from_project_root(
         project_root,
@@ -486,6 +486,23 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    #[test]
+    fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {
+        let source = include_str!("mod.rs");
+        let front_door = source
+            .split_once("pub fn prepare_daemon_front_door_for_path")
+            .expect("front-door function must exist")
+            .1
+            .split_once("pub(crate) fn refresh_managed_assets_for_hook_front_door")
+            .expect("managed-assets function must follow the front door")
+            .0;
+
+        assert!(
+            !front_door.contains("bootstrap_project_index_for_path"),
+            "GUI front door must not block server startup on Project Index bootstrap"
+        );
+    }
 
     #[test]
     fn daemon_hook_argv_and_internal_command_output_preserve_streams() {
