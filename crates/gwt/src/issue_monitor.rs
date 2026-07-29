@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs, io,
+    fs,
+    io::{self, Write},
     path::Path,
 };
 
@@ -39,6 +40,9 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
 /// version 0; fresh projects start at this current version and never replay a
 /// historical migration.
 pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
+const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
+const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
+const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
@@ -136,6 +140,245 @@ pub fn resolve_review_model(
     }
 }
 
+/// Durable delivery state for an Issue Monitor side effect. `Prepared` is
+/// guaranteed not to have been submitted remotely; `Attempting` crosses the
+/// submission boundary and therefore requires read-back or compensation after
+/// an ambiguous result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorEffectState {
+    Prepared,
+    Attempting,
+}
+
+/// The remote mutation described by one durable Issue Monitor journal entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorEffectPayload {
+    AcquireClaim {
+        issue_number: u64,
+        claim_id: String,
+        owner: String,
+        heartbeat_at: String,
+        expires_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launched_work_id: Option<String>,
+    },
+    ReleaseClaim {
+        issue_number: u64,
+        claim_id: String,
+        #[serde(default)]
+        owner: String,
+    },
+    ArmAutoMerge {
+        issue_number: u64,
+        pr_number: u64,
+        reviewed_sha: String,
+    },
+    DisarmAutoMerge {
+        issue_number: u64,
+        pr_number: u64,
+        compensates_effect_id: String,
+    },
+}
+
+/// Stable identity of one delivery attempt. Results are accepted only when all
+/// three fields still match the journal entry that crossed the execution fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorEffectAttemptKey {
+    pub effect_id: String,
+    pub authority_epoch: u64,
+    pub attempt: u32,
+}
+
+/// One durable side-effect proposal or in-flight delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingIssueMonitorEffect {
+    pub effect_id: String,
+    pub authority_epoch: u64,
+    pub attempt: u32,
+    pub state: IssueMonitorEffectState,
+    pub payload: IssueMonitorEffectPayload,
+}
+
+impl PendingIssueMonitorEffect {
+    pub fn prepared(
+        effect_id: impl Into<String>,
+        authority_epoch: u64,
+        payload: IssueMonitorEffectPayload,
+    ) -> Self {
+        Self {
+            effect_id: effect_id.into(),
+            authority_epoch,
+            attempt: 0,
+            state: IssueMonitorEffectState::Prepared,
+            payload,
+        }
+    }
+
+    pub fn attempt_key(&self) -> IssueMonitorEffectAttemptKey {
+        IssueMonitorEffectAttemptKey {
+            effect_id: self.effect_id.clone(),
+            authority_epoch: self.authority_epoch,
+            attempt: self.attempt,
+        }
+    }
+}
+
+fn effect_matches_key(
+    effect: &PendingIssueMonitorEffect,
+    key: &IssueMonitorEffectAttemptKey,
+) -> bool {
+    effect.effect_id == key.effect_id
+        && effect.authority_epoch == key.authority_epoch
+        && effect.attempt == key.attempt
+}
+
+fn mark_effect_attempting(
+    pending_effects: &mut [PendingIssueMonitorEffect],
+    key: &IssueMonitorEffectAttemptKey,
+) -> bool {
+    let Some(effect) = pending_effects
+        .iter_mut()
+        .find(|effect| effect_matches_key(effect, key))
+    else {
+        return false;
+    };
+    if effect.state != IssueMonitorEffectState::Prepared {
+        return false;
+    }
+    effect.state = IssueMonitorEffectState::Attempting;
+    true
+}
+
+fn complete_attempting_effect(
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    key: &IssueMonitorEffectAttemptKey,
+) -> Option<PendingIssueMonitorEffect> {
+    let index = pending_effects.iter().position(|effect| {
+        effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
+    })?;
+    Some(pending_effects.remove(index))
+}
+
+fn advance_autonomous_effect_authority(
+    autonomous_mode: &mut bool,
+    effect_authority_epoch: &mut u64,
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    enabled: bool,
+) -> Option<u64> {
+    if *autonomous_mode == enabled {
+        return Some(*effect_authority_epoch);
+    }
+    let next_epoch = advance_effect_authority(effect_authority_epoch, pending_effects)?;
+    *autonomous_mode = enabled;
+    Some(next_epoch)
+}
+
+fn advance_effect_authority(
+    effect_authority_epoch: &mut u64,
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+) -> Option<u64> {
+    let next_epoch = effect_authority_epoch.checked_add(1)?;
+    let mut next_effects = pending_effects.clone();
+    let attempting = next_effects
+        .iter()
+        .filter(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::AcquireClaim { .. }
+                        | IssueMonitorEffectPayload::ArmAutoMerge { .. }
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    next_effects.retain(|effect| {
+        effect.state != IssueMonitorEffectState::Prepared
+            || !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim { .. }
+                    | IssueMonitorEffectPayload::ArmAutoMerge { .. }
+            )
+    });
+
+    for effect in attempting {
+        let (effect_id, payload, already_compensated) = match &effect.payload {
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number,
+                claim_id,
+                owner,
+                ..
+            } => {
+                let already = next_effects.iter().any(|pending| {
+                    matches!(
+                        &pending.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim {
+                            issue_number: pending_issue,
+                            claim_id: pending_claim,
+                            owner: pending_owner,
+                        } if pending_issue == issue_number
+                            && pending_claim == claim_id
+                            && pending_owner == owner
+                    )
+                });
+                (
+                    format!("release:{}:{next_epoch}", effect.effect_id),
+                    IssueMonitorEffectPayload::ReleaseClaim {
+                        issue_number: *issue_number,
+                        claim_id: claim_id.clone(),
+                        owner: owner.clone(),
+                    },
+                    already,
+                )
+            }
+            IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number,
+                pr_number,
+                ..
+            } => {
+                let already = next_effects.iter().any(|pending| {
+                    matches!(
+                        &pending.payload,
+                        IssueMonitorEffectPayload::DisarmAutoMerge {
+                            compensates_effect_id,
+                            ..
+                        } if compensates_effect_id == &effect.effect_id
+                    )
+                });
+                (
+                    format!("disarm:{}:{next_epoch}", effect.effect_id),
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: *issue_number,
+                        pr_number: *pr_number,
+                        compensates_effect_id: effect.effect_id.clone(),
+                    },
+                    already,
+                )
+            }
+            IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::DisarmAutoMerge { .. } => continue,
+        };
+        if !already_compensated {
+            next_effects.push(PendingIssueMonitorEffect::prepared(
+                effect_id, next_epoch, payload,
+            ));
+        }
+    }
+
+    *effect_authority_epoch = next_epoch;
+    *pending_effects = next_effects;
+    Some(next_epoch)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorControlReceipt {
+    pub control_id: String,
+    pub should_scan: bool,
+    #[serde(default)]
+    pub authority_changed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -160,6 +403,10 @@ pub struct IssueMonitorPrefs {
         deserialize_with = "deserialize_launching_issues"
     )]
     pub launching_issues: Vec<IssueMonitorLaunchingIssue>,
+    /// SPEC #3200 FR-052: launch deliveries remain durable until the GUI
+    /// returns the matching delivery id in a Launched/LaunchFailed ACK.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_launch_deliveries: Vec<PendingIssueMonitorLaunchDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -178,6 +425,19 @@ pub struct IssueMonitorPrefs {
     /// in-flight attempt survives a daemon restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub autonomous_records: Vec<AutonomousIssueRecord>,
+    /// Monotonic authority generation for every remotely mutating effect.
+    /// Missing values in pre-journal prefs intentionally deserialize as zero.
+    #[serde(default)]
+    pub effect_authority_epoch: u64,
+    /// Durable side-effect journal. Empty is omitted to preserve the compact
+    /// shape of existing prefs files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_effects: Vec<PendingIssueMonitorEffect>,
+    /// Receipt for the most recently admitted daemon control. The control ID
+    /// is generated per admission and reused only by that control's retry, so
+    /// one slot is sufficient while the worker enforces a FIFO retry barrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_control_receipt: Option<IssueMonitorControlReceipt>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -191,11 +451,15 @@ impl Default for IssueMonitorPrefs {
             launch_profile: None,
             launched_issues: Vec::new(),
             launching_issues: Vec::new(),
+            pending_launch_deliveries: Vec::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
             autonomous_mode: false,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
+            effect_authority_epoch: 0,
+            pending_effects: Vec::new(),
+            last_control_receipt: None,
         }
     }
 }
@@ -246,7 +510,55 @@ impl IssueMonitorPrefs {
             .collect::<BTreeSet<_>>();
         self.launching_issues
             .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
+        self.pending_launch_deliveries
+            .retain(|delivery| !adopted_failure_numbers.contains(&delivery.issue_number));
         true
+    }
+
+    /// Commit the execution fence for an exact Prepared delivery tuple.
+    pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        mark_effect_attempting(&mut self.pending_effects, key)
+    }
+
+    /// Remove an Attempting journal entry only when the completed delivery
+    /// tuple is still exact.
+    pub fn complete_pending_effect(
+        &mut self,
+        key: &IssueMonitorEffectAttemptKey,
+    ) -> Option<PendingIssueMonitorEffect> {
+        complete_attempting_effect(&mut self.pending_effects, key)
+    }
+
+    /// Return an exact Attempting tuple to Prepared under a fresh attempt
+    /// number after a failure known to have happened before remote submission.
+    pub fn retry_pending_effect(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        let Some(effect) = self.pending_effects.iter_mut().find(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
+        }) else {
+            return false;
+        };
+        let Some(next_attempt) = effect.attempt.checked_add(1) else {
+            return false;
+        };
+        effect.attempt = next_attempt;
+        effect.state = IssueMonitorEffectState::Prepared;
+        true
+    }
+
+    pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
+        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+    }
+
+    /// Advance autonomous authority atomically. Turning autonomous mode off
+    /// cancels unsubmitted arm proposals and durably compensates every
+    /// outcome-ambiguous arm attempt. Overflow rejects the whole transition.
+    pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        advance_autonomous_effect_authority(
+            &mut self.autonomous_mode,
+            &mut self.effect_authority_epoch,
+            &mut self.pending_effects,
+            enabled,
+        )
     }
 }
 
@@ -264,6 +576,28 @@ pub struct IssueMonitorLaunchingIssue {
     pub issue_number: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingIssueMonitorLaunchDelivery {
+    pub delivery_id: String,
+    pub issue_number: u64,
+    pub branch_name: String,
+    pub linked_issue_kind: LinkedIssueKind,
+    pub claim_id: String,
+    #[serde(default)]
+    pub claim_owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_durable_window_id: Option<String>,
+    pub created_at: String,
 }
 
 /// Backward-compat: the first shipped shape was a bare id array. A parse
@@ -432,6 +766,9 @@ pub enum IssueMonitorIssueState {
 #[serde(rename_all = "snake_case")]
 pub enum IssueMonitorCandidateSource {
     Live,
+    /// Live GitHub data that reached the configured list cap. It is fresh but
+    /// cannot prove that an absent Issue is closed or belongs elsewhere.
+    LiveIncomplete,
     Cache,
 }
 
@@ -517,6 +854,8 @@ pub struct IssueMonitorLaunchRequest {
     pub issue_number: u64,
     pub branch_name: String,
     pub linked_issue_kind: LinkedIssueKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,6 +922,14 @@ pub struct IssueMonitorState {
     merged_issues: BTreeSet<u64>,
     /// SPEC #3200 FR-001: opt-in autonomous (unattended) resolution mode.
     autonomous_mode: bool,
+    /// SPEC #3200 Phase 7: authority generation and durable remote-effect
+    /// journal, mirrored losslessly by [`IssueMonitorPrefs`].
+    #[serde(default)]
+    effect_authority_epoch: u64,
+    #[serde(default)]
+    pending_effects: Vec<PendingIssueMonitorEffect>,
+    #[serde(default)]
+    last_control_receipt: Option<IssueMonitorControlReceipt>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     autonomous_tuning: AutonomousTuning,
     /// SPEC #3200 T-016/T-022: per-issue autonomous lifecycle records keyed by
@@ -594,6 +941,9 @@ pub struct IssueMonitorState {
     failed_windows: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
+    /// Durable ACK-driven deliveries. Unlike `pending_launches`, this queue is
+    /// projected non-destructively and mirrored in prefs across restart.
+    pending_launch_deliveries: VecDeque<PendingIssueMonitorLaunchDelivery>,
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
@@ -611,6 +961,13 @@ pub struct IssueMonitorState {
 enum AutonomousRecordRebasePolicy {
     DiskAuthoritative,
     LocalSameKeyAuthoritative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingLaunchDeliveryMatch {
+    Matched(usize),
+    Missing,
+    Mismatched,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -942,16 +1299,267 @@ fn unique_corrupt_prefs_path(path: &Path) -> std::path::PathBuf {
     ))
 }
 
-fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    // Windows does not support opening a directory through std::fs::File.
+    // The scratch file itself is still sync_all'd before the atomic rename;
+    // match the repository's other durable writers by treating directory
+    // metadata sync as an explicit compatibility no-op off Unix.
+    Ok(())
+}
+
+fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
     let tmp = unique_prefs_tmp_path(path);
-    fs::write(&tmp, content.as_bytes())?;
-    fs::rename(&tmp, path)
+    let result = (|| {
+        let mut scratch = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        scratch.write_all(content)?;
+        scratch.sync_all()?;
+        // Deadline-aware transactions may spend their remaining budget on
+        // serialization or scratch fsync. Recheck immediately before the
+        // canonical rename so an expired proposal cannot become visible after
+        // its acceptance boundary.
+        gwt_core::operation_deadline::ensure_remaining("Issue Monitor durable rename")?;
+        fs::rename(&tmp, path)?;
+        #[cfg(test)]
+        if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE")
+            .is_some_and(|target| Path::new(&target) == path)
+        {
+            let fail_once = path.with_extension("parent-sync-fail-once");
+            if fail_once.exists() {
+                fs::remove_file(fail_once)?;
+                return Err(io::Error::other(
+                    "injected Issue Monitor prefs parent sync failure after rename",
+                ));
+            }
+        }
+        sync_parent_directory(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
+    durable_atomic_write(path, content.as_bytes())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorAuthorityFence {
+    pub version: u32,
+    pub pid: u32,
+    pub instance_id: String,
+}
+
+impl IssueMonitorAuthorityFence {
+    pub fn current_process() -> Self {
+        Self {
+            version: ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+            pid: std::process::id(),
+            instance_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+/// Process-lifetime ownership of the Issue Monitor authority lock.
+///
+/// The stable sibling file stays on disk; ownership is the kernel lock held by
+/// this handle and is released automatically on process exit or lease drop.
+#[must_use = "dropping the lease releases Issue Monitor effect authority"]
+#[derive(Debug)]
+pub struct IssueMonitorAuthorityLease {
+    lock: fs::File,
+}
+
+impl Drop for IssueMonitorAuthorityLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.lock);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorAuthorityFenceState {
+    Missing,
+    LegacyShutdownRevoke,
+    Active(IssueMonitorAuthorityFence),
+}
+
+pub fn issue_monitor_authority_fence_path(prefs_path: &Path) -> std::path::PathBuf {
+    prefs_path.with_extension("shutdown-revoke")
+}
+
+fn issue_monitor_authority_lock_path(prefs_path: &Path) -> std::path::PathBuf {
+    prefs_path.with_extension("authority.lock")
+}
+
+pub fn load_issue_monitor_authority_fence(
+    prefs_path: &Path,
+) -> io::Result<IssueMonitorAuthorityFenceState> {
+    let path = issue_monitor_authority_fence_path(prefs_path);
+    let content = match fs::read(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(IssueMonitorAuthorityFenceState::Missing);
+        }
+        Err(error) => return Err(error),
+    };
+    if content == LEGACY_SHUTDOWN_REVOKE_FENCE {
+        return Ok(IssueMonitorAuthorityFenceState::LegacyShutdownRevoke);
+    }
+    let fence: IssueMonitorAuthorityFence = serde_json::from_slice(&content).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse Issue Monitor authority fence failed: {error}"),
+        )
+    })?;
+    if ![
+        LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+        ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+    ]
+    .contains(&fence.version)
+        || fence.pid == 0
+        || fence.instance_id.trim().is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Issue Monitor authority fence has invalid identity fields",
+        ));
+    }
+    Ok(IssueMonitorAuthorityFenceState::Active(fence))
+}
+
+pub fn persist_issue_monitor_authority_fence(
+    prefs_path: &Path,
+    fence: &IssueMonitorAuthorityFence,
+) -> io::Result<()> {
+    let content = serde_json::to_vec_pretty(fence).map_err(io::Error::other)?;
+    durable_atomic_write(&issue_monitor_authority_fence_path(prefs_path), &content)
+}
+
+pub fn persist_legacy_issue_monitor_shutdown_revoke_fence(prefs_path: &Path) -> io::Result<()> {
+    durable_atomic_write(
+        &issue_monitor_authority_fence_path(prefs_path),
+        LEGACY_SHUTDOWN_REVOKE_FENCE,
+    )
+}
+
+/// Establish durable effect authority and hold its process-lifetime lease.
+///
+/// Current v2 fences use the kernel lock as their liveness identity, so a free
+/// lock makes even a same-PID fence stale and recoverable. Legacy v1 owners did
+/// not hold this lock; their PID probe therefore remains fail-closed until the
+/// old process exits.
+pub fn establish_issue_monitor_authority_fence(
+    prefs_path: &Path,
+    current: &IssueMonitorAuthorityFence,
+    is_process_alive: impl Fn(u32) -> bool,
+) -> io::Result<(IssueMonitorPrefs, IssueMonitorAuthorityLease)> {
+    if current.version != ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
+        || current.pid == 0
+        || current.instance_id.trim().is_empty()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "current Issue Monitor authority fence must use the current schema and a valid identity",
+        ));
+    }
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        let authority_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(issue_monitor_authority_lock_path(prefs_path))?;
+        if let Err(error) = FileExt::try_lock_exclusive(&authority_lock) {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor authority lifetime lease is already held by another daemon",
+                ));
+            }
+            return Err(error);
+        }
+        let lease = IssueMonitorAuthorityLease {
+            lock: authority_lock,
+        };
+        let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
+        match load_issue_monitor_authority_fence(prefs_path)? {
+            IssueMonitorAuthorityFenceState::Missing => {
+                persist_issue_monitor_authority_fence(prefs_path, current)?;
+            }
+            IssueMonitorAuthorityFenceState::Active(existing)
+                if existing.version == LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
+                    && is_process_alive(existing.pid) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "legacy Issue Monitor authority fence is owned by live daemon pid {}",
+                        existing.pid
+                    ),
+                ));
+            }
+            IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
+            | IssueMonitorAuthorityFenceState::Active(_) => {
+                prefs.advance_effect_authority_epoch().ok_or_else(|| {
+                    io::Error::other("Issue Monitor authority epoch exhausted during fence replay")
+                })?;
+                save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+                persist_issue_monitor_authority_fence(prefs_path, current)?;
+            }
+        }
+        Ok((prefs, lease))
+    })
+}
+
+pub fn clear_issue_monitor_authority_fence(
+    prefs_path: &Path,
+    expected: &IssueMonitorAuthorityFence,
+) -> io::Result<()> {
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        match load_issue_monitor_authority_fence(prefs_path)? {
+            IssueMonitorAuthorityFenceState::Active(current) if current == *expected => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor authority fence identity changed before clear",
+                ));
+            }
+        }
+        let path = issue_monitor_authority_fence_path(prefs_path);
+        fs::remove_file(&path)?;
+        #[cfg(test)]
+        if let Some(fail_once) =
+            std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_FENCE_PARENT_SYNC_ONCE")
+        {
+            let fail_once = std::path::PathBuf::from(fail_once);
+            if fail_once.exists() {
+                fs::remove_file(fail_once)?;
+                return Err(io::Error::other(
+                    "injected Issue Monitor authority fence parent sync failure",
+                ));
+            }
+        }
+        sync_parent_directory(&path)
+    })
 }
 
 fn with_issue_monitor_prefs_lock<T>(
@@ -973,7 +1581,7 @@ fn with_issue_monitor_prefs_lock<T>(
         .write(true)
         .truncate(false)
         .open(path.with_extension("lock"))?;
-    lock.lock_exclusive()?;
+    gwt_core::operation_deadline::lock_exclusive(&lock)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock);
     match (result, unlock_result) {
@@ -1008,6 +1616,49 @@ pub fn mutate_issue_monitor_prefs<T>(
     with_issue_monitor_prefs_lock(path, || {
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let result = mutation(&mut prefs);
+        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, result))
+    })
+}
+
+/// Fail-closed prefs transaction whose mutation may reject before any save.
+/// The stable sibling lock is held across latest-load, validation, and the
+/// durable atomic writer. Returning `Err` from `mutation` leaves the canonical
+/// bytes untouched and creates no scratch write.
+pub fn try_mutate_issue_monitor_prefs<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock(path, || {
+        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let result = mutation(&mut prefs)?;
+        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, result))
+    })
+}
+
+/// Local fallback transaction ordered against daemon startup by the same
+/// stable prefs lock. A daemon that establishes its lifetime authority fence
+/// before this closure acquires the lock wins; the fallback then returns an
+/// error before mutation or save. If the fallback wins, startup waits and sees
+/// its committed prefs after the lock is released.
+pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock(path, || {
+        match load_issue_monitor_authority_fence(path)? {
+            IssueMonitorAuthorityFenceState::Missing => {}
+            IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
+            | IssueMonitorAuthorityFenceState::Active(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor daemon authority fence appeared before local fallback commit",
+                ));
+            }
+        }
+        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let result = mutation(&mut prefs)?;
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
     })
@@ -1074,12 +1725,16 @@ impl IssueMonitorState {
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
             autonomous_mode: false,
+            effect_authority_epoch: 0,
+            pending_effects: Vec::new(),
+            last_control_receipt: None,
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
             failed_windows: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
+            pending_launch_deliveries: VecDeque::new(),
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
@@ -1117,6 +1772,16 @@ impl IssueMonitorState {
                     .insert(entry.issue_number, claimed_at);
             }
         }
+        for delivery in prefs.pending_launch_deliveries {
+            if !state.active_launches.contains(&delivery.issue_number) {
+                state.active_launches.push(delivery.issue_number);
+            }
+            state
+                .launching_claimed_at
+                .entry(delivery.issue_number)
+                .or_insert_with(|| delivery.created_at.clone());
+            state.pending_launch_deliveries.push_back(delivery);
+        }
         for failed in prefs.failed_issues {
             if failed.message.trim().is_empty() {
                 continue;
@@ -1130,6 +1795,9 @@ impl IssueMonitorState {
         }
         state.merged_issues = prefs.merged_issues.into_iter().collect();
         state.autonomous_mode = prefs.autonomous_mode;
+        state.effect_authority_epoch = prefs.effect_authority_epoch;
+        state.pending_effects = prefs.pending_effects;
+        state.last_control_receipt = prefs.last_control_receipt;
         state.autonomous_tuning = prefs.autonomous_tuning;
         for record in prefs.autonomous_records {
             state.autonomous_records.insert(record.issue_number, record);
@@ -1162,6 +1830,7 @@ impl IssueMonitorState {
                     claimed_at: self.launching_claimed_at.get(issue_number).cloned(),
                 })
                 .collect(),
+            pending_launch_deliveries: self.pending_launch_deliveries.iter().cloned().collect(),
             failed_issues: self
                 .failed_issues
                 .iter()
@@ -1173,9 +1842,20 @@ impl IssueMonitorState {
                 .collect(),
             merged_issues: self.merged_issues.iter().copied().collect(),
             autonomous_mode: self.autonomous_mode,
+            effect_authority_epoch: self.effect_authority_epoch,
+            pending_effects: self.pending_effects.clone(),
+            last_control_receipt: self.last_control_receipt.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
         }
+    }
+
+    pub fn last_control_receipt(&self) -> Option<&IssueMonitorControlReceipt> {
+        self.last_control_receipt.as_ref()
+    }
+
+    pub fn set_last_control_receipt(&mut self, receipt: IssueMonitorControlReceipt) {
+        self.last_control_receipt = Some(receipt);
     }
 
     /// SPEC #3200 T-022: read-only access to an issue's autonomous record.
@@ -1395,11 +2075,43 @@ impl IssueMonitorState {
     /// `Reviewing` again.
     ///
     /// Idempotent and safe to call once right after loading persisted prefs; it
-    /// only touches records already parked in `Reviewing`.
+    /// only touches records parked in `Reviewing` while still awaiting a verdict.
+    /// A durable pass/fail verdict must continue to the gate on the next scan.
     pub fn resume_inflight_reviews_after_restart(&mut self, now: &str) -> Vec<u64> {
+        let reviewing = self
+            .autonomous_records
+            .values()
+            .filter(|record| {
+                record.phase == AutonomousPhase::Reviewing && record.review_passed.is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.resume_inflight_reviews_after_restart_for(&reviewing, now)
+    }
+
+    /// Resume only the records observed in `Reviewing` at daemon startup.
+    ///
+    /// Durable effect reconciliation may finish after normal operation has
+    /// already begun. Binding recovery to the complete captured startup record
+    /// prevents an unrelated runtime effect from rewinding a newly-dispatched
+    /// live review for the same Issue.
+    pub fn resume_inflight_reviews_after_restart_for(
+        &mut self,
+        startup_reviews: &[AutonomousIssueRecord],
+        now: &str,
+    ) -> Vec<u64> {
+        let startup_reviews = startup_reviews
+            .iter()
+            .map(|record| (record.issue_number, record))
+            .collect::<BTreeMap<_, _>>();
         let mut resumed = Vec::new();
         for record in self.autonomous_records.values_mut() {
-            if record.phase == AutonomousPhase::Reviewing {
+            if record.phase == AutonomousPhase::Reviewing
+                && record.review_passed.is_none()
+                && startup_reviews
+                    .get(&record.issue_number)
+                    .is_some_and(|startup_record| &*record == *startup_record)
+            {
                 record.phase = AutonomousPhase::Implementing;
                 record.review_passed = None;
                 record.last_heartbeat = Some(now.to_string());
@@ -1450,12 +2162,73 @@ impl IssueMonitorState {
         }
     }
 
+    /// Advance remote-effect authority together with the global monitor switch.
+    /// Turning the monitor off cancels effects that provably were not submitted
+    /// and appends compensation for every outcome-ambiguous claim/arm attempt.
+    /// A checked epoch overflow rejects the complete transition.
+    pub fn set_enabled_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        if self.config.enabled == enabled {
+            return Some(self.effect_authority_epoch);
+        }
+        let next_epoch =
+            advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)?;
+
+        self.config.enabled = enabled;
+        self.launch_auth_required = false;
+        if !enabled {
+            for delivery in &self.pending_launch_deliveries {
+                let already_pending = self.pending_effects.iter().any(|effect| {
+                    matches!(
+                        &effect.payload,
+                        IssueMonitorEffectPayload::ReleaseClaim {
+                            issue_number,
+                            claim_id,
+                            owner,
+                        } if *issue_number == delivery.issue_number
+                            && claim_id == &delivery.claim_id
+                            && owner == &delivery.claim_owner
+                    )
+                });
+                if !already_pending {
+                    self.pending_effects
+                        .push(PendingIssueMonitorEffect::prepared(
+                            format!("release:{}:{next_epoch}", delivery.delivery_id),
+                            next_epoch,
+                            IssueMonitorEffectPayload::ReleaseClaim {
+                                issue_number: delivery.issue_number,
+                                claim_id: delivery.claim_id.clone(),
+                                owner: delivery.claim_owner.clone(),
+                            },
+                        ));
+                }
+            }
+            self.active_launches.clear();
+            self.pending_launches.clear();
+            self.pending_launch_deliveries.clear();
+        }
+        Some(next_epoch)
+    }
+
+    /// Advance authority for a control that changes daemon decision state but
+    /// does not itself require a compensation rewrite.
+    pub fn advance_effect_authority_epoch(&mut self) -> Option<u64> {
+        advance_effect_authority(&mut self.effect_authority_epoch, &mut self.pending_effects)
+    }
+
     pub fn set_max_active_agents(&mut self, max_active_agents: usize) {
         self.config.max_active = max_active_agents.max(1);
     }
 
     pub fn record_scan_error(&mut self, now: impl Into<String>, error: impl Into<String>) {
         self.last_scan_at = Some(now.into());
+        self.last_error = Some(error.into());
+        self.launch_auth_required = false;
+    }
+
+    /// Project an uncommitted control-plane failure without changing any
+    /// durable preference or authority field. A later successful scan clears
+    /// this transient operator-facing error through the normal scan path.
+    pub fn record_control_commit_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
         self.launch_auth_required = false;
     }
@@ -1493,6 +2266,10 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
         self.launch_profile = disk.launch_profile.clone();
         self.autonomous_mode = disk.autonomous_mode;
+        self.effect_authority_epoch = disk.effect_authority_epoch;
+        self.pending_effects = disk.pending_effects.clone();
+        self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
+        self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
 
@@ -1580,6 +2357,19 @@ impl IssueMonitorState {
             self.merge_older_marker_disk_failures(disk);
         }
         self.refresh_disk_owned_prefs(disk);
+        let terminal_issue_numbers = self
+            .merged_issues
+            .iter()
+            .copied()
+            .chain(
+                self.inbox
+                    .iter()
+                    .filter(|item| item.state.is_terminal())
+                    .map(|item| item.issue.number),
+            )
+            .collect::<BTreeSet<_>>();
+        self.pending_launch_deliveries
+            .retain(|delivery| !terminal_issue_numbers.contains(&delivery.issue_number));
     }
 
     /// A terminal record paired with a rejected disk failure is part of the
@@ -1717,6 +2507,8 @@ impl IssueMonitorState {
             self.queue.retain(|queued| *queued != issue_number);
             self.pending_launches
                 .retain(|pending| pending.issue_number != issue_number);
+            self.pending_launch_deliveries
+                .retain(|delivery| delivery.issue_number != issue_number);
             if !self.launched_windows.contains_key(&issue_number) {
                 self.active_launches
                     .retain(|active| *active != issue_number);
@@ -1814,6 +2606,8 @@ impl IssueMonitorState {
             self.launching_claimed_at.remove(&issue_number);
             self.pending_launches
                 .retain(|pending| pending.issue_number != issue_number);
+            self.pending_launch_deliveries
+                .retain(|delivery| delivery.issue_number != issue_number);
             if let Some(item) = self
                 .inbox
                 .iter_mut()
@@ -1953,6 +2747,13 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
+            if self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            {
+                continue;
+            }
             match self.launching_claimed_at.get(&issue_number) {
                 Some(claimed_at) => {
                     let stale =
@@ -2045,6 +2846,31 @@ impl IssueMonitorState {
         }
     }
 
+    /// Project scan staleness onto the existing status error surface using a
+    /// caller-supplied clock so daemon publication and tests stay deterministic.
+    pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
+        let mut status = self.status_view();
+        if !status.enabled || status.last_error.is_some() {
+            return status;
+        }
+        let Some(last_scan_at) = status.last_scan_at.as_deref() else {
+            return status;
+        };
+        let Some(elapsed_secs) = rfc3339_elapsed_secs(last_scan_at, now) else {
+            return status;
+        };
+        let Ok(elapsed_secs) = u64::try_from(elapsed_secs) else {
+            return status;
+        };
+        if elapsed_secs >= self.config.poll_interval_secs.saturating_mul(3) {
+            status.state = "error".to_string();
+            status.last_error = Some(format!(
+                "Issue Monitor scan stalled; last scan at {last_scan_at}"
+            ));
+        }
+        status
+    }
+
     /// SPEC #3200 T-001/FR-001: read the opt-in autonomous mode flag.
     pub fn autonomous_mode(&self) -> bool {
         self.autonomous_mode
@@ -2054,6 +2880,91 @@ impl IssueMonitorState {
     /// keeps the SPEC #3165 human-gated behavior exactly.
     pub fn set_autonomous_mode(&mut self, enabled: bool) {
         self.autonomous_mode = enabled;
+    }
+
+    /// Current durable remote-effect authority generation.
+    pub fn effect_authority_epoch(&self) -> u64 {
+        self.effect_authority_epoch
+    }
+
+    /// Read the durable journal without granting callers mutable access around
+    /// the exact delivery-tuple guards.
+    pub fn pending_effects(&self) -> &[PendingIssueMonitorEffect] {
+        &self.pending_effects
+    }
+
+    /// Add a fully formed scan proposal. Only a current-authority Prepared
+    /// entry with a fresh stable id may enter the local proposal journal.
+    pub fn prepare_effect(&mut self, effect: PendingIssueMonitorEffect) -> bool {
+        if effect.effect_id.is_empty()
+            || effect.state != IssueMonitorEffectState::Prepared
+            || effect.authority_epoch != self.effect_authority_epoch
+            || self
+                .pending_effects
+                .iter()
+                .any(|pending| pending.effect_id == effect.effect_id)
+        {
+            return false;
+        }
+        self.pending_effects.push(effect);
+        true
+    }
+
+    /// Add one Prepared effect under the current authority. An empty or reused
+    /// stable id is rejected without changing the journal.
+    pub fn prepare_pending_effect(
+        &mut self,
+        effect_id: impl Into<String>,
+        payload: IssueMonitorEffectPayload,
+    ) -> Option<IssueMonitorEffectAttemptKey> {
+        let effect_id = effect_id.into();
+        if effect_id.is_empty()
+            || self
+                .pending_effects
+                .iter()
+                .any(|effect| effect.effect_id == effect_id)
+        {
+            return None;
+        }
+        let effect =
+            PendingIssueMonitorEffect::prepared(effect_id, self.effect_authority_epoch, payload);
+        let key = effect.attempt_key();
+        self.pending_effects.push(effect);
+        Some(key)
+    }
+
+    pub fn mark_pending_effect_attempting(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        mark_effect_attempting(&mut self.pending_effects, key)
+    }
+
+    pub fn complete_pending_effect(
+        &mut self,
+        key: &IssueMonitorEffectAttemptKey,
+    ) -> Option<PendingIssueMonitorEffect> {
+        complete_attempting_effect(&mut self.pending_effects, key)
+    }
+
+    pub fn retry_pending_effect(&mut self, key: &IssueMonitorEffectAttemptKey) -> bool {
+        let Some(effect) = self.pending_effects.iter_mut().find(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
+        }) else {
+            return false;
+        };
+        let Some(next_attempt) = effect.attempt.checked_add(1) else {
+            return false;
+        };
+        effect.attempt = next_attempt;
+        effect.state = IssueMonitorEffectState::Prepared;
+        true
+    }
+
+    pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
+        advance_autonomous_effect_authority(
+            &mut self.autonomous_mode,
+            &mut self.effect_authority_epoch,
+            &mut self.pending_effects,
+            enabled,
+        )
     }
 
     /// SPEC #3200 T-032/FR-003/004: the pure two-stage opt-in pre-gate — an issue
@@ -2536,6 +3447,7 @@ impl IssueMonitorState {
             issue_number,
             branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
             linked_issue_kind,
+            delivery_id: None,
         })
     }
 
@@ -2551,6 +3463,94 @@ impl IssueMonitorState {
             now,
             self.config.max_active.max(1),
         )
+    }
+
+    /// Select durable claim proposals without calling GitHub. The returned
+    /// count is the number of newly prepared logical claims; active slots are
+    /// consumed only after the serialized executor confirms acquisition.
+    pub fn prepare_claim_effects_with_probe(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        completed_probe: impl Fn(u64) -> bool,
+    ) -> usize {
+        match self.try_prepare_claim_effects_with_probe(owner, now, active_cap, |issue_number| {
+            Ok::<bool, std::convert::Infallible>(completed_probe(issue_number))
+        }) {
+            Ok(prepared) => prepared,
+            Err(never) => match never {},
+        }
+    }
+
+    /// Fallible proposal planner for deadline-integral scan transactions. A
+    /// probe error is returned to the scan owner instead of being collapsed to
+    /// `false`; callers discard the cloned proposal state on error.
+    pub fn try_prepare_claim_effects_with_probe<E>(
+        &mut self,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
+    ) -> Result<usize, E> {
+        let max_active = self.config.max_active.max(1).min(active_cap);
+        if !self.config.enabled || !self.gui_connected || max_active == 0 {
+            return Ok(0);
+        }
+        let pending_claims = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut available = max_active
+            .saturating_sub(self.active_launches.len())
+            .saturating_sub(pending_claims.len());
+        if available == 0 {
+            return Ok(0);
+        }
+
+        let mut prepared = 0;
+        for issue_number in self.queue.iter().copied().collect::<Vec<_>>() {
+            if available == 0 {
+                break;
+            }
+            if pending_claims.contains(&issue_number) {
+                continue;
+            }
+            let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
+                continue;
+            };
+            if completed_probe(issue_number)? {
+                self.record_merged(issue_number);
+                continue;
+            }
+            let kind = issue_monitor_linked_issue_kind(&issue);
+            let launched_work_id = knowledge_launch_target_branch_name(kind, issue_number);
+            let proposal_id = uuid::Uuid::new_v4();
+            let effect_id = format!("claim:{issue_number}:{proposal_id}");
+            let claim_id = format!("gwt-auto-improve:{proposal_id}");
+            if self
+                .prepare_pending_effect(
+                    effect_id,
+                    IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number,
+                        claim_id,
+                        owner: owner.to_string(),
+                        heartbeat_at: now.to_string(),
+                        expires_at: expiry_from_now_lexical(now, self.config.claim_ttl_secs),
+                        launched_work_id: Some(launched_work_id),
+                    },
+                )
+                .is_some()
+            {
+                prepared += 1;
+                available -= 1;
+            }
+        }
+        Ok(prepared)
     }
 
     pub fn claim_next_launch_requests_with_active_cap<C: IssueClient>(
@@ -2615,10 +3615,32 @@ impl IssueMonitorState {
 
             match acquire_claim(client, IssueNumber(issue.number), claim, now) {
                 Ok(ClaimAcquireOutcome::Acquired(claim)) => {
-                    self.record_claimed(issue, claim.claim_id);
-                    if let Some(request) = self.next_launch_request(now) {
-                        self.pending_launches.push_back(request.clone());
-                        launches.push(request);
+                    let claim_id = claim.claim_id;
+                    let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
+                    let delivery_id = format!("launch:{synchronous_effect_id}");
+                    if self.apply_confirmed_claim(
+                        issue.number,
+                        claim_id,
+                        owner,
+                        &synchronous_effect_id,
+                        now,
+                    ) {
+                        if let Some(request) = self
+                            .pending_launch_deliveries
+                            .iter()
+                            .find(|delivery| {
+                                delivery.issue_number == issue.number
+                                    && delivery.delivery_id == delivery_id
+                            })
+                            .map(|delivery| IssueMonitorLaunchRequest {
+                                issue_number: delivery.issue_number,
+                                branch_name: delivery.branch_name.clone(),
+                                linked_issue_kind: delivery.linked_issue_kind,
+                                delivery_id: Some(delivery.delivery_id.clone()),
+                            })
+                        {
+                            launches.push(request);
+                        }
                     }
                 }
                 Ok(ClaimAcquireOutcome::Blocked(claim)) => {
@@ -2641,7 +3663,25 @@ impl IssueMonitorState {
     }
 
     pub fn take_pending_launch_requests(&mut self) -> Vec<IssueMonitorLaunchRequest> {
-        self.pending_launches.drain(..).collect()
+        let durable_issue_numbers = self
+            .pending_launch_deliveries
+            .iter()
+            .map(|delivery| delivery.issue_number)
+            .collect::<BTreeSet<_>>();
+        let mut requests = self
+            .pending_launches
+            .drain(..)
+            .filter(|request| !durable_issue_numbers.contains(&request.issue_number))
+            .collect::<Vec<_>>();
+        requests.extend(self.pending_launch_deliveries.iter().map(|delivery| {
+            IssueMonitorLaunchRequest {
+                issue_number: delivery.issue_number,
+                branch_name: delivery.branch_name.clone(),
+                linked_issue_kind: delivery.linked_issue_kind,
+                delivery_id: Some(delivery.delivery_id.clone()),
+            }
+        }));
+        requests
     }
 
     /// SPEC #3200 Option A: queue a review-agent spawn request (orchestration
@@ -2715,7 +3755,7 @@ impl IssueMonitorState {
     /// A failed disarm must never strand a live armed auto-merge behind a
     /// NeedsHuman screen. No-op while the mode is ON.
     pub fn kill_switch_disarm_targets(&self) -> Vec<(u64, u64)> {
-        if self.autonomous_mode {
+        if self.config.enabled && self.autonomous_mode {
             return Vec::new();
         }
         self.autonomous_records
@@ -2765,6 +3805,170 @@ impl IssueMonitorState {
         }
     }
 
+    /// Apply a confirmed durable claim effect and enqueue the corresponding GUI
+    /// launch exactly once. Returns false if the scanned issue disappeared
+    /// before the executor result committed.
+    pub fn apply_confirmed_claim(
+        &mut self,
+        issue_number: u64,
+        claim_id: impl Into<String>,
+        claim_owner: impl Into<String>,
+        claim_effect_id: &str,
+        now: &str,
+    ) -> bool {
+        let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
+            return false;
+        };
+        let claim_id = claim_id.into();
+        let claim_owner = claim_owner.into();
+        let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
+        let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+        let delivery_id = format!("launch:{claim_effect_id}");
+        self.record_claimed(issue, claim_id.clone());
+        self.queue.retain(|queued| *queued != issue_number);
+        if !self.active_launches.contains(&issue_number) {
+            self.active_launches.push(issue_number);
+        }
+        self.launching_claimed_at
+            .insert(issue_number, now.to_string());
+        self.set_inbox_state(issue_number, MonitorInboxState::Launching);
+        if !self
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.delivery_id == delivery_id)
+        {
+            self.pending_launch_deliveries
+                .push_back(PendingIssueMonitorLaunchDelivery {
+                    delivery_id,
+                    issue_number,
+                    branch_name,
+                    linked_issue_kind,
+                    claim_id,
+                    claim_owner,
+                    materializer_id: None,
+                    materializer_pid: None,
+                    materializer_window_id: None,
+                    materialized_window_id: None,
+                    workspace_durable_window_id: None,
+                    created_at: now.to_string(),
+                });
+        }
+        true
+    }
+
+    pub fn complete_active_launch_delivery(
+        &mut self,
+        issue_number: u64,
+        window_id: impl Into<String>,
+        delivery_id: Option<&str>,
+    ) -> bool {
+        let window_id = window_id.into();
+        if let Some(delivery_id) = delivery_id {
+            match self.match_pending_launch_delivery(issue_number, delivery_id) {
+                PendingLaunchDeliveryMatch::Matched(index) => {
+                    let delivery = &self.pending_launch_deliveries[index];
+                    if delivery.materialized_window_id.as_deref() != Some(window_id.as_str())
+                        || delivery.workspace_durable_window_id.as_deref()
+                            != Some(window_id.as_str())
+                    {
+                        return false;
+                    }
+                    self.pending_launch_deliveries.remove(index);
+                }
+                PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
+                    return false
+                }
+            }
+        }
+        self.complete_active_launch(issue_number, window_id);
+        true
+    }
+
+    pub fn claim_launch_delivery(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        materializer_pid: u32,
+        materializer_window_id: &str,
+        is_process_alive: impl Fn(u32) -> bool,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        if delivery.materializer_id.as_deref() == Some(materializer_id) {
+            delivery.materializer_pid = Some(materializer_pid);
+            if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
+                delivery.materialized_window_id = None;
+                delivery.workspace_durable_window_id = None;
+            }
+            delivery.materializer_window_id = Some(materializer_window_id.to_string());
+            return true;
+        }
+        if delivery
+            .materializer_pid
+            .filter(|pid| *pid > 0)
+            .is_some_and(is_process_alive)
+        {
+            return false;
+        }
+        delivery.materializer_id = Some(materializer_id.to_string());
+        delivery.materializer_pid = Some(materializer_pid);
+        delivery.materializer_window_id = Some(materializer_window_id.to_string());
+        delivery.materialized_window_id = None;
+        delivery.workspace_durable_window_id = None;
+        true
+    }
+
+    pub fn mark_launch_delivery_materialized(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        materializer_window_id: &str,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
+            return false;
+        }
+        if delivery.materializer_id.as_deref() != Some(materializer_id) {
+            return false;
+        }
+        if delivery.materialized_window_id.as_deref() == Some(materializer_window_id) {
+            return true;
+        }
+        delivery.materialized_window_id = Some(materializer_window_id.to_string());
+        true
+    }
+
+    pub fn mark_launch_delivery_workspace_durable(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        materializer_window_id: &str,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) else {
+            return false;
+        };
+        if delivery.materializer_id.as_deref() != Some(materializer_id)
+            || delivery.materializer_window_id.as_deref() != Some(materializer_window_id)
+            || delivery.materialized_window_id.as_deref() != Some(materializer_window_id)
+        {
+            return false;
+        }
+        delivery.workspace_durable_window_id = Some(materializer_window_id.to_string());
+        true
+    }
+
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
         let window_id = window_id.into();
         self.launching_claimed_at.remove(&issue_number);
@@ -2801,6 +4005,43 @@ impl IssueMonitorState {
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
         self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
+    }
+
+    pub fn record_launch_failed_delivery(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+    ) -> bool {
+        if delivery_id.is_none()
+            && self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+        {
+            return false;
+        }
+        if let Some(delivery_id) = delivery_id {
+            match self.match_pending_launch_delivery(issue_number, delivery_id) {
+                PendingLaunchDeliveryMatch::Matched(index) => {
+                    if materializer_id.is_none()
+                        || self.pending_launch_deliveries[index]
+                            .materializer_id
+                            .as_deref()
+                            != materializer_id
+                    {
+                        return false;
+                    }
+                    self.pending_launch_deliveries.remove(index);
+                }
+                PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
+                    return false
+                }
+            }
+        }
+        self.record_launch_failed(issue_number, message);
+        true
     }
 
     pub fn record_agent_window_failed(
@@ -2866,8 +4107,53 @@ impl IssueMonitorState {
         self.failed_windows.remove(&issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
+        self.pending_launch_deliveries
+            .retain(|pending| pending.issue_number != issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
+    }
+
+    /// Reconcile persisted in-flight accounting against one complete live
+    /// repository snapshot. A qualified window owned by another project tab is
+    /// also stale for this GUI observer. Bare legacy window ids have no
+    /// trustworthy project provenance and are therefore retained.
+    fn prune_inflight_launches_for_live_snapshot(
+        &mut self,
+        live_issue_numbers: &BTreeSet<u64>,
+        expected_project_tab_id: Option<&str>,
+    ) {
+        let absent_issues = self
+            .active_launches
+            .iter()
+            .copied()
+            .filter(|issue_number| !live_issue_numbers.contains(issue_number))
+            .collect::<BTreeSet<_>>();
+        let foreign_window_issues = expected_project_tab_id
+            .map(|expected_tab_id| {
+                self.launched_windows
+                    .iter()
+                    .filter_map(|(issue_number, window_id)| {
+                        issue_monitor_qualified_window_id(window_id)
+                            .filter(|(tab_id, _)| *tab_id != expected_tab_id)
+                            .map(|_| *issue_number)
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let targets = absent_issues
+            .union(&foreign_window_issues)
+            .copied()
+            .collect::<Vec<_>>();
+
+        for issue_number in targets {
+            self.clear_active_tracking(issue_number);
+            if absent_issues.contains(&issue_number) {
+                self.queue.retain(|queued| *queued != issue_number);
+                self.inbox.retain(|item| item.issue.number != issue_number);
+            } else {
+                self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+            }
+        }
     }
 
     fn set_inbox_state(&mut self, issue_number: u64, state: MonitorInboxState) {
@@ -2879,6 +4165,27 @@ impl IssueMonitorState {
             item.state = state;
             item.launched_window_id = None;
             item.error_message = None;
+        }
+    }
+
+    fn match_pending_launch_delivery(
+        &self,
+        issue_number: u64,
+        delivery_id: &str,
+    ) -> PendingLaunchDeliveryMatch {
+        if let Some(index) = self.pending_launch_deliveries.iter().position(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        }) {
+            return PendingLaunchDeliveryMatch::Matched(index);
+        }
+        if self
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.issue_number == issue_number)
+        {
+            PendingLaunchDeliveryMatch::Mismatched
+        } else {
+            PendingLaunchDeliveryMatch::Missing
         }
     }
 
@@ -3093,12 +4400,45 @@ pub fn scan_issue_monitor_candidates_with_provenance(
     project_root: &Path,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    scan_issue_monitor_candidates_for_project_tab_with_provenance(
+        monitor,
+        issues,
+        source,
+        project_root,
+        None,
+        now,
+    )
+}
+
+/// Provenance-aware scan for a GUI observer bound to one project tab.
+///
+/// Destructive reconciliation is authorized only by a complete live snapshot.
+/// The optional tab id lets the GUI positively identify qualified window ids
+/// from another open project without guessing about legacy bare ids.
+pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    source: IssueMonitorCandidateSource,
+    project_root: &Path,
+    expected_project_tab_id: Option<&str>,
+    now: &str,
+) -> IssueMonitorScanSummary {
     if monitor.legacy_git_launch_failure_migration_version
         < LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
         && source == IssueMonitorCandidateSource::Live
         && crate::start_work::resolve_launch_agent_base_branch(project_root).is_ok()
     {
         monitor.apply_legacy_git_launch_failure_migration(project_root);
+    }
+    if source == IssueMonitorCandidateSource::Live {
+        let live_issue_numbers = issues
+            .iter()
+            .map(|issue| issue.number)
+            .collect::<BTreeSet<_>>();
+        monitor.prune_inflight_launches_for_live_snapshot(
+            &live_issue_numbers,
+            expected_project_tab_id,
+        );
     }
     scan_issue_monitor_candidates(monitor, issues, now)
 }
@@ -3117,9 +4457,22 @@ fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
     if stored == incoming {
         return true;
     }
-    let stored_raw = stored.rsplit("::").next().unwrap_or(stored);
-    let incoming_raw = incoming.rsplit("::").next().unwrap_or(incoming);
+    let stored_qualified = issue_monitor_qualified_window_id(stored);
+    let incoming_qualified = issue_monitor_qualified_window_id(incoming);
+    if let (Some((stored_tab, stored_raw)), Some((incoming_tab, incoming_raw))) =
+        (stored_qualified, incoming_qualified)
+    {
+        return stored_tab == incoming_tab && stored_raw == incoming_raw;
+    }
+    let stored_raw = stored_qualified.map(|(_, raw)| raw).unwrap_or(stored);
+    let incoming_raw = incoming_qualified.map(|(_, raw)| raw).unwrap_or(incoming);
     !stored_raw.is_empty() && stored_raw == incoming_raw
+}
+
+fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
+    let (project_tab_id, raw_window_id) = window_id.split_once("::")?;
+    (!project_tab_id.is_empty() && !raw_window_id.is_empty())
+        .then_some((project_tab_id, raw_window_id))
 }
 
 #[cfg(test)]
@@ -3134,6 +4487,37 @@ mod tests {
             state: IssueMonitorIssueState::Open,
             body: None,
             url: None,
+        }
+    }
+
+    fn pending_arm_effect(
+        effect_id: &str,
+        authority_epoch: u64,
+        attempt: u32,
+        state: IssueMonitorEffectState,
+    ) -> PendingIssueMonitorEffect {
+        PendingIssueMonitorEffect {
+            effect_id: effect_id.to_string(),
+            authority_epoch,
+            attempt,
+            state,
+            payload: IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                reviewed_sha: "abc123".to_string(),
+            },
+        }
+    }
+
+    fn effect_attempt_key(
+        effect_id: &str,
+        authority_epoch: u64,
+        attempt: u32,
+    ) -> IssueMonitorEffectAttemptKey {
+        IssueMonitorEffectAttemptKey {
+            effect_id: effect_id.to_string(),
+            authority_epoch,
+            attempt,
         }
     }
 
@@ -3227,6 +4611,42 @@ mod tests {
         monitor
     }
 
+    fn assert_manual_relaunch_accepts_fresh_lifecycle_failures(base: &IssueMonitorState) {
+        for (agent_failure, expected_state) in [
+            (false, MonitorInboxState::LaunchFailed),
+            (true, MonitorInboxState::AgentFailed),
+        ] {
+            let mut relaunched = base.clone();
+            relaunched.complete_active_launch(7, "tab-1::manual-relaunch-7");
+            assert_eq!(relaunched.active_count(), 1, "manual relaunch is active");
+            assert_eq!(
+                relaunched.inbox_item(7).map(|item| item.state),
+                Some(MonitorInboxState::Launched)
+            );
+
+            if agent_failure {
+                relaunched.record_agent_issue_failed(7, "fresh manual agent failure");
+            } else {
+                relaunched.record_launch_failed(7, "fresh manual launch failure");
+            }
+
+            assert_eq!(
+                relaunched.inbox_item(7).map(|item| item.state),
+                Some(expected_state),
+                "new launch tracking distinguishes a fresh failure from receipt replay"
+            );
+            assert_eq!(relaunched.active_count(), 0);
+            assert!(
+                relaunched
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|failed| failed.issue_number == 7),
+                "fresh manual relaunch failure is persisted"
+            );
+        }
+    }
+
     #[test]
     fn launching_claims_survive_prefs_roundtrip_and_are_not_reclaimed() {
         // Issue #3222: a claimed-but-not-yet-acked launch (Launching, no window
@@ -3292,6 +4712,161 @@ mod tests {
         assert_eq!(
             prefs.launching_issues[0].claimed_at.as_deref(),
             Some("2026-07-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn qualified_window_ids_require_the_same_project_tab_prefix() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "project-a::agent-1".to_string(),
+                }],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        assert_eq!(
+            monitor.launched_window_issue("project-a::agent-1"),
+            Some(42),
+            "the exact qualified id still matches"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("agent-1"),
+            Some(42),
+            "a legacy bare id remains compatible"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("project-b::agent-1"),
+            None,
+            "the same raw id in another project tab must not match"
+        );
+        assert_eq!(
+            monitor.record_agent_window_failed("project-b::agent-1", "foreign failure"),
+            None,
+            "failure reverse lookup must not consume another project tab's launch"
+        );
+        assert_eq!(
+            monitor.requeue_window("project-b::agent-1"),
+            None,
+            "close reverse lookup must not consume another project tab's launch"
+        );
+        assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn live_candidate_snapshot_prunes_repo_absent_inflight_launches_but_cache_does_not() {
+        let stale_prefs = IssueMonitorPrefs {
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "project-a::agent-1".to_string(),
+            }],
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 43,
+                claimed_at: Some("2026-07-02T00:00:00Z".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        let project_root = Path::new(".");
+
+        let mut live =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+        scan_issue_monitor_candidates_with_provenance(
+            &mut live,
+            &[issue(99)],
+            IssueMonitorCandidateSource::Live,
+            project_root,
+            "2026-07-28T00:00:00Z",
+        );
+        assert_eq!(
+            live.active_count(),
+            0,
+            "a complete live snapshot frees both slots"
+        );
+        assert!(live.prefs().launched_issues.is_empty());
+        assert!(live.prefs().launching_issues.is_empty());
+
+        let mut cache = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+        scan_issue_monitor_candidates_with_provenance(
+            &mut cache,
+            &[issue(99)],
+            IssueMonitorCandidateSource::Cache,
+            project_root,
+            "2026-07-28T00:00:00Z",
+        );
+        assert_eq!(
+            cache.active_count(),
+            2,
+            "a partial cache snapshot must never authorize destructive pruning"
+        );
+    }
+
+    #[test]
+    fn live_gui_snapshot_prunes_foreign_qualified_windows_after_disk_rebase() {
+        let stale_prefs = IssueMonitorPrefs {
+            launched_issues: vec![
+                IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "project-b::agent-1".to_string(),
+                },
+                IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "legacy-agent-1".to_string(),
+                },
+            ],
+            ..IssueMonitorPrefs::default()
+        };
+        let issues = [issue(42), issue(43)];
+        let project_root = Path::new(".");
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs.clone());
+
+        scan_issue_monitor_candidates_for_project_tab_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            project_root,
+            Some("project-a"),
+            "2026-07-28T00:00:00Z",
+        );
+        assert_eq!(monitor.launched_window_issue("project-b::agent-1"), None);
+        assert_eq!(
+            monitor.launched_window_issue("legacy-agent-1"),
+            Some(43),
+            "bare legacy ids have no positive foreign-project provenance"
+        );
+
+        monitor.rebase_gui_observer_prefs(&stale_prefs);
+        scan_issue_monitor_candidates_for_project_tab_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            project_root,
+            Some("project-a"),
+            "2026-07-28T00:00:01Z",
+        );
+        assert_eq!(
+            monitor.launched_window_issue("project-b::agent-1"),
+            None,
+            "the final post-rebase scan prevents union merge resurrection"
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        let mut cache = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), stale_prefs);
+        scan_issue_monitor_candidates_for_project_tab_with_provenance(
+            &mut cache,
+            &issues,
+            IssueMonitorCandidateSource::Cache,
+            project_root,
+            Some("project-a"),
+            "2026-07-28T00:00:02Z",
+        );
+        assert_eq!(
+            cache.launched_window_issue("project-b::agent-1"),
+            Some(42),
+            "cache provenance cannot authorize foreign-prefix pruning"
         );
     }
 
@@ -3795,6 +5370,47 @@ mod tests {
     }
 
     #[test]
+    fn terminal_delivery_deletion_survives_stale_disk_rebase() {
+        for terminal_state in [
+            MonitorInboxState::Merged,
+            MonitorInboxState::Released,
+            MonitorInboxState::LaunchFailed,
+            MonitorInboxState::AgentFailed,
+            MonitorInboxState::NeedsHuman,
+        ] {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.record_candidate(issue(42));
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42",
+                "host/session",
+                "effect-42",
+                "2026-07-28T00:00:00Z",
+            ));
+            let stale_disk = monitor.prefs();
+
+            monitor.clear_active_tracking(42);
+            monitor.set_inbox_state(42, terminal_state);
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+
+            monitor.rebase_daemon_driver_prefs(&stale_disk);
+
+            assert!(
+                monitor.prefs().pending_launch_deliveries.is_empty(),
+                "a stale disk outbox cannot revive a delivery deleted by local {terminal_state:?}"
+            );
+            assert!(monitor.take_pending_launch_requests().is_empty());
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(terminal_state)
+            );
+        }
+    }
+
+    #[test]
     fn daemon_rebase_updates_profile_and_tuning_from_disk() {
         // Issue #3222: the daemon loads prefs once at startup, so a launch
         // profile the GUI saves later stays invisible (has_launch_profile=false
@@ -3923,6 +5539,1043 @@ mod tests {
         assert_eq!(prefs.autonomous_tuning.max_attempts, 3);
         assert_eq!(prefs.merged_issues, vec![42], "existing fields preserved");
         assert!(!IssueMonitorPrefs::default().autonomous_mode);
+    }
+
+    #[test]
+    fn pre_effect_journal_prefs_default_to_epoch_zero_and_no_pending_effects() {
+        // SPEC #3200 Phase 7 T-137 / FR-044: prefs written before the durable
+        // effect journal existed must remain readable. Missing authority and
+        // journal fields mean "no prior authority" rather than a parse error or
+        // a fabricated effect.
+        let legacy = r#"{
+            "enabled": true,
+            "max_active_agents": 2,
+            "priority_order": [7],
+            "autonomous_mode": true
+        }"#;
+
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(legacy).expect("pre-journal prefs deserialize");
+
+        assert_eq!(prefs.effect_authority_epoch, 0);
+        assert!(prefs.pending_effects.is_empty());
+        assert!(prefs.enabled);
+        assert!(prefs.autonomous_mode);
+        assert_eq!(prefs.priority_order, vec![7]);
+    }
+
+    #[test]
+    fn control_receipt_defaults_absent_and_round_trips_through_state_and_rebase() {
+        let legacy = r#"{
+            "enabled": true,
+            "max_active_agents": 1,
+            "priority_order": []
+        }"#;
+        let legacy: IssueMonitorPrefs =
+            serde_json::from_str(legacy).expect("pre-receipt prefs deserialize");
+        assert_eq!(legacy.last_control_receipt, None);
+        assert_eq!(IssueMonitorPrefs::default().last_control_receipt, None);
+
+        let receipt = IssueMonitorControlReceipt {
+            control_id: uuid::Uuid::new_v4().to_string(),
+            should_scan: true,
+            authority_changed: false,
+        };
+        let restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                last_control_receipt: Some(receipt.clone()),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert_eq!(restored.prefs().last_control_receipt, Some(receipt.clone()));
+
+        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+        stale.rebase_daemon_driver_prefs(&restored.prefs());
+        assert_eq!(stale.prefs().last_control_receipt, Some(receipt));
+    }
+
+    #[test]
+    fn prepared_and_attempting_effects_round_trip_every_authority_field() {
+        // A restart must retain the complete delivery identity. Dropping any of
+        // effect_id / epoch / attempt / payload would make a stale result look
+        // current or make an ambiguous remote mutation impossible to reconcile.
+        let prepared =
+            pending_arm_effect("arm:7:99:abc123:4", 4, 0, IssueMonitorEffectState::Prepared);
+        let attempting = PendingIssueMonitorEffect {
+            effect_id: "disarm:arm:7:99:abc123:4".to_string(),
+            authority_epoch: 5,
+            attempt: 3,
+            state: IssueMonitorEffectState::Attempting,
+            payload: IssueMonitorEffectPayload::DisarmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                compensates_effect_id: "arm:7:99:abc123:4".to_string(),
+            },
+        };
+        let prefs = IssueMonitorPrefs {
+            effect_authority_epoch: 5,
+            pending_effects: vec![prepared.clone(), attempting.clone()],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let json = serde_json::to_string(&prefs).expect("effect journal serializes");
+        let restored: IssueMonitorPrefs =
+            serde_json::from_str(&json).expect("effect journal deserializes");
+
+        assert_eq!(restored.effect_authority_epoch, 5);
+        assert_eq!(restored.pending_effects, vec![prepared, attempting]);
+    }
+
+    #[test]
+    fn effect_attempt_and_result_transitions_require_the_exact_delivery_tuple() {
+        // The executor may finish after a control advanced authority or after a
+        // retry allocated a newer attempt. Both Prepared -> Attempting and the
+        // confirmed-result transition must compare all three tuple components.
+        let prepared = pending_arm_effect("arm-7", 12, 4, IssueMonitorEffectState::Prepared);
+        let exact = effect_attempt_key("arm-7", 12, 4);
+        let mismatches = [
+            effect_attempt_key("other-effect", 12, 4),
+            effect_attempt_key("arm-7", 13, 4),
+            effect_attempt_key("arm-7", 12, 5),
+        ];
+
+        for mismatch in &mismatches {
+            let mut prefs = IssueMonitorPrefs {
+                effect_authority_epoch: 12,
+                pending_effects: vec![prepared.clone()],
+                ..IssueMonitorPrefs::default()
+            };
+            let before = prefs.clone();
+            assert!(!prefs.mark_pending_effect_attempting(mismatch));
+            assert_eq!(prefs, before, "mismatched Attempting transition is inert");
+        }
+
+        let mut attempting = IssueMonitorPrefs {
+            effect_authority_epoch: 12,
+            pending_effects: vec![prepared],
+            ..IssueMonitorPrefs::default()
+        };
+        assert!(attempting.mark_pending_effect_attempting(&exact));
+        assert_eq!(
+            attempting.pending_effects[0].state,
+            IssueMonitorEffectState::Attempting
+        );
+
+        for mismatch in &mismatches {
+            let mut prefs = attempting.clone();
+            let before = prefs.clone();
+            assert!(prefs.complete_pending_effect(mismatch).is_none());
+            assert_eq!(prefs, before, "mismatched result transition is inert");
+        }
+
+        let completed = attempting
+            .complete_pending_effect(&exact)
+            .expect("the exact Attempting result is accepted");
+        assert_eq!(completed.effect_id, "arm-7");
+        assert!(attempting.pending_effects.is_empty());
+    }
+
+    #[test]
+    fn autonomous_control_rejects_authority_epoch_wrap_atomically() {
+        // Authority must never wrap to zero: an ancient effect could otherwise
+        // regain the same epoch. The mode change and journal rewrite are one
+        // atomic transition, so overflow leaves every field untouched.
+        let mut prefs = IssueMonitorPrefs {
+            autonomous_mode: true,
+            effect_authority_epoch: u64::MAX,
+            pending_effects: vec![pending_arm_effect(
+                "arm-max",
+                u64::MAX,
+                0,
+                IssueMonitorEffectState::Prepared,
+            )],
+            ..IssueMonitorPrefs::default()
+        };
+        let before = prefs.clone();
+
+        assert_eq!(
+            prefs.set_autonomous_mode_with_effect_revocation(false),
+            None,
+            "checked epoch overflow rejects the control transition"
+        );
+        assert_eq!(prefs, before);
+    }
+
+    #[test]
+    fn same_value_authority_controls_are_idempotent_at_epoch_max() {
+        let arm = pending_arm_effect("arm-max", u64::MAX, 3, IssueMonitorEffectState::Attempting);
+        let mut autonomous = IssueMonitorPrefs {
+            autonomous_mode: true,
+            effect_authority_epoch: u64::MAX,
+            pending_effects: vec![arm],
+            ..IssueMonitorPrefs::default()
+        };
+        let autonomous_before = autonomous.clone();
+
+        assert_eq!(
+            autonomous.set_autonomous_mode_with_effect_revocation(true),
+            Some(u64::MAX)
+        );
+        assert_eq!(autonomous, autonomous_before);
+
+        let claim = PendingIssueMonitorEffect {
+            effect_id: "claim-max".to_string(),
+            authority_epoch: u64::MAX,
+            attempt: 2,
+            state: IssueMonitorEffectState::Attempting,
+            payload: IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-max".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-27T00:00:00Z".to_string(),
+                expires_at: "2026-07-27T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        };
+        let mut enabled = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: u64::MAX,
+                pending_effects: vec![claim],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let enabled_before = enabled.prefs();
+
+        assert_eq!(
+            enabled.set_enabled_with_effect_revocation(true),
+            Some(u64::MAX)
+        );
+        assert_eq!(enabled.prefs(), enabled_before);
+    }
+
+    #[test]
+    fn autonomous_off_cancels_prepared_arm_and_compensates_attempting_arm_durably() {
+        // Prepared means no remote request was submitted, so OFF can cancel it.
+        // Attempting is outcome-ambiguous: retain it for result reconciliation
+        // and add a new-epoch disarm. Re-enabling autonomous mode must not revoke
+        // that safety compensation.
+        let prepared = pending_arm_effect("arm-prepared", 7, 0, IssueMonitorEffectState::Prepared);
+        let attempting =
+            pending_arm_effect("arm-attempting", 7, 2, IssueMonitorEffectState::Attempting);
+        let mut prefs = IssueMonitorPrefs {
+            autonomous_mode: true,
+            effect_authority_epoch: 7,
+            pending_effects: vec![prepared, attempting.clone()],
+            ..IssueMonitorPrefs::default()
+        };
+
+        assert_eq!(
+            prefs.set_autonomous_mode_with_effect_revocation(false),
+            Some(8)
+        );
+        assert!(!prefs.autonomous_mode);
+        assert_eq!(prefs.effect_authority_epoch, 8);
+        assert!(prefs
+            .pending_effects
+            .iter()
+            .all(|effect| effect.effect_id != "arm-prepared"));
+        assert!(prefs.pending_effects.contains(&attempting));
+
+        let compensation = prefs
+            .pending_effects
+            .iter()
+            .find(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: 7,
+                        pr_number: 99,
+                        compensates_effect_id,
+                    } if compensates_effect_id == "arm-attempting"
+                )
+            })
+            .cloned()
+            .expect("Attempting arm receives durable disarm compensation");
+        assert_eq!(compensation.authority_epoch, 8);
+        assert_eq!(compensation.attempt, 0);
+        assert_eq!(compensation.state, IssueMonitorEffectState::Prepared);
+        assert!(!compensation.effect_id.is_empty());
+        assert_ne!(compensation.effect_id, "arm-attempting");
+
+        assert_eq!(
+            prefs.set_autonomous_mode_with_effect_revocation(true),
+            Some(9)
+        );
+        assert!(prefs.autonomous_mode);
+        assert_eq!(prefs.effect_authority_epoch, 9);
+        assert!(
+            prefs.pending_effects.contains(&compensation),
+            "a newer ON authority cannot erase an unfinished safety disarm"
+        );
+    }
+
+    #[test]
+    fn scan_claim_planning_is_side_effect_free_and_deduplicated() {
+        // Phase 7 T-140: the cloned scan may select candidates, but GitHub
+        // mutation begins only after the proposal commits and is fenced by the
+        // daemon executor. Repeated scans must retain one stable proposal.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-27T00:00:00Z",
+        );
+
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-27T00:00:01Z",
+                2,
+                |_| false,
+            ),
+            2
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-27T00:00:02Z",
+                2,
+                |_| false,
+            ),
+            0,
+            "an uncommitted/replayed scan cannot duplicate logical claims"
+        );
+        assert_eq!(monitor.active_count(), 0, "planning does not claim a slot");
+        assert_eq!(monitor.pending_effects().len(), 2);
+        assert!(monitor.pending_effects().iter().all(|effect| matches!(
+            effect.payload,
+            IssueMonitorEffectPayload::AcquireClaim { .. }
+        )));
+    }
+
+    #[test]
+    fn claim_proposal_planning_preserves_completion_probe_failure() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-28T00:00:00Z",
+        );
+
+        let error = monitor
+            .try_prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-28T00:00:01Z",
+                2,
+                |issue_number| {
+                    if issue_number == 43 {
+                        Err("merged-pr readback failed")
+                    } else {
+                        Ok(false)
+                    }
+                },
+            )
+            .expect_err("completion probe failure must not become false");
+
+        assert_eq!(error, "merged-pr readback failed");
+    }
+
+    #[test]
+    fn confirmed_claim_persists_and_replays_one_stable_launch_delivery() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "claim-effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            prefs.pending_launch_deliveries[0].delivery_id,
+            "launch:claim-effect-42"
+        );
+        assert_eq!(prefs.pending_launch_deliveries[0].claim_id, "claim-42");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launching)
+        );
+
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let first = restored.take_pending_launch_requests();
+        let replay = restored.take_pending_launch_requests();
+        assert_eq!(first, replay, "delivery remains replayable until ACK");
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].delivery_id.as_deref(),
+            Some("launch:claim-effect-42")
+        );
+        assert!(
+            restored
+                .expire_stale_unbound_launches("2026-07-28T01:00:00Z")
+                .is_empty(),
+            "a durable delivery is ACK-driven, not TTL-expired"
+        );
+    }
+
+    #[test]
+    fn deduped_confirmed_claim_returns_its_exact_delivery_not_the_queue_tail() {
+        use gwt_github::{
+            issue_auto_claim::render_claim_comment, CommentId, CommentSnapshot, FakeIssueClient,
+            IssueSnapshot, IssueState, UpdatedAt,
+        };
+
+        let owner = "host/session";
+        let now = "2026-07-28T00:00:00Z";
+        let claim_id = format!("gwt-auto-improve:{owner}:42:{now}");
+        let synchronous_effect_id = format!("synchronous-claim:{claim_id}");
+        let expected_delivery_id = format!("launch:{synchronous_effect_id}");
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(43));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            claim_id.clone(),
+            owner,
+            &synchronous_effect_id,
+            now,
+        ));
+        assert!(monitor.apply_confirmed_claim(43, "claim-43", owner, "effect-43", now,));
+        monitor
+            .active_launches
+            .retain(|issue_number| *issue_number != 42);
+        monitor.launching_claimed_at.remove(&42);
+        monitor.set_inbox_state(42, MonitorInboxState::Queued);
+        monitor.queue.push_front(42);
+
+        let client = FakeIssueClient::new();
+        let claim = ClaimComment {
+            comment_id: Some(CommentId(9)),
+            claim_id,
+            owner: owner.to_string(),
+            issue_number: 42,
+            status: ClaimStatus::Active,
+            heartbeat_at: now.to_string(),
+            expires_at: "2026-07-28T00:30:00Z".to_string(),
+            launched_work_id: Some("work/issue-42".to_string()),
+        };
+        client.seed(IssueSnapshot {
+            number: IssueNumber(42),
+            title: "Issue 42".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("t1"),
+            comments: vec![CommentSnapshot {
+                id: CommentId(9),
+                body: render_claim_comment(&claim),
+                updated_at: UpdatedAt::new("t1"),
+            }],
+        });
+
+        let requests = monitor.claim_next_launch_requests_with_active_cap(&client, owner, now, 2);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].issue_number, 42);
+        assert_eq!(
+            requests[0].delivery_id.as_deref(),
+            Some(expected_delivery_id.as_str())
+        );
+    }
+
+    #[test]
+    fn matching_launch_ack_consumes_only_its_delivery_and_legacy_ack_consumes_none() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(43));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            43,
+            "claim-43",
+            "host/session",
+            "effect-43",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::wrong",
+            Some("launch:effect-43"),
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 2);
+
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(!monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::wrong-window",
+            Some("launch:effect-42"),
+        ));
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].issue_number,
+            43
+        );
+
+        assert!(monitor.complete_active_launch_delivery(43, "tab-1::legacy-43", None));
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries.len(),
+            1,
+            "legacy ACK must not consume a new delivery"
+        );
+        assert!(monitor.claim_launch_delivery(
+            43,
+            "launch:effect-43",
+            "gui-b",
+            202,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        assert!(!monitor.record_launch_failed_delivery(
+            43,
+            "materialization failed",
+            Some("launch:effect-43"),
+            Some("gui-a"),
+        ));
+        assert!(monitor.record_launch_failed_delivery(
+            43,
+            "materialization failed",
+            Some("launch:effect-43"),
+            Some("gui-b"),
+        ));
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+    }
+
+    #[test]
+    fn launch_delivery_materializer_claim_is_single_owner_and_dead_owner_is_recoverable() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-1",
+            |pid| pid == 101,
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-b",
+            202,
+            "tab-b::agent-1",
+            |pid| pid == 101,
+        ));
+        let first = monitor.prefs().pending_launch_deliveries.remove(0);
+        assert_eq!(first.materializer_id.as_deref(), Some("gui-a"));
+        assert_eq!(
+            first.materializer_window_id.as_deref(),
+            Some("tab-a::agent-1")
+        );
+
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-b",
+            202,
+            "tab-b::agent-1",
+            |_| false,
+        ));
+        let recovered = monitor.prefs().pending_launch_deliveries.remove(0);
+        assert_eq!(recovered.materializer_id.as_deref(), Some("gui-b"));
+        assert_eq!(recovered.materializer_pid, Some(202));
+        assert_eq!(
+            recovered.materializer_window_id.as_deref(),
+            Some("tab-b::agent-1")
+        );
+    }
+
+    #[test]
+    fn foreign_materializer_cannot_confirm_existing_materialized_or_durable_markers() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-42",
+            |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-a::agent-42",
+        ));
+
+        assert!(
+            !monitor.mark_launch_delivery_materialized(
+                42,
+                "launch:effect-42",
+                "gui-b",
+                "tab-a::agent-42",
+            ),
+            "an idempotent materialized marker is still bound to the exact materializer"
+        );
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-a::agent-42",
+        ));
+        assert!(
+            !monitor.mark_launch_delivery_workspace_durable(
+                42,
+                "launch:effect-42",
+                "gui-b",
+                "tab-a::agent-42",
+            ),
+            "an idempotent durable marker is still bound to the exact materializer"
+        );
+    }
+
+    #[test]
+    fn autonomous_legacy_failure_cannot_leave_one_issue_queued_and_replayable() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        let before = monitor.prefs();
+
+        assert!(
+            !monitor.record_launch_failed_delivery(42, "stale legacy failure", None, None),
+            "a legacy failure cannot mutate an exact durable delivery without its identity"
+        );
+
+        assert_eq!(monitor.prefs(), before);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-28T01:00:00Z",
+                2,
+                |_| false,
+            ),
+            0,
+            "the retained outbox remains the only launch path"
+        );
+    }
+
+    #[test]
+    fn autonomous_direct_launch_failure_requeues_without_replaying_old_delivery() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+
+        monitor.record_launch_failed(42, "legacy autonomous launch failure");
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the autonomous failure is scheduled through the retry path"
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        let record = monitor.autonomous_record(42).expect("retry record");
+        assert_eq!(record.phase, AutonomousPhase::Idle);
+        assert!(record.retry_not_before.is_some());
+        assert!(monitor.queue.contains(&42));
+        assert!(!monitor.active_launches.contains(&42));
+        assert!(
+            monitor.prefs().pending_launch_deliveries.is_empty(),
+            "a retryable issue cannot also replay its previous durable delivery"
+        );
+    }
+
+    #[test]
+    fn autonomous_exact_delivery_failure_consumes_outbox_before_retrying() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-42",
+            |_| false,
+        ));
+
+        assert!(monitor.record_launch_failed_delivery(
+            42,
+            "exact autonomous launch failure",
+            Some("launch:effect-42"),
+            Some("gui-a"),
+        ));
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(monitor.queue.contains(&42));
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+    }
+
+    #[test]
+    fn disabling_monitor_compensates_durable_launch_claim_before_clearing_outbox() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(1));
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id,
+                owner,
+            } if claim_id == "claim-42" && owner == "host/session"
+        )));
+    }
+
+    #[test]
+    fn autonomous_legacy_launch_failure_does_not_consume_durable_delivery() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        monitor.record_attempt(42);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+
+        assert!(!monitor.record_launch_failed_delivery(42, "legacy failure", None, None));
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].delivery_id,
+            "launch:effect-42"
+        );
+    }
+
+    #[test]
+    fn claim_proposals_use_distinct_uuid_identity_and_preserve_it_across_retry_restart() {
+        fn prepare(owner: &str) -> IssueMonitorState {
+            let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..IssueMonitorConfig::default()
+            });
+            monitor.set_gui_connected(true);
+            scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-27T00:00:00Z");
+            assert_eq!(
+                monitor
+                    .prepare_claim_effects_with_probe(owner, "2026-07-27T00:00:01Z", 1, |_| false,),
+                1
+            );
+            monitor
+        }
+
+        fn identity(effect: &PendingIssueMonitorEffect) -> (&str, &str) {
+            let IssueMonitorEffectPayload::AcquireClaim { claim_id, .. } = &effect.payload else {
+                panic!("expected claim proposal");
+            };
+            (&effect.effect_id, claim_id)
+        }
+
+        let mut first = prepare("host-a/session-a");
+        let second = prepare("host-b/session-b");
+        let first_effect = first.pending_effects()[0].clone();
+        let second_effect = second.pending_effects()[0].clone();
+        let (first_effect_id, first_claim_id) = identity(&first_effect);
+        let (second_effect_id, second_claim_id) = identity(&second_effect);
+
+        assert_ne!(first_effect_id, second_effect_id);
+        assert_ne!(first_claim_id, second_claim_id);
+        let effect_uuid = first_effect_id
+            .rsplit(':')
+            .next()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .expect("effect identity ends in a UUID");
+        let claim_uuid = first_claim_id
+            .strip_prefix("gwt-auto-improve:")
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .expect("claim identity carries a UUID");
+        assert_eq!(effect_uuid, claim_uuid, "one UUID identifies the proposal");
+
+        let first_key = first_effect.attempt_key();
+        assert!(first.mark_pending_effect_attempting(&first_key));
+        assert!(first.retry_pending_effect(&first_key));
+        assert_eq!(
+            identity(&first.pending_effects()[0]),
+            (first_effect_id, first_claim_id)
+        );
+
+        let encoded = serde_json::to_string(&first.prefs()).expect("prefs serialize");
+        let restored_prefs: IssueMonitorPrefs =
+            serde_json::from_str(&encoded).expect("prefs deserialize");
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+        assert_eq!(
+            identity(&restored.pending_effects()[0]),
+            (first_effect_id, first_claim_id)
+        );
+    }
+
+    #[test]
+    fn disabling_monitor_cancels_prepared_claim_and_compensates_attempting_claim() {
+        let prepared = PendingIssueMonitorEffect::prepared(
+            "claim-prepared",
+            3,
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-prepared".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-27T00:00:00Z".to_string(),
+                expires_at: "2026-07-27T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        );
+        let mut attempting = PendingIssueMonitorEffect::prepared(
+            "claim-attempting",
+            3,
+            IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 43,
+                claim_id: "claim-attempting".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-07-27T00:00:00Z".to_string(),
+                expires_at: "2026-07-27T00:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-43".to_string()),
+            },
+        );
+        attempting.state = IssueMonitorEffectState::Attempting;
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: 3,
+                pending_effects: vec![prepared, attempting.clone()],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+
+        assert_eq!(monitor.set_enabled_with_effect_revocation(false), Some(4));
+        assert!(!monitor.config.enabled);
+        assert!(monitor.pending_effects().contains(&attempting));
+        assert!(!monitor
+            .pending_effects()
+            .iter()
+            .any(|effect| effect.effect_id == "claim-prepared"));
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 43,
+                claim_id,
+                owner,
+            } if claim_id == "claim-attempting" && owner == "host/session"
+        )));
+
+        let encoded = serde_json::to_string(&monitor.prefs()).expect("prefs serialize");
+        let restored: IssueMonitorPrefs =
+            serde_json::from_str(&encoded).expect("prefs deserialize after restart");
+        assert!(restored.pending_effects.iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 43,
+                claim_id,
+                owner,
+            } if claim_id == "claim-attempting" && owner == "host/session"
+        )));
+    }
+
+    #[test]
+    fn ownerless_legacy_release_journal_deserializes_without_being_dropped() {
+        let prefs: IssueMonitorPrefs = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "max_active_agents": 1,
+                "priority_order": [],
+                "pending_effects": [{
+                    "effect_id": "release:legacy",
+                    "authority_epoch": 4,
+                    "attempt": 2,
+                    "state": "attempting",
+                    "payload": {
+                        "kind": "release_claim",
+                        "issue_number": 42,
+                        "claim_id": "stable-effect-claim"
+                    }
+                }]
+            }"#,
+        )
+        .expect("legacy ownerless journal remains readable");
+
+        assert!(matches!(
+            prefs.pending_effects.as_slice(),
+            [PendingIssueMonitorEffect {
+                payload: IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number: 42,
+                    claim_id,
+                    owner,
+                },
+                ..
+            }] if claim_id == "stable-effect-claim" && owner.is_empty()
+        ));
     }
 
     #[test]
@@ -4094,6 +6747,258 @@ mod tests {
             path.parent(),
             "scratch stays in the target's dir so the rename is atomic"
         );
+    }
+
+    #[test]
+    fn failed_atomic_prefs_rename_removes_unique_scratch_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("issue-monitor.json");
+        fs::create_dir(&path).expect("make destination a directory");
+
+        let error = super::save_issue_monitor_prefs(
+            &path,
+            &super::IssueMonitorPrefs {
+                enabled: true,
+                ..super::IssueMonitorPrefs::default()
+            },
+        )
+        .expect_err("rename over a directory must fail");
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        let scratch_prefix = ".issue-monitor.json.tmp-";
+        assert!(
+            fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(scratch_prefix)),
+            "failed atomic write must not leave a partial scratch file"
+        );
+        assert!(path.is_dir(), "failed rename leaves destination untouched");
+    }
+
+    #[test]
+    fn authority_fence_clear_waits_for_the_stable_prefs_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let fence = IssueMonitorAuthorityFence::current_process();
+        persist_issue_monitor_authority_fence(&prefs_path, &fence).expect("seed authority fence");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let clear_path = prefs_path.clone();
+        let clear_fence = fence.clone();
+
+        let (clear_thread, completed_while_locked, fence_while_locked) =
+            with_issue_monitor_prefs_lock(&prefs_path, || {
+                let clear_thread = std::thread::spawn(move || {
+                    started_tx.send(()).expect("signal clear start");
+                    let result = clear_issue_monitor_authority_fence(&clear_path, &clear_fence);
+                    done_tx.send(result).expect("signal clear completion");
+                });
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("clear thread started");
+                let completed_while_locked = done_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .ok();
+                let fence_while_locked = load_issue_monitor_authority_fence(&prefs_path)?;
+                Ok((clear_thread, completed_while_locked, fence_while_locked))
+            })
+            .expect("hold stable prefs lock");
+
+        let completed_early = completed_while_locked.is_some();
+        let completion = match completed_while_locked {
+            Some(result) => result,
+            None => done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("clear completes after lock release"),
+        };
+        clear_thread.join().expect("clear thread joins");
+
+        assert!(
+            !completed_early,
+            "fence clear must not compare/remove while another prefs transaction owns the lock"
+        );
+        assert_eq!(
+            fence_while_locked,
+            IssueMonitorAuthorityFenceState::Active(fence)
+        );
+        completion.expect("exact fence clears after lock release");
+    }
+
+    #[test]
+    fn current_authority_fence_recovers_under_a_reused_live_pid_when_lifetime_lock_is_free() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 7,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence {
+                version: ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+                pid: std::process::id(),
+                instance_id: "stale-owner".to_string(),
+            },
+        )
+        .expect("seed stale current fence");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let (prefs, lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |_| true)
+                .expect("free lifetime lock proves that the current fence is stale");
+
+        assert_eq!(prefs.effect_authority_epoch, 8);
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load replacement fence"),
+            IssueMonitorAuthorityFenceState::Active(current)
+        );
+        drop(lease);
+    }
+
+    #[test]
+    fn current_authority_fence_rejects_a_second_owner_until_the_lease_is_dropped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let first = IssueMonitorAuthorityFence::current_process();
+        let (_, first_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &first, |_| false)
+                .expect("first owner acquires lifetime lease");
+        let second = IssueMonitorAuthorityFence::current_process();
+
+        let overlap = establish_issue_monitor_authority_fence(&prefs_path, &second, |_| false)
+            .expect_err("live lifetime lease rejects a second owner");
+
+        assert_eq!(overlap.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("load prefs after rejected overlap")
+                .effect_authority_epoch,
+            0,
+            "rejected overlap must not advance authority"
+        );
+
+        drop(first_lease);
+        let (recovered, second_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &second, |_| true)
+                .expect("dropping the lease makes the persisted current fence recoverable");
+        assert_eq!(recovered.effect_authority_epoch, 1);
+        drop(second_lease);
+    }
+
+    #[test]
+    fn legacy_v1_authority_fence_fails_closed_for_a_live_pid_without_a_lifetime_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 11,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let legacy = IssueMonitorAuthorityFence {
+            version: LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+            pid: 4242,
+            instance_id: "legacy-live-owner".to_string(),
+        };
+        persist_issue_monitor_authority_fence(&prefs_path, &legacy).expect("seed v1 fence");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let overlap =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |pid| pid == legacy.pid)
+                .expect_err("a live v1 owner has no lock identity, so recovery stays fail-closed");
+
+        assert_eq!(overlap.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load preserved v1 fence"),
+            IssueMonitorAuthorityFenceState::Active(legacy)
+        );
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("load preserved prefs")
+                .effect_authority_epoch,
+            11
+        );
+    }
+
+    #[test]
+    fn legacy_v1_authority_fence_recovers_after_its_pid_is_dead() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 19,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let legacy = IssueMonitorAuthorityFence {
+            version: LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+            pid: 4242,
+            instance_id: "legacy-dead-owner".to_string(),
+        };
+        persist_issue_monitor_authority_fence(&prefs_path, &legacy).expect("seed v1 fence");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let (prefs, lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |_| false)
+                .expect("dead v1 owner is recoverable once the lifetime lock is free");
+
+        assert_eq!(prefs.effect_authority_epoch, 20);
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load upgraded fence"),
+            IssueMonitorAuthorityFenceState::Active(current)
+        );
+        drop(lease);
+    }
+
+    #[test]
+    fn expired_deadline_rejects_durable_write_before_canonical_rename() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("issue-monitor.json");
+        fs::write(&path, b"original").expect("seed canonical bytes");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        let error = super::durable_atomic_write(&path, b"replacement")
+            .expect_err("expired deadline must reject the canonical rename");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(fs::read(&path).expect("read canonical bytes"), b"original");
+        let scratch_prefix = ".issue-monitor.json.tmp-";
+        assert!(
+            fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(scratch_prefix)),
+            "deadline rejection must clean the scratch file"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn parent_directory_sync_is_a_non_unix_compatibility_noop() {
+        let missing_parent =
+            std::path::Path::new("definitely-missing-parent").join("issue-monitor.json");
+
+        super::sync_parent_directory(&missing_parent)
+            .expect("non-Unix durable writers do not open directory handles");
     }
 
     #[test]
@@ -4896,6 +7801,57 @@ mod tests {
     }
 
     #[test]
+    fn deferred_restart_resume_only_rewinds_the_startup_review_set() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 70, "old-sha");
+        monitor.begin_review(8, 80, "stable-sha");
+        let startup_reviews = vec![
+            monitor.autonomous_record(7).expect("review 7").clone(),
+            monitor.autonomous_record(8).expect("review 8").clone(),
+        ];
+        monitor.begin_review(7, 71, "new-sha");
+
+        let resumed = monitor
+            .resume_inflight_reviews_after_restart_for(&startup_reviews, "2026-06-29T00:00:00Z");
+
+        assert_eq!(resumed, vec![8]);
+        assert_eq!(
+            monitor.autonomous_record(7).map(|record| record.phase),
+            Some(AutonomousPhase::Reviewing),
+            "a newer review for the same Issue is not the startup-stranded review",
+        );
+        assert_eq!(
+            monitor.autonomous_record(8).map(|record| record.phase),
+            Some(AutonomousPhase::Implementing),
+        );
+    }
+
+    #[test]
+    fn resume_after_restart_preserves_durable_review_verdicts() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 70, "pending-sha");
+        monitor.begin_review(8, 80, "passed-sha");
+        monitor.record_review_verdict(8, true);
+        monitor.begin_review(9, 90, "failed-sha");
+        monitor.record_review_verdict(9, false);
+
+        let resumed = monitor.resume_inflight_reviews_after_restart("2026-06-29T00:00:00Z");
+
+        assert_eq!(resumed, vec![7], "only a verdict-pending review is lost");
+        for (issue_number, expected_verdict) in [(8, true), (9, false)] {
+            let record = monitor
+                .autonomous_record(issue_number)
+                .expect("review record retained");
+            assert_eq!(record.phase, AutonomousPhase::Reviewing);
+            assert_eq!(
+                record.review_passed,
+                Some(expected_verdict),
+                "a durable verdict must survive daemon restart",
+            );
+        }
+    }
+
+    #[test]
     fn resume_after_restart_leaves_delivering_and_other_phases_untouched() {
         // Delivering self-heals on its own (its watch polls the persisted pr_number
         // for the merge commit) and has an armed GitHub auto-merge, so it must NOT
@@ -5013,9 +7969,18 @@ mod tests {
         monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
         monitor.begin_review(7, 99, "abc123");
         monitor.begin_delivering(7);
+        monitor.set_enabled(true);
 
         // Mode ON ⇒ no targets (deliveries are still owned by the loop).
         assert!(monitor.kill_switch_disarm_targets().is_empty());
+
+        monitor.set_enabled(false);
+        assert_eq!(
+            monitor.kill_switch_disarm_targets(),
+            vec![(7, 99)],
+            "global monitor OFF is also a kill switch for an armed delivery"
+        );
+        monitor.set_enabled(true);
 
         monitor.set_autonomous_mode(false);
         assert_eq!(
@@ -5187,6 +8152,15 @@ mod tests {
             Some(MonitorInboxState::Queued),
             "re-queued for automatic relaunch (not parked in LaunchFailed)"
         );
+
+        let mut pre_materialization = monitor.clone();
+        pre_materialization.record_launch_failed(7, "fresh pre-materialization failure");
+        assert_eq!(
+            pre_materialization.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "a distinct admission before materialization cannot be mistaken for receipt replay"
+        );
+        assert_manual_relaunch_accepts_fresh_lifecycle_failures(&monitor);
     }
 
     #[test]
@@ -5212,6 +8186,8 @@ mod tests {
             monitor.inbox_item(7).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman)
         );
+
+        assert_manual_relaunch_accepts_fresh_lifecycle_failures(&monitor);
     }
 
     #[test]

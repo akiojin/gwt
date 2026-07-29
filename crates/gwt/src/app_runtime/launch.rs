@@ -47,9 +47,9 @@ use super::{
     resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
     AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
-    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, PendingContinueWork,
-    PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WindowRuntime, WorkspaceResumeContext,
+    IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
+    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 #[cfg(test)]
@@ -2371,14 +2371,31 @@ impl AppRuntime {
                             is_fresh_execution_launch
                                 .then(|| "Waiting for authenticated SessionStart...".to_string()),
                         ));
+                        // A fresh execution launch is not producing yet: its
+                        // delivery ACK is emitted from the SessionStart
+                        // finalizer in `continuation.rs`, which owns the same
+                        // `launch_feedback_context` (and therefore the same
+                        // delivery id).
                         if !is_fresh_execution_launch {
                             if let Some(issue_number) = launch_feedback_context
                                 .as_ref()
                                 .and_then(|context| context.issue_monitor_issue_number)
                             {
-                                events.extend(self.issue_monitor_launch_succeeded_events(
+                                let delivery_id =
+                                    launch_feedback_context.as_ref().and_then(|context| {
+                                        context.issue_monitor_delivery_id.as_deref()
+                                    });
+                                let issue_monitor_project_root = launch_feedback_context
+                                    .as_ref()
+                                    .and_then(|context| {
+                                        context.issue_monitor_project_root.as_deref()
+                                    })
+                                    .unwrap_or(&project_root);
+                                events.extend(self.issue_monitor_launch_completed_delivery_events(
+                                    issue_monitor_project_root,
                                     issue_number,
                                     &window_id,
+                                    delivery_id,
                                 ));
                             }
                         }
@@ -2869,6 +2886,12 @@ impl AppRuntime {
             agent_kanban_target,
             continuation,
         } = options;
+        // SPEC #3200 FR-052: a durable Issue Monitor delivery must always
+        // materialize its own window so the delivery tuple can be ACKed.
+        // Focusing an existing window would strand the delivery as pending.
+        let durable_issue_monitor_delivery = launch_feedback_context
+            .as_ref()
+            .is_some_and(|context| context.issue_monitor_delivery_id.is_some());
         if continuation.is_some() {
             if let Some(window_id) =
                 self.pending_continue_work
@@ -2887,7 +2910,7 @@ impl AppRuntime {
                     .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
             }
         }
-        if continuation.is_none() {
+        if continuation.is_none() && !durable_issue_monitor_delivery {
             if let Some(window_id) = self.live_agent_window_for_work(
                 tab_id,
                 config.branch.as_deref(),
@@ -2912,11 +2935,15 @@ impl AppRuntime {
                     && window_lookup.contains_key(window_id.as_str())
             });
         }
-        if let Some(key) = inflight_key.as_deref() {
-            if let Some((window_id, _)) = self.inflight_launches.get(key) {
-                let window_id = window_id.clone();
-                return Ok(self
-                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+        if !durable_issue_monitor_delivery {
+            if let Some(key) = inflight_key.as_deref() {
+                if let Some((window_id, _)) = self.inflight_launches.get(key) {
+                    let window_id = window_id.clone();
+                    return Ok(self.focus_existing_live_work_agent_events(
+                        &window_id,
+                        Some(placement.bounds()),
+                    ));
+                }
             }
         }
         // Resolve every synchronously fallible launch dependency before adding
@@ -2997,6 +3024,18 @@ impl AppRuntime {
         if let Some(context) = workspace_resume_context {
             self.pending_workspace_resume_contexts
                 .insert(window_id.clone(), context);
+        }
+        if let Some(delivery_id) = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_delivery_id.as_ref())
+        {
+            self.issue_monitor_launch_deliveries.insert(
+                delivery_id.clone(),
+                IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id: window_id.clone(),
+                    started_at: std::time::Instant::now(),
+                },
+            );
         }
         if let Some(context) = launch_feedback_context {
             self.pending_launch_feedback_contexts
