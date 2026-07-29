@@ -1,5 +1,4 @@
 use std::{
-    fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -414,7 +413,7 @@ fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    fs::File::open(parent)?.sync_all()
+    std::fs::File::open(parent)?.sync_all()
 }
 
 #[cfg(not(unix))]

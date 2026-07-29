@@ -41,6 +41,17 @@ pub fn current() -> Option<Instant> {
     CURRENT_DEADLINE.with(Cell::get)
 }
 
+/// Whether a `try_lock_*` failure means "another holder has the lock".
+///
+/// Unix reports contention as [`io::ErrorKind::WouldBlock`], while Windows
+/// returns `ERROR_LOCK_VIOLATION` (raw OS error 33), which `std` still maps to
+/// `Uncategorized`. Comparing against fs2's canonical contention error covers
+/// both without hard-coding the platform error number.
+pub fn is_lock_contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 pub fn lock_exclusive(file: &File) -> io::Result<()> {
     let Some(deadline) = current() else {
         return FileExt::lock_exclusive(file);
@@ -57,7 +68,7 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
                 }
                 return Ok(());
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(error) if is_lock_contended(&error) => {
                 let now = Instant::now();
                 if now >= deadline {
                     return Err(deadline_error("file lock"));
