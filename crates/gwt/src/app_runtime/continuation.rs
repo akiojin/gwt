@@ -2267,6 +2267,265 @@ fn resolve_activated_fresh_execution_commit(
     .map(|result| result == Some(true))
 }
 
+pub(crate) use gwt::cli::execution_state::{
+    BindingRepairFailureCause, BindingRepairOutcome, BindingRepairOutcomeRecord,
+};
+#[cfg(test)]
+pub(crate) const BINDING_REPAIR_OUTCOME_FILE: &str =
+    gwt::cli::execution_state::BINDING_REPAIR_OUTCOME_FILE;
+const BINDING_REPAIR_OPERATION_ID: &str = "continue-work-local-repair";
+
+fn new_binding_repair_outcome_record(
+    binding: &gwt_agent::SessionExecutionBinding,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    outcome: BindingRepairOutcome,
+) -> BindingRepairOutcomeRecord {
+    gwt::cli::execution_state::new_binding_repair_outcome_record(binding, owner, outcome)
+}
+
+#[cfg(test)]
+pub(crate) fn load_binding_repair_outcome(
+    worktree: &Path,
+) -> std::io::Result<Option<BindingRepairOutcomeRecord>> {
+    gwt::cli::execution_state::load_binding_repair_outcome(worktree)
+}
+
+#[cfg(test)]
+fn persist_binding_repair_outcome(
+    worktree: &Path,
+    record: BindingRepairOutcomeRecord,
+) -> std::io::Result<BindingRepairOutcomeRecord> {
+    gwt::cli::execution_state::persist_binding_repair_outcome(worktree, record)
+}
+
+fn record_binding_repair_outcome(worktree: &Path, record: BindingRepairOutcomeRecord) -> bool {
+    gwt::cli::execution_state::record_binding_repair_outcome(worktree, record)
+}
+
+fn repaired_binding_probe_receipt_matches(
+    expected_session_id: &str,
+    binding: &gwt_agent::SessionExecutionBinding,
+    request: &gwt::AgentExecutionBindingProbeRequest,
+    receipt: Option<&gwt::AgentExecutionBindingProbeReceipt>,
+) -> bool {
+    let Some(receipt) = receipt else {
+        return false;
+    };
+    binding.session_id == expected_session_id
+        && receipt.schema_version == gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION
+        && receipt.operation_id == request.operation_id
+        && receipt.nonce == request.nonce
+        && !receipt.host_instance_id.trim().is_empty()
+        && receipt.execution_binding == binding.identity
+        && receipt.capability_generation == binding.capability_generation
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Kept beside the private D3-R codec it exercises.
+mod repaired_binding_probe_tests {
+    use super::*;
+
+    fn init_repo(path: &Path) {
+        std::fs::create_dir_all(path).expect("create repository directory");
+        let status = gwt_core::process::hidden_command("git")
+            .args(["init", "--quiet"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+        let status = gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/owner/binding-repair.git",
+            ])
+            .current_dir(path)
+            .status()
+            .expect("git remote add origin");
+        assert!(status.success(), "git remote add origin failed");
+    }
+
+    fn binding() -> gwt_agent::SessionExecutionBinding {
+        gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-current".to_string(),
+            repo_hash: "repo-current".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3394,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-current".to_string(),
+                binding_id: "binding-current".to_string(),
+                ledger_head_hash: "head-current".to_string(),
+            },
+            capability_generation: 3,
+        }
+    }
+
+    fn request() -> gwt::AgentExecutionBindingProbeRequest {
+        gwt::AgentExecutionBindingProbeRequest {
+            schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+            operation_id: "operation-current".to_string(),
+            nonce: "nonce-current".to_string(),
+        }
+    }
+
+    fn exact_receipt(
+        binding: &gwt_agent::SessionExecutionBinding,
+        request: &gwt::AgentExecutionBindingProbeRequest,
+    ) -> gwt::AgentExecutionBindingProbeReceipt {
+        gwt::AgentExecutionBindingProbeReceipt {
+            schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+            operation_id: request.operation_id.clone(),
+            nonce: request.nonce.clone(),
+            host_instance_id: "host-current".to_string(),
+            execution_binding: binding.identity.clone(),
+            capability_generation: binding.capability_generation,
+        }
+    }
+
+    #[test]
+    fn repaired_authority_requires_an_exact_read_after_write_receipt() {
+        let binding = binding();
+        let request = request();
+        let exact = exact_receipt(&binding, &request);
+        assert!(repaired_binding_probe_receipt_matches(
+            "session-current",
+            &binding,
+            &request,
+            Some(&exact),
+        ));
+        assert!(!repaired_binding_probe_receipt_matches(
+            "session-current",
+            &binding,
+            &request,
+            None,
+        ));
+
+        let mut old_generation = exact.clone();
+        old_generation.execution_binding.generation_id = "generation-old".to_string();
+        assert!(!repaired_binding_probe_receipt_matches(
+            "session-current",
+            &binding,
+            &request,
+            Some(&old_generation),
+        ));
+
+        assert!(!repaired_binding_probe_receipt_matches(
+            "session-foreign",
+            &binding,
+            &request,
+            Some(&exact),
+        ));
+    }
+
+    #[test]
+    fn binding_repair_outcome_roundtrips_success_and_typed_failure() {
+        let _env_guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let binding = binding();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        };
+
+        let stored_success = persist_binding_repair_outcome(
+            &repo,
+            new_binding_repair_outcome_record(
+                &binding,
+                owner,
+                BindingRepairOutcome::Succeeded {
+                    host_instance_id: "host-current".to_string(),
+                    receipt_generation_id: binding.identity.generation_id.clone(),
+                },
+            ),
+        )
+        .expect("persist successful repair outcome");
+        assert_eq!(
+            load_binding_repair_outcome(&repo)
+                .expect("load successful repair outcome")
+                .expect("successful repair outcome"),
+            stored_success
+        );
+
+        let stored_failure = persist_binding_repair_outcome(
+            &repo,
+            new_binding_repair_outcome_record(
+                &binding,
+                owner,
+                BindingRepairOutcome::Failed {
+                    cause: BindingRepairFailureCause::ProbeReceiptMismatch,
+                    observed_generation_id: Some("generation-stale".to_string()),
+                },
+            ),
+        )
+        .expect("persist failed repair outcome");
+        assert_eq!(
+            load_binding_repair_outcome(&repo)
+                .expect("load failed repair outcome")
+                .expect("failed repair outcome"),
+            stored_failure
+        );
+    }
+
+    #[test]
+    fn binding_repair_outcome_rejects_tampering_and_store_failure_cannot_report_success() {
+        let _env_guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let binding = binding();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        };
+        let success = new_binding_repair_outcome_record(
+            &binding,
+            owner,
+            BindingRepairOutcome::Succeeded {
+                host_instance_id: "host-current".to_string(),
+                receipt_generation_id: binding.identity.generation_id.clone(),
+            },
+        );
+        persist_binding_repair_outcome(&repo, success.clone()).expect("persist outcome");
+
+        let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("trusted worktree directory");
+        let path = trusted_dir.join(BINDING_REPAIR_OUTCOME_FILE);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read outcome"))
+                .expect("parse outcome");
+        stored["outcome"]["receipt_generation_id"] =
+            serde_json::Value::String("generation-forged".to_string());
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&stored).expect("serialize forged outcome"),
+        )
+        .expect("forge outcome");
+        assert_eq!(
+            load_binding_repair_outcome(&repo)
+                .expect_err("tampered outcome must fail closed")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        std::fs::remove_file(&path).expect("remove forged outcome");
+        std::fs::create_dir(&path).expect("block outcome writer with directory");
+        assert!(
+            !record_binding_repair_outcome(&repo, success),
+            "a verified repair must not report success when its outcome cannot be persisted"
+        );
+    }
+}
+
 impl AppRuntime {
     pub(super) fn reconcile_durable_fresh_execution_launches(&mut self) {
         for (_receipt_path, receipt) in durable_launch_recovery_records(&self.sessions_dir) {
@@ -3126,8 +3385,8 @@ impl AppRuntime {
         let Some(token) = self.agent_capability_tokens.get(window_id).cloned() else {
             return false;
         };
-        let binding = match durable.execution_binding.clone() {
-            Some(binding) if binding.identity == *current => binding,
+        let (binding, repaired) = match durable.execution_binding.clone() {
+            Some(binding) if binding.identity == *current => (binding, false),
             Some(_) => return false,
             None => {
                 let unbound_snapshot = durable.clone();
@@ -3159,24 +3418,165 @@ impl AppRuntime {
                         .ok()
                         != Some(true)
                 {
+                    record_binding_repair_outcome(
+                        &active.worktree_path,
+                        new_binding_repair_outcome_record(
+                            &binding,
+                            owner,
+                            BindingRepairOutcome::Failed {
+                                cause: BindingRepairFailureCause::SessionPersistenceFailed,
+                                observed_generation_id: None,
+                            },
+                        ),
+                    );
                     return false;
                 }
-                binding
+                (binding, true)
             }
         };
         if !issuer.active_token_is_current(&token, &binding)
             && issuer.promote_inspection(&token, &binding).is_err()
         {
+            if repaired {
+                record_binding_repair_outcome(
+                    &active.worktree_path,
+                    new_binding_repair_outcome_record(
+                        &binding,
+                        owner,
+                        BindingRepairOutcome::Failed {
+                            cause: BindingRepairFailureCause::CapabilityPromotionFailed,
+                            observed_generation_id: None,
+                        },
+                    ),
+                );
+            }
             return false;
         }
-        issuer.active_token_is_current(&token, &binding)
+        if !repaired {
+            return issuer.active_token_is_current(&token, &binding)
+                && gwt::cli::execution_state::current_active_execution_binding_matches(
+                    &active.worktree_path,
+                    owner,
+                    &active.session_id,
+                    &binding.identity,
+                )
+                .unwrap_or(false);
+        }
+
+        let project_root = match gwt::validated_project_state_root_for_session_recovery(&durable) {
+            Ok(project_root) => project_root,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %active.session_id,
+                    error = %error,
+                    "repaired execution binding has no valid repository Project State anchor"
+                );
+                record_binding_repair_outcome(
+                    &active.worktree_path,
+                    new_binding_repair_outcome_record(
+                        &binding,
+                        owner,
+                        BindingRepairOutcome::Failed {
+                            cause: BindingRepairFailureCause::ProjectStateAnchorInvalid,
+                            observed_generation_id: None,
+                        },
+                    ),
+                );
+                return false;
+            }
+        };
+        let request = gwt::AgentExecutionBindingProbeRequest {
+            schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
+            operation_id: BINDING_REPAIR_OPERATION_ID.to_string(),
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let receipt = match gwt::probe_authenticated_execution_binding(
+            &project_root,
+            &active.session_id,
+            &binding,
+            BINDING_REPAIR_OPERATION_ID,
+            request.clone(),
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %active.session_id,
+                    error = %error,
+                    "repaired execution binding Host probe failed"
+                );
+                record_binding_repair_outcome(
+                    &active.worktree_path,
+                    new_binding_repair_outcome_record(
+                        &binding,
+                        owner,
+                        BindingRepairOutcome::Failed {
+                            cause: BindingRepairFailureCause::ProbeTransportFailed,
+                            observed_generation_id: None,
+                        },
+                    ),
+                );
+                return false;
+            }
+        };
+        if !repaired_binding_probe_receipt_matches(
+            &active.session_id,
+            &binding,
+            &request,
+            Some(&receipt),
+        ) {
+            tracing::warn!(
+                session_id = %active.session_id,
+                "repaired execution binding failed exact read-after-write authority probe"
+            );
+            record_binding_repair_outcome(
+                &active.worktree_path,
+                new_binding_repair_outcome_record(
+                    &binding,
+                    owner,
+                    BindingRepairOutcome::Failed {
+                        cause: BindingRepairFailureCause::ProbeReceiptMismatch,
+                        observed_generation_id: Some(
+                            receipt.execution_binding.generation_id.clone(),
+                        ),
+                    },
+                ),
+            );
+            return false;
+        }
+        let authority_matches = issuer.active_token_is_current(&token, &binding)
             && gwt::cli::execution_state::current_active_execution_binding_matches(
                 &active.worktree_path,
                 owner,
                 &active.session_id,
                 &binding.identity,
             )
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !authority_matches {
+            return record_binding_repair_outcome(
+                &active.worktree_path,
+                new_binding_repair_outcome_record(
+                    &binding,
+                    owner,
+                    BindingRepairOutcome::Failed {
+                        cause: BindingRepairFailureCause::ActiveAuthorityMismatch,
+                        observed_generation_id: Some(
+                            receipt.execution_binding.generation_id.clone(),
+                        ),
+                    },
+                ),
+            );
+        }
+        record_binding_repair_outcome(
+            &active.worktree_path,
+            new_binding_repair_outcome_record(
+                &binding,
+                owner,
+                BindingRepairOutcome::Succeeded {
+                    host_instance_id: receipt.host_instance_id,
+                    receipt_generation_id: receipt.execution_binding.generation_id,
+                },
+            ),
+        )
     }
 
     pub(super) fn classify_nonlocal_active_owner_liveness(
@@ -4980,25 +5380,8 @@ impl AppRuntime {
             ));
         }
         let requested_at = chrono::Utc::now();
-        let execution = if let Some((from_session_id, stale_reason)) = takeover_owner {
-            PendingContinueWorkExecution::Takeover(
-                gwt::cli::execution_state::GenerationTakeoverRequest {
-                    operation_id: operation_id.clone(),
-                    principal_id: "gwt-host-continuation".to_string(),
-                    work_id: Some(work_id.clone()),
-                    source: Some(match outcome {
-                        gwt::ContinueWorkOutcomeKind::ContinuedConversation => {
-                            "continue-work:resume".to_string()
-                        }
-                        _ => "continue-work:handoff".to_string(),
-                    }),
-                    from_session_id,
-                    to_session_id: continuation_session_id.clone(),
-                    reason: format!("continue-work-stale-takeover: {stale_reason}"),
-                    requested_at,
-                },
-            )
-        } else {
+        let replaces_active_generation = takeover_owner.is_some();
+        let execution =
             PendingContinueWorkExecution::Successor(gwt::cli::execution_state::SuccessorRequest {
                 operation_id: operation_id.clone(),
                 principal_id: "gwt-host-continuation".to_string(),
@@ -5016,16 +5399,24 @@ impl AppRuntime {
                     config.session_mode == gwt_agent::SessionMode::Resume,
                 ),
                 requested_at,
-            })
-        };
+            });
         let prepared = match &execution {
             PendingContinueWorkExecution::Successor(request) => {
-                gwt::cli::execution_state::prepare_successor(
-                    &target.worktree_path,
-                    target.owner,
-                    request,
-                )
-                .map(|_| ())
+                if replaces_active_generation {
+                    gwt::cli::execution_state::prepare_active_continuation_successor(
+                        &target.worktree_path,
+                        target.owner,
+                        request,
+                    )
+                    .map(|_| ())
+                } else {
+                    gwt::cli::execution_state::prepare_successor(
+                        &target.worktree_path,
+                        target.owner,
+                        request,
+                    )
+                    .map(|_| ())
+                }
             }
             PendingContinueWorkExecution::Takeover(request) => {
                 gwt::cli::execution_state::prepare_generation_takeover(

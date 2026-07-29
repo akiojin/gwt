@@ -242,6 +242,15 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
+    // The title requirement is meaningful only for the same Session/container
+    // that workspace.update itself can mutate. A stale ambient Session must
+    // not brick an unrelated cwd, repository, or branch before the user can
+    // inspect and recover it.
+    if crate::agent_project_state::resolve_session_work_mutation_target(worktree_root, &session.id)
+        .is_err()
+    {
+        return Ok(false);
+    }
     let projection_root = if session.worktree_path.exists() {
         session.worktree_path.as_path()
     } else {
@@ -409,10 +418,14 @@ Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
 /// path-based blocking and remain covered by the integrity hashes.)
 const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
     "execution-control.json",
+    "execution-generation-pointer.json",
+    "generation-ledger.json",
+    "execution-repair-audit.json",
     "verification-run.json",
     "verification-plan.json",
     "intake-outcome.json",
     "action-obligations.json",
+    "action-obligation-revival.json",
 ];
 
 fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, HookError> {
@@ -442,7 +455,7 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
         "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.reopen` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.repair` / `execution.reopen` for execution authority, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
@@ -990,6 +1003,8 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "index.status"
             | "diagnostics.cpu"
             | "daemon.status"
+            | "execution.status"
+            | "execution.continue"
             | "hook.health"
             | "pane.list"
             | "pane.read"
@@ -1140,6 +1155,20 @@ fn normalize_command_name(token: &str) -> String {
 }
 
 fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
+    let mut subcommand_index = 0;
+    loop {
+        match tokens.get(subcommand_index).copied() {
+            Some("-C" | "-c") if tokens.get(subcommand_index + 1).is_some() => {
+                subcommand_index += 2;
+            }
+            Some("--no-pager" | "-P") => {
+                subcommand_index += 1;
+            }
+            Some("-C" | "-c") => return false,
+            _ => break,
+        }
+    }
+    let tokens = &tokens[subcommand_index..];
     match tokens {
         ["cat-file" | "diff" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "rev-list"
         | "rev-parse" | "show" | "status", ..] => true,
@@ -1627,10 +1656,12 @@ Coverage requirements.
     fn trusted_state_write_guard_blocks_direct_edits_in_all_lanes() {
         for state_file in [
             ".gwt/skill-state/execution-control.json",
+            ".gwt/skill-state/execution-generation-pointer.json",
             ".gwt/skill-state/verification-run.json",
             ".gwt/skill-state/verification-plan.json",
             ".gwt/skill-state/intake-outcome.json",
             ".gwt/skill-state/action-obligations.json",
+            ".gwt/skill-state/action-obligation-revival.json",
         ] {
             let event = HookEvent {
                 tool_name: Some("Edit".to_string()),
@@ -2042,6 +2073,23 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_execution_status_before_identity_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
     fn title_summary_guard_allows_read_only_git_config_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
@@ -2073,6 +2121,30 @@ Coverage requirements.
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_read_only_git_after_global_options() {
+        for command in [
+            "git -C /tmp/repository log -1",
+            "git -c color.ui=false status --short",
+            "git --no-pager log -1",
+            "git -P show --stat HEAD",
+            "git -C /tmp/repository -c color.ui=false --no-pager log -1",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
     }
 
     #[test]

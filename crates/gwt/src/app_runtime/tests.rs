@@ -9494,6 +9494,76 @@ fn projection_only_continue_matches_canonical_branch_for_durable_session() {
 }
 
 #[test]
+fn linked_workspace_resume_routes_through_authority_producing_continuation() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "linked-resume-producing",
+        ProjectionOnlyContinueFixture {
+            work_owner: Some("Issue #2359"),
+            owner_number: 2359,
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            agent_id: Some("Codex"),
+            cross_worktree: false,
+            missing_container: false,
+            conflicting_owner: false,
+            conflicting_container: false,
+            conflicting_branch_only: false,
+            conflicting_agent: false,
+            legacy_flat_only: false,
+        },
+    );
+    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
+    let mut durable = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    durable.id = "historical-session".to_string();
+    durable.display_name = "Authority-producing Resume".to_string();
+    durable.project_state_root = Some(project_root);
+    durable.linked_issue_number = Some(owner.number);
+    durable
+        .save(&runtime.sessions_dir)
+        .expect("save linked durable Session");
+
+    let events = runtime.resume_workspace_agent_events(
+        "resume-client",
+        "linked-resume-operation".to_string(),
+        durable.id.clone(),
+        None,
+        canvas_bounds(),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WorkspaceResumeAgentStarted {
+            operation_id,
+            session_id,
+            ..
+        } if operation_id == "linked-resume-operation" && session_id == "historical-session"
+    )));
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "linked-resume-operation")
+        .expect("linked Resume must prepare continuation authority");
+    assert_eq!(pending.work_id, work_id);
+    assert!(matches!(
+        &pending.execution,
+        PendingContinueWorkExecution::Successor(request)
+            if request.initial_session_id == pending.binding.session_id
+    ));
+    assert_eq!(pending.binding.owner_number, owner.number);
+    assert!(
+        runtime.inspection_agent_windows.is_empty(),
+        "linked Resume must not materialize a permanently Inspection pane"
+    );
+}
+
+#[test]
 fn continue_work_prefers_exact_custom_durable_session() {
     let _env_guard = env_test_lock()
         .lock()
@@ -19373,6 +19443,7 @@ fn history_work_view(
             pr_number: None,
             pr_url: None,
             pr_state: None,
+            diagnosis: None,
         }],
         board_refs: Vec::new(),
         related_workspace_ids: Vec::new(),
@@ -35185,8 +35256,76 @@ fn workspace_test_child(
         manual_close_allowed: true,
         close_blocked_reason: None,
         agents,
+        execution_diagnosis: None,
         updated_at: String::new(),
     }
+}
+
+#[test]
+fn workspace_execution_diagnosis_view_preserves_backend_classification() {
+    let view = super::workspace_execution_diagnosis_view(
+        gwt::cli::execution_state::ExecutionDiagnosisSnapshot {
+            schema_version: 1,
+            ecr_status: gwt::cli::execution_state::ExecutionDiagnosisState::Blocked,
+            owner_kind: Some(gwt::cli::execution_state::ExecutionOwnerKind::Spec),
+            owner_number: Some(3393),
+            blocked_reason: Some("verification evidence is stale".to_string()),
+            missing_verification: Some("user confirmation".to_string()),
+            generation_id: Some("generation-2".to_string()),
+            binding_state: gwt::cli::execution_state::ExecutionBindingState::Stale,
+            binding_cause: "current_session_not_authorized".to_string(),
+            verification_state: "stale_fingerprint".to_string(),
+            trivial_reason: None,
+            generated_outputs: vec!["artifacts/report.json".to_string()],
+            capability_generation: Some(3),
+            continuation: None,
+            workspace_update_applicable: Some(false),
+            workspace_update_applicability_reason: Some(
+                "workspace_update_authority_mismatch".to_string(),
+            ),
+            obligation_revival: None,
+            binding_repair: None,
+            repair: None,
+            work_event_receipt_generation_id: Some("generation-1".to_string()),
+            work_event_receipt_matches_current_generation: Some(false),
+            settlement: Some(
+                gwt::cli::verification_record::WorkEventSettlementStatus::Blocked(
+                    gwt::cli::verification_record::WorkEventSettlementBlocker::MissingUpstream,
+                ),
+            ),
+            settlement_severity: "warning".to_string(),
+            settlement_obligation_open: true,
+            open_obligations: vec!["user_verification".to_string()],
+            available_recoveries: vec!["verify.run".to_string(), "execution.reopen".to_string()],
+            warnings: vec!["Host status is temporarily unavailable".to_string()],
+        },
+    );
+
+    assert_eq!(view.ecr_status, "blocked");
+    assert_eq!(view.binding_state, "stale");
+    assert_eq!(view.verification_state, "stale_fingerprint");
+    assert_eq!(view.capability_generation, Some(3));
+    assert_eq!(
+        view.work_event_receipt_generation_id.as_deref(),
+        Some("generation-1")
+    );
+    assert_eq!(
+        view.work_event_receipt_matches_current_generation,
+        Some(false)
+    );
+    assert_eq!(
+        view.generated_outputs,
+        vec!["artifacts/report.json".to_string()]
+    );
+    assert_eq!(view.settlement_severity, "warning");
+    assert_eq!(
+        view.settlement,
+        Some(serde_json::json!({"blocked": "missing_upstream"}))
+    );
+    assert_eq!(
+        view.available_recoveries,
+        vec!["verify.run", "execution.reopen"]
+    );
 }
 
 fn workspace_test_work(
