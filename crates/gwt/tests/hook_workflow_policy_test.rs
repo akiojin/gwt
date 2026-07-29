@@ -123,6 +123,7 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
     let home = tempfile::tempdir().expect("temp home");
     let _home = ScopedGwtHome::set(home.path());
     let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
 
     f(&home)
 }
@@ -1390,6 +1391,10 @@ fn allows_read_only_tools_without_owner() {
 
 #[test]
 fn blocks_worktree_internal_edit_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let wt = root();
     let event = event(
         "Edit",
@@ -1404,6 +1409,10 @@ fn blocks_worktree_internal_edit_without_owner() {
 
 #[test]
 fn blocks_worktree_internal_edit_with_relative_path() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let event = event(
         "Edit",
         json!({ "file_path": "src/lib.rs", "old_string": "x", "new_string": "y" }),
@@ -1417,6 +1426,10 @@ fn blocks_worktree_internal_edit_with_relative_path() {
 
 #[test]
 fn blocks_edit_outside_worktree_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let event = event(
         "Edit",
         json!({ "file_path": "/outside/project/src/lib.rs", "old_string": "x", "new_string": "y" }),
@@ -1430,6 +1443,10 @@ fn blocks_edit_outside_worktree_without_owner() {
 
 #[test]
 fn blocks_docs_edit_outside_worktree_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let event = event(
         "Edit",
         json!({ "file_path": "/outside/project/README.md", "old_string": "x", "new_string": "y" }),
@@ -1468,6 +1485,10 @@ fn allows_docs_only_apply_patch_without_owner_as_chore_exemption() {
 
 #[test]
 fn blocks_source_apply_patch_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let event = event(
         "apply_patch",
         json!({
@@ -1501,6 +1522,10 @@ fn allows_docs_only_apply_patch_for_spec_owner_before_plan_refresh() {
 
 #[test]
 fn allows_mutation_for_plain_issue_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let event = event(
         "Write",
         json!({ "file_path": "src/lib.rs", "content": "fn x() {}\n" }),
@@ -2491,6 +2516,7 @@ fn blocks_write_outside_worktree_non_plan_paths_without_owner() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let home = tempfile::tempdir().expect("temp home");
     let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
     let outside = home.path().join("elsewhere/notes.rs");

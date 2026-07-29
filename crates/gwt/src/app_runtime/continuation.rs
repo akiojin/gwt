@@ -1225,6 +1225,8 @@ fn durable_launch_recovery_path(sessions_dir: &Path, session_id: &str) -> Result
 }
 
 #[cfg(test)]
+// Only the `#[cfg(unix)]` directory-sync tests install this hook.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) fn set_durable_launch_recovery_directory_sync_test_hook(
     hook: Option<DurableLaunchRecoveryDirectorySyncHook>,
 ) {
@@ -1233,6 +1235,8 @@ pub(super) fn set_durable_launch_recovery_directory_sync_test_hook(
     });
 }
 
+// `directory` is only read by the test hook and the `#[cfg(unix)]` fsync.
+#[cfg_attr(not(any(test, unix)), allow(unused_variables))]
 fn sync_durable_launch_recovery_directory(directory: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     if let Some(result) = DURABLE_LAUNCH_RECOVERY_DIRECTORY_SYNC_HOOK
@@ -1469,8 +1473,8 @@ fn durable_launch_recovery_records(
 }
 
 fn durable_launch_recovery_repo_matches(record: &DurableLaunchRecoveryRecord) -> bool {
-    if !gwt_core::repo_hash::detect_repo_hash(&record.worktree_path)
-        .is_some_and(|repo_hash| repo_hash.to_string() == record.repo_hash)
+    if gwt_core::repo_hash::detect_repo_hash(&record.worktree_path)
+        .is_none_or(|repo_hash| repo_hash.to_string() != record.repo_hash)
     {
         return false;
     }

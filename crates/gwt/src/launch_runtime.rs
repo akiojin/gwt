@@ -928,6 +928,8 @@ mod tests {
         }
     }
 
+    // Only the `#[cfg(not(windows))]` fallback tests build failing probes.
+    #[cfg_attr(windows, allow(dead_code))]
     fn probe_failure(detail: &str) -> gwt_agent::HostRunnerProbeOutcome {
         gwt_agent::HostRunnerProbeOutcome {
             success: false,

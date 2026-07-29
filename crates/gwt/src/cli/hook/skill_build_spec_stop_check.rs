@@ -81,6 +81,8 @@ mod tests {
     #[test]
     fn blocks_when_build_state_active_and_includes_phase_in_reason() {
         let dir = tempfile::tempdir().unwrap();
+        gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         save(
             dir.path(),
             SKILL_NAME,

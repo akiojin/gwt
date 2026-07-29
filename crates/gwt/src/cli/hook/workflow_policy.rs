@@ -1514,11 +1514,23 @@ Coverage requirements.
     // that could still expand elsewhere fails closed.
     #[test]
     fn gwt_bookkeeping_target_accepts_only_literal_worktree_paths() {
-        let root = Path::new("/worktree");
-        for target in [
-            ".gwt/work/register-spec/envelope.json",
-            "/worktree/.gwt/work/out.json",
-        ] {
+        // `Path::is_absolute` needs a drive prefix on Windows, so the roots
+        // (and the absolute fixtures derived from them) are platform-shaped.
+        // Forward slashes are kept because the allowance rejects backslashes.
+        let (root, inside, outside) = if cfg!(windows) {
+            (
+                Path::new("C:/worktree"),
+                "C:/worktree/.gwt/work/out.json",
+                "C:/elsewhere/.gwt/out.json",
+            )
+        } else {
+            (
+                Path::new("/worktree"),
+                "/worktree/.gwt/work/out.json",
+                "/elsewhere/.gwt/out.json",
+            )
+        };
+        for target in [".gwt/work/register-spec/envelope.json", inside] {
             assert!(
                 is_worktree_gwt_bookkeeping_target(target, root),
                 "{target} is worktree-local bookkeeping"
@@ -1535,7 +1547,7 @@ Coverage requirements.
             ".gwt/*.json",
             "~/.gwt/out.json",
             "src/generated.rs",
-            "/elsewhere/.gwt/out.json",
+            outside,
             ".gwt/skill-state/execution-control.json",
             super::super::segments::UNRESOLVED_REDIRECT_TARGET,
         ] {
@@ -2325,6 +2337,10 @@ Coverage requirements.
             }
         }
 
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2336,7 +2352,7 @@ Coverage requirements.
 
         let output = evaluate_with_context(
             &event,
-            std::path::Path::new("."),
+            repo.path(),
             &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
@@ -2365,7 +2381,7 @@ Coverage requirements.
         assert_eq!(
             evaluate_with_context(
                 &allowed,
-                std::path::Path::new("."),
+                repo.path(),
                 &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
@@ -2386,7 +2402,7 @@ Coverage requirements.
             assert_eq!(
                 evaluate_with_context(
                     &allowed,
-                    std::path::Path::new("."),
+                    repo.path(),
                     &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
@@ -2418,6 +2434,8 @@ Coverage requirements.
     #[test]
     fn owner_guard_blocks_mutating_tools_without_owner() {
         let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2445,6 +2463,8 @@ Coverage requirements.
     #[test]
     fn owner_guard_requires_plan_and_tasks_for_spec_owner() {
         let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let event = HookEvent {
             tool_name: Some("Write".to_string()),
             tool_input: Some(serde_json::json!({
