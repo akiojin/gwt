@@ -822,6 +822,8 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let worktree = tempfile::tempdir().unwrap();
+        gwt_skills::write_lane_file(worktree.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let sessions_dir = worktree.path().join(".gwt").join("sessions");
         let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
         session.agent_session_id = Some("agent-123".to_string());

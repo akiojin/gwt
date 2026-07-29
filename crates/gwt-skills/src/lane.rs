@@ -214,6 +214,19 @@ pub fn resolve_lane_for_worktree(worktree: &Path) -> &'static LaneProfile {
     }
 }
 
+/// [`SessionKind`] view of [`resolve_lane_for_worktree`] for call sites that
+/// still branch on the enum while hooks migrate lane-by-lane (#3377). The
+/// worktree lane file wins when present; only lane-file-less worktrees fall
+/// back to the ambient `GWT_SESSION_KIND` env fast-path.
+#[must_use]
+pub fn resolve_session_kind_for_worktree(worktree: &Path) -> SessionKind {
+    if resolve_lane_for_worktree(worktree).id == INTAKE_PROFILE.id {
+        SessionKind::Intake
+    } else {
+        SessionKind::Execution
+    }
+}
+
 /// Extract the `"lane"` string from the lane file body without pulling in a
 /// JSON dependency for such a tiny schema. Returns `None` on any shape it does
 /// not recognize (→ caller falls back to the default profile).
@@ -354,6 +367,32 @@ mod tests {
         write_lane_file(dir.path(), &EXECUTION_PROFILE).expect("write lane file");
         assert_eq!(resolve_lane_for_worktree(dir.path()), &EXECUTION_PROFILE);
         std::env::remove_var(crate::GWT_SESSION_KIND_ENV);
+    }
+
+    #[test]
+    fn resolve_session_kind_prefers_lane_file_over_env() {
+        let _guard = env_lock();
+        let dir = TempDir::new().expect("tempdir");
+        // Lane file wins over a conflicting ambient env (#3377: an intake
+        // session invoking gwtd against an execution worktree must not
+        // re-materialize it as intake).
+        std::env::set_var(crate::GWT_SESSION_KIND_ENV, "intake");
+        write_lane_file(dir.path(), &EXECUTION_PROFILE).expect("write lane file");
+        assert_eq!(
+            resolve_session_kind_for_worktree(dir.path()),
+            SessionKind::Execution
+        );
+        // A lane-file-less worktree keeps the env fast-path (transition).
+        let bare = TempDir::new().expect("tempdir");
+        assert_eq!(
+            resolve_session_kind_for_worktree(bare.path()),
+            SessionKind::Intake
+        );
+        std::env::remove_var(crate::GWT_SESSION_KIND_ENV);
+        assert_eq!(
+            resolve_session_kind_for_worktree(bare.path()),
+            SessionKind::Execution
+        );
     }
 
     #[test]

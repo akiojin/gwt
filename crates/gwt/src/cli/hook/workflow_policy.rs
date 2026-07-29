@@ -2265,6 +2265,10 @@ Coverage requirements.
             }
         }
 
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2276,7 +2280,7 @@ Coverage requirements.
 
         let output = evaluate_with_context(
             &event,
-            std::path::Path::new("."),
+            repo.path(),
             &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
@@ -2305,7 +2309,7 @@ Coverage requirements.
         assert_eq!(
             evaluate_with_context(
                 &allowed,
-                std::path::Path::new("."),
+                repo.path(),
                 &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
@@ -2326,7 +2330,7 @@ Coverage requirements.
             assert_eq!(
                 evaluate_with_context(
                     &allowed,
-                    std::path::Path::new("."),
+                    repo.path(),
                     &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
@@ -2358,6 +2362,8 @@ Coverage requirements.
     #[test]
     fn owner_guard_blocks_mutating_tools_without_owner() {
         let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2385,6 +2391,8 @@ Coverage requirements.
     #[test]
     fn owner_guard_requires_plan_and_tasks_for_spec_owner() {
         let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let event = HookEvent {
             tool_name: Some("Write".to_string()),
             tool_input: Some(serde_json::json!({
