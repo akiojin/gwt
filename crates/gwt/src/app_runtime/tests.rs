@@ -16984,6 +16984,7 @@ No viable candidates found in PATH \
 #[test]
 fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
         "tab-1",
@@ -17031,6 +17032,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
 #[test]
 fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
         "tab-1",
