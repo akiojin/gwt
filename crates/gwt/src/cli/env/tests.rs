@@ -652,6 +652,9 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
 
 #[test]
 fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _runtime_path =
+        crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
     let mut env = TestEnv::new(temp.path().to_path_buf());
