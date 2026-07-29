@@ -2805,6 +2805,81 @@ kbd.op-kbd {
   font-size: var(--type-xs);
 }
 
+.workspace-execution-diagnosis {
+  --workspace-execution-accent: var(--color-state-idle);
+  padding-inline-start: var(--space-3);
+  border-inline-start: 2px solid var(--workspace-execution-accent);
+}
+
+.workspace-execution-diagnosis.is-clear {
+  --workspace-execution-accent: var(--color-state-done);
+}
+
+.workspace-execution-diagnosis.is-warning {
+  --workspace-execution-accent: var(--color-state-needs-input);
+}
+
+.workspace-execution-diagnosis.is-blocked {
+  --workspace-execution-accent: var(--color-state-blocked);
+}
+
+.workspace-execution-severity {
+  display: inline-flex;
+  align-items: center;
+  margin-block-end: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--workspace-execution-accent);
+  border-radius: var(--radius-pill);
+  color: var(--workspace-execution-accent);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.workspace-execution-alert {
+  margin-block-start: var(--space-2);
+  padding: var(--space-2);
+  border-inline-start: 2px solid var(--color-state-needs-input);
+  background: var(--color-surface-elevated);
+}
+
+.workspace-execution-alert.is-blocked {
+  border-inline-start-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.workspace-execution-list-group {
+  margin-block-start: var(--space-3);
+}
+
+.workspace-execution-list-label {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.workspace-execution-obligation-list,
+.workspace-execution-recovery-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-execution-obligation-list li,
+.workspace-execution-recovery-list li {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+/* Execution diagnosis extends the existing detail section; it is not an overlay. */
+
 .workspace-hook-issue-list,
 .workspace-hook-slow-list {
   display: flex;

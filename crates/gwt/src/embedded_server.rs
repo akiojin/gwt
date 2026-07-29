@@ -1244,7 +1244,7 @@ impl AgentCapabilityRegistry {
         token: &str,
         expected_binding: &gwt_agent::SessionExecutionBinding,
     ) -> Result<(), String> {
-        self.promote_to_active(token, expected_binding, false)
+        self.promote_to_active(token, expected_binding, false, false)
     }
 
     fn promote_inspection(
@@ -1252,7 +1252,15 @@ impl AgentCapabilityRegistry {
         token: &str,
         expected_binding: &gwt_agent::SessionExecutionBinding,
     ) -> Result<(), String> {
-        self.promote_to_active(token, expected_binding, true)
+        self.promote_to_active(token, expected_binding, true, false)
+    }
+
+    fn promote_continuation(
+        &self,
+        token: &str,
+        expected_binding: &gwt_agent::SessionExecutionBinding,
+    ) -> Result<(), String> {
+        self.promote_to_active(token, expected_binding, true, true)
     }
 
     fn promote_to_active(
@@ -1260,6 +1268,7 @@ impl AgentCapabilityRegistry {
         token: &str,
         expected_binding: &gwt_agent::SessionExecutionBinding,
         allow_inspection: bool,
+        allow_active_replacement: bool,
     ) -> Result<(), String> {
         let mut state = self
             .inner
@@ -1303,6 +1312,13 @@ impl AgentCapabilityRegistry {
                 Ok(())
             }
             AgentExecutionAuthority::Active(binding) if binding.as_ref() == expected_binding => {
+                Ok(())
+            }
+            AgentExecutionAuthority::Active(_) if allow_active_replacement => {
+                let mut promoted = principal;
+                promoted.execution_authority =
+                    AgentExecutionAuthority::Active(Box::new(expected_binding.clone()));
+                state.principals_by_token.insert(issued_token, promoted);
                 Ok(())
             }
             AgentExecutionAuthority::Inspection
@@ -2043,6 +2059,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             "/internal/execution-binding-probe",
             post(execution_binding_probe_handler),
         )
+        .route(
+            "/internal/execution-continuation",
+            post(execution_continuation_handler),
+        )
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route(
             "/internal/work-terminalization",
@@ -2472,7 +2492,9 @@ async fn workspace_update_handler(
     };
 
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
-        return execution_binding_error_response();
+        return execution_binding_error_response(
+            "workspace_update_requires_active_execution_authority",
+        );
     };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
@@ -2525,7 +2547,9 @@ async fn work_terminalization_handler(
     };
 
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
-        return execution_binding_error_response();
+        return execution_binding_error_response(
+            "work_terminalization_requires_active_execution_authority",
+        );
     };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
@@ -2594,7 +2618,9 @@ async fn execution_binding_probe_handler(
     // promotes the bearer, so it must never receive a successful receipt
     // through the same endpoint used by PreToolUse.
     let Some(execution_binding) = principal.active_execution_binding().cloned() else {
-        return execution_binding_error_response();
+        return execution_binding_error_response(
+            "execution_binding_probe_requires_active_execution_authority",
+        );
     };
     let project_root = principal.canonical_project_root().to_path_buf();
     let session_id = principal.session_id().to_string();
@@ -2627,7 +2653,76 @@ async fn execution_binding_probe_handler(
     }
 }
 
-fn execution_binding_error_response() -> Response {
+async fn execution_continuation_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<gwt::AgentExecutionContinuationRequest>,
+) -> Response {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+    let project_root = grant.principal().canonical_project_root().to_path_buf();
+    let session_id = grant.principal().session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let operation = tokio::task::spawn_blocking(move || {
+        gwt::continue_authenticated_execution(&mutation_project_root, &session_id, request)
+    })
+    .await;
+    let (receipt, binding) = match operation {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            return workspace_update_error_response(
+                workspace_update_error_status(error.code),
+                error,
+            );
+        }
+        Err(_) => {
+            return workspace_update_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                AgentWorkspaceUpdateError {
+                    code: AgentWorkspaceUpdateErrorCode::Internal,
+                    message: "Host continuation task failed before a response was produced"
+                        .to_string(),
+                },
+            );
+        }
+    };
+    if state
+        .agent_capabilities
+        .promote_continuation(&grant.token, &binding)
+        .is_err()
+        || !state
+            .agent_capabilities
+            .refresh_grant(&grant)
+            .is_some_and(|current| current.principal().active_execution_binding() == Some(&binding))
+    {
+        return workspace_update_error_response(
+            StatusCode::CONFLICT,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                message:
+                    "agent capability changed before continuation authority could be published"
+                        .to_string(),
+            },
+        );
+    }
+    state
+        .proxy
+        .send(UserEvent::WorkspaceProjectionChanged { project_root });
+    Json(receipt).into_response()
+}
+
+fn execution_binding_error_response(diagnostic_reason: &'static str) -> Response {
+    tracing::warn!(
+        reason = diagnostic_reason,
+        "Host-managed operation rejected an execution binding"
+    );
     workspace_update_error_response(
         StatusCode::CONFLICT,
         AgentWorkspaceUpdateError {
@@ -2639,11 +2734,36 @@ fn execution_binding_error_response() -> Response {
     )
 }
 
+#[derive(Serialize)]
+struct AgentWorkspaceUpdateErrorResponse {
+    code: AgentWorkspaceUpdateErrorCode,
+    reason: &'static str,
+    message: String,
+}
+
 fn workspace_update_error_response(
     status: StatusCode,
     error: AgentWorkspaceUpdateError,
 ) -> Response {
-    (status, Json(error)).into_response()
+    let reason = match error.code {
+        AgentWorkspaceUpdateErrorCode::InvalidRequest => "invalid_request",
+        AgentWorkspaceUpdateErrorCode::RelaunchRequired => "relaunch_required",
+        AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => "authority_mismatch",
+        AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => "workspace_ensure_required",
+        AgentWorkspaceUpdateErrorCode::ProvenanceMismatch => "provenance_mismatch",
+        AgentWorkspaceUpdateErrorCode::IdentityConflict => "identity_conflict",
+        AgentWorkspaceUpdateErrorCode::TransactionConflict => "transaction_conflict",
+        AgentWorkspaceUpdateErrorCode::Internal => "internal",
+    };
+    (
+        status,
+        Json(AgentWorkspaceUpdateErrorResponse {
+            code: error.code,
+            reason,
+            message: error.message,
+        }),
+    )
+        .into_response()
 }
 
 struct AgentPaneSessionScope {
@@ -3664,6 +3784,58 @@ mod tests {
         let mut mismatched = binding;
         mismatched.identity.ledger_head_hash.push_str("-mismatch");
         assert!(registry.promote_inspection(&token, &mismatched).is_err());
+    }
+
+    #[test]
+    fn continuation_promotion_can_replace_only_the_current_bearers_active_binding() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = AgentCapabilityRegistry::default();
+        let predecessor = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-continuation".to_string(),
+            repo_hash: "repo-continuation".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3393,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-predecessor".to_string(),
+                binding_id: "binding-predecessor".to_string(),
+                ledger_head_hash: "head-predecessor".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let token = registry
+            .issue_bound(project.path(), "session-continuation", predecessor.clone())
+            .expect("Active capability");
+        let stale = AgentCapabilityGrant::new(
+            token.clone(),
+            registry.authenticate(&token).expect("authenticate bearer"),
+        );
+        let mut successor = predecessor;
+        successor.identity.generation_id = "generation-successor".to_string();
+        successor.identity.binding_id = "binding-successor".to_string();
+        successor.identity.ledger_head_hash = "head-successor".to_string();
+        successor.capability_generation = 2;
+
+        assert!(
+            registry.promote_inspection(&token, &successor).is_err(),
+            "ordinary inspection promotion cannot replace Active authority"
+        );
+        registry
+            .promote_continuation(&token, &successor)
+            .expect("validated continuation may replace Active authority");
+        let current = registry
+            .refresh_grant(&stale)
+            .expect("same current bearer refreshes after continuation");
+        assert_eq!(
+            current.principal().active_execution_binding(),
+            Some(&successor)
+        );
+
+        let rotated = registry
+            .issue_bound(project.path(), "session-continuation", successor.clone())
+            .expect("rotate bearer");
+        assert_ne!(rotated, token);
+        assert!(registry.promote_continuation(&token, &successor).is_err());
     }
 
     #[test]
@@ -5143,6 +5315,7 @@ mod tests {
         assert_eq!(response.status(), HttpStatusCode::CONFLICT);
         let error: serde_json::Value = response.json().expect("binding probe error");
         assert_eq!(error["code"], "execution_binding_mismatch");
+        assert_eq!(error["reason"], "authority_mismatch");
         assert!(events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
