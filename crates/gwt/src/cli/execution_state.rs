@@ -5712,6 +5712,11 @@ pub enum ExecutionCommand {
     Reopen {
         reason: String,
     },
+    /// Read-only diagnostic snapshot (SPEC-3393 FR-001): report the ECR, its
+    /// integrity, verification evidence, and work-event settlement state in
+    /// one response so agents and humans can diagnose gate denials without
+    /// reading trusted-store files by hand. Never mutates state.
+    Status,
 }
 
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
@@ -5721,6 +5726,12 @@ pub(super) fn run<E: CliEnv>(
     command: ExecutionCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    // SPEC-3393 FR-001: the status snapshot is read-only and must work
+    // without a bound session — diagnosing a lost binding is its whole point.
+    if matches!(command, ExecutionCommand::Status) {
+        let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+        return run_status(&worktree, out);
+    }
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -5752,7 +5763,9 @@ pub(super) fn run<E: CliEnv>(
     // advertised escape becomes a silent no-op.
     let mut deferral_reason: Option<String> = None;
     let result = match command {
-        ExecutionCommand::Adopt { .. } | ExecutionCommand::Reopen { .. } => {
+        ExecutionCommand::Adopt { .. }
+        | ExecutionCommand::Reopen { .. }
+        | ExecutionCommand::Status => {
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
@@ -12045,5 +12058,136 @@ mod tests {
                 .expect_err("missing GWT_SESSION_ID must fail");
             assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
         }
+    }
+}
+
+/// `execution.status` (SPEC-3393 FR-001): read-only diagnostic snapshot.
+///
+/// Reports the Execution Control Record (or its absence), record integrity,
+/// verification-evidence status for the calling session, the work-event
+/// settlement obligation, and the owner generation ledger head. Absence and
+/// unreadability are reportable states, not errors — this operation must
+/// succeed precisely when everything else is refusing.
+fn run_status(worktree: &Path, out: &mut String) -> Result<i32, SpecOpsError> {
+    use crate::cli::verification_record as vr;
+
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let (record_json, integrity, owner) = match load(worktree) {
+        Ok(Some(record)) => {
+            let integrity = integrity_ok(&record);
+            let owner = Some(ExecutionOwnerKey {
+                kind: record.owner_kind,
+                number: record.owner_number,
+            });
+            let json = serde_json::json!({
+                "owner_kind": record.owner_kind,
+                "owner_number": record.owner_number,
+                "primary_session_id": record.primary_session_id,
+                "entrypoint": record.entrypoint,
+                "status": record.status,
+                "blocked_reason": record.blocked_reason,
+                "missing_verification": record.missing_verification,
+                "launched_at": record.launched_at,
+                "settled_at": record.settled_at,
+                "bundled_required_owners": record.bundled_required_owners,
+            });
+            (json, Some(integrity), owner)
+        }
+        Ok(None) => (serde_json::Value::Null, None, None),
+        Err(error) => (
+            serde_json::json!({ "unreadable": error.to_string() }),
+            Some(false),
+            None,
+        ),
+    };
+
+    let evidence = match (&session_id, owner) {
+        (Some(session_id), Some(owner)) => match vr::load(worktree) {
+            Ok(Some(run_record)) => {
+                let plan = vr::load_plan(worktree).ok().flatten();
+                let status = vr::evaluate_evidence_snapshot(
+                    worktree,
+                    session_id,
+                    Some(owner.number),
+                    plan.as_ref(),
+                    &run_record,
+                );
+                serde_json::json!({
+                    "status": format!("{status:?}"),
+                    "detail": status.describe(),
+                })
+            }
+            Ok(None) => serde_json::json!({
+                "status": "MissingRecord",
+                "detail": vr::EvidenceStatus::MissingRecord.describe(),
+            }),
+            Err(_) => serde_json::json!({
+                "status": "Unreadable",
+                "detail": vr::EvidenceStatus::Unreadable.describe(),
+            }),
+        },
+        _ => serde_json::Value::Null,
+    };
+
+    let settlement_refusal = vr::work_event_settlement_refusal(worktree);
+    let settlement = serde_json::json!({
+        "open": settlement_refusal.is_some(),
+        "detail": settlement_refusal,
+    });
+
+    let generation = owner
+        .and_then(|owner| load_owner_generation_ledger(worktree, owner).ok().flatten())
+        .map(|ledger| {
+            serde_json::json!({
+                "current_generation_id": ledger.current_generation_id,
+                "generations": ledger.generations.len(),
+            })
+        })
+        .unwrap_or(serde_json::Value::Null);
+
+    let snapshot = serde_json::json!({
+        "execution_status": {
+            "record": record_json,
+            "integrity_ok": integrity,
+            "session_id": session_id,
+            "evidence": evidence,
+            "settlement": settlement,
+            "generation": generation,
+        }
+    });
+    out.push_str(&serde_json::to_string_pretty(&snapshot).map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(format!(
+            "execution.status serialization failed: {err}"
+        )))
+    })?);
+    out.push('\n');
+    Ok(0)
+}
+
+#[cfg(test)]
+mod execution_status_snapshot_tests {
+    use super::*;
+
+    // SPEC-3393 FR-001 / T-001: `execution.status` is a read-only diagnostic.
+    // An absent record is a reportable state, not an error.
+    #[test]
+    fn status_reports_absent_record_without_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut out = String::new();
+        let code = run_status(tmp.path(), &mut out).unwrap();
+        assert_eq!(code, 0, "status must exit 0 on absent record: {out}");
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            value["execution_status"]["record"].is_null(),
+            "absent record must serialize as null: {out}"
+        );
+        assert_eq!(
+            value["execution_status"]["settlement"]["open"], false,
+            "no settlement obligation on a fresh dir: {out}"
+        );
     }
 }

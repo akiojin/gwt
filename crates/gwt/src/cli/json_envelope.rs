@@ -306,6 +306,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.status" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -1745,6 +1748,15 @@ mod tests {
         assert!(matches!(
             err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
+        ));
+    }
+
+    // SPEC-3393 FR-001: read-only status snapshot parse.
+    #[test]
+    fn execution_status_parses_without_params() {
+        assert!(matches!(
+            ok("execution.status", json!({})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         ));
     }
 
