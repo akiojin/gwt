@@ -1,6 +1,124 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.70.0] - 2026-07-29
+
+### Bug Fixes
+
+- **agent:** Enforce monotonic capability generation
+- **execution:** Harden generation authority
+- **agent:** Fence stale pane execution bindings
+- **verification:** Authenticate execution evidence writers
+- **agent:** Linearize pane input with execution leases
+- **workspace:** Align inspection permission state
+- **workspace:** Harden continuation recovery
+- Preserve legacy blocked execution transactions
+- Recover fresh execution transactions after restart
+- Harden durable recovery identity
+- **workspace:** Enforce singleton work surface
+- **session:** Preserve unchanged startup records
+- **startup:** Defer project index bootstrap
+- エージェント起動と作業継続の権限境界を強化
+- Linked worktree の作業継続を安定化
+- **hooks:** Owner guardの誤blockを解消しStop gate要求操作の通過をinvariant固定する
+- **terminal:** Semantic snapshot とPTYグリッドの一貫性を保つ
+- **issue-monitor:** コンテナルートのGitHub操作を正規化する
+- **skills:** Make user verification handoffs actionable
+- **issue-monitor:** Preserve merged state during persist rebase
+- 検証計画の権限引数を統合
+- PR レビューで判明した実行境界を強化
+- **launch:** Intake worktreeをfreshなorigin baseで実体化しstale skillsを自己修復する (#3374)
+- Harden issue monitor side-effect authority
+- Harden issue monitor claim and control authority
+- Make issue monitor scans deadline integral
+- Harden issue monitor launch delivery transactions
+- Reconcile issue monitor failure deliveries
+- **issue-monitor:** Linearize durable launch delivery
+- **issue-monitor:** Keep autonomous retry single-path
+- **issue-monitor:** コンテナルートの autonomous loop 正規化を回帰テストで固定する
+- **issue-monitor:** Origin/HEAD 未設定を scan 失敗にせず autonomous loop を継続する
+- **gui:** 添付進捗が Queued 100% のまま残る不具合を修正
+- **gui:** 添付進捗キューの hard cap を維持する
+- **issue-monitor:** ライフサイクルを所有プロジェクトへ分離する
+- **issue-monitor:** Close durable recovery authority gaps
+- **gwt-git:** Windows ローカルパスから repo 名を導出できるようにする
+- **gwt-core:** Windows のファイルロック競合を移植可能に扱う
+- **gwt:** Issue Monitor authority fence の Windows ロック競合を WouldBlock に正規化する
+- **gwt-core:** Index coordinator の登録ロックを shared に戻す
+- **gwt-core:** Windows で登録ロックと JSONL 修復が失敗する問題を直す
+- **lane:** Resolve session kind from the worktree lane file before env
+
+### Documentation
+
+- **verification:** Avoid private rustdoc links
+
+### Features
+
+- **agent:** Persist execution generation binding
+- **execution:** Add owner generation ledger
+- **execution:** Scope verification evidence to generation
+- **agent:** Rotate durable capability epochs
+- **agent:** Enforce current execution binding authority
+- **agent:** Bind producing launches to execution generation
+- **workspace:** Coordinate execution commit with Work state
+- **workspace:** Continue completed work in new executions
+- Continue Work with fresh execution generations
+- **hooks:** Prompt-to-action obligation gateをexecution laneに追加する
+- **hooks:** Completion/Ready操作がopen obligationを拒否する(T-247 core)
+- **hooks:** 導出surfaceのCoverage Mapをplan recordへ永続化する(T-131 core)
+- **hooks:** Trusted store破損時にactionableな修復導線を提示する(T-177 core)
+- **hooks:** Assistant commitment scannerで裏付けなき完了宣言をblockする(T-243 core)
+- **hooks:** Wget/PowerShellのGitHub API mutationをsink分類に追加する(P10 transport拡張)
+- **hooks:** Trusted storeのGC/retentionとlegacy importを追加する(T-181/T-182 core)
+- **hooks:** Phase Launch Packetをlaunch時に生成する(T-275 staged core)
+- **hooks:** Execution.reopenがdefer済みissue/pr義務を復活させる(T-248 absorbed core)
+- 実行リカバリーのデッドロックを解消する
+- **execution:** Add read-only execution.status JSON operation
+
+### Miscellaneous Tasks
+
+- **work:** Issue #2359 の完了状態を同期する
+- **work:** Preserve workspace backfill event
+- **agent:** Export execution binding APIs
+- **work:** Record issue 2359 continuation progress
+- **work:** Record workspace backfill
+- **work:** SPEC-2359 の実行 owner を正本へ収束
+- **work:** Work イベントジャーナルを記録する
+- **work:** Record issue 3348 work projection
+- **work:** Persist SPEC-3350 backfill events
+- **work:** SPEC-2359 の backfill event を記録
+- **work:** SPEC #2359 の追跡イベントを記録
+- **work:** Issue #3315 の実行状態を同期する
+- **work:** Issue #3315 の統合状態を記録する
+- **work:** Issue #3315 の検証確定を記録する
+- **work:** Issue #3315 の追跡履歴を確定する
+- **work:** 視覚確認環境の起動記録を保存する
+- **work:** Issue #3041 の Work 項目を記録する
+- **gwt:** Windows ビルドの clippy 警告を解消する
+- **work:** Issue 3290のWorkイベントbackfillを保存する
+- **work:** Develop を取り込み events.jsonl を統合する
+- **work:** Events.jsonl の重複追記を取り消す
+
+### Testing
+
+- **workspace:** Align continuation launch fixtures
+- 起動権限境界の検証契約を修正
+- **issue-monitor:** Isolate bare repo fixture cwd
+- **agent:** Probe redaction fixture を決定的にする
+- 実在する sibling gwtd で launch fixture を構成
+- **issue-monitor:** Isolate process-wide test fixtures
+- **start-work:** Isolate deadline git fixture
+- **issue-monitor:** Isolate abort fixture blocking slots
+- **issue-monitor:** Isolate GUI remote scan probe
+- **issue-monitor:** Separate launch capacity from scan health
+- **issue-monitor:** Scan hang からの自己回復と fresh launch の delivery ACK を回帰テストで固定する
+- **gui:** 添付進捗の操作単位集約を厳密化
+- **gwt:** Bookkeeping パス判定テストの OS 前提を修正する
+- **lane:** Pin intake lane-file preservation for env-less rematerialization
+
+# Changelog
+
+All notable changes to this project will be documented in this file.
 ## [9.69.1] - 2026-07-27
 
 ### Bug Fixes
