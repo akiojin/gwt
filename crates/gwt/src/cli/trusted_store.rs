@@ -97,6 +97,30 @@ pub fn write(worktree: &Path, file_name: &str, bytes: &[u8]) -> io::Result<()> {
     write_to_resolved_dir(&dir, file_name, bytes)
 }
 
+/// Write one authoritative repo-scoped record and read it back under the
+/// same resolved-directory lease.
+///
+/// Unlike [`write()`], this operation refuses mirror-only degenerate mode:
+/// callers use the returned bytes to decide whether a security-sensitive
+/// outcome may be reported as successful.
+pub fn write_with_readback(worktree: &Path, file_name: &str, bytes: &[u8]) -> io::Result<String> {
+    let trusted_dir = trusted_dir_for_worktree(worktree).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "trusted write readback requires a canonical repository scope",
+        )
+    })?;
+    with_write_lease_for_resolved_dir(&trusted_dir, || {
+        write_to_resolved_dir(&trusted_dir, file_name, bytes)?;
+        read_from_resolved_dir(&trusted_dir, file_name)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "trusted record disappeared after write",
+            )
+        })
+    })
+}
+
 /// Write to a trusted directory that the caller already resolved and leased.
 /// This prevents a second resolver call from moving the authoritative write
 /// beneath a directory whose lease is not held.
@@ -106,6 +130,63 @@ pub(crate) fn write_to_resolved_dir(
     bytes: &[u8],
 ) -> io::Result<()> {
     gwt_github::cache::write_atomic(&trusted_dir.join(file_name), bytes)
+}
+
+/// Result of moving one unhealthy trusted-state file out of the canonical
+/// authority path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuarantinedTrustedFile {
+    pub source_hash: String,
+    pub destination: PathBuf,
+}
+
+/// Move an unhealthy trusted-state file to a collision-resistant sibling.
+///
+/// The hard-link-first sequence gives the destination create-new semantics:
+/// an existing path is never overwritten. Callers hold the surrounding
+/// trusted-store lease, so removing the source after the link succeeds
+/// completes the move without another canonical writer racing the source.
+pub(crate) fn quarantine_file(source: &Path) -> io::Result<QuarantinedTrustedFile> {
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "quarantine source has no UTF-8 file name",
+            )
+        })?;
+    let bytes = fs::read(source)?;
+    let source_hash = format!("{:x}", Sha256::digest(&bytes));
+    for _ in 0..16 {
+        let destination = source.with_file_name(format!(
+            "{file_name}.corrupt-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        match quarantine_file_to(source, &destination) {
+            Ok(()) => {
+                return Ok(QuarantinedTrustedFile {
+                    source_hash,
+                    destination,
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        ErrorKind::AlreadyExists,
+        "trusted-state quarantine could not allocate a unique destination",
+    ))
+}
+
+fn quarantine_file_to(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::hard_link(source, destination)?;
+    if let Err(error) = fs::remove_file(source) {
+        let _ = fs::remove_file(destination);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Write the authoritative trusted copy, then the worktree mirror. Once the
@@ -457,6 +538,32 @@ mod tests {
         assert!(!ran, "refused writer must not run its operation");
         release_tx.send(()).unwrap();
         holder.join().unwrap();
+    }
+
+    #[test]
+    fn quarantine_preserves_source_bytes_and_never_overwrites_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("execution-control.json");
+        let collision = dir.path().join("execution-control.json.corrupt-fixed");
+        fs::write(&source, b"corrupt authority").unwrap();
+        fs::write(&collision, b"existing quarantine").unwrap();
+
+        let error = quarantine_file_to(&source, &collision).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"corrupt authority");
+        assert_eq!(fs::read(&collision).unwrap(), b"existing quarantine");
+
+        let quarantined = quarantine_file(&source).unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(&quarantined.destination).unwrap(),
+            b"corrupt authority"
+        );
+        assert_eq!(
+            quarantined.source_hash,
+            format!("{:x}", Sha256::digest(b"corrupt authority"))
+        );
+        assert_ne!(quarantined.destination, collision);
     }
 
     // T-181: GC removes orphaned sibling entries (marker points at a gone

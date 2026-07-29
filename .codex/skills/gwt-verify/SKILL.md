@@ -40,6 +40,17 @@ Playwright recipe. Instead it executes the following four-part contract:
    launch → navigate → observe) and ask the user to confirm or reject. See
    `references/user-verification-guide.md`.
 
+For every new or changed blocking gate, the verification evidence must also
+cover the complete gate acceptance contract:
+
+- an **agent-reachable recovery operation**
+- **diagnostic visibility** for both the requirement and current state
+- a **positive test** proving the invalid state is rejected
+- a **false-positive negative test** proving legitimate work is not rejected
+
+A gate missing any of these four elements fails verification. Warning-only
+diagnostics are not classified as blocking gates.
+
 Project-local rules always win. If the project root has an AGENTS.md / README
 section describing its own testing approach (e.g., "run `make verify`",
 "use Unity Editor batch mode test runner"), the agent follows that instead of

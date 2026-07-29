@@ -95,7 +95,7 @@ struct RuntimeStopThreads {
 
 mod attachments;
 mod board;
-mod continuation;
+pub(crate) mod continuation;
 mod file_windows;
 mod frontend_action_log;
 mod knowledge;
@@ -176,7 +176,8 @@ use workspace_views::{
     assign_and_merge_workspace_groups, attach_registry_sessions_to_active_works,
     derive_work_summary, is_identifier_like_title, mark_merged_active_works,
     mark_remote_only_active_works, mark_workspace_cleanup_candidates,
-    workspace_work_agent_view_from_ref, workspace_work_event_kind_wire,
+    workspace_execution_diagnosis_view, workspace_work_agent_view_from_ref,
+    workspace_work_event_kind_wire,
 };
 
 #[derive(Debug, Clone)]
@@ -223,6 +224,7 @@ pub(crate) struct PendingContinueWork {
 #[derive(Debug, Clone)]
 pub(crate) enum PendingContinueWorkExecution {
     Successor(gwt::cli::execution_state::SuccessorRequest),
+    #[allow(dead_code)] // Retained for reconciliation of legacy in-memory fixtures.
     Takeover(gwt::cli::execution_state::GenerationTakeoverRequest),
 }
 

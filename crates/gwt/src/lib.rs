@@ -58,14 +58,15 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 pub use agent_project_state::{
     apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    observe_agent_runtime, probe_authenticated_execution_binding,
+    continue_authenticated_execution, observe_agent_runtime, probe_authenticated_execution_binding,
     probe_authenticated_prepared_execution_binding, AgentExecutionBindingProbeReceipt,
-    AgentExecutionBindingProbeRequest, AgentRuntimeObservation, AgentWorkTerminalKind,
-    AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
+    AgentExecutionBindingProbeRequest, AgentExecutionContinuationOutcome,
+    AgentExecutionContinuationReceipt, AgentExecutionContinuationRequest, AgentRuntimeObservation,
+    AgentWorkTerminalKind, AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
     AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
     AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
-    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
-    AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+    AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
@@ -176,7 +177,8 @@ pub use protocol::{
     ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
     ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
     WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
-    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
-    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
+    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
+    WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

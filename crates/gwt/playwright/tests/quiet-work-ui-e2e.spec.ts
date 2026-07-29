@@ -101,6 +101,36 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(sessionResume).toHaveText("Inspect session");
   });
 
+  test("Workspace detail exposes blocked execution recovery without replacing purpose", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-detail-title")).toHaveText(
+      "Quiet Work UI redesign",
+    );
+    const diagnosis = page.locator(
+      '[data-section="execution-diagnosis"][data-severity="warning"]',
+    );
+    await expect(diagnosis).toBeVisible();
+    await expect(diagnosis).toHaveAttribute("aria-label", "Execution diagnosis");
+    await expect(diagnosis).toContainText("Blocked");
+    await expect(diagnosis).toContainText("Stale");
+    await expect(diagnosis).toContainText("Verification evidence is stale");
+    await expect(diagnosis).toContainText("Host status is temporarily unavailable");
+    await expect(diagnosis.locator(".workspace-execution-severity")).toHaveText(
+      "Warning",
+    );
+    await expect(diagnosis.locator(".workspace-execution-recovery-list")).toContainText(
+      "verify.run",
+    );
+    await expect(diagnosis.locator(".workspace-execution-recovery-list")).toContainText(
+      "execution.reopen",
+    );
+  });
+
   test("Work without Session history keeps Continue work and shows one Work-level guidance", async ({
     page,
   }) => {
@@ -435,6 +465,23 @@ async function installBackend(
                 agents: workAgents,
                 manual_close_allowed: true,
                 close_blocked_reason: "",
+                execution_diagnosis: {
+                  ecr_status: "blocked",
+                  owner_kind: "spec",
+                  owner_number: 3393,
+                  blocked_reason: "Verification evidence is stale",
+                  missing_verification: "User confirmation",
+                  generation_id: "generation-2",
+                  binding_state: "stale",
+                  binding_cause: "current_session_not_authorized",
+                  verification_state: "stale_fingerprint",
+                  settlement: { blocked: "missing_upstream" },
+                  settlement_severity: "warning",
+                  settlement_obligation_open: true,
+                  open_obligations: ["user_verification"],
+                  available_recoveries: ["verify.run", "execution.reopen"],
+                  warnings: ["Host status is temporarily unavailable"],
+                },
               },
             ],
             events: [

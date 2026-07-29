@@ -1862,9 +1862,16 @@ pub(crate) mod tests {
         assert!(matches!(
             record.status,
             crate::cli::verification_record::WorkEventSettlementStatus::Blocked(
-                crate::cli::verification_record::WorkEventSettlementBlocker::PathDirty { .. }
+                crate::cli::verification_record::WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+                    environment: crate::cli::verification_record::WorkEventSettlementEnvironment::MissingUpstream,
+                    ..
+                }
             )
         ));
+        assert_eq!(
+            record.status.severity(),
+            crate::cli::verification_record::WorkEventSettlementSeverity::Warning
+        );
     }
 
     #[test]

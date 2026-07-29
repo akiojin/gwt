@@ -23,7 +23,6 @@ pub mod coordination_event;
 pub mod diagnostics;
 pub mod envelope;
 pub mod event_dispatcher;
-pub mod execution_completion_stop_check;
 pub mod execution_control_stop_check;
 pub mod forward;
 pub mod gwt_self_improvement_stop;
@@ -283,12 +282,19 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match event_dispatcher::handle_with_input(
-                event,
-                &stdin,
-                &cwd,
-                current_session.as_deref(),
-            ) {
+            let dispatch_result = {
+                let mut capture = |failure| {
+                    crate::cli::improvement_contract::capture_managed_hook_failure(env, failure)
+                };
+                event_dispatcher::handle_with_input_and_managed_capture(
+                    event,
+                    &stdin,
+                    &cwd,
+                    current_session.as_deref(),
+                    &mut capture,
+                )
+            };
+            match dispatch_result {
                 Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -310,13 +316,20 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match provider_event::handle_with_input(
-                provider,
-                native_event,
-                &stdin,
-                &cwd,
-                current_session.as_deref(),
-            ) {
+            let dispatch_result = {
+                let mut capture = |failure| {
+                    crate::cli::improvement_contract::capture_managed_hook_failure(env, failure)
+                };
+                provider_event::handle_with_input_and_managed_capture(
+                    provider,
+                    native_event,
+                    &stdin,
+                    &cwd,
+                    current_session.as_deref(),
+                    &mut capture,
+                )
+            };
+            match dispatch_result {
                 Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -484,6 +497,7 @@ mod tests {
 
     use crate::cli::env::{InternalCommandOutput, TestEnv};
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
+    use gwt_core::test_support::ScopedGwtHome;
 
     use super::*;
 
@@ -651,5 +665,80 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{provider}:{native}: {err}"));
             assert_eq!(normalized.event, expected, "{provider}:{native}");
         }
+    }
+
+    #[test]
+    fn daemon_stop_entrypoints_inject_registered_intake_failure_producer() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempdir().expect("home");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let repo = tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
+
+        let mut session =
+            gwt_agent::Session::new(repo.path(), "intake/daemon", gwt_agent::AgentId::Codex);
+        session.repo_hash = Some(gwt_core::paths::project_scope_hash(repo.path()).to_string());
+        let session_id = session.id.clone();
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save session");
+        let runtime_path =
+            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session_id);
+        let _session_env = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_env =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        crate::cli::intake_outcome::mark_required_since(
+            repo.path(),
+            &session_id,
+            chrono::Utc::now(),
+        )
+        .expect("arm intake gate");
+
+        let mut env = TestEnv::new(repo.path().join("cache"));
+        env.repo_path = repo.path().to_path_buf();
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(repo.path())
+                .expect("source scope nonce");
+        env.stdin = r#"{"stop_hook_active":false}"#.to_string();
+        let code = run_daemon_hook(&mut env, "event", &["Stop".to_string()])
+            .expect("daemon hook dispatch");
+
+        assert_eq!(code, 0);
+        let stdout = String::from_utf8(env.stdout.clone()).expect("hook output");
+        assert!(stdout.contains("fingerprint: v2:"), "{stdout}");
+        let candidates = crate::cli::improvement::candidate_public_values(repo.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["target_artifact"], "issue-spec-workflow");
+        assert_eq!(candidates[0]["eligibility"], "deterministic");
+        assert_eq!(candidates[0]["occurrences"], 1);
+        assert_eq!(env.owner_client_access_count(), 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::cli::intake_outcome::mark_required_since(
+            repo.path(),
+            &session_id,
+            chrono::Utc::now(),
+        )
+        .expect("arm next intake event");
+        env.stdout.clear();
+        env.stdin = r#"{"stop_hook_active":false}"#.to_string();
+        let code = run_daemon_hook(
+            &mut env,
+            "provider-event",
+            &["opencode".to_string(), "session.idle".to_string()],
+        )
+        .expect("provider daemon hook dispatch");
+
+        assert_eq!(code, 0);
+        let stdout = String::from_utf8(env.stdout.clone()).expect("provider hook output");
+        assert!(stdout.contains("fingerprint: v2:"), "{stdout}");
+        let candidates = crate::cli::improvement::candidate_public_values(repo.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["occurrences"], 2);
+        assert_eq!(env.owner_client_access_count(), 2);
     }
 }

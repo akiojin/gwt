@@ -144,6 +144,10 @@ pub struct VerificationPlanRecord {
     /// (AS/FR) binding is T-131 full.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<String>,
+    /// Exact repo-relative files that verification commands are expected to
+    /// generate. Only these paths are excluded from freshness fingerprints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_outputs: Vec<String>,
     /// Content-level worktree fingerprint at plan registration. Derived
     /// matrices are valid only for this exact change set; a later surface
     /// change requires deriving and registering a new plan.
@@ -205,8 +209,10 @@ pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<(
         let mut plan = plan.clone();
         let (_, execution_binding) = current_execution_context(worktree)?;
         plan.execution_binding = execution_binding;
+        plan.generated_outputs = validate_generated_outputs(worktree, &plan.generated_outputs)?;
         if plan.worktree_fingerprint.is_empty() {
-            plan.worktree_fingerprint = worktree_fingerprint(worktree);
+            plan.worktree_fingerprint =
+                worktree_fingerprint_excluding(worktree, &plan.generated_outputs)?;
         }
         save_plan_unleased(worktree, &plan)
     })
@@ -229,31 +235,41 @@ fn register_plan_for_caller(
     worktree: &Path,
     session_id: &str,
     commands: Vec<String>,
+    generated_outputs: Vec<String>,
     derived: bool,
     authority: &VerificationCallerAuthority,
 ) -> io::Result<VerificationPlanRecord> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
-        let fingerprint = worktree_fingerprint(worktree);
+        let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
+        let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         revalidate_verification_caller_authority(worktree, session_id, authority)?;
         register_plan_with_context_unleased(
             worktree,
             session_id,
             commands,
-            Vec::new(),
-            derived,
-            fingerprint,
+            PlanRegistrationContext {
+                surfaces: Vec::new(),
+                generated_outputs,
+                derived,
+                worktree_fingerprint: fingerprint,
+            },
             authority,
         )
     })
+}
+
+struct PlanRegistrationContext {
+    surfaces: Vec<String>,
+    generated_outputs: Vec<String>,
+    derived: bool,
+    worktree_fingerprint: String,
 }
 
 fn register_plan_with_context_unleased(
     worktree: &Path,
     session_id: &str,
     commands: Vec<String>,
-    surfaces: Vec<String>,
-    derived: bool,
-    worktree_fingerprint: String,
+    context: PlanRegistrationContext,
     authority: &VerificationCallerAuthority,
 ) -> io::Result<VerificationPlanRecord> {
     let mut plan = VerificationPlanRecord {
@@ -261,9 +277,10 @@ fn register_plan_with_context_unleased(
         owner_number: authority.owner_number,
         execution_binding: authority.execution_binding.clone(),
         commands,
-        derived,
-        surfaces,
-        worktree_fingerprint,
+        derived: context.derived,
+        surfaces: context.surfaces,
+        generated_outputs: context.generated_outputs,
+        worktree_fingerprint: context.worktree_fingerprint,
         created_at: Utc::now(),
         content_hash: String::new(),
     };
@@ -275,6 +292,7 @@ fn register_plan_with_context_unleased(
 fn derive_and_register_plan_for_caller(
     worktree: &Path,
     session_id: &str,
+    generated_outputs: Vec<String>,
     authority: &VerificationCallerAuthority,
 ) -> Result<
     (
@@ -284,10 +302,13 @@ fn derive_and_register_plan_for_caller(
     String,
 > {
     crate::cli::trusted_store::with_write_lease(worktree, || {
-        let fingerprint_before = worktree_fingerprint(worktree);
+        let generated_outputs = validate_generated_outputs(worktree, &generated_outputs)?;
+        let fingerprint_before =
+            worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         let derived = crate::cli::verify_derivation::derive(worktree)
             .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-        let fingerprint_after = worktree_fingerprint(worktree);
+        let fingerprint_after =
+            worktree_fingerprint_excluding(worktree, &generated_outputs)?;
         if fingerprint_before != fingerprint_after {
             return Err(io::Error::new(
                 ErrorKind::WouldBlock,
@@ -299,9 +320,12 @@ fn derive_and_register_plan_for_caller(
             worktree,
             session_id,
             derived.commands.clone(),
-            derived.surfaces.clone(),
-            true,
-            fingerprint_after,
+            PlanRegistrationContext {
+                surfaces: derived.surfaces.clone(),
+                generated_outputs,
+                derived: true,
+                worktree_fingerprint: fingerprint_after,
+            },
             authority,
         )?;
         Ok((derived, plan))
@@ -361,60 +385,159 @@ pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
 /// pass as fresh (FR-036). Non-git worktrees return a degenerate constant.
 #[must_use]
 pub fn worktree_fingerprint(worktree: &Path) -> String {
+    worktree_fingerprint_excluding(worktree, &[]).unwrap_or_else(|_| "no-git".to_string())
+}
+
+fn validate_generated_outputs(worktree: &Path, outputs: &[String]) -> io::Result<Vec<String>> {
+    let root = dunce::canonicalize(worktree)?;
+    let mut normalized = Vec::with_capacity(outputs.len());
+    let mut seen = std::collections::HashSet::new();
+    for raw in outputs {
+        let path = Path::new(raw);
+        if raw.trim().is_empty()
+            || raw.chars().any(char::is_control)
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output must be a normalized repo-relative path: {raw}"),
+            ));
+        }
+        let value = path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if value == ".git"
+            || value.starts_with(".git/")
+            || value == ".gwt"
+            || value.starts_with(".gwt/")
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output targets protected state: {raw}"),
+            ));
+        }
+        if !seen.insert(value.clone()) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("duplicate generated output: {value}"),
+            ));
+        }
+        let candidate = root.join(&value);
+        let mut anchor = candidate.as_path();
+        while !anchor.exists() {
+            anchor = anchor.parent().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("generated output has no repository parent: {value}"),
+                )
+            })?;
+        }
+        let canonical_anchor = dunce::canonicalize(anchor)?;
+        if !canonical_anchor.starts_with(&root) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output escapes the repository through a symlink: {value}"),
+            ));
+        }
+        if candidate.exists() {
+            let canonical = dunce::canonicalize(&candidate)?;
+            if !canonical.starts_with(&root) || canonical.is_dir() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("generated output is not a repository file: {value}"),
+                ));
+            }
+        }
+        let tracked = gwt_core::process::hidden_command("git")
+            .args(["ls-files", "--error-unmatch", "--", &value])
+            .current_dir(&root)
+            .output()?;
+        if tracked.status.success() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("generated output must not exclude a tracked repository file: {value}"),
+            ));
+        }
+        normalized.push(value);
+    }
+    normalized.sort();
+    Ok(normalized)
+}
+
+pub(crate) fn worktree_fingerprint_excluding(
+    worktree: &Path,
+    generated_outputs: &[String],
+) -> io::Result<String> {
     let head = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(worktree)
-        .output();
-    let Ok(head) = head else {
-        return "no-git".to_string();
-    };
+        .output()?;
     if !head.status.success() {
-        return "no-git".to_string();
+        return Ok("no-git".to_string());
     }
     let mut hasher = Sha256::new();
     hasher.update(&head.stdout);
     hasher.update(b"\n--diff--\n");
+    let mut diff_args = vec![
+        "diff".to_string(),
+        "HEAD".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        ":(exclude).gwt".to_string(),
+    ];
+    diff_args.extend(
+        generated_outputs
+            .iter()
+            .map(|path| format!(":(literal,exclude){path}")),
+    );
     let diff = gwt_core::process::hidden_command("git")
-        .args(["diff", "HEAD", "--", ".", ":(exclude).gwt"])
+        .args(&diff_args)
         .current_dir(worktree)
-        .output();
-    if let Ok(diff) = diff {
-        if diff.status.success() {
-            hasher.update(&diff.stdout);
-        }
+        .output()?;
+    if diff.status.success() {
+        hasher.update(&diff.stdout);
     }
     hasher.update(b"\n--untracked--\n");
     // `-uall` expands untracked directories to individual files so new files
     // inside an already-untracked directory change the fingerprint too.
+    let mut status_args = vec![
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "-uall".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        ":(exclude).gwt".to_string(),
+    ];
+    status_args.extend(
+        generated_outputs
+            .iter()
+            .map(|path| format!(":(literal,exclude){path}")),
+    );
     let untracked = gwt_core::process::hidden_command("git")
-        .args([
-            "status",
-            "--porcelain",
-            "-uall",
-            "--",
-            ".",
-            ":(exclude).gwt",
-        ])
+        .args(&status_args)
         .current_dir(worktree)
-        .output();
-    if let Ok(untracked) = untracked {
-        if untracked.status.success() {
-            let listing = String::from_utf8_lossy(&untracked.stdout);
-            for line in listing.lines() {
-                let Some(path) = line.strip_prefix("?? ") else {
-                    continue;
-                };
-                let path = path.trim().trim_matches('"');
-                hasher.update(path.as_bytes());
-                hasher.update(b"\n");
-                if let Ok(bytes) = fs::read(worktree.join(path)) {
-                    hasher.update(&bytes);
-                }
-                hasher.update(b"\n");
+        .output()?;
+    if untracked.status.success() {
+        let listing = String::from_utf8_lossy(&untracked.stdout);
+        for line in listing.lines() {
+            let Some(path) = line.strip_prefix("?? ") else {
+                continue;
+            };
+            let path = path.trim().trim_matches('"');
+            hasher.update(path.as_bytes());
+            hasher.update(b"\n");
+            if let Ok(bytes) = fs::read(worktree.join(path)) {
+                hasher.update(&bytes);
             }
+            hasher.update(b"\n");
         }
     }
-    format!("{:x}", hasher.finalize())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Exact tracked path whose delivery must settle before terminal mutations.
@@ -423,7 +546,7 @@ pub const WORK_EVENT_LOG_RELATIVE: &str = ".gwt/work/events.jsonl";
 const WORK_EVENT_SETTLEMENT_RECORD_FILE: &str = "work-event-settlement.json";
 const WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION: u64 = 1;
 const WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION: u64 = 2;
-const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 3;
+pub(crate) const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 3;
 
 /// Independent dirty states reported for the exact tracked Work event path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -435,11 +558,27 @@ pub enum WorkEventPathState {
     Deleted,
 }
 
+/// Environment facts that prevent proving whether a dirty Work event path is
+/// currently agent-correctable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventSettlementEnvironment {
+    MissingUpstream,
+    GitStatusError,
+    RemoteReadbackError,
+}
+
 /// Fail-closed reasons for Work event delivery settlement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkEventSettlementBlocker {
-    PathDirty { states: Vec<WorkEventPathState> },
+    PathDirty {
+        states: Vec<WorkEventPathState>,
+    },
+    PathDirtyInUnreachableEnvironment {
+        states: Vec<WorkEventPathState>,
+        environment: WorkEventSettlementEnvironment,
+    },
     CommitNotPushed,
     MissingUpstream,
     RemoteDiverged,
@@ -467,10 +606,35 @@ pub enum WorkEventSettlementStatus {
     Blocked(WorkEventSettlementBlocker),
 }
 
+/// Whether a settlement fact should clear, warn, or stop the current agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventSettlementSeverity {
+    Clear,
+    Warning,
+    Blocked,
+}
+
 impl WorkEventSettlementStatus {
     #[must_use]
     pub fn is_settled(&self) -> bool {
         matches!(self, Self::Settled { .. })
+    }
+
+    /// Classify facts by whether the current agent can fix them.
+    #[must_use]
+    pub fn severity(&self) -> WorkEventSettlementSeverity {
+        match self {
+            Self::Settled { .. } => WorkEventSettlementSeverity::Clear,
+            Self::PendingMutation { .. } => WorkEventSettlementSeverity::Blocked,
+            Self::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream
+                | WorkEventSettlementBlocker::GitStatusError
+                | WorkEventSettlementBlocker::RemoteReadbackError
+                | WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment { .. },
+            ) => WorkEventSettlementSeverity::Warning,
+            Self::Blocked(_) => WorkEventSettlementSeverity::Blocked,
+        }
     }
 }
 
@@ -683,7 +847,7 @@ pub fn save_work_event_settlement_record(
 }
 
 #[cfg(test)]
-fn persist_work_event_settlement_record(
+pub(crate) fn persist_work_event_settlement_record(
     worktree: &Path,
     record: &WorkEventSettlementRecord,
 ) -> io::Result<()> {
@@ -762,8 +926,19 @@ pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementSta
         }
     };
     if !states.is_empty() {
-        return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
-            states,
+        let environment = match configured_upstream(worktree) {
+            Ok((remote, merge_ref, _)) => fetch_upstream_tip(worktree, &remote, &merge_ref)
+                .err()
+                .map(|()| WorkEventSettlementEnvironment::RemoteReadbackError),
+            Err(UpstreamFailure::Missing) => Some(WorkEventSettlementEnvironment::MissingUpstream),
+            Err(UpstreamFailure::Git) => Some(WorkEventSettlementEnvironment::GitStatusError),
+        };
+        return WorkEventSettlementStatus::Blocked(match environment {
+            Some(environment) => WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+                states,
+                environment,
+            },
+            None => WorkEventSettlementBlocker::PathDirty { states },
         });
     }
 
@@ -867,26 +1042,23 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
     let receipt = match load_work_event_settlement_record(worktree) {
         Ok(record) => record,
         Err(error) => {
-            return Some(format!(
-                "Work event settlement refused: the trusted settlement receipt is unreadable ({error}). Repair the trusted store, then commit `{WORK_EVENT_LOG_RELATIVE}` and push HEAD to its configured upstream before retrying."
-            ));
+            tracing::warn!(%error, "work event settlement receipt is unreadable");
+            return None;
         }
     };
     let current_binding = match current_execution_context(worktree) {
         Ok((_, binding)) => binding,
         Err(error) => {
-            return Some(format!(
-                "Work event settlement refused: current execution generation authority is unreadable ({error}). Repair or relaunch the execution before retrying."
-            ));
+            tracing::warn!(%error, "work event settlement authority is unreadable");
+            return None;
         }
     };
     let path_exists = match fs::symlink_metadata(worktree.join(WORK_EVENT_LOG_RELATIVE)) {
         Ok(_) => true,
         Err(error) if error.kind() == ErrorKind::NotFound => false,
         Err(error) => {
-            return Some(format!(
-                "Work event settlement refused: `{WORK_EVENT_LOG_RELATIVE}` could not be inspected ({error}). Repair the path, commit it, and push HEAD to its configured upstream before retrying."
-            ));
+            tracing::warn!(%error, "work event settlement path could not be inspected");
+            return None;
         }
     };
     let path_tracked = if path_exists {
@@ -921,9 +1093,8 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         match save_work_event_settlement_record(worktree, &receipt.session_id, false) {
             Ok(refreshed) => refreshed.status,
             Err(error) => {
-                return Some(format!(
-                    "Work event settlement refused: the trusted settlement receipt could not be refreshed ({error}). Repair the trusted store, then commit `{WORK_EVENT_LOG_RELATIVE}` and push HEAD to its configured upstream before retrying."
-                ));
+                tracing::warn!(%error, "work event settlement receipt could not be refreshed");
+                return None;
             }
         }
     } else {
@@ -941,6 +1112,11 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             &journal_entry_id,
         )),
         WorkEventSettlementStatus::Settled { .. } => None,
+        WorkEventSettlementStatus::Blocked(_)
+            if status.severity() == WorkEventSettlementSeverity::Warning =>
+        {
+            None
+        }
         WorkEventSettlementStatus::Blocked(blocker) => {
             Some(work_event_settlement_blocker_description(&blocker))
         }
@@ -973,6 +1149,24 @@ pub(crate) fn work_event_settlement_blocker_description(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("`{WORK_EVENT_LOG_RELATIVE}` is dirty ({states})")
+        }
+        WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+            states,
+            environment,
+        } => {
+            let states = states
+                .iter()
+                .map(|state| match state {
+                    WorkEventPathState::Staged => "staged",
+                    WorkEventPathState::Unstaged => "unstaged",
+                    WorkEventPathState::Untracked => "untracked",
+                    WorkEventPathState::Deleted => "deleted",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "`{WORK_EVENT_LOG_RELATIVE}` is dirty ({states}), but remote reachability is unavailable ({environment:?})"
+            )
         }
         WorkEventSettlementBlocker::CommitNotPushed => {
             "the current HEAD is not contained by its configured upstream".to_string()
@@ -1316,9 +1510,6 @@ fn run_verification_inner<F>(
 where
     F: FnOnce(),
 {
-    if commands.is_empty() {
-        return Err("verify.run requires at least one command".to_string());
-    }
     // Snapshot owner, plan, and worktree together. Commands deliberately run
     // outside the lease; the final commit reacquires it and rejects any
     // interleaving writer by invalidating the evidence snapshot.
@@ -1330,7 +1521,12 @@ where
                 current_execution_context(worktree)?
             };
             let plan = load_plan(worktree)?;
-            let fingerprint = worktree_fingerprint(worktree);
+            let generated_outputs = plan
+                .as_ref()
+                .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
+                .transpose()?
+                .unwrap_or_default();
+            let fingerprint = worktree_fingerprint_excluding(worktree, &generated_outputs)?;
             if let Some(authority) = authority {
                 revalidate_verification_caller_authority(worktree, session_id, authority)?;
             }
@@ -1343,6 +1539,15 @@ where
                 format!("failed to snapshot verification state: {err}")
             }
         })?;
+    if commands.is_empty()
+        && !plan_snapshot
+            .as_ref()
+            .is_some_and(is_canonical_trivial_plan)
+    {
+        return Err(
+            "verify.run with no commands requires a canonical trivial derived plan".to_string(),
+        );
+    }
     let started_at = Utc::now();
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
@@ -1409,7 +1614,13 @@ where
         }
         let (current_owner, current_binding) = current_execution_context(worktree)?;
         let current_plan = load_plan(worktree)?;
-        let fingerprint_after = worktree_fingerprint(worktree);
+        let fingerprint_after = worktree_fingerprint_excluding(
+            worktree,
+            plan_snapshot
+                .as_ref()
+                .map(|plan| plan.generated_outputs.as_slice())
+                .unwrap_or_default(),
+        )?;
         if fingerprint_before != fingerprint_after {
             transcript.push_str(
                 "warning: the worktree changed while verification ran — the record is invalidated; rerun `verify.run` on the final state\n",
@@ -1464,6 +1675,22 @@ where
         );
     }
     Ok((record, transcript))
+}
+
+fn is_canonical_trivial_plan(plan: &VerificationPlanRecord) -> bool {
+    plan.derived
+        && plan.commands.is_empty()
+        && matches!(
+            plan.surfaces.as_slice(),
+            [surface]
+                if matches!(
+                    surface.as_str(),
+                    "trivial(ledger_only)"
+                        | "trivial(deletion_only)"
+                        | "trivial(integration_branch)"
+                        | "trivial(merge_base_unavailable)"
+                )
+        )
 }
 
 /// Evidence status consumed by completion and PR handoff gates (T-111/T-112).
@@ -1560,7 +1787,21 @@ pub fn evaluate_evidence_snapshot(
     if record.execution_binding != current_binding {
         return EvidenceStatus::WrongGeneration;
     }
-    if record.worktree_fingerprint != worktree_fingerprint(worktree) {
+    let generated_outputs = plan
+        .filter(|plan| {
+            !record.verification_plan_hash.is_empty()
+                && plan.content_hash == record.verification_plan_hash
+                && plan_integrity_ok(plan)
+        })
+        .map(|plan| validate_generated_outputs(worktree, &plan.generated_outputs))
+        .transpose();
+    let Ok(generated_outputs) = generated_outputs else {
+        return EvidenceStatus::Tampered;
+    };
+    let current_fingerprint =
+        worktree_fingerprint_excluding(worktree, generated_outputs.as_deref().unwrap_or_default())
+            .unwrap_or_else(|_| "no-git".to_string());
+    if record.worktree_fingerprint != current_fingerprint {
         return EvidenceStatus::StaleFingerprint;
     }
     if !record.all_passed {
@@ -1821,6 +2062,12 @@ pub enum VerifyCommand {
         commands: Vec<String>,
         derive: bool,
     },
+    /// Explicit plan with an exact generated-file allowlist.
+    PlanWithOutputs {
+        commands: Vec<String>,
+        derive: bool,
+        generated_outputs: Vec<String>,
+    },
 }
 
 pub(super) fn run<E: CliEnv>(
@@ -1848,8 +2095,20 @@ pub(super) fn run<E: CliEnv>(
                 },
             ))
         })?;
+    let command = match command {
+        VerifyCommand::Plan { commands, derive } => VerifyCommand::PlanWithOutputs {
+            commands,
+            derive,
+            generated_outputs: Vec::new(),
+        },
+        other => other,
+    };
     match command {
-        VerifyCommand::Plan { commands, derive } => {
+        VerifyCommand::PlanWithOutputs {
+            commands,
+            derive,
+            generated_outputs,
+        } => {
             let (commands, plan) = if derive {
                 if !commands.is_empty() {
                     return Err(SpecOpsError::from(ApiError::Unexpected(
@@ -1857,9 +2116,13 @@ pub(super) fn run<E: CliEnv>(
                             .to_string(),
                     )));
                 }
-                let (derived_plan, plan) =
-                    derive_and_register_plan_for_caller(&worktree, &session_id, &authority)
-                        .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+                let (derived_plan, plan) = derive_and_register_plan_for_caller(
+                    &worktree,
+                    &session_id,
+                    generated_outputs,
+                    &authority,
+                )
+                .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
                 out.push_str(&format!(
                     "verify: derived matrix from changed surfaces [{}]\n",
                     derived_plan.surfaces.join(", ")
@@ -1879,6 +2142,7 @@ pub(super) fn run<E: CliEnv>(
                     &worktree,
                     &session_id,
                     commands.clone(),
+                    generated_outputs,
                     false,
                     &authority,
                 )
@@ -1905,6 +2169,7 @@ pub(super) fn run<E: CliEnv>(
             ));
             Ok(0)
         }
+        VerifyCommand::Plan { .. } => unreachable!("normalized above"),
         VerifyCommand::Run { commands } => {
             let (record, transcript) =
                 run_verification_for_caller(&worktree, &session_id, &commands, &authority)
@@ -1977,6 +2242,7 @@ pub(crate) mod tests {
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2022,6 +2288,7 @@ pub(crate) mod tests {
                 commands: vec!["cargo test -p gwt --lib".to_string()],
                 derived: true,
                 surfaces: vec!["rust(gwt)".to_string(), "docs(1)".to_string()],
+                generated_outputs: Vec::new(),
                 worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
@@ -2069,12 +2336,24 @@ pub(crate) mod tests {
         let src = dir.path().join("crates/gwt-core/src/lib.rs");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
         fs::write(&src, "pub fn x() {}").unwrap();
+        let report = dir.path().join("artifacts/report.json");
+        fs::create_dir_all(report.parent().unwrap()).unwrap();
+        fs::write(&report, "{}").unwrap();
 
         let authority = snapshot_verification_caller_authority(dir.path(), "sess-cov").unwrap();
-        let (derived, plan) =
-            derive_and_register_plan_for_caller(dir.path(), "sess-cov", &authority).unwrap();
+        let (derived, plan) = derive_and_register_plan_for_caller(
+            dir.path(),
+            "sess-cov",
+            vec!["artifacts/report.json".to_string()],
+            &authority,
+        )
+        .unwrap();
         assert!(!derived.surfaces.is_empty());
         assert_eq!(plan.surfaces, derived.surfaces);
+        assert_eq!(
+            plan.generated_outputs,
+            vec!["artifacts/report.json".to_string()]
+        );
         assert!(plan.derived);
         let loaded = load_plan(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.surfaces, derived.surfaces);
@@ -2112,6 +2391,7 @@ pub(crate) mod tests {
             derived: false,
             worktree_fingerprint: String::new(),
             surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -2188,6 +2468,7 @@ pub(crate) mod tests {
             derived: false,
             worktree_fingerprint: String::new(),
             surfaces: Vec::new(),
+            generated_outputs: Vec::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -2334,6 +2615,7 @@ pub(crate) mod tests {
                 derived: true,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2479,6 +2761,181 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn declared_generated_output_keeps_evidence_fresh_but_source_mutation_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("src.txt"), "v1").unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-generated".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: vec!["artifacts/report.json".to_string()],
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, transcript) =
+            run_verification_inner(dir.path(), "sess-generated", &commands, None, || {
+                fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+                fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
+            })
+            .unwrap();
+        assert!(record.plan_covered, "{transcript}");
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-generated", None),
+            EvidenceStatus::Fresh
+        );
+
+        fs::write(dir.path().join("src.txt"), "v2").unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-generated", None),
+            EvidenceStatus::StaleFingerprint
+        );
+    }
+
+    #[test]
+    fn generated_output_validation_rejects_unsafe_or_duplicate_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_generated_outputs(dir.path(), &["/tmp/out".to_string()]).is_err());
+        assert!(validate_generated_outputs(dir.path(), &["../out".to_string()]).is_err());
+        assert!(validate_generated_outputs(
+            dir.path(),
+            &["out.json".to_string(), "out.json".to_string()]
+        )
+        .is_err());
+
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+            assert!(
+                validate_generated_outputs(dir.path(), &["escape/report.json".to_string()])
+                    .is_err()
+            );
+        }
+
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "t@example.com"].as_slice(),
+            ["config", "user.name", "t"].as_slice(),
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("tracked-report.json"), "{}").unwrap();
+        for args in [
+            ["add", "tracked-report.json"].as_slice(),
+            ["commit", "-qm", "init"].as_slice(),
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let error = validate_generated_outputs(dir.path(), &["tracked-report.json".to_string()])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("tracked repository file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn mixed_generated_and_source_mutation_invalidates_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("src.txt"), "v1").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-qm", "init"]] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-mixed".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: commands.clone(),
+                derived: false,
+                surfaces: Vec::new(),
+                generated_outputs: vec!["report.json".to_string()],
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, _) = run_verification_inner(dir.path(), "sess-mixed", &commands, None, || {
+            fs::write(dir.path().join("report.json"), "{}").unwrap();
+            fs::write(dir.path().join("src.txt"), "v2").unwrap();
+        })
+        .unwrap();
+        assert_eq!(
+            record.worktree_fingerprint,
+            "invalidated-by-concurrent-change"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-mixed", None),
+            EvidenceStatus::StaleFingerprint
+        );
+    }
+
     // T-130-lite: evidence requires a registered plan and a covering run.
     #[test]
     fn plan_coverage_gates_freshness() {
@@ -2502,6 +2959,7 @@ pub(crate) mod tests {
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2544,6 +3002,7 @@ pub(crate) mod tests {
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2570,6 +3029,7 @@ pub(crate) mod tests {
                 derived: true,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2597,6 +3057,7 @@ pub(crate) mod tests {
                 derived: true,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2632,6 +3093,7 @@ pub(crate) mod tests {
                 derived: true,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -2667,6 +3129,45 @@ pub(crate) mod tests {
         )
         .expect_err("missing GWT_SESSION_ID must fail");
         assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
+    }
+
+    #[test]
+    fn derived_trivial_plan_allows_empty_run_and_fresh_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-trivial".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: Vec::new(),
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: vec!["trivial(ledger_only)".to_string()],
+                generated_outputs: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(dir.path(), "sess-trivial", &[]).unwrap();
+
+        assert!(record.commands.is_empty());
+        assert!(record.all_passed);
+        assert!(record.plan_covered, "{transcript}");
+        assert!(record.plan_derived);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-trivial", None),
+            EvidenceStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn empty_run_without_canonical_trivial_plan_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_verification(dir.path(), "sess-trivial", &[]).unwrap_err();
+        assert!(error.contains("trivial derived plan"), "{error}");
     }
 
     // P11 review fix: only a plan-covering all-passing run settles
@@ -2709,6 +3210,7 @@ pub(crate) mod tests {
                 derived: false,
                 worktree_fingerprint: String::new(),
                 surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -3767,10 +4269,12 @@ pub(crate) mod tests {
     }
 
     fn assert_path_dirty(fixture: &WorkEventGitFixture, states: Vec<WorkEventPathState>) {
+        let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&fixture.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty { states })
         );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
     }
 
     #[test]
@@ -3813,10 +4317,12 @@ pub(crate) mod tests {
         fixture.stage_events();
         fixture.commit("chore(work): commit final Work event");
 
+        let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&fixture.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed)
         );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
     }
 
     #[test]
@@ -3864,17 +4370,21 @@ pub(crate) mod tests {
         let fixture = WorkEventGitFixture::tracked();
         fixture.git_ok(&["branch", "--unset-upstream"]);
 
+        let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&fixture.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream)
         );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
 
         let detached = WorkEventGitFixture::tracked();
         detached.git_ok(&["checkout", "--detach", "-q"]);
+        let status = evaluate_work_event_settlement(&detached.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&detached.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream)
         );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
     }
 
     #[test]
@@ -3888,10 +4398,12 @@ pub(crate) mod tests {
         fixture.advance_remote_from_peer();
         fixture.git_ok(&["fetch", "-q", "origin", "main"]);
 
+        let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&fixture.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged)
         );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
     }
 
     #[test]
@@ -3900,10 +4412,12 @@ pub(crate) mod tests {
         fs::write(fixture.repo.join(".git/index"), b"corrupt-index")
             .expect("corrupt fixture index");
 
+        let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&fixture.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError)
         );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
     }
 
     #[test]
@@ -3917,9 +4431,40 @@ pub(crate) mod tests {
             missing_remote.to_str().expect("UTF-8 missing remote path"),
         ]);
 
+        let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
-            evaluate_work_event_settlement(&fixture.repo),
+            status,
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteReadbackError)
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+    }
+
+    #[test]
+    fn dirty_work_event_is_warning_while_remote_is_unreachable() {
+        let fixture = WorkEventGitFixture::tracked();
+        fixture.append_event("offline-dirty-event");
+        let missing_remote = fixture._root.path().join("missing-upstream.git");
+        fixture.git_ok(&[
+            "remote",
+            "set-url",
+            "origin",
+            missing_remote.to_str().expect("UTF-8 missing remote path"),
+        ]);
+
+        let status = evaluate_work_event_settlement(&fixture.repo);
+        assert_eq!(
+            status,
+            WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+                    states: vec![WorkEventPathState::Unstaged],
+                    environment: WorkEventSettlementEnvironment::RemoteReadbackError,
+                }
+            )
+        );
+        assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_none(),
+            "an offline environment must not turn a dirty fact into an unreachable Stop block"
         );
     }
 

@@ -35,6 +35,38 @@ use gwt_core::process::hidden_command;
 pub struct DerivedPlan {
     pub commands: Vec<String>,
     pub surfaces: Vec<String>,
+    pub trivial_reason: Option<TrivialReason>,
+}
+
+/// Stable reasons why a derived plan has no runnable verification target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrivialReason {
+    LedgerOnly,
+    DeletionOnly,
+    IntegrationBranch,
+    MergeBaseUnavailable,
+}
+
+impl TrivialReason {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LedgerOnly => "ledger_only",
+            Self::DeletionOnly => "deletion_only",
+            Self::IntegrationBranch => "integration_branch",
+            Self::MergeBaseUnavailable => "merge_base_unavailable",
+        }
+    }
+}
+
+impl DerivedPlan {
+    fn trivial(reason: TrivialReason) -> Self {
+        Self {
+            commands: Vec::new(),
+            surfaces: vec![format!("trivial({})", reason.as_str())],
+            trivial_reason: Some(reason),
+        }
+    }
 }
 
 fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
@@ -62,25 +94,22 @@ fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
 /// Resolve the integration base the committed span is diffed against.
 /// Fail-closed: without a resolvable base the committed branch work would
 /// silently vanish from the matrix, so derivation refuses instead.
-fn integration_merge_base(worktree: &Path) -> Result<String, String> {
+fn integration_merge_base(worktree: &Path) -> Option<String> {
     for base_ref in ["origin/develop", "origin/main", "origin/HEAD"] {
         if let Some(base) = git_lines(worktree, &["merge-base", base_ref, "HEAD"])
             .into_iter()
             .next()
         {
-            return Ok(base);
+            return Some(base);
         }
     }
-    Err(
-        "verify.plan derive cannot resolve an integration base (origin/develop, origin/main,          origin/HEAD) — committed branch changes would be invisible to the derived matrix.          Fetch the integration branch or pass explicit params.commands"
-            .to_string(),
-    )
+    None
 }
 
 /// Collect the changed paths: the committed span against the integration
 /// merge-base, uncommitted changes against HEAD, and untracked files. gwt
 /// bookkeeping under `.gwt/` and `tasks/` never counts as a surface.
-fn changed_paths(worktree: &Path) -> Result<Vec<String>, String> {
+fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
     // On the integration branch itself the committed span is unattributable
     // (merge-base == HEAD hides already-pushed work) — refuse rather than
     // derive a silently weak matrix.
@@ -89,11 +118,9 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, String> {
         .next()
         .unwrap_or_default();
     if matches!(head_branch.as_str(), "develop" | "main" | "master") {
-        return Err(format!(
-            "verify.plan derive cannot attribute committed work on the integration branch              '{head_branch}' (already-pushed commits are indistinguishable from the base) —              pass explicit params.commands"
-        ));
+        return Err(TrivialReason::IntegrationBranch);
     }
-    let base = integration_merge_base(worktree)?;
+    let base = integration_merge_base(worktree).ok_or(TrivialReason::MergeBaseUnavailable)?;
     let mut paths: BTreeSet<String> = BTreeSet::new();
     paths.extend(git_lines(worktree, &["diff", "--name-only", &base, "HEAD"]));
     paths.extend(git_lines(worktree, &["diff", "--name-only", "HEAD"]));
@@ -133,19 +160,19 @@ fn is_docs_path(path: &str) -> bool {
 }
 
 /// Derive the verification matrix from the worktree's changed surfaces.
-/// `Err` when nothing changed (an empty derived plan would make coverage
-/// vacuously satisfied) or when the worktree is not a git checkout.
+/// A no-target change set is represented by a reason-bearing trivial plan.
+/// Non-git directories remain invalid because they cannot provide a stable
+/// worktree fingerprint.
 pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
     if git_lines(worktree, &["rev-parse", "--git-dir"]).is_empty() {
         return Err("verify.plan derive requires a git worktree".to_string());
     }
-    let paths = changed_paths(worktree)?;
+    let paths = match changed_paths(worktree) {
+        Ok(paths) => paths,
+        Err(reason) => return Ok(DerivedPlan::trivial(reason)),
+    };
     if paths.is_empty() {
-        return Err(
-            "no changed surfaces detected (merge-base, HEAD, untracked) — nothing to derive; \
-             pass explicit params.commands if the matrix truly differs"
-                .to_string(),
-        );
+        return Ok(DerivedPlan::trivial(TrivialReason::LedgerOnly));
     }
 
     let mut rust_crates: BTreeSet<String> = BTreeSet::new();
@@ -242,13 +269,14 @@ pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
         );
     }
     if commands.is_empty() {
-        return Err(
-            "changed paths resolve to no runnable matrix (e.g. deletions only) — pass explicit              params.commands"
-                .to_string(),
-        );
+        return Ok(DerivedPlan::trivial(TrivialReason::DeletionOnly));
     }
 
-    Ok(DerivedPlan { commands, surfaces })
+    Ok(DerivedPlan {
+        commands,
+        surfaces,
+        trivial_reason: None,
+    })
 }
 
 #[cfg(test)]
@@ -331,9 +359,9 @@ mod tests {
         );
     }
 
-    // T-130 review fixes: committed branch work counts through the
-    // merge-base leg; unresolvable bases and integration branches refuse
-    // instead of deriving a silently weak matrix.
+    // DE-1: committed branch work counts through the merge-base leg, while
+    // an unresolvable base or integration branch produces an explicit
+    // no-target verification plan instead of a recovery dead end.
     #[test]
     fn committed_branch_changes_join_the_matrix() {
         let dir = tempfile::tempdir().unwrap();
@@ -357,17 +385,20 @@ mod tests {
     }
 
     #[test]
-    fn unresolvable_base_and_integration_branch_refuse() {
-        // No origin/develop|main|HEAD refs at all → fail closed.
+    fn unresolvable_base_and_integration_branch_are_trivial() {
+        // No origin/develop|main|HEAD refs at all.
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "work/fixture"]);
         write(dir.path(), "README.md", "# readme");
-        let err = derive(dir.path()).unwrap_err();
-        assert!(err.contains("integration base"), "{err}");
+        let plan = derive(dir.path()).unwrap();
+        assert!(plan.commands.is_empty());
+        assert_eq!(
+            plan.trivial_reason,
+            Some(TrivialReason::MergeBaseUnavailable)
+        );
 
-        // Sitting on the integration branch itself → refuse (already-pushed
-        // work is indistinguishable from the base).
+        // Sitting on the integration branch itself.
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         git(
@@ -376,14 +407,15 @@ mod tests {
         );
         git(dir.path(), &["checkout", "-q", "-B", "develop"]);
         write(dir.path(), "README.md", "# readme");
-        let err = derive(dir.path()).unwrap_err();
-        assert!(err.contains("integration branch"), "{err}");
+        let plan = derive(dir.path()).unwrap();
+        assert!(plan.commands.is_empty());
+        assert_eq!(plan.trivial_reason, Some(TrivialReason::IntegrationBranch));
     }
 
-    // Deletions-only change sets refuse rather than derive a vacuous
-    // markdownlint run over zero files.
+    // Deletions-only change sets produce an explicit no-target plan rather
+    // than a vacuous markdownlint invocation.
     #[test]
-    fn deleted_docs_only_refuses() {
+    fn deleted_docs_only_is_trivial() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
         write(dir.path(), "notes.md", "# notes");
@@ -391,18 +423,20 @@ mod tests {
         git(dir.path(), &["commit", "-qm", "docs: notes"]);
         std::fs::remove_file(dir.path().join("notes.md")).unwrap();
 
-        let err = derive(dir.path()).unwrap_err();
-        assert!(err.contains("no runnable matrix"), "{err}");
+        let plan = derive(dir.path()).unwrap();
+        assert!(plan.commands.is_empty());
+        assert_eq!(plan.trivial_reason, Some(TrivialReason::DeletionOnly));
     }
 
-    // No changes → refuse to derive (an empty plan would satisfy coverage
-    // vacuously). Non-git dirs refuse too.
+    // No non-bookkeeping changes are represented as an explicit ledger-only
+    // plan. Non-git directories still refuse.
     #[test]
-    fn refuses_empty_and_non_git_derivation() {
+    fn empty_is_trivial_and_non_git_refuses() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
-        let err = derive(dir.path()).unwrap_err();
-        assert!(err.contains("nothing to derive"), "{err}");
+        let plan = derive(dir.path()).unwrap();
+        assert!(plan.commands.is_empty());
+        assert_eq!(plan.trivial_reason, Some(TrivialReason::LedgerOnly));
 
         let plain = tempfile::tempdir().unwrap();
         let err = derive(plain.path()).unwrap_err();

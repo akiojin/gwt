@@ -68,7 +68,8 @@ impl ManagedHookHealthInput {
     pub fn new(worktree_root: impl AsRef<Path>) -> Self {
         Self {
             worktree_root: worktree_root.as_ref().to_path_buf(),
-            runtime_state_path: None,
+            runtime_state_path: std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+                .map(PathBuf::from),
             profile_path: None,
             expected_hook_bin: None,
         }
