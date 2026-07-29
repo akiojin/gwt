@@ -337,11 +337,15 @@ impl IndexCoordinator {
                     let waiters_dir = self.target_waiters_dir(key);
                     fs::create_dir_all(&waiters_dir)?;
                     let waiter_path = waiters_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-                    // Create and shared-lock the registration BEFORE writing
-                    // content so a concurrent stale sweep never deletes a
-                    // just-registered live waiter.
+                    // Create and lock the registration BEFORE writing content
+                    // so a concurrent stale sweep never deletes a
+                    // just-registered live waiter. The lock is exclusive: the
+                    // file has a single owner, the sweep only needs
+                    // `try_lock_exclusive` to fail while it is held, and a
+                    // Windows shared lock would deny the owner's own write
+                    // below with ERROR_LOCK_VIOLATION.
                     let waiter_file = open_lock_file(&waiter_path)?;
-                    waiter_file.lock_shared()?;
+                    fs2::FileExt::lock_exclusive(&waiter_file)?;
                     let registration = Registration {
                         schema_version: COORDINATOR_SCHEMA_VERSION,
                         owner: OwnerIdentity::current(),
@@ -408,7 +412,10 @@ impl TargetJobGuard {
         fs::create_dir_all(&pending_dir)?;
         let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
         let pending_file = open_lock_file(&pending_path)?;
-        pending_file.lock_shared()?;
+        // Exclusive for the same reason as the waiter registration above: the
+        // owner writes through this handle right after locking, which a
+        // Windows shared lock would refuse.
+        fs2::FileExt::lock_exclusive(&pending_file)?;
         let registration = Registration {
             schema_version: COORDINATOR_SCHEMA_VERSION,
             owner: OwnerIdentity::current(),
