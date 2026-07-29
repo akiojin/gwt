@@ -2953,13 +2953,18 @@ fn repair_jsonl_tail(path: &Path) -> Result<()> {
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |index| index + 1);
-    let mut file = fs::OpenOptions::new().append(true).open(path)?;
     if serde_json::from_slice::<serde_json::Value>(&bytes[tail_start..]).is_ok() {
+        let mut file = fs::OpenOptions::new().append(true).open(path)?;
         file.write_all(b"\n")?;
+        file.sync_all()?;
     } else {
+        // Truncation needs real write access: a Windows handle opened for
+        // append carries only FILE_APPEND_DATA, so `set_len` would fail with
+        // ERROR_ACCESS_DENIED there.
+        let file = fs::OpenOptions::new().write(true).open(path)?;
         file.set_len(tail_start as u64)?;
+        file.sync_all()?;
     }
-    file.sync_all()?;
     Ok(())
 }
 
