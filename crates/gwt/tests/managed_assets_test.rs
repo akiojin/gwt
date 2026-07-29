@@ -105,6 +105,39 @@ fn intake_materialize_applies_reduced_skill_set() {
     );
 }
 
+/// #3377 (AC): a worktree whose lane file says intake keeps the reduced
+/// (curation) skill set when re-materialized by a process WITHOUT
+/// `GWT_SESSION_KIND` in its env (e.g. the GUI front door). Before #3399 the
+/// resolver read only the env, fell back to Execution, and wrote
+/// implementation skills back into the intake worktree.
+#[test]
+fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    gwt_skills::write_lane_file(dir.path(), &gwt_skills::INTAKE_PROFILE)
+        .expect("write intake lane file");
+    let _env_guard = env_lock();
+    let _kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
+        .expect("materialize managed assets");
+
+    assert!(
+        !dir.path().join(".claude/skills/gwt-build-spec").exists(),
+        "intake lane file must keep the reduced skill set without env"
+    );
+    assert!(
+        dir.path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md")
+            .exists(),
+        "intake must keep curation skills"
+    );
+}
+
 /// #3374: an ephemeral intake worktree must surface the embedded (binary)
 /// skill bundle even where the project tracks gwt skills — the gwt repo
 /// itself tracks `.claude/skills/**`, so a stale-base worktree would
