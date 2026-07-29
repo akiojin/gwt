@@ -618,16 +618,14 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_future_is_abandoned_after_grace() {
-        let started = std::time::Instant::now();
         let completed = tokio::time::timeout(
-            Duration::from_millis(200),
+            Duration::from_secs(2),
             run_cleanup_with_grace(Duration::from_millis(20), std::future::pending()),
         )
         .await
         .expect("cleanup grace must bound a stalled cleanup future");
 
         assert!(!completed, "stalled cleanup must report incomplete");
-        assert!(started.elapsed() < Duration::from_millis(150));
     }
 
     #[tokio::test]
@@ -649,10 +647,9 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = command.spawn().expect("spawn cleanup test child");
-        let started = std::time::Instant::now();
 
         let completed = tokio::time::timeout(
-            Duration::from_millis(200),
+            Duration::from_secs(2),
             cleanup_child_process_after_tree_termination(
                 Duration::from_millis(20),
                 std::future::pending(),
@@ -666,7 +663,6 @@ mod tests {
             !completed,
             "stalled tree termination must report incomplete"
         );
-        assert!(started.elapsed() < Duration::from_millis(150));
         let _ = child.start_kill();
         let _ = child.wait().await;
     }

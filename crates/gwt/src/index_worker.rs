@@ -1041,10 +1041,28 @@ pub(crate) fn run_coordinated_index_job<T>(
     scope_label: &str,
     worktree_hash: Option<&str>,
     priority: JobPriority,
-    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+    build: impl FnMut() -> Result<BuildStep<T>, String>,
 ) -> Result<CoordinatedRun<T>, String> {
     let coordinator = IndexCoordinator::open_default()
         .map_err(|err| format!("index coordinator unavailable: {err}"))?;
+    run_coordinated_index_job_with_coordinator(
+        &coordinator,
+        repo_hash,
+        scope_label,
+        worktree_hash,
+        priority,
+        build,
+    )
+}
+
+fn run_coordinated_index_job_with_coordinator<T>(
+    coordinator: &IndexCoordinator,
+    repo_hash: &str,
+    scope_label: &str,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
+    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+) -> Result<CoordinatedRun<T>, String> {
     let key = match worktree_hash {
         Some(worktree) => TargetKey::worktree(repo_hash, scope_label, worktree),
         None => TargetKey::repo_shared(repo_hash, scope_label),
@@ -2844,7 +2862,11 @@ detached
 
     #[test]
     fn run_coordinated_index_job_runs_the_owner_build() {
-        let run = run_coordinated_index_job(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
+        let run = run_coordinated_index_job_with_coordinator(
+            &coordinator,
             "ownertestrepo001",
             "files",
             Some("wt001"),
@@ -2860,7 +2882,11 @@ detached
 
     #[test]
     fn run_coordinated_index_job_propagates_build_failures() {
-        let error = run_coordinated_index_job::<()>(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
+        let error = run_coordinated_index_job_with_coordinator::<()>(
+            &coordinator,
             "failtestrepo0001",
             "issues",
             None,
@@ -2873,8 +2899,12 @@ detached
 
     #[test]
     fn run_coordinated_index_job_resumes_after_a_yield() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
         let mut calls = 0;
-        let run = run_coordinated_index_job(
+        let run = run_coordinated_index_job_with_coordinator(
+            &coordinator,
             "yieldtestrepo001",
             "files",
             Some("wt002"),
@@ -2896,15 +2926,17 @@ detached
     #[test]
     fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
+        let coordinator_root = tmp.path().join("coordinator");
+        let coordinator =
+            IndexCoordinator::open(&coordinator_root).expect("open isolated coordinator");
         let started = tmp.path().join("owner-started");
         let started_for_thread = started.clone();
+        let owner_coordinator_root = coordinator_root.clone();
 
         let owner = std::thread::spawn(move || {
-            let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+            let coordinator =
+                IndexCoordinator::open(owner_coordinator_root).expect("open owner coordinator");
             let key = TargetKey::repo_shared("coalescetestrepo", "specs");
             let guard = match coordinator
                 .request_job(
@@ -2933,7 +2965,8 @@ detached
             assert!(Instant::now() < deadline, "owner never started");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let run = run_coordinated_index_job::<()>(
+        let run = run_coordinated_index_job_with_coordinator::<()>(
+            &coordinator,
             "coalescetestrepo",
             "specs",
             None,

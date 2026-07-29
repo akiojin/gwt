@@ -443,9 +443,14 @@ pub struct ClientHubHealthStats {
     pub dead_clients: usize,
 }
 
+#[cfg(test)]
+type ClientHubDispatchHook = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+    #[cfg(test)]
+    before_dispatch_enqueue: Arc<Mutex<Option<ClientHubDispatchHook>>>,
 }
 
 #[derive(Clone)]
@@ -455,6 +460,14 @@ struct ClientRegistration {
 }
 
 impl ClientHub {
+    #[cfg(test)]
+    fn set_before_dispatch_enqueue_hook(&self, hook: ClientHubDispatchHook) {
+        *self
+            .before_dispatch_enqueue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
         self.register_with_broadcasts(client_id, true)
     }
@@ -561,6 +574,20 @@ impl ClientHub {
                 })
                 .collect()
         };
+
+        // The test barrier intentionally sits after the registry snapshot
+        // guard is dropped and before serialization or per-client enqueue.
+        // This makes the lock boundary observable without relying on a
+        // scheduler-sensitive latency assertion.
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_dispatch_enqueue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
@@ -6289,41 +6316,50 @@ mod tests {
     #[test]
     fn client_hub_dispatch_releases_lock_before_serializing_and_sending() {
         let hub = ClientHub::default();
-        let _receivers: Vec<_> = (0..200)
-            .map(|i| hub.register(format!("client-{i}")))
-            .collect();
-
-        let events: Vec<OutboundEvent> = (0..1000)
-            .map(|i| {
-                OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                    message: format!("event-{i}"),
-                })
-            })
-            .collect();
-
+        let _receiver = hub.register("busy-client".to_string());
+        let (dispatch_paused_tx, dispatch_paused_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_dispatch_tx, release_dispatch_rx) = std::sync::mpsc::sync_channel(1);
+        let release_dispatch_rx = Arc::new(Mutex::new(release_dispatch_rx));
+        hub.set_before_dispatch_enqueue_hook(Arc::new(move || {
+            dispatch_paused_tx
+                .send(())
+                .expect("report dispatch enqueue phase");
+            release_dispatch_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv()
+                .expect("release dispatch enqueue phase");
+        }));
         let dispatch_hub = hub.clone();
-        let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let started_flag_for_thread = started_flag.clone();
         let dispatch_handle = std::thread::spawn(move || {
-            started_flag_for_thread.store(true, std::sync::atomic::Ordering::Release);
-            dispatch_hub.dispatch(events);
+            dispatch_hub.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::ProjectOpenError {
+                    message: "blocked enqueue".to_string(),
+                },
+            )]);
         });
 
-        while !started_flag.load(std::sync::atomic::Ordering::Acquire) {
-            std::thread::yield_now();
+        let dispatch_paused = dispatch_paused_rx.recv_timeout(Duration::from_secs(5));
+        if dispatch_paused.is_err() {
+            let _ = release_dispatch_tx.send(());
         }
-        std::thread::sleep(std::time::Duration::from_micros(200));
+        dispatch_paused.expect("dispatch should pause after releasing the client registry lock");
 
-        let register_start = std::time::Instant::now();
-        let _intruder_rx = hub.register("intruder".to_string());
-        let register_elapsed = register_start.elapsed();
+        let register_hub = hub.clone();
+        let (register_done_tx, register_done_rx) = std::sync::mpsc::sync_channel(1);
+        let register_handle = std::thread::spawn(move || {
+            let queue = register_hub.register("intruder".to_string());
+            register_done_tx
+                .send(queue)
+                .expect("report concurrent registration");
+        });
 
+        let registered = register_done_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_dispatch_tx.send(());
+        let _intruder_rx =
+            registered.expect("register must complete while dispatch enqueue work is paused");
+        register_handle.join().expect("register thread joins");
         dispatch_handle.join().expect("dispatch thread joins");
-
-        assert!(
-            register_elapsed < std::time::Duration::from_millis(20),
-            "register must not wait for dispatch's serialize+send loop; waited {register_elapsed:?}"
-        );
     }
 
     #[test]

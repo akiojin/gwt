@@ -320,11 +320,9 @@ impl BroadcastHub {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use gwt_core::daemon::DaemonFrame;
     use serde_json::json;
-    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    use tokio::sync::broadcast::error::TryRecvError;
 
     use super::{
         BroadcastHub, IssueMonitorControlQueueError, DEFAULT_CHANNEL_CAPACITY,
@@ -354,8 +352,8 @@ mod tests {
         assert_eq!(queued, 0);
     }
 
-    #[tokio::test]
-    async fn publish_fans_out_to_all_subscribers() {
+    #[test]
+    fn publish_fans_out_to_all_subscribers() {
         let hub = BroadcastHub::new();
         let mut rx_a = hub.subscribe("board");
         let mut rx_b = hub.subscribe("board");
@@ -367,21 +365,15 @@ mod tests {
         let queued = hub.publish("board", frame.clone());
         assert_eq!(queued, 2);
 
-        let received_a = tokio::time::timeout(Duration::from_millis(50), rx_a.recv())
-            .await
-            .expect("rx_a timed out")
-            .expect("rx_a recv");
+        let received_a = rx_a.try_recv().expect("rx_a frame was queued by publish");
         assert_eq!(received_a, frame);
 
-        let received_b = tokio::time::timeout(Duration::from_millis(50), rx_b.recv())
-            .await
-            .expect("rx_b timed out")
-            .expect("rx_b recv");
+        let received_b = rx_b.try_recv().expect("rx_b frame was queued by publish");
         assert_eq!(received_b, frame);
     }
 
-    #[tokio::test]
-    async fn publish_skips_subscribers_on_other_channels() {
+    #[test]
+    fn publish_skips_subscribers_on_other_channels() {
         let hub = BroadcastHub::new();
         let mut rx_board = hub.subscribe("board");
         let mut rx_runtime = hub.subscribe("runtime-status");
@@ -393,7 +385,9 @@ mod tests {
         let queued = hub.publish("board", board_frame.clone());
         assert_eq!(queued, 1);
 
-        let received = rx_board.recv().await.expect("board recv");
+        let received = rx_board
+            .try_recv()
+            .expect("board frame was queued by publish");
         assert_eq!(received, board_frame);
 
         // The runtime-status receiver must NOT have observed the board
@@ -405,8 +399,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn hub_is_cheaply_cloneable_and_shares_state() {
+    #[test]
+    fn hub_is_cheaply_cloneable_and_shares_state() {
         let hub = BroadcastHub::new();
         let hub_clone = hub.clone();
         let mut rx = hub.subscribe("board");
@@ -416,17 +410,19 @@ mod tests {
         let queued = hub_clone.publish("board", frame.clone());
         assert_eq!(queued, 1);
 
-        let received = rx.recv().await.expect("recv");
+        let received = rx
+            .try_recv()
+            .expect("clone publish queued the shared frame");
         assert_eq!(received, frame);
     }
 
-    #[tokio::test]
-    async fn slow_subscriber_recovers_after_lag() {
+    #[test]
+    fn slow_subscriber_recovers_after_lag() {
         // A subscriber that does not drain fast enough loses old
         // frames once the publisher pushes more than
         // `DEFAULT_CHANNEL_CAPACITY` items. The first post-lag
-        // `recv()` returns `RecvError::Lagged(skipped)`, but the
-        // subscription is NOT closed — the next `recv()` returns the
+        // `try_recv()` returns `TryRecvError::Lagged(skipped)`, but the
+        // subscription is NOT closed — the next `try_recv()` returns the
         // newest still-buffered frame.
         //
         // The daemon's per-channel forwarder relies on this contract:
@@ -454,20 +450,20 @@ mod tests {
 
         // First receive after overflow must surface the lag signal,
         // not silently swallow or fail the subscription.
-        match rx.recv().await {
-            Err(RecvError::Lagged(skipped)) => {
+        match rx.try_recv() {
+            Err(TryRecvError::Lagged(skipped)) => {
                 assert!(
                     skipped > 0,
-                    "expected a positive skipped count from RecvError::Lagged"
+                    "expected a positive skipped count from TryRecvError::Lagged"
                 );
             }
-            other => panic!("expected RecvError::Lagged, got {other:?}"),
+            other => panic!("expected TryRecvError::Lagged, got {other:?}"),
         }
 
-        // The subscription is still alive: the next recv returns a
+        // The subscription is still alive: the next try_recv returns a
         // real frame. Confirms the forwarder's "log + continue"
         // strategy will keep delivering the newest events.
-        match rx.recv().await {
+        match rx.try_recv() {
             Ok(DaemonFrame::Event { payload, .. }) => {
                 let seq = payload["seq"].as_u64().expect("seq u64");
                 assert!(
@@ -497,15 +493,12 @@ mod tests {
                 .expect("admission remains available"),
             );
         }
-        let overflow = tokio::time::timeout(
-            Duration::from_millis(50),
-            hub.enqueue_issue_monitor_control(DaemonFrame::Ack),
-        )
-        .await
-        .expect("full admission rejects without waiting");
+        let overflow = hub.enqueue_issue_monitor_control(DaemonFrame::Ack).await;
         assert!(matches!(overflow, Err(IssueMonitorControlQueueError::Busy)));
 
-        let first = receiver.recv().await.expect("first admitted request");
+        let first = receiver
+            .try_recv()
+            .expect("first admitted request was already queued");
         assert!(matches!(
             first.frame(),
             DaemonFrame::Event { payload, .. } if *payload == json!({"seq": 0})
@@ -525,10 +518,9 @@ mod tests {
             .expect("resolved receipt releases one admission");
 
         for (expected, receipt) in (1..ISSUE_MONITOR_CONTROL_CAPACITY).zip(receipts) {
-            let request = tokio::time::timeout(Duration::from_millis(100), receiver.recv())
-                .await
-                .expect("control receive timed out")
-                .expect("control queue remains open");
+            let request = receiver
+                .try_recv()
+                .expect("admitted control request was already queued");
             assert!(matches!(
                 request.frame(),
                 DaemonFrame::Event { payload, .. }
@@ -540,7 +532,9 @@ mod tests {
                 .expect("receipt sender remains live")
                 .expect("request commits");
         }
-        let final_request = receiver.recv().await.expect("final admitted request");
+        let final_request = receiver
+            .try_recv()
+            .expect("final admitted request was already queued");
         assert!(matches!(
             final_request.frame(),
             DaemonFrame::Event { payload, .. }

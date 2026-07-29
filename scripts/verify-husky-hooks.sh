@@ -29,7 +29,7 @@ require_contains() {
 require_not_contains() {
   local file="$1"
   local pattern="$2"
-  if grep -Fq "$pattern" "$file"; then
+  if grep -Fq -- "$pattern" "$file"; then
     fail "Unexpected pattern found in $file: $pattern"
   fi
 }
@@ -56,6 +56,7 @@ require_contains "$PRE_PUSH" "cargo install cargo-llvm-cov --locked"
 require_contains "$PRE_PUSH" "cargo llvm-cov --version"
 require_order "$PRE_PUSH" "if cargo llvm-cov --version >/dev/null 2>&1; then" "if command -v rustup >/dev/null 2>&1; then"
 require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json"
+require_not_contains "$PRE_PUSH" "--test-threads=1"
 require_contains "$PRE_PUSH" "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90"
 require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md"
 require_contains "$PRE_PUSH" "bash scripts/validate-skill-frontmatter.sh"

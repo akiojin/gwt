@@ -313,6 +313,27 @@ run("CI workflows call direct verification scripts and skip npm publish", () => 
   }
 });
 
+run("Windows CI proves the Rust suites with default parallelism three times", () => {
+  const testWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "test.yml"),
+    "utf8"
+  );
+  assert.match(testWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
+  assert.match(testWorkflow, /1\.\.3 \| ForEach-Object/);
+  assert.match(testWorkflow, /cargo test -p gwt-core -p gwt --all-features/);
+  for (const command of [
+    "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
+    "cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary",
+    "cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture",
+    "cargo test -p gwt --bin gwt command_prompt_agent_wrapper",
+  ]) {
+    assert.doesNotMatch(
+      testWorkflow,
+      new RegExp(`${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*--test-threads=1`)
+    );
+  }
+});
+
 run("README install guidance points to GUI-first release assets", () => {
   const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
   const readmeJa = fs.readFileSync(path.join(__dirname, "..", "README.ja.md"), "utf8");

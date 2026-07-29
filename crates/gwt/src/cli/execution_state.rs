@@ -9334,7 +9334,6 @@ mod tests {
             .execution_binding
             .unwrap();
 
-        let started = std::time::Instant::now();
         let error = gwt_agent::with_session_lease_wait(
             &sessions_dir,
             "session-original",
@@ -9353,10 +9352,6 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::WouldBlock);
         assert!(error.to_string().contains("owner lease"));
         assert!(error.to_string().contains("before the Session lease"));
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "reverse nesting must fail immediately rather than waiting for its own Session lock"
-        );
     }
 
     #[test]

@@ -250,12 +250,30 @@ pub struct PythonRunnerSpawner {
     pub runner_script: PathBuf,
 }
 
-impl RunnerSpawner for PythonRunnerSpawner {
-    fn spawn_index_issues(
+impl PythonRunnerSpawner {
+    /// Spawn the detached issue index runner with an explicit coordinator
+    /// root. Tests use this seam to avoid sharing host-wide coordinator state.
+    pub fn spawn_index_issues_with_coordinator_root(
         &self,
         repo_hash: &str,
         project_root: &Path,
         respect_ttl: bool,
+        coordinator_root: &Path,
+    ) -> std::io::Result<()> {
+        self.spawn_index_issues_with_coordinator(
+            repo_hash,
+            project_root,
+            respect_ttl,
+            Some(coordinator_root.to_path_buf()),
+        )
+    }
+
+    fn spawn_index_issues_with_coordinator(
+        &self,
+        repo_hash: &str,
+        project_root: &Path,
+        respect_ttl: bool,
+        coordinator_root: Option<PathBuf>,
     ) -> std::io::Result<()> {
         // A missing venv python must surface synchronously to the caller;
         // once the job is detached behind the coordinator only logs would
@@ -316,8 +334,27 @@ impl RunnerSpawner for PythonRunnerSpawner {
         let repo_hash = repo_hash.to_string();
         std::thread::Builder::new()
             .name("gwt-index-issues".to_string())
-            .spawn(move || run_coordinated_issue_index(&repo_hash, cmd, spawn_id, &label))
+            .spawn(move || {
+                run_coordinated_issue_index(
+                    &repo_hash,
+                    cmd,
+                    spawn_id,
+                    &label,
+                    coordinator_root.as_deref(),
+                );
+            })
             .map(|_| ())
+    }
+}
+
+impl RunnerSpawner for PythonRunnerSpawner {
+    fn spawn_index_issues(
+        &self,
+        repo_hash: &str,
+        project_root: &Path,
+        respect_ttl: bool,
+    ) -> std::io::Result<()> {
+        self.spawn_index_issues_with_coordinator(repo_hash, project_root, respect_ttl, None)
     }
 }
 
@@ -331,12 +368,16 @@ fn run_coordinated_issue_index(
     mut cmd: std::process::Command,
     spawn_id: u64,
     label: &str,
+    coordinator_root: Option<&Path>,
 ) {
     use crate::index_coordinator::{
         IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
     };
 
-    let coordinator = match IndexCoordinator::open_default() {
+    let coordinator = match coordinator_root
+        .map(IndexCoordinator::open)
+        .unwrap_or_else(IndexCoordinator::open_default)
+    {
         Ok(coordinator) => coordinator,
         Err(err) => {
             tracing::warn!(

@@ -3389,6 +3389,7 @@ mod tests {
     };
 
     use fs2::FileExt;
+    use futures_util::FutureExt;
     use gwt_core::daemon::{
         ClientFrame, DaemonEndpoint, DaemonFrame, HookEnvelope, IpcHandshakeRequest, RuntimeScope,
         RuntimeTarget, DAEMON_PROTOCOL_VERSION,
@@ -6076,18 +6077,20 @@ exit 1
         ));
     }
 
-    #[tokio::test]
-    async fn daemon_shutdown_request_is_sticky_before_worker_wait_registration() {
+    #[test]
+    fn daemon_shutdown_request_is_sticky_before_worker_wait_registration() {
         let shutdown = DaemonShutdown::new();
         shutdown.request();
 
-        tokio::time::timeout(Duration::from_millis(50), shutdown.notified())
-            .await
-            .expect("a pre-registered shutdown request must remain observable");
+        assert_eq!(
+            shutdown.notified().now_or_never(),
+            Some(()),
+            "a pre-registered shutdown request must be immediately observable"
+        );
     }
 
-    #[tokio::test]
-    async fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
+    #[test]
+    fn daemon_shutdown_request_between_sticky_check_and_await_is_observed() {
         let shutdown = DaemonShutdown::new();
         assert!(!shutdown.requested.load(Ordering::Acquire));
         let notified = shutdown.notify.notified();
@@ -6096,10 +6099,10 @@ exit 1
         // created, so a broadcast before its first poll remains observable.
         shutdown.request();
 
-        let observed = tokio::time::timeout(Duration::from_millis(50), notified).await;
-
-        observed.expect(
-            "Notified must observe notify_waiters after its generation snapshot and before polling",
+        assert_eq!(
+            notified.now_or_never(),
+            Some(()),
+            "Notified must immediately observe notify_waiters after its generation snapshot and before polling",
         );
     }
 

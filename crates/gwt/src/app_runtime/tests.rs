@@ -3477,30 +3477,37 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
         .recv_timeout(Duration::from_secs(1))
         .expect("Session lease holder starts");
 
-    let started = Instant::now();
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::SendInput {
-            text: "must-not-block-tao\r".to_string(),
-        },
-    );
-    let elapsed = started.elapsed();
+    let (dispatch_done_tx, dispatch_done_rx) = std::sync::mpsc::sync_channel(1);
+    let dispatch = std::thread::spawn(move || {
+        let outcome = runtime.handle_agent_frontend_event_if_current(
+            "pane-client".to_string(),
+            grant,
+            AgentFrontendRequest::SendInput {
+                text: "must-not-block-tao\r".to_string(),
+            },
+        );
+        dispatch_done_tx
+            .send(outcome)
+            .expect("report tao dispatch outcome");
+    });
 
+    // The holder cannot release its Session lease until this receive finishes
+    // and `release_lease_tx` fires below. A successful receive therefore proves
+    // dispatch completed while the lease was still contended. The generous
+    // timeout is only a deadlock guard; it is not the behavior contract.
+    let outcome = dispatch_done_rx.recv_timeout(Duration::from_secs(2));
     release_lease_tx
         .send(())
         .expect("release contended Session lease");
     holder.join().expect("join Session lease holder");
+    dispatch.join().expect("join tao dispatch");
+    let outcome = outcome.expect("tao dispatch must finish before the contended lease is released");
     assert!(
         matches!(
             outcome,
             super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
         ),
         "tao dispatch must fail closed when its pre-dispatch lease is no longer immediately available"
-    );
-    assert!(
-        elapsed < Duration::from_millis(250),
-        "tao dispatch waited {elapsed:?} for a contended Session lease"
     );
 }
 
@@ -3995,35 +4002,51 @@ fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
     let (proxy, events) = AppEventProxy::stub();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let spawn_started = Instant::now();
     let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::new_for_test();
+    let project_root = temp.path().to_path_buf();
+    let (spawn_returned_tx, spawn_returned_rx) = mpsc::sync_channel(1);
 
-    let spawned = service.spawn_with(
-        proxy,
-        temp.path().to_path_buf(),
-        move |_project_root| {
-            started_tx.send(()).expect("signal bootstrap start");
-            release_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("release bootstrap");
-            Ok(())
-        },
-        |_project_root| {
-            gwt::ProjectIndexStatusView::new(
-                gwt::ProjectIndexStatusState::Ready,
-                "test bootstrap complete",
-            )
-        },
-    );
-    let spawn_elapsed = spawn_started.elapsed();
+    let spawn_caller = std::thread::spawn(move || {
+        let spawned = service.spawn_with(
+            proxy,
+            project_root,
+            move |_project_root| {
+                started_tx.send(()).expect("signal bootstrap start");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release bootstrap");
+                Ok(())
+            },
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(
+                    gwt::ProjectIndexStatusState::Ready,
+                    "test bootstrap complete",
+                )
+            },
+        );
+        spawn_returned_tx
+            .send(spawned)
+            .expect("report bootstrap spawn return");
+    });
+
+    // The bootstrap body cannot complete until `release_tx` fires below.
+    // Receiving the return value first proves launch is independent of the
+    // background bootstrap duration. This timeout only bounds a regression.
+    let spawned = match spawn_returned_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(spawned) => {
+            spawn_caller.join().expect("join bootstrap spawn caller");
+            spawned
+        }
+        Err(error) => {
+            let _ = release_tx.send(());
+            let _ = spawn_caller.join();
+            panic!("bootstrap spawn did not return before body release: {error}");
+        }
+    };
 
     assert_eq!(
         spawned,
         crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
-    );
-    assert!(
-        spawn_elapsed < Duration::from_millis(250),
-        "spawning bootstrap must return before the slow bootstrap body completes"
     );
     started_rx
         .recv_timeout(Duration::from_secs(1))
