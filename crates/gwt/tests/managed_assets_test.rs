@@ -170,6 +170,8 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
+    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
+        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -272,6 +274,8 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
 fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
+    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
+        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -319,6 +323,8 @@ fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
 fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
+    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
+        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -362,6 +368,8 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
 fn refresh_existing_managed_assets_refreshes_only_present_provider_surfaces() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
+    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
+        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -412,6 +420,8 @@ fn refresh_managed_gwt_assets_reports_the_failed_step() {
 fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
+    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
+        .expect("pin execution lane");
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
