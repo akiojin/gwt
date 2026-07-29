@@ -1485,7 +1485,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
@@ -1495,7 +1495,22 @@ impl AppRuntime {
                 },
             )];
         };
-        let Some(tab) = self.tab(&tab_id) else {
+        self.open_issue_monitor_launch_wizard_events_for_project(
+            client_id,
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+        )
+    }
+
+    fn open_issue_monitor_launch_wizard_events_for_project(
+        &mut self,
+        client_id: &str,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(project_root) else {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
@@ -1504,6 +1519,9 @@ impl AppRuntime {
                     issue_number: Some(issue_number),
                 },
             )];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return Vec::new();
         };
         if tab.kind != gwt::ProjectKind::Git {
             return vec![OutboundEvent::reply(
@@ -1592,8 +1610,31 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        let events = self.open_issue_monitor_launch_wizard_events(
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return self.open_issue_monitor_launch_wizard_events(
+                client_id,
+                issue_number,
+                linked_issue_kind,
+            );
+        };
+        self.open_issue_monitor_configure_wizard_events_for_project(
             client_id,
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+        )
+    }
+
+    fn open_issue_monitor_configure_wizard_events_for_project(
+        &mut self,
+        client_id: &str,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        let events = self.open_issue_monitor_launch_wizard_events_for_project(
+            client_id,
+            project_root,
             issue_number,
             linked_issue_kind,
         );
@@ -1762,37 +1803,237 @@ impl AppRuntime {
         profiles.with_repo_local(fallback_profile)
     }
 
-    pub(crate) fn auto_launch_issue_monitor_request_events(
+    #[cfg(test)]
+    pub(crate) fn auto_launch_issue_monitor_request_events_for_project(
         &mut self,
+        project_root: &Path,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind, None, None) {
-            Ok(Some(events)) => events,
+        self.auto_launch_issue_monitor_delivery_events_for_project(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auto_launch_issue_monitor_delivery_events(
+        &mut self,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return self.issue_monitor_launch_failed_delivery_events(
+                None,
+                issue_number,
+                "Project tab not found",
+                delivery_id.as_deref(),
+            );
+        };
+        self.auto_launch_issue_monitor_delivery_events_for_project(
+            &project_root,
+            issue_number,
+            linked_issue_kind,
+            delivery_id,
+        )
+    }
+
+    pub(crate) fn auto_launch_issue_monitor_delivery_events_for_project(
+        &mut self,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let mut recovery_events = Vec::new();
+        if let Some(delivery_id) = delivery_id.as_deref() {
+            match self
+                .issue_monitor_launch_deliveries
+                .get(delivery_id)
+                .cloned()
+            {
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id,
+                    started_at,
+                }) => {
+                    let window_exists = self.tracked_window_exists(&window_id);
+                    if window_exists
+                        && started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL
+                    {
+                        return Vec::new();
+                    }
+                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                    self.pending_launch_feedback_contexts.remove(&window_id);
+                    self.inflight_launches
+                        .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
+                    if window_exists {
+                        recovery_events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { window_id }) => {
+                    return self.issue_monitor_launch_completed_delivery_events(
+                        project_root,
+                        issue_number,
+                        &window_id,
+                        Some(delivery_id),
+                    );
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::Launched { window_id }) => {
+                    return self.issue_monitor_launch_succeeded_delivery_events(
+                        project_root,
+                        issue_number,
+                        &window_id,
+                        Some(delivery_id),
+                    );
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message }) => {
+                    return self.issue_monitor_launch_failed_delivery_events(
+                        Some(project_root),
+                        issue_number,
+                        &message,
+                        Some(delivery_id),
+                    );
+                }
+                None => {}
+            }
+            if let Some((window_id, was_materialized, _)) =
+                self.existing_issue_monitor_delivery_window(project_root, issue_number, delivery_id)
+            {
+                match self.claim_issue_monitor_launch_delivery(
+                    project_root,
+                    issue_number,
+                    delivery_id,
+                    &window_id,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return recovery_events,
+                    Err(error) => {
+                        recovery_events.extend(self.issue_monitor_control_error_events(
+                            None,
+                            error,
+                            "reclaim-launch-delivery-window",
+                            Some(issue_number),
+                        ));
+                        return recovery_events;
+                    }
+                }
+                if !was_materialized {
+                    recovery_events
+                        .extend(self.close_window_after_issue_monitor_finalize_events(&window_id));
+                } else {
+                    let Some((window_id, materialized, workspace_durable)) = self
+                        .existing_issue_monitor_delivery_window(
+                            project_root,
+                            issue_number,
+                            delivery_id,
+                        )
+                    else {
+                        return recovery_events;
+                    };
+                    return if materialized && workspace_durable {
+                        self.issue_monitor_launch_succeeded_delivery_events(
+                            project_root,
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    } else {
+                        self.issue_monitor_launch_completed_delivery_events(
+                            project_root,
+                            issue_number,
+                            &window_id,
+                            Some(delivery_id),
+                        )
+                    };
+                }
+            }
+        }
+        match self.silent_issue_monitor_launch_events_for_project(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            None,
+            None,
+            delivery_id.clone(),
+        ) {
+            Ok(Some(events)) => {
+                recovery_events.extend(events);
+                recovery_events
+            }
             Ok(None) => {
                 if self.launch_wizard.is_some() {
-                    return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-                        level: "info".to_string(),
-                        message: "Issue Monitor settings are already open".to_string(),
-                        issue_number: Some(issue_number),
-                    })];
+                    recovery_events.push(OutboundEvent::broadcast(
+                        BackendEvent::IssueMonitorToast {
+                            level: "info".to_string(),
+                            message: "Issue Monitor settings are already open".to_string(),
+                            issue_number: Some(issue_number),
+                        },
+                    ));
+                    return recovery_events;
                 }
-                self.open_issue_monitor_configure_wizard_events(
-                    "__issue_monitor__",
-                    issue_number,
-                    linked_issue_kind,
-                )
-                .into_iter()
-                .map(|mut event| {
-                    if matches!(event.target, DispatchTarget::Client(_)) {
-                        event.target = DispatchTarget::Broadcast;
-                    }
-                    event
-                })
-                .collect()
+                recovery_events.extend(
+                    self.open_issue_monitor_configure_wizard_events_for_project(
+                        "__issue_monitor__",
+                        project_root,
+                        issue_number,
+                        linked_issue_kind,
+                    )
+                    .into_iter()
+                    .map(|mut event| {
+                        if matches!(event.target, DispatchTarget::Client(_)) {
+                            event.target = DispatchTarget::Broadcast;
+                        }
+                        event
+                    })
+                    .collect::<Vec<_>>(),
+                );
+                recovery_events
             }
-            Err(error) => self.issue_monitor_launch_failed_events(issue_number, &error),
+            Err(error) => {
+                recovery_events.extend(self.issue_monitor_launch_failed_delivery_events(
+                    Some(project_root),
+                    issue_number,
+                    &error,
+                    delivery_id.as_deref(),
+                ));
+                recovery_events
+            }
         }
+    }
+
+    fn existing_issue_monitor_delivery_window(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: &str,
+    ) -> Option<(String, bool, bool)> {
+        let tab_id = self.issue_monitor_tab_id_for_project_root(project_root)?;
+        let tab = self.tab(&tab_id)?;
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &tab.project_root,
+        ))
+        .ok()?;
+        let delivery = prefs.pending_launch_deliveries.iter().find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        })?;
+        let bound_window_id = delivery.materializer_window_id.as_deref()?;
+        let window_id = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .map(|window| combined_window_id(&tab_id, &window.id))
+            .find(|window_id| window_id == bound_window_id)?;
+        Some((
+            window_id,
+            delivery.materialized_window_id.as_deref() == Some(bound_window_id),
+            delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
+        ))
     }
 
     /// SPEC #3200 Option A: handle a daemon `review_dispatch` — prepare the
@@ -1801,8 +2042,9 @@ impl AppRuntime {
     /// dispatched. Spawning the review agent in an isolated worktree on a
     /// different model, and bridging its verdict back via the `ReviewVerdict`
     /// control, is the live-integration step verified against a real PR.
-    pub(crate) fn auto_dispatch_issue_monitor_review_events(
+    pub(crate) fn auto_dispatch_issue_monitor_review_events_for_project(
         &mut self,
+        project_root: &Path,
         dispatch: gwt::AutonomousReviewDispatch,
     ) -> Vec<OutboundEvent> {
         let prompt = build_review_dispatch_prompt(&dispatch);
@@ -1820,18 +2062,18 @@ impl AppRuntime {
         // unattended.
         // SPEC #3200 FR-015: the configured review model (if any) is forced for
         // the review agent so it differs from the implementer's.
-        let review_model =
-            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
-                self.active_project_root()
-                    .unwrap_or(std::path::Path::new(".")),
-            ))
-            .ok()
-            .and_then(|prefs| prefs.autonomous_tuning.review_model);
-        match self.silent_issue_monitor_launch_events(
+        let review_model = gwt::load_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| prefs.autonomous_tuning.review_model);
+        match self.silent_issue_monitor_launch_events_for_project(
+            project_root,
             dispatch.issue_number,
             dispatch.linked_issue_kind,
             Some(prompt),
             review_model,
+            None,
         ) {
             Ok(Some(events)) => events,
             Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
@@ -1842,33 +2084,69 @@ impl AppRuntime {
                 ),
                 issue_number: Some(dispatch.issue_number),
             })],
-            Err(error) => self.issue_monitor_launch_failed_events(dispatch.issue_number, &error),
+            Err(error) => self.issue_monitor_launch_failed_events(
+                Some(project_root),
+                dispatch.issue_number,
+                &error,
+            ),
         }
     }
 
-    fn silent_issue_monitor_launch_events(
+    fn silent_issue_monitor_launch_events_for_project(
         &mut self,
+        requested_project_root: &Path,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         review_prompt: Option<String>,
         review_model: Option<String>,
+        delivery_id: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return Err("Open a project before launching monitored Issue work".to_string());
-        };
-        let Some(tab) = self.tab(&tab_id) else {
+        let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
+        else {
             return Err("Project tab not found".to_string());
         };
-        if tab.kind != gwt::ProjectKind::Git {
+        let (project_kind, migration_pending, project_root, proposed_window_id) = {
+            let Some(tab) = self.tab(&tab_id) else {
+                return Err("Project tab not found".to_string());
+            };
+            (
+                tab.kind,
+                tab.migration_pending,
+                tab.project_root.clone(),
+                combined_window_id(
+                    &tab_id,
+                    &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+                ),
+            )
+        };
+        if let Some(delivery_id) = delivery_id.as_deref() {
+            match self.claim_issue_monitor_launch_delivery(
+                &project_root,
+                issue_number,
+                delivery_id,
+                &proposed_window_id,
+            ) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Some(Vec::new())),
+                Err(error) => {
+                    return Ok(Some(self.issue_monitor_control_error_events(
+                        None,
+                        error,
+                        "claim-launch-delivery",
+                        Some(issue_number),
+                    )));
+                }
+            }
+        }
+        if project_kind != gwt::ProjectKind::Git {
             return Err("Issue Monitor launch requires a Git project".to_string());
         }
-        if tab.migration_pending {
+        if migration_pending {
             return Err(
                 "Complete the project migration before launching monitored Issue work".to_string(),
             );
         }
 
-        let project_root = tab.project_root.clone();
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
         let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
         if previous_profiles.preferred_profile().is_none() {
@@ -1899,6 +2177,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                delivery_id.clone(),
             )? {
                 return Ok(Some(events));
             }
@@ -1969,6 +2248,8 @@ impl AppRuntime {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
+            issue_monitor_delivery_id: delivery_id,
+            issue_monitor_project_root: Some(project_root.clone()),
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -2005,6 +2286,7 @@ impl AppRuntime {
         project_root: &Path,
         target_branch: &str,
         issue_number: u64,
+        delivery_id: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
         else {
@@ -2046,6 +2328,8 @@ impl AppRuntime {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
+            issue_monitor_delivery_id: delivery_id,
+            issue_monitor_project_root: Some(project_root.to_path_buf()),
         };
         let mut events = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
@@ -2361,6 +2645,10 @@ impl AppRuntime {
             self.launch_wizard = Some(session);
             return Vec::new();
         }
+        let issue_monitor_project_root = session
+            .issue_monitor_launch_issue_number
+            .and_then(|_| self.tab(&session.tab_id))
+            .map(|tab| tab.project_root.clone());
 
         match config {
             LaunchWizardLaunchRequest::Agent(config) => {
@@ -2374,6 +2662,8 @@ impl AppRuntime {
                         "Launch Agent".to_string()
                     },
                     issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+                    issue_monitor_delivery_id: None,
+                    issue_monitor_project_root: issue_monitor_project_root.clone(),
                 });
                 let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
                     self.spawn_agent_window_in_agent_kanban(
@@ -2444,7 +2734,7 @@ impl AppRuntime {
         }
     }
 
-    fn save_issue_monitor_profile_from_launch_request(
+    pub(super) fn save_issue_monitor_profile_from_launch_request(
         &mut self,
         mut session: LaunchWizardSession,
         save_context: IssueMonitorProfileSaveContext,
@@ -2470,16 +2760,36 @@ impl AppRuntime {
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
-        if let Err(error) = gwt::mutate_issue_monitor_prefs_recovering(
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
+        let saved = gwt::mutate_issue_monitor_prefs_recovering(
             &prefs_path,
             &gwt::IssueMonitorPrefs::recovery_default(),
             |prefs| {
-                prefs.launch_profile = Some(launch_profile);
+                if prefs.advance_effect_authority_epoch().is_some() {
+                    prefs.launch_profile = Some(launch_profile);
+                    true
+                } else {
+                    false
+                }
             },
-        ) {
-            session.wizard.error = Some(format!("Failed to save Issue Monitor settings: {error}"));
-            self.launch_wizard = Some(session);
-            return vec![self.launch_wizard_state_outbound()];
+        );
+        match saved {
+            Ok((_, true)) => {}
+            Ok((_, false)) => {
+                session.wizard.error = Some(
+                    "Failed to save Issue Monitor settings: authority epoch overflow".to_string(),
+                );
+                self.launch_wizard = Some(session);
+                return vec![self.launch_wizard_state_outbound()];
+            }
+            Err(error) => {
+                session.wizard.error =
+                    Some(format!("Failed to save Issue Monitor settings: {error}"));
+                self.launch_wizard = Some(session);
+                return vec![self.launch_wizard_state_outbound()];
+            }
         }
         let mut events = vec![
             self.launch_wizard_state_broadcast(None),
