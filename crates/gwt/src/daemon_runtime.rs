@@ -55,6 +55,47 @@ pub struct HookForwardTarget {
     pub token: String,
 }
 
+#[derive(Debug)]
+pub(crate) enum AgentBridgeRequestError {
+    NotSent(String),
+    Rejected(crate::AgentWorkspaceUpdateError),
+    Unknown(String),
+}
+
+impl AgentBridgeRequestError {
+    pub(crate) fn rejection_code(&self) -> Option<crate::AgentWorkspaceUpdateErrorCode> {
+        match self {
+            Self::Rejected(error) => Some(error.code),
+            Self::NotSent(_) | Self::Unknown(_) => None,
+        }
+    }
+
+    pub(crate) fn proves_zero_mutation(&self) -> bool {
+        matches!(self, Self::NotSent(_))
+            || matches!(
+                self.rejection_code(),
+                Some(
+                    crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired
+                        | crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                        | crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+                )
+            )
+    }
+}
+
+impl std::fmt::Display for AgentBridgeRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent(message) | Self::Unknown(message) => formatter.write_str(message),
+            Self::Rejected(error) => write!(
+                formatter,
+                "Host bridge rejected the request ({:?}); no local fallback was attempted",
+                error.code
+            ),
+        }
+    }
+}
+
 impl std::fmt::Debug for HookForwardTarget {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -153,6 +194,16 @@ impl HookForwardTarget {
         let mut url =
             Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
         url.set_path("/internal/work-terminalization");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
+    pub fn work_materialization_probe_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/work-materialization-probe");
         url.set_query(None);
         url.set_fragment(None);
         Ok(url)
@@ -311,47 +362,111 @@ pub fn send_workspace_update_via_agent_bridge(
     Ok(receipt)
 }
 
-pub fn send_work_terminalization_via_agent_bridge(
+pub(crate) fn send_work_terminalization_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentWorkTerminalizationRequest,
-) -> Result<crate::AgentWorkTerminalizationReceipt, String> {
-    let url = target.work_terminalization_url()?;
+) -> Result<crate::AgentWorkTerminalizationReceipt, AgentBridgeRequestError> {
+    let url = target
+        .work_terminalization_url()
+        .map_err(AgentBridgeRequestError::NotSent)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|_| "failed to build the Host Work terminalization bridge client".to_string())?;
+        .map_err(|_| {
+            AgentBridgeRequestError::NotSent(
+                "failed to build the Host Work terminalization bridge client".to_string(),
+            )
+        })?;
     let response = client
         .post(url)
         .bearer_auth(&target.token)
         .json(request)
         .send()
         .map_err(|_| {
-            "Host Work terminalization bridge is unavailable; the close was not retried locally and its outcome may be unknown"
-                .to_string()
+            AgentBridgeRequestError::Unknown(
+                "Host Work terminalization bridge is unavailable; the close was not retried locally and its outcome may be unknown"
+                    .to_string(),
+            )
         })?;
     let status = response.status();
     if !status.is_success() {
         return match response.json::<crate::AgentWorkspaceUpdateError>() {
-            Ok(error) => Err(format!(
-                "Host Work terminalization bridge rejected the close ({:?}); no local fallback was attempted",
-                error.code
-            )),
-            Err(_) => Err(format!(
-                "Host Work terminalization bridge rejected the close with HTTP {status}; no local fallback was attempted"
-            )),
+            Ok(error) => Err(AgentBridgeRequestError::Rejected(error)),
+            Err(_) => Err(AgentBridgeRequestError::Unknown(format!(
+                "Host Work terminalization bridge rejected the close with HTTP {status}; its mutation outcome is unknown"
+            ))),
         };
     }
     let receipt = response
         .json::<crate::AgentWorkTerminalizationReceipt>()
         .map_err(|_| {
-            "Host Work terminalization bridge returned an invalid success response; no local fallback was attempted"
-                .to_string()
+            AgentBridgeRequestError::Unknown(
+                "Host Work terminalization bridge returned an invalid success response; no local fallback was attempted"
+                    .to_string(),
+            )
         })?;
-    if receipt.schema_version != crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION {
-        return Err(
+    if receipt.schema_version != crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION
+        || receipt.owner_number != request.owner_number
+    {
+        return Err(AgentBridgeRequestError::Unknown(
             "Host Work terminalization bridge returned an unsupported response schema; no local fallback was attempted"
                 .to_string(),
-        );
+        ));
+    }
+    Ok(receipt)
+}
+
+pub(crate) fn send_work_materialization_probe_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkMaterializationProbeRequest,
+) -> Result<crate::AgentWorkMaterializationProbeReceipt, AgentBridgeRequestError> {
+    let url = target
+        .work_materialization_probe_url()
+        .map_err(AgentBridgeRequestError::NotSent)?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| {
+            AgentBridgeRequestError::NotSent(
+                "failed to build the Host Work materialization probe client".to_string(),
+            )
+        })?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| {
+            AgentBridgeRequestError::Unknown(
+                "Host Work materialization probe is unavailable; no build lifecycle state was created"
+                    .to_string(),
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return match response.json::<crate::AgentWorkspaceUpdateError>() {
+            Ok(error) => Err(AgentBridgeRequestError::Rejected(error)),
+            Err(_) => Err(AgentBridgeRequestError::Unknown(format!(
+                "Host Work materialization probe failed with HTTP {status}; no build lifecycle state was created"
+            ))),
+        };
+    }
+    let receipt = response
+        .json::<crate::AgentWorkMaterializationProbeReceipt>()
+        .map_err(|_| {
+            AgentBridgeRequestError::Unknown(
+                "Host Work materialization probe returned an invalid success response; no build lifecycle state was created"
+                    .to_string(),
+            )
+        })?;
+    if receipt.schema_version != crate::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION
+        || receipt.owner_number != request.owner_number
+        || receipt.work_id.trim().is_empty()
+    {
+        return Err(AgentBridgeRequestError::Unknown(
+            "Host Work materialization probe returned an unsupported or incomplete receipt; no build lifecycle state was created"
+                .to_string(),
+        ));
     }
     Ok(receipt)
 }
@@ -770,6 +885,13 @@ mod tests {
             );
             assert_eq!(
                 target
+                    .work_materialization_probe_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/work-materialization-probe")
+            );
+            assert_eq!(
+                target
                     .execution_binding_probe_url()
                     .unwrap_or_else(|error| panic!("{host}: {error}"))
                     .as_str(),
@@ -796,6 +918,13 @@ mod tests {
             }
             .work_terminalization_url()
             .expect_err("non-canonical terminal bridge target must fail closed");
+            assert!(!error.contains("secret"));
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .work_materialization_probe_url()
+            .expect_err("non-canonical materialization probe target must fail closed");
             assert!(!error.contains("secret"));
             let error = HookForwardTarget {
                 url: url.to_string(),

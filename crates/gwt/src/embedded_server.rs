@@ -24,8 +24,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    AgentWorkTerminalizationRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+    AgentWorkMaterializationProbeRequest, AgentWorkTerminalizationRequest,
+    AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest,
+    BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
@@ -2018,6 +2019,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
         )
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route(
+            "/internal/work-materialization-probe",
+            post(work_materialization_probe_handler),
+        )
+        .route(
             "/internal/work-terminalization",
             post(work_terminalization_handler),
         )
@@ -2529,6 +2534,53 @@ async fn work_terminalization_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::Internal,
                 message: "Host Work terminalization task failed before a response was produced"
+                    .to_string(),
+            },
+        ),
+    }
+}
+
+async fn work_materialization_probe_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentWorkMaterializationProbeRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+            },
+        );
+    };
+
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response();
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::probe_bound_authenticated_work_materialization(
+            &project_root,
+            &session_id,
+            &execution_binding,
+            request,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => Json(receipt).into_response(),
+        Ok(Err(error)) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::Internal,
+                message: "Host Work materialization probe failed before a response was produced"
                     .to_string(),
             },
         ),
@@ -5364,6 +5416,57 @@ mod tests {
         session
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("persist initial execution binding");
+        let work_id = "work-materialization-probe-route";
+        let now = chrono::Utc::now();
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents = vec![gwt_core::workspace_projection::WorkspaceAgentSummary {
+            session_id: session.id.clone(),
+            window_id: Some("project::agent-materialization-probe".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: Some(repo.clone()),
+            branch: Some(session.branch.clone()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status:
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: Some(work_id.to_string()),
+            updated_at: now,
+        }];
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save materialization probe assignment");
+        let mut work_items =
+            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            now,
+        );
+        work_event.title = Some("Materialization probe route".to_string());
+        work_event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        work_event.agent_session_id = Some(session.id.clone());
+        work_event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(session.branch.clone()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        work_items.apply_event(work_event);
+        let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &work_items,
+        )
+        .expect("save materialized Work");
 
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy_a, events_a) = AppEventProxy::stub();
@@ -5547,6 +5650,71 @@ mod tests {
         assert_eq!(receipt.capability_generation, rotated.capability_generation);
         assert!(!receipt.host_instance_id.trim().is_empty());
 
+        let materialization_request = gwt::AgentWorkMaterializationProbeRequest {
+            schema_version: gwt::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+            claimed_session_id: session.id.clone(),
+            owner_number: 2359,
+            observation: gwt::observe_agent_runtime(&repo).expect("runtime observation"),
+        };
+        let materialization_probe = |target: &HookForwardTarget| {
+            let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
+            url.set_path("/internal/work-materialization-probe");
+            client
+                .post(url)
+                .bearer_auth(&target.token)
+                .json(&materialization_request)
+                .send()
+                .expect("Work materialization probe request")
+        };
+        let projection_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+        let projection_before =
+            std::fs::read(&projection_path).expect("projection before route probes");
+        let work_items_before =
+            std::fs::read(&work_items_path).expect("WorkItems before route probes");
+        let stale_materialization = materialization_probe(&target_a);
+        assert_eq!(stale_materialization.status(), HttpStatusCode::CONFLICT);
+        let current_materialization = materialization_probe(&target_b);
+        assert_eq!(current_materialization.status(), HttpStatusCode::OK);
+        let materialization_receipt: gwt::AgentWorkMaterializationProbeReceipt =
+            current_materialization
+                .json()
+                .expect("current Work materialization receipt");
+        assert_eq!(materialization_receipt.owner_number, 2359);
+        assert_eq!(materialization_receipt.work_id, work_id);
+        assert_eq!(
+            std::fs::read(&projection_path).expect("projection after route probes"),
+            projection_before,
+            "materialization route must not mutate Workspace projection"
+        );
+        assert_eq!(
+            std::fs::read(&work_items_path).expect("WorkItems after route probes"),
+            work_items_before,
+            "materialization route must not mutate WorkItems"
+        );
+        let missing_work_items =
+            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &missing_work_items,
+        )
+        .expect("remove assigned Work from route fixture");
+        let missing_before =
+            std::fs::read(&work_items_path).expect("missing WorkItems before rejection");
+        let missing_materialization = materialization_probe(&target_b);
+        assert_eq!(missing_materialization.status(), HttpStatusCode::CONFLICT);
+        let missing_error: gwt::AgentWorkspaceUpdateError = missing_materialization
+            .json()
+            .expect("typed missing Work rejection");
+        assert_eq!(
+            missing_error.code,
+            gwt::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+        );
+        assert_eq!(
+            std::fs::read(&work_items_path).expect("WorkItems after missing rejection"),
+            missing_before,
+            "missing Work rejection must not mutate WorkItems"
+        );
+
         let dispatched_before_corruption = events_b
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5629,8 +5797,9 @@ mod tests {
         let mut url = reqwest::Url::parse(&target.url).expect("agent hook URL");
         url.set_path("/internal/work-terminalization");
         let request = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": gwt::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             "claimed_session_id": "different-session",
+            "owner_number": 2359,
             "observation": {
                 "cwd": "/workspace/repo",
                 "git_toplevel": "/workspace/repo",
@@ -6595,6 +6764,9 @@ mod tests {
         workspace_update_url.set_path("/internal/workspace-update");
         let mut work_terminalization_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         work_terminalization_url.set_path("/internal/work-terminalization");
+        let mut work_materialization_probe_url =
+            reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        work_materialization_probe_url.set_path("/internal/work-materialization-probe");
         let mut execution_binding_probe_url =
             reqwest::Url::parse(&hook.url).expect("agent hook URL");
         execution_binding_probe_url.set_path("/internal/execution-binding-probe");
@@ -6610,8 +6782,9 @@ mod tests {
             "intent": {}
         });
         let terminalization_request = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": gwt::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             "claimed_session_id": "session-1",
+            "owner_number": 2359,
             "observation": {
                 "cwd": "/workspace/repo",
                 "git_toplevel": "/workspace/repo",
@@ -6619,6 +6792,17 @@ mod tests {
                 "branch": "work/observed"
             },
             "terminal_kind": "done"
+        });
+        let materialization_probe_request = serde_json::json!({
+            "schema_version": 1,
+            "claimed_session_id": "session-1",
+            "owner_number": 2359,
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            }
         });
         let binding_probe_request = serde_json::json!({
             "schema_version": gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
@@ -6654,6 +6838,17 @@ mod tests {
             HttpStatusCode::UNAUTHORIZED
         );
 
+        let materialization_probe_response = client
+            .post(work_materialization_probe_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&materialization_probe_request)
+            .send()
+            .expect("unauthorized Work materialization probe request");
+        assert_eq!(
+            materialization_probe_response.status(),
+            HttpStatusCode::UNAUTHORIZED
+        );
+
         let binding_probe_response = client
             .post(execution_binding_probe_url)
             .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
@@ -6670,6 +6865,7 @@ mod tests {
             "/internal/hook-live",
             "/internal/execution-binding-probe",
             "/internal/workspace-update",
+            "/internal/work-materialization-probe",
             "/internal/work-terminalization",
         ] {
             let record = records

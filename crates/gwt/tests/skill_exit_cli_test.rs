@@ -49,6 +49,59 @@ fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) 
 }
 
 #[test]
+fn managed_build_start_refusal_is_typed_and_does_not_create_state() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let session_id = "session-managed-build-refusal";
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+    gwt::cli::execution_state::save(
+        dir.path(),
+        &gwt::cli::execution_state::ExecutionControlRecord {
+            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            owner_number: 3403,
+            primary_session_id: session_id.to_string(),
+            entrypoint: "$gwt-execute".to_string(),
+            bundled_required_owners: Vec::new(),
+            status: gwt::cli::execution_state::ExecutionControlStatus::Active,
+            blocked_reason: None,
+            missing_verification: None,
+            launched_at: chrono::Utc::now(),
+            settled_at: None,
+            transfers: Vec::new(),
+            recoveries: Vec::new(),
+            content_hash: String::new(),
+        },
+    )
+    .expect("save managed execution record");
+
+    assert_eq!(
+        dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 3403})),
+        2
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("JSON operation response envelope");
+    let refusal: serde_json::Value = serde_json::from_str(
+        envelope["output"]
+            .as_str()
+            .expect("typed build.start refusal output")
+            .trim(),
+    )
+    .expect("nested build.start refusal JSON");
+    assert_eq!(refusal["ok"], false);
+    assert_eq!(refusal["error_code"], "relaunch_required");
+    assert_eq!(refusal["recovery_operation"], "session.relaunch");
+    assert!(
+        skill_state::load(dir.path(), "build-spec")
+            .expect("load build state")
+            .is_none(),
+        "managed preflight rejection must not create lifecycle state"
+    );
+}
+
+#[test]
 fn exit_operations_dispatch_through_json_envelopes() {
     let (mut env, _dir) = new_env();
     let code = dispatch_json(
@@ -1132,9 +1185,18 @@ fn build_complete_from_another_session_does_not_close_current_work() {
                 "build.complete",
                 serde_json::json!({"spec": 2359})
             ),
-            0
+            1,
+            "a foreign Session must not finalize the active build lifecycle"
         );
     }
+    let state = skill_state::load(dir.path(), "build-spec")
+        .expect("load foreign-owned build state")
+        .expect("foreign-owned build state");
+    assert!(
+        state.active,
+        "foreign completion must preserve active state"
+    );
+    assert_eq!(state.session_id, "session-build-owner");
 
     let projection = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
         .expect("load Work items")

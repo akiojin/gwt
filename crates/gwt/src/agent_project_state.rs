@@ -16,7 +16,8 @@ use gwt_core::{
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION: u32 = 1;
-pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +100,7 @@ pub enum AgentWorkTerminalKind {
 pub struct AgentWorkTerminalizationRequest {
     pub schema_version: u32,
     pub claimed_session_id: String,
+    pub owner_number: u64,
     pub observation: AgentRuntimeObservation,
     pub terminal_kind: AgentWorkTerminalKind,
 }
@@ -118,7 +120,25 @@ pub enum AgentWorkTerminalizationOutcome {
 #[serde(deny_unknown_fields)]
 pub struct AgentWorkTerminalizationReceipt {
     pub schema_version: u32,
+    pub owner_number: u64,
     pub outcome: AgentWorkTerminalizationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkMaterializationProbeRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub owner_number: u64,
+    pub observation: AgentRuntimeObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkMaterializationProbeReceipt {
+    pub schema_version: u32,
+    pub owner_number: u64,
+    pub work_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,6 +655,73 @@ pub fn apply_authenticated_work_terminalization(
     )
 }
 
+pub fn probe_bound_authenticated_work_materialization(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    request: AgentWorkMaterializationProbeRequest,
+) -> std::result::Result<AgentWorkMaterializationProbeReceipt, AgentWorkspaceUpdateError> {
+    probe_authenticated_work_materialization_with_binding(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+        request,
+    )
+}
+
+fn probe_authenticated_work_materialization_with_binding(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    request: AgentWorkMaterializationProbeRequest,
+) -> std::result::Result<AgentWorkMaterializationProbeReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "unsupported Work materialization probe schema version",
+        ));
+    }
+    validate_mutation_session_id(authenticated_session_id)?;
+    if request.claimed_session_id != authenticated_session_id {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
+            "Work materialization probe Session claim does not match the authenticated launch",
+        ));
+    }
+    let validated = validate_current_execution_binding_authority(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+    )?;
+    if request.owner_number == 0 || request.owner_number != validated.owner_number {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "Work materialization probe owner does not match the authenticated Execution",
+        ));
+    }
+
+    let target = resolve_authenticated_session_work_mutation_target(
+        authenticated_project_root,
+        authenticated_session_id,
+        &request.observation,
+    )
+    .map_err(|error| {
+        if error.code == AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired {
+            AgentWorkspaceUpdateError::new(
+                error.code,
+                "Session-bound Work is not materialized; run workspace.ensure before build.start",
+            )
+        } else {
+            error
+        }
+    })?;
+    Ok(AgentWorkMaterializationProbeReceipt {
+        schema_version: AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+        owner_number: request.owner_number,
+        work_id: target.work_id,
+    })
+}
+
 pub fn apply_bound_authenticated_work_terminalization(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
@@ -701,12 +788,24 @@ fn apply_authenticated_work_terminalization_with_binding(
             "Work terminalization Session claim does not match the authenticated launch",
         ));
     }
+    if request.owner_number == 0 {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "Work terminalization owner is missing",
+        ));
+    }
     if let Some(binding) = authenticated_binding {
-        validate_current_execution_binding_authority(
+        let validated = validate_current_execution_binding_authority(
             authenticated_project_root,
             authenticated_session_id,
             binding,
         )?;
+        if request.owner_number != validated.owner_number {
+            return Err(AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "Work terminalization owner does not match the authenticated Execution",
+            ));
+        }
     }
 
     let target = resolve_authenticated_session_terminal_target(
@@ -794,6 +893,7 @@ fn apply_authenticated_work_terminalization_with_binding(
     };
     Ok(AgentWorkTerminalizationReceipt {
         schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+        owner_number: request.owner_number,
         outcome,
     })
 }
@@ -2326,9 +2426,30 @@ mod tests {
         AgentWorkTerminalizationRequest {
             schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: session.id.clone(),
+            owner_number: session
+                .execution_binding
+                .as_ref()
+                .expect("bound Session")
+                .owner_number,
             observation: observe_agent_runtime(&session.worktree_path)
                 .expect("runtime observation"),
             terminal_kind: AgentWorkTerminalKind::Done,
+        }
+    }
+
+    fn bound_work_materialization_probe_request(
+        session: &Session,
+    ) -> AgentWorkMaterializationProbeRequest {
+        AgentWorkMaterializationProbeRequest {
+            schema_version: AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+            claimed_session_id: session.id.clone(),
+            owner_number: session
+                .execution_binding
+                .as_ref()
+                .expect("bound Session")
+                .owner_number,
+            observation: observe_agent_runtime(&session.worktree_path)
+                .expect("runtime observation"),
         }
     }
 
@@ -2677,7 +2798,42 @@ mod tests {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
             let work_id = "work-bound-current";
+            seed_work_mutation_surfaces(repo, repo);
             seed_unique_mutation_target(repo, repo, &session, work_id);
+
+            let before_probe = WorkMutationSnapshot::capture(repo, repo);
+            let probe = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect("current binding authorizes Work materialization probe");
+            assert_eq!(probe.work_id, work_id);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_probe,
+                "Work materialization probe must remain side-effect free"
+            );
+            let owner_error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &binding,
+                AgentWorkMaterializationProbeRequest {
+                    owner_number: binding.owner_number + 1,
+                    ..bound_work_materialization_probe_request(&session)
+                },
+            )
+            .expect_err("caller-selected owner must not bypass the authenticated Execution");
+            assert_eq!(
+                owner_error.code,
+                AgentWorkspaceUpdateErrorCode::InvalidRequest
+            );
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_probe,
+                "owner mismatch rejection must remain side-effect free"
+            );
 
             let update = apply_bound_authenticated_workspace_update(
                 repo,
@@ -2688,6 +2844,27 @@ mod tests {
             .expect("current binding authorizes workspace update");
             assert_eq!(update.work_id, work_id);
 
+            let before_terminal_owner_rejection = WorkMutationSnapshot::capture(repo, repo);
+            let owner_error = apply_bound_authenticated_work_terminalization(
+                repo,
+                &session.id,
+                &binding,
+                AgentWorkTerminalizationRequest {
+                    owner_number: binding.owner_number + 1,
+                    ..bound_work_terminalization_request(&session)
+                },
+            )
+            .expect_err("terminalization owner must match the authenticated Execution");
+            assert_eq!(
+                owner_error.code,
+                AgentWorkspaceUpdateErrorCode::InvalidRequest
+            );
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_terminal_owner_rejection,
+                "terminalization owner rejection must not mutate Work"
+            );
+
             let terminal = apply_bound_authenticated_work_terminalization(
                 repo,
                 &session.id,
@@ -2696,6 +2873,42 @@ mod tests {
             )
             .expect("current binding authorizes Work terminalization");
             assert_eq!(terminal.outcome, AgentWorkTerminalizationOutcome::Emitted);
+        });
+    }
+
+    #[test]
+    fn work_materialization_probe_reports_missing_assignment_without_mutation() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            save_project_assignments(
+                repo,
+                vec![assigned_session_agent(
+                    &session,
+                    "work-assigned-but-missing",
+                    Utc::now(),
+                )],
+            );
+            save_mutation_work_items(repo, &mutation_work_items(repo, &session, "work-different"));
+            let before = WorkMutationSnapshot::capture(repo, repo);
+
+            let error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect_err("assigned-but-missing Work must reject build.start preflight");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+            );
+            assert!(error.message.contains("workspace.ensure"));
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before,
+                "rejected materialization probe must preserve every Work mutation surface"
+            );
         });
     }
 
@@ -2718,6 +2931,19 @@ mod tests {
                 crate::cli::execution_state::SettleResult::Settled(_)
             ));
             let before_predecessor = WorkMutationSnapshot::capture(repo, repo);
+            let probe_error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &predecessor_binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect_err("pre-settlement binding must not authorize Work materialization probe");
+            assert_execution_binding_denial(&probe_error);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_predecessor,
+                "a stale materialization probe must not mutate Work"
+            );
             let error = apply_bound_authenticated_workspace_update(
                 repo,
                 &session.id,
@@ -2753,6 +2979,19 @@ mod tests {
             .expect("supersede Host capability generation");
 
             let before_superseded = WorkMutationSnapshot::capture(repo, repo);
+            let probe_error = probe_bound_authenticated_work_materialization(
+                repo,
+                &session.id,
+                &current_binding,
+                bound_work_materialization_probe_request(&session),
+            )
+            .expect_err("superseded capability must not authorize Work materialization probe");
+            assert_execution_binding_denial(&probe_error);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before_superseded,
+                "a superseded materialization probe must not mutate Work"
+            );
             let error = apply_bound_authenticated_work_terminalization(
                 repo,
                 &session.id,
@@ -3148,6 +3387,7 @@ mod tests {
             let request = || AgentWorkTerminalizationRequest {
                 schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                owner_number: 2359,
                 observation: observation.clone(),
                 terminal_kind: AgentWorkTerminalKind::Done,
             };
@@ -3218,6 +3458,7 @@ mod tests {
             let request = || AgentWorkTerminalizationRequest {
                 schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                owner_number: 2359,
                 observation: observe_agent_runtime(repo).expect("runtime observation"),
                 terminal_kind: AgentWorkTerminalKind::Done,
             };
@@ -3296,6 +3537,7 @@ mod tests {
             let request = AgentWorkTerminalizationRequest {
                 schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                owner_number: 2359,
                 observation: observe_agent_runtime(repo).expect("runtime observation"),
                 terminal_kind: AgentWorkTerminalKind::Done,
             };
@@ -3356,8 +3598,9 @@ mod tests {
             ),
         ] {
             let mut request = serde_json::json!({
-                "schema_version": 1,
+                "schema_version": AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 "claimed_session_id": "session-1",
+                "owner_number": 2359,
                 "observation": {
                     "cwd": "/workspace/repo",
                     "git_toplevel": "/workspace/repo",
@@ -3375,8 +3618,9 @@ mod tests {
         }
 
         let invalid_kind = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             "claimed_session_id": "session-1",
+            "owner_number": 2359,
             "observation": {
                 "cwd": "/workspace/repo",
                 "git_toplevel": "/workspace/repo",
