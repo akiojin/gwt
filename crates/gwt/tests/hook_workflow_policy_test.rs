@@ -817,7 +817,7 @@ fn gwt_self_improvement_stop_attempts_at_most_one_unresolved_candidate() {
 }
 
 #[test]
-fn gwt_self_improvement_stop_fails_closed_for_a_corrupt_candidate_store() {
+fn gwt_self_improvement_stop_warns_for_a_corrupt_candidate_store_without_rewriting_it() {
     with_temp_home(|_| {
         let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
         let mut env = TestEnv::new(repo.path().join("cache"));
@@ -829,19 +829,25 @@ fn gwt_self_improvement_stop_fails_closed_for_a_corrupt_candidate_store() {
             .expect("create candidate store parent");
         std::fs::write(&store_path, b"{not-json").expect("write corrupt candidate store");
 
+        let before = std::fs::read(&store_path).expect("read corrupt candidate store");
         let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
 
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("a corrupt gwt candidate store must fail closed");
+        let HookOutput::SystemMessage(reason) = output else {
+            panic!("a corrupt gwt candidate store must warn without blocking");
         };
         assert!(reason.contains("reason=store"), "{reason}");
         assert!(reason.contains("REPAIR_CANDIDATE_STORE"), "{reason}");
         assert_eq!(env.owner_client_access_count(), 0);
+        assert_eq!(
+            std::fs::read(&store_path).expect("reread corrupt candidate store"),
+            before,
+            "warning evaluation must not rewrite the corrupt store it reports"
+        );
     });
 }
 
 #[test]
-fn gwt_self_improvement_stop_fails_closed_when_repo_probe_cannot_run() {
+fn gwt_self_improvement_stop_warns_when_repo_probe_cannot_run() {
     with_temp_home(|_| {
         let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
         let mut env = self_improvement_test_env(repo.path());
@@ -850,12 +856,105 @@ fn gwt_self_improvement_stop_fails_closed_when_repo_probe_cannot_run() {
 
         let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
 
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("a failed gwt repository probe must fail closed");
+        let HookOutput::SystemMessage(reason) = output else {
+            panic!("a failed gwt repository probe must warn without blocking");
         };
         assert!(reason.contains("reason=routing"), "{reason}");
         assert!(reason.contains("RETRY_REPOSITORY_PROBE"), "{reason}");
         assert_eq!(env.owner_client_access_count(), 0);
+    });
+}
+
+#[test]
+fn structured_prompt_obligation_still_blocks_stop() {
+    with_temp_home(|_| {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let sessions_dir = gwt_sessions_dir();
+        let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
+        session.agent_session_id = Some("agent-structured-obligation".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE)
+            .expect("write execution lane");
+
+        let prompt = json!({
+            "prompt": "バグを修正して、検証してください",
+            "session_id": "agent-structured-obligation",
+        })
+        .to_string();
+        event_dispatcher::handle_with_input(
+            "UserPromptSubmit",
+            &prompt,
+            worktree.path(),
+            Some(&session_id),
+        )
+        .expect("prompt hook");
+
+        let stop = json!({
+            "session_id": "agent-structured-obligation",
+            "stop_hook_active": false,
+        })
+        .to_string();
+        let output =
+            event_dispatcher::handle_with_input("Stop", &stop, worktree.path(), Some(&session_id))
+                .expect("stop hook");
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("structured prompt obligation must still block Stop: {output:?}");
+        };
+        assert!(reason.contains("Producing obligations"), "{reason}");
+        assert!(reason.contains("implementation"), "{reason}");
+        assert!(reason.contains("verification"), "{reason}");
+    });
+}
+
+#[test]
+fn completion_and_history_prose_do_not_block_stop() {
+    with_temp_home(|_| {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let sessions_dir = gwt_sessions_dir();
+        let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
+        session.agent_session_id = Some("agent-completion-prose".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE)
+            .expect("write execution lane");
+        let transcript = worktree.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"過去の担当者は実装しましたと報告しました。\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"実装しました。検証しました。Issue #3393 は push 済みです。\"}]}}\n",
+            ),
+        )
+        .expect("write transcript");
+        let stop = json!({
+            "session_id": "agent-completion-prose",
+            "transcript_path": transcript,
+            "stop_hook_active": false,
+        })
+        .to_string();
+
+        let output =
+            event_dispatcher::handle_with_input("Stop", &stop, worktree.path(), Some(&session_id))
+                .expect("stop hook");
+
+        assert!(
+            !matches!(output, HookOutput::StopBlock { .. }),
+            "assistant completion/history prose must not be interpreted as gate state: {output:?}"
+        );
     });
 }
 

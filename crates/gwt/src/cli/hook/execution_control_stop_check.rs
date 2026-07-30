@@ -299,8 +299,8 @@ mod tests {
         else {
             panic!("expected StopBlock");
         };
-        assert!(reason.contains("fresh linked-owner launch"), "{reason}");
-        assert!(reason.contains("cannot be repaired"), "{reason}");
+        assert!(reason.contains("execution.repair"), "{reason}");
+        assert!(reason.contains("quarantines"), "{reason}");
         assert!(
             !reason.contains("Repair it with JSON operation `execution.adopt`"),
             "{reason}"

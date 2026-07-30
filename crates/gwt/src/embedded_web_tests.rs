@@ -2538,6 +2538,41 @@ fn embedded_web_work_detail_keeps_task_first_action_and_inspection_contract() {
 }
 
 #[test]
+fn embedded_web_work_detail_execution_diagnosis_uses_existing_surface_and_operator_tokens() {
+    let js = workspace_kanban_surface_js();
+    let css = styles_components_css();
+
+    assert!(
+        js.contains("section.dataset.section = \"execution-diagnosis\"")
+            && js.contains("settlement_severity")
+            && js.contains("available_recoveries"),
+        "execution diagnosis must render from the backend contract in the existing Work detail",
+    );
+    assert!(
+        css.contains(".workspace-execution-diagnosis")
+            && css.contains("var(--color-state-blocked)")
+            && css.contains("var(--color-state-needs-input)")
+            && css.contains("var(--color-state-done)"),
+        "execution diagnosis styling must use Operator state tokens",
+    );
+    let diagnosis_css = css
+        .split_once(".workspace-execution-diagnosis")
+        .map(|(_, suffix)| suffix)
+        .expect("execution diagnosis CSS")
+        .split("/*")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        !diagnosis_css.contains('#')
+            && !diagnosis_css.contains("rgb(")
+            && !diagnosis_css.contains("rgba(")
+            && !diagnosis_css.contains("position: fixed")
+            && !diagnosis_css.contains("position: absolute"),
+        "execution diagnosis must not introduce raw colors or a bespoke overlay",
+    );
+}
+
+#[test]
 fn embedded_web_board_entry_ids_are_diagnostics_only() {
     let js = workspace_kanban_surface_js();
 
