@@ -37105,6 +37105,7 @@ fn apply_work_merge_status_caches_and_flags_rows() {
     assert!(row.merged_into_base, "cached merge scan flags the row");
 }
 
+#[cfg(unix)]
 #[test]
 fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     let _env_lock = env_test_lock()

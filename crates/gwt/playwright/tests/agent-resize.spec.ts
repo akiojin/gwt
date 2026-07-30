@@ -252,6 +252,9 @@ test.describe("Window controls: resize handle + click semantics", () => {
       staleWorkspaceState.workspace.tabs[0].workspace.windows[0].z_index = 2;
       fixture.socket.emit(staleWorkspaceState);
     });
+    // Prove the stale snapshot traversed the render path before checking the
+    // geometry guard. z-index is intentionally outside geometry fencing.
+    await expect(windowFrame).toHaveCSS("z-index", "2");
     await expect
       .poll(() =>
         windowFrame.evaluate((element) => ({

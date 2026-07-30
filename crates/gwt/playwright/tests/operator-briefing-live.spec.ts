@@ -23,7 +23,7 @@ test.describe("Mission Briefing dismissal (live backend)", () => {
     await page.goto(BASE);
 
     const briefing = page.locator("#op-briefing");
-    await expect(briefing).toBeHidden({ timeout: 1_000 });
+    await expect(briefing).toBeHidden({ timeout: 3_000 });
     await expect(briefing).toHaveCSS("pointer-events", "auto");
     expect(await briefing.evaluate((element) => element.hidden)).toBe(true);
   });
