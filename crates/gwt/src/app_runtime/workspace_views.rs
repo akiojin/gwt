@@ -2654,6 +2654,37 @@ impl AppRuntime {
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab))
     }
 
+    /// Rebuild the cache for the project whose background completion just
+    /// arrived. Completion events can belong to an inactive tab; rebuilding
+    /// only the active tab leaves the target cache stale, while tab-change is
+    /// intentionally cache-only to keep the GUI event path process-free.
+    pub(crate) fn refresh_active_work_projection_for_project_root(
+        &self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| projection_worktree_paths_match(&tab.project_root, project_root))
+        else {
+            return Vec::new();
+        };
+        let tab_id = tab.id.clone();
+        let projection = self.active_work_projection_for_tab(&tab_id, tab);
+        if self.active_tab_id.as_deref() != Some(tab_id.as_str()) {
+            return Vec::new();
+        }
+        projection
+            .map(|projection| {
+                vec![OutboundEvent::broadcast(
+                    BackendEvent::ActiveWorkProjection {
+                        projection: Box::new(projection),
+                    },
+                )]
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;

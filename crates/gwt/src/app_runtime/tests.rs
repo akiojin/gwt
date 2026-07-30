@@ -37827,6 +37827,75 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
     );
 }
 
+#[test]
+fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    fs::create_dir_all(&repo_a).expect("repo-a dir");
+    fs::create_dir_all(&repo_b).expect("repo-b dir");
+    let tabs = vec![
+        sample_project_tab("tab-a", "Repo A", repo_a, ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-b", "Repo B", repo_b.clone(), ProjectKind::NonRepo, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-a"));
+
+    let branch = "work/inactive-cache";
+    let mut seed = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "work-inactive-cache",
+        chrono::Utc::now(),
+    );
+    seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Idle);
+    seed.title = Some(branch.to_string());
+    seed.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(repo_b.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo_b, seed)
+        .expect("seed inactive project work");
+
+    let initial = runtime
+        .active_work_projection_for_tab("tab-b", &runtime.tabs[1])
+        .expect("initial inactive projection");
+    assert_eq!(initial.active_works[0].work_summary, None);
+
+    let events = runtime.apply_work_pr_titles(
+        &repo_b,
+        HashMap::from([(
+            branch.to_string(),
+            "Fresh inactive project purpose".to_string(),
+        )]),
+    );
+    assert!(
+        events.is_empty(),
+        "an inactive project cache refresh must not broadcast into the active tab"
+    );
+
+    runtime.active_tab_id = Some("tab-b".to_string());
+    let outbound = runtime
+        .active_work_projection_broadcast_on_tab_change()
+        .expect("tab-change projection");
+    let BackendEvent::ActiveWorkProjection { projection } = outbound.event else {
+        panic!("expected active work projection");
+    };
+    assert_eq!(
+        projection.active_works[0].work_summary.as_deref(),
+        Some("Fresh inactive project purpose"),
+        "tab change must use the target project's completion-refreshed cache",
+    );
+}
+
 /// SPEC-2359 W16-2 (FR-389 / SC-259): two Works on the same canonical branch
 /// (any spelling) merge into ONE Workspace row — newest representative,
 /// agents concatenated, counts summed — while branchless legacy rows keep

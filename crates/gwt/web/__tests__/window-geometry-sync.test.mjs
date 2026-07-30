@@ -176,6 +176,35 @@ test("clearLocalGeometryEdit removes the guard (drag cancel / no-move click)", (
   );
 });
 
+test("a cancelled follow-up gesture restores the previous pending commit guard", () => {
+  const state = createGeometrySyncState();
+  commitLocalGeometryEdit(state, "w-1", 8, G1, 1_000);
+
+  beginLocalGeometryEdit(state, "w-1", 9, 1_100);
+  geometrySync.cancelLocalGeometryEdit(state, "w-1");
+
+  const stale = resolveIncomingGeometry(state, {
+    id: "w-1",
+    geometry: G0,
+    now: 1_200,
+  });
+  assert.equal(stale.apply, false);
+  assert.deepEqual(
+    stale.patchGeometry,
+    G1,
+    "a no-move click or cancelled drag must not expose stale server geometry",
+  );
+  assert.deepEqual(
+    resolveIncomingGeometry(state, {
+      id: "w-1",
+      geometry: G1,
+      now: 1_300,
+    }),
+    { apply: true, patchGeometry: null },
+    "the original pending commit echo must still release the restored guard",
+  );
+});
+
 test("resize release geometry uses the pointer-end event coordinates", () => {
   assert.equal(typeof geometrySync.syncResizeStatePointerEvent, "function");
   assert.equal(typeof geometrySync.resizeGeometryFromPointerState, "function");

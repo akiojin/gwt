@@ -48,6 +48,7 @@ export function beginLocalGeometryEdit(state, id, baseRevision, now = Date.now()
   if (!state || !id) {
     return;
   }
+  const existing = state.localEdits.get(id);
   const normalizedBaseRevision = normalizeRevision(baseRevision);
   state.localEdits.set(id, {
     baseRevision: normalizedBaseRevision,
@@ -56,6 +57,10 @@ export function beginLocalGeometryEdit(state, id, baseRevision, now = Date.now()
     committedGeometry: null,
     startedAt: finiteNumber(now),
     committedAt: null,
+    previousPending:
+      existing?.phase === "pending"
+        ? clonePendingEdit(existing)
+        : clonePendingEdit(existing?.previousPending),
   });
 }
 
@@ -88,6 +93,39 @@ export function clearLocalGeometryEdit(state, id) {
     return;
   }
   state.localEdits.delete(id);
+}
+
+function clonePendingEdit(edit) {
+  if (edit?.phase !== "pending") {
+    return null;
+  }
+  return {
+    ...edit,
+    committedGeometry: edit.committedGeometry
+      ? { ...edit.committedGeometry }
+      : null,
+    previousPending: null,
+  };
+}
+
+// A pointerdown can start while the previous geometry commit is still
+// waiting for its server echo. Cancelling that follow-up gesture (including
+// a titlebar click with no movement) must restore the older pending guard;
+// otherwise a queued stale workspace_state can snap the window back.
+export function cancelLocalGeometryEdit(state, id) {
+  if (!state || !id) {
+    return;
+  }
+  const existing = state.localEdits.get(id);
+  if (existing?.phase !== "active") {
+    return;
+  }
+  const previousPending = clonePendingEdit(existing.previousPending);
+  if (previousPending) {
+    state.localEdits.set(id, previousPending);
+  } else {
+    state.localEdits.delete(id);
+  }
 }
 
 function geometryMatches(incoming, committed) {

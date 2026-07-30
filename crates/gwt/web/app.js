@@ -119,6 +119,7 @@
       } from "/terminal-viewport-reflow.js";
       import {
         beginLocalGeometryEdit,
+        cancelLocalGeometryEdit,
         clearLocalGeometryEdit,
         commitLocalGeometryEdit,
         createGeometrySyncState,
@@ -6210,9 +6211,10 @@
               );
             }
           } else {
-            // A click (no move) never sent geometry: release the guard armed
-            // at pointerdown.
-            clearLocalGeometryEdit(geometrySyncState, dragState.id);
+            // A click (no move) never sent geometry. Cancel only the current
+            // gesture so a previous commit that is still awaiting its echo
+            // remains protected from queued stale workspace state.
+            cancelLocalGeometryEdit(geometrySyncState, dragState.id);
             clearTitlebarDockPreview();
             handleTitlebarClick(dragState.id);
           }
@@ -6285,10 +6287,9 @@
             window_id: dragState.id,
           });
           clearTitlebarDockPreview();
-          // Issue #3364 — a cancelled drag is abandoned, not committed:
-          // release the guard so the next workspace_state restores the
-          // server's placement.
-          clearLocalGeometryEdit(geometrySyncState, dragState.id);
+          // Issue #3364 — a cancelled drag is abandoned, not committed.
+          // Restore any older pending commit guard that pointerdown replaced.
+          cancelLocalGeometryEdit(geometrySyncState, dragState.id);
           dragState = null;
         } else if (dragState) {
           tracePointer(UI_TRACE_EVENT.pointerCancelIgnored, event, {

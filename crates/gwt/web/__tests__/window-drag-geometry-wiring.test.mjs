@@ -67,7 +67,7 @@ test("the drag drop branch commits through the shared gesture helper", () => {
   );
 });
 
-test("kanban / dock drops and no-move clicks clear the drag guard instead of committing", () => {
+test("placement drops discard the guard while no-move clicks restore a previous pending guard", () => {
   assert.match(
     appSource,
     /agentKanbanTarget\s*\)\s*\{[\s\S]{0,220}?clearLocalGeometryEdit\(\s*geometrySyncState\s*,\s*dragState\.id\s*\)/,
@@ -80,16 +80,16 @@ test("kanban / dock drops and no-move clicks clear the drag guard instead of com
   );
   assert.match(
     appSource,
-    /clearLocalGeometryEdit\(\s*geometrySyncState\s*,\s*dragState\.id\s*\)[\s\S]{0,220}?handleTitlebarClick\(dragState\.id\)/,
-    "expected the no-move click branch to clear the drag guard",
+    /cancelLocalGeometryEdit\(\s*geometrySyncState\s*,\s*dragState\.id\s*\)[\s\S]{0,220}?handleTitlebarClick\(dragState\.id\)/,
+    "expected the no-move click branch to restore an older pending guard",
   );
 });
 
-test("drag pointercancel abandons the gesture by clearing the guard (server truth wins)", () => {
+test("drag pointercancel abandons only the current gesture and restores older pending geometry", () => {
   assert.match(
     appSource,
-    /pointerDragCancel[\s\S]{0,400}?clearLocalGeometryEdit\(\s*geometrySyncState\s*,\s*dragState\.id\s*\)[\s\S]{0,200}?dragState\s*=\s*null/,
-    "expected the drag pointercancel branch to clear the local edit guard",
+    /pointerDragCancel[\s\S]{0,400}?cancelLocalGeometryEdit\(\s*geometrySyncState\s*,\s*dragState\.id\s*\)[\s\S]{0,200}?dragState\s*=\s*null/,
+    "expected the drag pointercancel branch to restore an older pending guard",
   );
 });
 

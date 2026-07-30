@@ -1334,9 +1334,7 @@ impl AppRuntime {
             .insert(project_root.to_path_buf(), dirty_branches);
         self.work_live_process_branches
             .insert(project_root.to_path_buf(), live_process_branches);
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
+        self.refresh_active_work_projection_for_project_root(project_root)
     }
 
     /// SPEC-2359 W-15 / US-84 and SPEC-3170 FR-077: publish cleanup evidence
@@ -1420,11 +1418,9 @@ impl AppRuntime {
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
         self.spawn_work_pr_titles_scan(project_root.clone());
-        self.spawn_work_ai_summaries_scan(project_root);
+        self.spawn_work_ai_summaries_scan(project_root.clone());
         if changed {
-            self.active_work_projection_broadcast_for_active_tab()
-                .into_iter()
-                .collect()
+            self.refresh_active_work_projection_for_project_root(&project_root)
         } else {
             Vec::new()
         }
@@ -1544,9 +1540,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.work_tip_subjects
             .insert(project_root.to_path_buf(), tip_subjects);
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
+        self.refresh_active_work_projection_for_project_root(project_root)
     }
 
     /// SPEC-3075: resolve every branch's tip commit subject off the UI thread in
@@ -1579,9 +1573,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.work_pr_titles
             .insert(project_root.to_path_buf(), pr_titles);
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
+        self.refresh_active_work_projection_for_project_root(project_root)
     }
 
     /// SPEC-3075: resolve every branch's PR title off the UI thread in ONE
@@ -1615,9 +1607,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.work_ai_summaries
             .insert(project_root.to_path_buf(), ai_summaries);
-        self.active_work_projection_broadcast_for_active_tab()
-            .into_iter()
-            .collect()
+        self.refresh_active_work_projection_for_project_root(project_root)
     }
 
     /// SPEC-3075 FR-006: optional AI polish for the rail summary. Runs off the UI
