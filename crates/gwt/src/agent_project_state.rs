@@ -265,6 +265,41 @@ pub fn probe_authenticated_prepared_execution_binding(
 /// Session. Request fields are correlation only; project, Session, owner, and
 /// worktree authority are derived from the authenticated principal and
 /// durable records.
+/// SPEC-3393 FR-012 (AC-12): recover producing authority for a Resume or
+/// Continue launch before spawn. Wraps [`continue_authenticated_execution`]
+/// for the launch path: `None` means the durable session has no producing
+/// linkage or the coordinator refused, and the launch stays observation-only
+/// (the unlinked-session carve-out) instead of failing.
+#[must_use]
+pub fn prepare_resume_producing_authority(
+    project_root: &Path,
+    predecessor_session_id: &str,
+) -> Option<(AgentExecutionContinuationReceipt, SessionExecutionBinding)> {
+    let request = AgentExecutionContinuationRequest {
+        schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+        operation_id: format!("resume-producing-{}", uuid::Uuid::new_v4()),
+    };
+    match continue_authenticated_execution(project_root, predecessor_session_id, request) {
+        Ok(result) => {
+            tracing::info!(
+                session_id = predecessor_session_id,
+                outcome = ?result.0.outcome,
+                "resume launch recovered producing authority (SPEC-3393 FR-012)"
+            );
+            Some(result)
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = predecessor_session_id,
+                code = ?error.code,
+                message = %error.message,
+                "resume launch stays observation-only"
+            );
+            None
+        }
+    }
+}
+
 pub fn continue_authenticated_execution(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
@@ -2977,6 +3012,30 @@ mod tests {
                     .len(),
                 1,
                 "replay must reuse one durable validation audit"
+            );
+        });
+    }
+
+    #[test]
+    fn resume_producing_helper_recovers_authority_for_linked_session() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            let (receipt, rebound) = prepare_resume_producing_authority(repo, &session.id)
+                .expect("linked durable session must recover producing authority");
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::ReboundCurrent
+            );
+            assert_eq!(rebound, binding);
+        });
+    }
+
+    #[test]
+    fn resume_producing_helper_returns_none_without_durable_linkage() {
+        with_strict_target_fixture(|repo, _session| {
+            assert!(
+                prepare_resume_producing_authority(repo, "session-unknown").is_none(),
+                "unknown durable session must stay observation-only"
             );
         });
     }

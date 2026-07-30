@@ -288,6 +288,7 @@ impl AppRuntime {
             .branch(session.branch.clone())
             .session_mode(SessionMode::Resume)
             .resume_session_id(resume_session_id.to_string())
+            .predecessor_session_id(session.id.clone())
             .runtime_target(session.runtime_target)
             .docker_lifecycle_intent(session.docker_lifecycle_intent);
 

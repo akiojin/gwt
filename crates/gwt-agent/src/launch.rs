@@ -844,6 +844,10 @@ pub struct LaunchConfig {
     pub reasoning_level: Option<String>,
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
+    /// Durable gwt Session id this Resume/Continue launch continues from
+    /// (SPEC-3393 FR-012): lets the launch path recover producing authority
+    /// through the continuation coordinator before spawn.
+    pub predecessor_session_id: Option<String>,
     pub skip_permissions: bool,
     pub fast_mode: bool,
     /// Legacy Codex-only compatibility field. New callers should use
@@ -898,6 +902,7 @@ pub struct AgentLaunchBuilder {
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
+    predecessor_session_id: Option<String>,
     permission_mode: Option<PermissionMode>,
     env_overrides: HashMap<String, String>,
     /// Env table from a `CustomCodingAgent`. Merged into the spawn env AFTER
@@ -948,6 +953,7 @@ impl AgentLaunchBuilder {
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            predecessor_session_id: None,
             permission_mode: None,
             env_overrides: HashMap::new(),
             custom_agent_env: HashMap::new(),
@@ -1048,6 +1054,13 @@ impl AgentLaunchBuilder {
 
     pub fn resume_session_id(mut self, id: impl Into<String>) -> Self {
         self.resume_session_id = Some(id.into());
+        self
+    }
+
+    /// See [`LaunchConfig::predecessor_session_id`].
+    #[must_use]
+    pub fn predecessor_session_id(mut self, id: impl Into<String>) -> Self {
+        self.predecessor_session_id = Some(id.into());
         self
     }
 
@@ -1275,6 +1288,7 @@ impl AgentLaunchBuilder {
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
+        let predecessor_session_id = self.predecessor_session_id.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
@@ -1294,6 +1308,7 @@ impl AgentLaunchBuilder {
             reasoning_level,
             session_mode,
             resume_session_id,
+            predecessor_session_id,
             skip_permissions,
             fast_mode,
             codex_fast_mode,
