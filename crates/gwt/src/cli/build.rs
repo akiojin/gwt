@@ -601,11 +601,20 @@ mod tests {
     struct TerminalBridgeState {
         tx: mpsc::Sender<(HeaderMap, serde_json::Value)>,
         status: StatusCode,
+        content_type: &'static str,
         body: String,
     }
 
     impl TerminalBridgeServer {
         fn start(status: StatusCode, body: serde_json::Value) -> Self {
+            Self::start_raw(status, "application/json", body.to_string())
+        }
+
+        fn start_raw(
+            status: StatusCode,
+            content_type: &'static str,
+            body: impl Into<String>,
+        ) -> Self {
             let runtime = Runtime::new().expect("terminal bridge runtime");
             let listener = runtime
                 .block_on(TcpListener::bind(("127.0.0.1", 0)))
@@ -626,8 +635,8 @@ mod tests {
                                 .expect("capture materialization probe request");
                             (
                                 state.status,
-                                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                state.body,
+                                [(axum::http::header::CONTENT_TYPE, state.content_type)],
+                                state.body.clone(),
                             )
                                 .into_response()
                         },
@@ -645,8 +654,8 @@ mod tests {
                                 .expect("capture terminal bridge request");
                             (
                                 state.status,
-                                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                state.body,
+                                [(axum::http::header::CONTENT_TYPE, state.content_type)],
+                                state.body.clone(),
                             )
                                 .into_response()
                         },
@@ -655,7 +664,8 @@ mod tests {
                 .with_state(TerminalBridgeState {
                     tx,
                     status,
-                    body: body.to_string(),
+                    content_type,
+                    body: body.into(),
                 });
             runtime.spawn(async move {
                 axum::serve(listener, app)
@@ -1459,6 +1469,31 @@ mod tests {
         );
         rejected.receive();
 
+        let legacy_schema_rejection = TerminalBridgeServer::start_raw(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "text/plain; charset=utf-8",
+            "Failed to deserialize the JSON body into the target type: owner_number: unknown field `owner_number`, expected one of `schema_version`, `claimed_session_id`, `observation`, `terminal_kind` at line 1 column 94",
+        );
+        let (code, output, fixture) = run_active_action(
+            SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("recover legacy protocol orphan".to_string()),
+            },
+            Some(&legacy_schema_rejection.forward_url),
+            Some("terminal-secret"),
+            true,
+        );
+        assert_eq!(code, 0, "{output}");
+        assert!(output.contains("orphan_recovered"), "{output}");
+        assert!(
+            !gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+                .expect("load legacy-protocol build state")
+                .expect("legacy-protocol build state")
+                .active,
+            "a legacy Host schema rejection proves terminalization never reached its handler"
+        );
+        legacy_schema_rejection.receive();
+
         let (code, output, fixture) = run_active_action(
             SkillStateAction::Abort {
                 spec: 3327,
@@ -1563,6 +1598,24 @@ mod tests {
             assert_build_still_active(&fixture);
             server.receive();
         }
+
+        let ambiguous_unprocessable = TerminalBridgeServer::start_raw(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "text/plain; charset=utf-8",
+            "Failed to deserialize the JSON body into the target type: owner_number: invalid type: string, expected u64 at line 1 column 94",
+        );
+        let (code, output, fixture) = run_active_action(
+            SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("must preserve ambiguous rejection".to_string()),
+            },
+            Some(&ambiguous_unprocessable.forward_url),
+            Some("terminal-secret"),
+            true,
+        );
+        assert_eq!(code, 1, "{output}");
+        assert_build_still_active(&fixture);
+        ambiguous_unprocessable.receive();
 
         let missing_work = TerminalBridgeServer::start(
             StatusCode::OK,

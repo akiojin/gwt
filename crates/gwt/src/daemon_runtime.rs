@@ -102,6 +102,7 @@ pub struct HookForwardTarget {
 #[derive(Debug)]
 pub(crate) enum AgentBridgeRequestError {
     NotSent(String),
+    RejectedBeforeHandler(String),
     Rejected(crate::AgentWorkspaceUpdateError),
     Unknown(String),
 }
@@ -110,12 +111,12 @@ impl AgentBridgeRequestError {
     pub(crate) fn rejection_code(&self) -> Option<crate::AgentWorkspaceUpdateErrorCode> {
         match self {
             Self::Rejected(error) => Some(error.code),
-            Self::NotSent(_) | Self::Unknown(_) => None,
+            Self::NotSent(_) | Self::RejectedBeforeHandler(_) | Self::Unknown(_) => None,
         }
     }
 
     pub(crate) fn proves_zero_mutation(&self) -> bool {
-        matches!(self, Self::NotSent(_))
+        matches!(self, Self::NotSent(_) | Self::RejectedBeforeHandler(_))
             || matches!(
                 self.rejection_code(),
                 Some(
@@ -130,7 +131,9 @@ impl AgentBridgeRequestError {
 impl std::fmt::Display for AgentBridgeRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotSent(message) | Self::Unknown(message) => formatter.write_str(message),
+            Self::NotSent(message)
+            | Self::RejectedBeforeHandler(message)
+            | Self::Unknown(message) => formatter.write_str(message),
             Self::Rejected(error) => write!(
                 formatter,
                 "Host bridge rejected the request ({:?}); no local fallback was attempted",
@@ -439,17 +442,28 @@ pub(crate) fn send_work_terminalization_via_agent_bridge(
             )
         })?;
     let status = response.status();
+    let body = response.bytes().map_err(|_| {
+        AgentBridgeRequestError::Unknown(
+            "Host Work terminalization bridge response could not be read; its mutation outcome is unknown"
+                .to_string(),
+        )
+    })?;
     if !status.is_success() {
-        return match response.json::<crate::AgentWorkspaceUpdateError>() {
-            Ok(error) => Err(AgentBridgeRequestError::Rejected(error)),
-            Err(_) => Err(AgentBridgeRequestError::Unknown(format!(
+        if let Ok(error) = serde_json::from_slice::<crate::AgentWorkspaceUpdateError>(&body) {
+            return Err(AgentBridgeRequestError::Rejected(error));
+        }
+        if legacy_terminalization_schema_rejection(status, &body) {
+            return Err(AgentBridgeRequestError::RejectedBeforeHandler(
+                "legacy Host rejected Work terminalization before handler dispatch; no Work mutation was attempted"
+                    .to_string(),
+            ));
+        }
+        return Err(AgentBridgeRequestError::Unknown(format!(
                 "Host Work terminalization bridge rejected the close with HTTP {status}; its mutation outcome is unknown"
-            ))),
-        };
+            )));
     }
-    let receipt = response
-        .json::<crate::AgentWorkTerminalizationReceipt>()
-        .map_err(|_| {
+    let receipt =
+        serde_json::from_slice::<crate::AgentWorkTerminalizationReceipt>(&body).map_err(|_| {
             AgentBridgeRequestError::Unknown(
                 "Host Work terminalization bridge returned an invalid success response; no local fallback was attempted"
                     .to_string(),
@@ -464,6 +478,20 @@ pub(crate) fn send_work_terminalization_via_agent_bridge(
         ));
     }
     Ok(receipt)
+}
+
+fn legacy_terminalization_schema_rejection(status: reqwest::StatusCode, body: &[u8]) -> bool {
+    if status != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        return false;
+    }
+    let Ok(body) = std::str::from_utf8(body) else {
+        return false;
+    };
+    body.starts_with("Failed to deserialize the JSON body into the target type:")
+        && body.contains("owner_number: unknown field `owner_number`")
+        && body.contains(
+            "expected one of `schema_version`, `claimed_session_id`, `observation`, `terminal_kind`",
+        )
 }
 
 pub(crate) fn send_work_materialization_probe_via_agent_bridge(
