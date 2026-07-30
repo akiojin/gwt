@@ -226,9 +226,11 @@ test.describe("Window controls: resize handle + click semantics", () => {
 
     const sentGeometry = await page.evaluate(() => {
       const fixture = (window as any).__resizeFixture;
-      return fixture.socket.recordedSends.findLast(
+      return fixture.socket.recordedSends.find(
         (message) =>
-          message.kind === "update_window_geometry" && message.id === "agent-1",
+          message.kind === "update_window_geometry" &&
+          message.id === "agent-1" &&
+          !Object.hasOwn(message, "base_geometry_revision"),
       );
     });
     expect(sentGeometry?.geometry).toEqual({
