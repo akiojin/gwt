@@ -95,12 +95,14 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+    prune_orphan_intake_worktrees, resolve_ephemeral_launch_worktree,
+    resolve_launch_worktree_request,
 };
 pub(crate) use launch_runtime::{
     apply_windows_host_shell_wrapper, build_shell_process_launch,
-    ensure_docker_launch_runtime_ready_for_runtime, install_launch_gwt_bin_env,
-    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
+    ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
+    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune, resolve_launch_worktree,
+    resolve_shell_launch_worktree, OrphanIntakePrunePlan,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -213,21 +215,6 @@ fn load_tray_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
 
 fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
-}
-
-fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) {
-    clients.dispatch(vec![OutboundEvent::broadcast(
-        BackendEvent::LogEntryAppended { entry },
-    )]);
-}
-
-/// SPEC-2809 Phase F1 — fan out one external-process line to every
-/// connected client. The Console window renders it under the matching
-/// kind tab; the Logs window renders it inside the Process kind facet.
-fn broadcast_process_line(clients: &ClientHub, line: gwt_core::process_console::ProcessLine) {
-    clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::ProcessLine {
-        line,
-    })]);
 }
 
 fn spawn_project_index_status_check(
@@ -1078,6 +1065,8 @@ enum UserEvent {
         project_root: PathBuf,
         merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
         cleanup_ready_branches: std::collections::HashMap<String, String>,
+        dirty_branches: std::collections::HashSet<String>,
+        live_process_branches: std::collections::HashSet<String>,
     },
     /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
     /// caches the `branch -> subject` map and rebroadcasts the Workspace
@@ -1175,6 +1164,12 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
+    AgentBackendConnectionProbeComplete {
+        client_id: ClientId,
+        agent: gwt_agent::BuiltinAgentId,
+        generation: u64,
+        event: BackendEvent,
+    },
     ImprovementActionComplete {
         project_root: PathBuf,
         client_id: ClientId,
@@ -1299,9 +1294,9 @@ mod tests {
     use super::{
         app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
         apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
-        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
-        build_shell_process_launch, close_window_from_workspace, combined_window_id,
-        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
+        close_window_from_workspace, combined_window_id, current_git_branch,
+        docker_bundle_mounts_for_home, docker_bundle_override_content,
         gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
@@ -2000,16 +1995,21 @@ mod tests {
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
     }
 
+    // Issue #3366 — delivery gating lives in `AppRuntime::log_entry_events`
+    // (see app_runtime tests); this guards the hub fan-out and payload
+    // shape once an entry passes the gate.
     #[test]
     fn log_entry_broadcast_reaches_all_registered_clients() {
         let clients = ClientHub::default();
         let native = clients.register("native".to_string());
         let browser = clients.register("browser".to_string());
 
-        broadcast_log_entry(
-            &clients,
-            LogEvent::new(LogLevel::Warn, "pty", "reader stalled").with_detail("retrying"),
-        );
+        clients.dispatch(vec![OutboundEvent::broadcast(
+            BackendEvent::LogEntryAppended {
+                entry: LogEvent::new(LogLevel::Warn, "pty", "reader stalled")
+                    .with_detail("retrying"),
+            },
+        )]);
 
         let native_payload = native.try_recv().expect("native payload");
         let browser_payload = browser.try_recv().expect("browser payload");
@@ -2662,6 +2662,8 @@ mod tests {
             active_agent_sessions: HashMap::new(),
             inspection_agent_windows: std::collections::HashSet::new(),
             work_merged_branches: HashMap::new(),
+            work_dirty_branches: HashMap::new(),
+            work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
@@ -2672,6 +2674,7 @@ mod tests {
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
+            active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -2693,6 +2696,8 @@ mod tests {
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
             improvement_refresh_epoch: 0,
             improvement_latest_refresh_epochs: HashMap::new(),
+            agent_backend_probe_generation: 0,
+            agent_backend_latest_probe_generations: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -4579,6 +4584,143 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_backend_connection_replies_through_async_dispatch() {
+        let temp = tempdir().expect("tempdir");
+        let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::TestAgentBackendConnection {
+                agent: gwt_agent::BuiltinAgentId::Codex,
+                base_url: "ws://not-http".to_string(),
+                api_key: "secret".to_string(),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "blocking agent backend probe must not reply on the frontend event loop"
+        );
+        wait_for_recorded_event("agent backend connection completion", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::AgentBackendConnectionProbeComplete {
+                        client_id,
+                        agent: gwt_agent::BuiltinAgentId::Codex,
+                        ..
+                    } if client_id == "client-1"
+                )
+            })
+        });
+        let (client_id, agent, generation, event) = events
+            .lock()
+            .expect("event log")
+            .iter()
+            .find_map(|recorded| match recorded {
+                UserEvent::AgentBackendConnectionProbeComplete {
+                    client_id,
+                    agent,
+                    generation,
+                    event,
+                } => Some((client_id.clone(), *agent, *generation, event.clone())),
+                _ => None,
+            })
+            .expect("agent backend completion");
+        let dispatched = runtime
+            .handle_agent_backend_connection_probe_complete(client_id, agent, generation, event);
+        assert!(dispatched.iter().any(|outbound| {
+            matches!(
+                &outbound.target,
+                DispatchTarget::Client(client_id) if client_id == "client-1"
+            ) && matches!(
+                &outbound.event,
+                BackendEvent::AgentBackendError {
+                    agent: gwt_agent::BuiltinAgentId::Codex,
+                    code: gwt::CustomAgentErrorCode::Probe,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_backend_connection_probe_drops_older_reverse_completion_per_client_and_agent() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let codex = gwt_agent::BuiltinAgentId::Codex;
+        let claude = gwt_agent::BuiltinAgentId::ClaudeCode;
+
+        let older_generation = runtime.register_agent_backend_connection_probe("client-1", codex);
+        let newer_generation = runtime.register_agent_backend_connection_probe("client-1", codex);
+        let other_agent_generation =
+            runtime.register_agent_backend_connection_probe("client-1", claude);
+        let other_client_generation =
+            runtime.register_agent_backend_connection_probe("client-2", codex);
+
+        let newer = runtime.handle_agent_backend_connection_probe_complete(
+            "client-1".to_string(),
+            codex,
+            newer_generation,
+            BackendEvent::BackendConnectionResult {
+                models: vec!["newer".to_string()],
+            },
+        );
+        assert_eq!(newer.len(), 1, "the newest completion is dispatched");
+        assert!(matches!(
+            &newer[0].target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            &newer[0].event,
+            BackendEvent::BackendConnectionResult { models }
+                if models.as_slice() == ["newer"]
+        ));
+
+        let older = runtime.handle_agent_backend_connection_probe_complete(
+            "client-1".to_string(),
+            codex,
+            older_generation,
+            BackendEvent::BackendConnectionResult {
+                models: vec!["older".to_string()],
+            },
+        );
+        assert!(
+            older.is_empty(),
+            "an older completion arriving after the newest result must not be dispatched"
+        );
+
+        assert_eq!(
+            runtime
+                .handle_agent_backend_connection_probe_complete(
+                    "client-1".to_string(),
+                    claude,
+                    other_agent_generation,
+                    BackendEvent::BackendConnectionResult {
+                        models: vec!["other-agent".to_string()],
+                    },
+                )
+                .len(),
+            1,
+            "a different agent has an independent generation"
+        );
+        assert_eq!(
+            runtime
+                .handle_agent_backend_connection_probe_complete(
+                    "client-2".to_string(),
+                    codex,
+                    other_client_generation,
+                    BackendEvent::BackendConnectionResult {
+                        models: vec!["other-client".to_string()],
+                    },
+                )
+                .len(),
+            1,
+            "a different client has an independent generation"
+        );
+    }
+
+    #[test]
     fn wizard_handler_helpers_cover_preparation_focus_and_error_paths() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -6164,6 +6306,33 @@ mod tests {
         }
         let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
         assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        let startup_orphan = temp.path().join(".intake-startup-orphan");
+        manager
+            .create_detached("HEAD", &startup_orphan)
+            .expect("startup orphan");
+
+        let plan = super::plan_orphan_intake_worktree_prune(&repo).expect("startup prune plan");
+
+        let launched_after_snapshot = temp.path().join(".intake-live-after-snapshot");
+        manager
+            .create_detached("HEAD", &launched_after_snapshot)
+            .expect("later intake");
+        let removed = super::execute_orphan_intake_worktree_prune(plan, 10);
+
+        assert_eq!(removed, 1);
+        assert!(!startup_orphan.exists(), "snapshotted orphan is reaped");
+        assert!(
+            launched_after_snapshot.exists(),
+            "an intake materialized after startup snapshot is never treated as orphaned"
+        );
     }
 
     #[test]
@@ -7946,10 +8115,14 @@ fn main() -> std::io::Result<()> {
                 // stragglers from older clients are dropped silently.
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
-                broadcast_log_entry(&clients, entry);
+                // Issue #3366 — gated on an open Logs window; see
+                // `AppRuntime::log_entry_events`.
+                clients.dispatch(app.log_entry_events(entry));
             }
             Event::UserEvent(UserEvent::ProcessLine { line }) => {
-                broadcast_process_line(&clients, line);
+                // Issue #3366 — gated on an open Console window; see
+                // `AppRuntime::process_line_events`.
+                clients.dispatch(app.process_line_events(line));
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);
@@ -7982,11 +8155,15 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 merged_branches,
                 cleanup_ready_branches,
+                dirty_branches,
+                live_process_branches,
             }) => {
                 let events = app.apply_work_merge_status(
                     &project_root,
                     merged_branches,
                     cleanup_ready_branches,
+                    dirty_branches,
+                    live_process_branches,
                 );
                 clients.dispatch(events);
             }
@@ -8129,6 +8306,16 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::AgentBackendConnectionProbeComplete {
+                client_id,
+                agent,
+                generation,
+                event,
+            }) => {
+                clients.dispatch(app.handle_agent_backend_connection_probe_complete(
+                    client_id, agent, generation, event,
+                ));
             }
             Event::UserEvent(UserEvent::ImprovementActionComplete {
                 project_root,

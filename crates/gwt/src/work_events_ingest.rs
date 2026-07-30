@@ -9,17 +9,22 @@
 //! never depends on it (dedup is event-id based, SC-260).
 //!
 //! Spawn budget per run: 1 `git worktree list` (inventory) + 1
-//! `for-each-ref` + 1 `cat-file --batch-check` + one `cat-file blob` per
-//! not-yet-ingested events blob. Callers run this off the UI thread.
+//! `for-each-ref` + 1 `cat-file --batch-check` + at most 1 `cat-file --batch`
+//! for all not-yet-ingested unique event blobs. Callers run this off the UI
+//! thread.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[cfg(test)]
 use gwt_core::work_events_intake::ingest_work_events_content;
 use gwt_core::work_events_intake::{
-    content_fingerprint, ingest_work_events_contents, ingest_work_events_with_local_path,
+    content_fingerprint, ingest_work_event_sources_with_local_path, ingest_work_events_sources,
     load_work_events_intake_state, rebuild_work_events_with_shared_loader,
-    save_work_events_intake_state,
+    save_work_events_intake_state, SharedWorkEventsSource,
 };
 use gwt_core::workspace_projection::WorkspaceExecutionContainerRef;
 
@@ -57,7 +62,8 @@ impl WorkEventsIngestSummary {
 struct PendingWorkEventsSource {
     key: String,
     fingerprint: String,
-    content: String,
+    content: Arc<str>,
+    container: Option<WorkspaceExecutionContainerRef>,
     reload: Option<ReloadableWorkEventsSource>,
 }
 
@@ -67,8 +73,16 @@ struct ReloadableWorkEventsSource {
     container: Option<WorkspaceExecutionContainerRef>,
 }
 
+#[derive(Debug)]
+struct PendingOriginBlob {
+    key: String,
+    fingerprint: String,
+    oid: String,
+    container: Option<WorkspaceExecutionContainerRef>,
+}
+
 type SourceFingerprints = Vec<(String, String)>;
-type ReloadedWorkEventsSources = (Vec<String>, SourceFingerprints);
+type ReloadedWorkEventsSources = (Vec<SharedWorkEventsSource>, SourceFingerprints);
 
 fn load_pending_sources_for_rebuild(
     pending_sources: &[PendingWorkEventsSource],
@@ -77,7 +91,10 @@ fn load_pending_sources_for_rebuild(
     let mut fingerprints = Vec::with_capacity(pending_sources.len());
     for source in pending_sources {
         let Some(reload) = &source.reload else {
-            contents.push(source.content.clone());
+            contents.push(SharedWorkEventsSource::new(
+                Arc::clone(&source.content),
+                source.container.clone(),
+            ));
             fingerprints.push((source.key.clone(), source.fingerprint.clone()));
             continue;
         };
@@ -86,9 +103,9 @@ fn load_pending_sources_for_rebuild(
             source.key.clone(),
             source_fingerprint(&content_fingerprint(&content), reload.container.as_ref()),
         ));
-        contents.push(content_with_source_container(
-            &content,
-            reload.container.as_ref(),
+        contents.push(SharedWorkEventsSource::new(
+            content,
+            reload.container.clone(),
         ));
     }
     Ok((contents, fingerprints))
@@ -196,11 +213,11 @@ where
             summary.sources_skipped += 1;
             continue;
         }
-        let ingest_content = content_with_source_container(&content, source_container);
         pending_sources.push(PendingWorkEventsSource {
             key,
             fingerprint,
-            content: ingest_content,
+            content: Arc::from(content),
+            container: source.container.clone(),
             reload: Some(ReloadableWorkEventsSource {
                 events_path,
                 container: source.container,
@@ -216,6 +233,7 @@ where
             let commits: Vec<String> = refs.iter().map(|(_, sha)| sha.clone()).collect();
             match gwt_git::blob::events_blob_oids_batch(project_root, &commits, EVENTS_TREE_PATH) {
                 Ok(oids) => {
+                    let mut pending_blobs = Vec::new();
                     for ((refname, _), oid) in refs.iter().zip(oids) {
                         let Some(oid) = oid else { continue };
                         let key = format!("{SOURCE_REF}{refname}");
@@ -225,22 +243,50 @@ where
                             summary.sources_skipped += 1;
                             continue;
                         }
-                        let content = match gwt_git::blob::read_blob(project_root, &oid) {
-                            Ok(content) => content,
-                            Err(error) => {
-                                tracing::warn!(%error, refname, "work events ingest: blob read failed");
-                                source_discovery_failed = true;
-                                continue;
-                            }
-                        };
-                        let ingest_content =
-                            content_with_source_container(&content, source_container.as_ref());
-                        pending_sources.push(PendingWorkEventsSource {
+                        pending_blobs.push(PendingOriginBlob {
                             key,
                             fingerprint,
-                            content: ingest_content,
-                            reload: None,
+                            oid,
+                            container: source_container,
                         });
+                    }
+                    let mut oid_indices = HashMap::new();
+                    let mut unique_oids = Vec::new();
+                    for pending in &pending_blobs {
+                        if oid_indices.contains_key(&pending.oid) {
+                            continue;
+                        }
+                        oid_indices.insert(pending.oid.clone(), unique_oids.len());
+                        unique_oids.push(pending.oid.clone());
+                    }
+                    match gwt_git::blob::read_blobs_batch(project_root, &unique_oids) {
+                        Ok(contents) => {
+                            let contents = contents
+                                .into_iter()
+                                .map(Arc::<str>::from)
+                                .collect::<Vec<_>>();
+                            for pending in pending_blobs {
+                                let Some(index) = oid_indices.get(&pending.oid).copied() else {
+                                    source_discovery_failed = true;
+                                    continue;
+                                };
+                                let Some(content) = contents.get(index) else {
+                                    source_discovery_failed = true;
+                                    continue;
+                                };
+                                pending_sources.push(PendingWorkEventsSource {
+                                    key: pending.key,
+                                    fingerprint: pending.fingerprint,
+                                    content: Arc::clone(content),
+                                    container: pending.container,
+                                    reload: None,
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "work events ingest: batch blob read failed");
+                            source_discovery_failed = true;
+                        }
                     }
                 }
                 Err(error) => {
@@ -298,7 +344,12 @@ where
     }
 
     before_intake();
-    let contents = pending_sources.iter().map(|source| source.content.as_str());
+    let shared_sources = pending_sources
+        .iter()
+        .map(|source| {
+            SharedWorkEventsSource::new(Arc::clone(&source.content), source.container.clone())
+        })
+        .collect::<Vec<_>>();
     let intake = if rebuild_required {
         rebuild_work_events_with_shared_loader(
             work_items_path,
@@ -306,20 +357,23 @@ where
             close_path.as_deref(),
         )
     } else if pending_local_lifecycle.is_some() {
-        ingest_work_events_with_local_path(work_items_path, contents, close_path.as_deref()).map(
-            |(report, local_fingerprint)| {
-                (
-                    report,
-                    pending_sources
-                        .iter()
-                        .map(|source| (source.key.clone(), source.fingerprint.clone()))
-                        .collect(),
-                    local_fingerprint,
-                )
-            },
+        ingest_work_event_sources_with_local_path(
+            work_items_path,
+            shared_sources,
+            close_path.as_deref(),
         )
+        .map(|(report, local_fingerprint)| {
+            (
+                report,
+                pending_sources
+                    .iter()
+                    .map(|source| (source.key.clone(), source.fingerprint.clone()))
+                    .collect(),
+                local_fingerprint,
+            )
+        })
     } else {
-        ingest_work_events_contents(work_items_path, contents).map(|report| {
+        ingest_work_events_sources(work_items_path, shared_sources).map(|report| {
             (
                 report,
                 pending_sources
@@ -420,50 +474,6 @@ fn source_fingerprint(
     content_fingerprint(&format!(
         "{SOURCE_CONTEXT_FINGERPRINT_VERSION}\n{raw_fingerprint}\n{container_fingerprint}"
     ))
-}
-
-fn content_with_source_container(
-    content: &str,
-    container: Option<&WorkspaceExecutionContainerRef>,
-) -> String {
-    let Some(container) = container else {
-        return content.to_string();
-    };
-    let Ok(container_value) = serde_json::to_value(container) else {
-        return content.to_string();
-    };
-
-    let mut output = String::new();
-    let mut changed = false;
-    for line in content.lines() {
-        let replacement = match serde_json::from_str::<serde_json::Value>(line.trim()) {
-            Ok(mut value) => {
-                if let Some(object) = value.as_object_mut() {
-                    let missing_container = object
-                        .get("execution_container")
-                        .map(|value| value.is_null())
-                        .unwrap_or(true);
-                    if missing_container {
-                        object.insert("execution_container".to_string(), container_value.clone());
-                        changed = true;
-                    }
-                }
-                serde_json::to_string(&value).unwrap_or_else(|_| line.to_string())
-            }
-            Err(_) => line.to_string(),
-        };
-        output.push_str(&replacement);
-        output.push('\n');
-    }
-    if !content.ends_with('\n') {
-        output.pop();
-    }
-
-    if changed {
-        output
-    } else {
-        content.to_string()
-    }
 }
 
 #[cfg(test)]

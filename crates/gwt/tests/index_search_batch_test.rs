@@ -205,11 +205,44 @@ fn missing_scope_returns_typed_not_ready_instead_of_silent_empty_success() {
                 "retry information is mandatory: {not_ready:?}"
             );
         }
-        IndexSearchError::Other(other) => {
-            panic!("expected typed INDEX_NOT_READY, got untyped error: {other}")
-        }
+        other => panic!("expected typed INDEX_NOT_READY, got {other:?}"),
     }
     assert_eq!(INDEX_NOT_READY_EXIT_CODE, 75);
+}
+
+#[test]
+fn healthy_query_failure_returns_typed_non_retryable_error_without_repair_wait() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = setup_search_fixture(
+        r#"{"ok": false, "error_code": "SEARCH_FAILED", "retryable": false, "error": "issues query failed: query embedding rejected", "affected_scopes": ["issues"]}"#,
+    );
+
+    let error = gwt::search_project_index(
+        &fixture.repo,
+        "healthy query contract failure",
+        &[IndexSearchScope::Issues],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect_err("a healthy query failure must surface immediately");
+
+    assert_eq!(error.error_code(), Some("SEARCH_FAILED"));
+    assert!(!error.retryable());
+    match error {
+        IndexSearchError::SearchFailed(failed) => {
+            assert_eq!(failed.affected_scopes, vec!["issues".to_string()]);
+            assert!(failed.reason.contains("query embedding rejected"));
+        }
+        other => panic!("expected typed SEARCH_FAILED, got {other:?}"),
+    }
+    assert_eq!(
+        search_invocations(&fixture.runner_log).len(),
+        1,
+        "healthy query failure must not enter status polling or repair wait"
+    );
 }
 
 fn init_git_repo(path: &Path) {

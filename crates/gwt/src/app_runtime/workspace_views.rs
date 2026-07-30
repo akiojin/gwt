@@ -26,16 +26,36 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-
 use super::{
     active_agent_summary_from_session, current_git_branch, local_branch_exists,
     merge_active_sessions_into_projection, normalize_branch_name, origin_remote_ref,
-    retain_live_workspace_agents, same_worktree_path, save_workspace_launch_projection,
+    retain_live_workspace_agents, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_owner_title,
     ActiveAgentSession, AppRuntime, BackendEvent, ClientId, IssueBranchLinkStore, OutboundEvent,
     ProjectTabRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
+
+fn projection_worktree_path_key(path: &Path) -> PathBuf {
+    let mut key = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if key.file_name().is_some() {
+                    key.pop();
+                } else if !path.is_absolute() {
+                    key.push(component.as_os_str());
+                }
+            }
+            _ => key.push(component.as_os_str()),
+        }
+    }
+    key
+}
+
+fn projection_worktree_paths_match(left: &Path, right: &Path) -> bool {
+    left == right || projection_worktree_path_key(left) == projection_worktree_path_key(right)
+}
 
 fn workspace_status_category_wire(
     category: gwt_core::workspace_projection::WorkspaceStatusCategory,
@@ -218,6 +238,101 @@ fn empty_active_work_projection_view(
     }
 }
 
+fn active_work_projection_from_live_sessions(
+    tab_id: &str,
+    tab: &ProjectTabRuntime,
+    sessions: &[&ActiveAgentSession],
+    managed_hook_health: Option<gwt::ManagedHookHealthView>,
+) -> Option<gwt::ActiveWorkProjectionView> {
+    let first = sessions.first()?;
+    let active_agents = sessions.len();
+    let now = chrono::Utc::now();
+    let mut agents = sessions
+        .iter()
+        .map(|session| {
+            let summary = active_agent_summary_from_session(session, now);
+            active_work_agent_view_from_summary(&summary)
+        })
+        .collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    let active_works = vec![gwt::ActiveWorkItemView {
+        id: tab_id.to_string(),
+        title: format!("{} Work", tab.title),
+        status_category: "active".to_string(),
+        status_text: if active_agents == 1 {
+            "1 active agent".to_string()
+        } else {
+            format!("{active_agents} active agents")
+        },
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: None,
+        next_action: Some("Check Board for latest updates".to_string()),
+        active_agents,
+        blocked_agents: 0,
+        branch: Some(first.branch_name.clone()),
+        worktree_path: Some(first.worktree_path.display().to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: agents.clone(),
+        works: Vec::new(),
+        lifecycle_state: work_active_lifecycle_state_wire(
+            gwt_core::workspace_projection::recompute_work_active_lifecycle(
+                gwt_core::workspace_projection::WorkAgentRuntime::Running,
+                None,
+            ),
+        )
+        .to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        cleanup_blocked_reason: None,
+        updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }];
+    Some(gwt::ActiveWorkProjectionView {
+        id: tab_id.to_string(),
+        title: format!("{} workspace", tab.title),
+        status_category: "active".to_string(),
+        status_text: if active_agents == 1 {
+            "1 active agent".to_string()
+        } else {
+            format!("{active_agents} active agents")
+        },
+        summary: None,
+        progress_summary: None,
+        owner: None,
+        next_action: Some("Check Board for latest updates".to_string()),
+        active_agents,
+        blocked_agents: 0,
+        branch: Some(first.branch_name.clone()),
+        worktree_path: Some(first.worktree_path.display().to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        pr_created_at: None,
+        board_refs: Vec::new(),
+        journal_entries: Vec::new(),
+        works: Vec::new(),
+        cleanup_candidate: None,
+        managed_hook_health,
+        active_work_count: active_works.len(),
+        active_works,
+        agents,
+        unassigned_agents: Vec::new(),
+    })
+}
+
 fn managed_hook_health_view_for_project(
     project_root: &Path,
     sessions_dir: &Path,
@@ -376,7 +491,7 @@ fn agent_matches_projection_git_details(
         .worktree_path
         .as_deref()
         .zip(agent.worktree_path.as_deref())
-        .is_some_and(|(left, right)| same_worktree_path(left, Path::new(right)));
+        .is_some_and(|(left, right)| projection_worktree_paths_match(left, Path::new(right)));
     let worktree_conflicts =
         details.worktree_path.is_some() && agent.worktree_path.is_some() && !worktree_matches;
     (branch_matches || worktree_matches) && !branch_conflicts && !worktree_conflicts
@@ -387,6 +502,8 @@ fn history_git_identity_conflicts(
     worktree: Option<&str>,
     work: &gwt::WorkspaceHistoryView,
 ) -> bool {
+    #[cfg(test)]
+    HISTORY_GIT_IDENTITY_CONFLICT_CHECKS.with(|count| count.set(count.get() + 1));
     let branch = branch
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -413,12 +530,28 @@ fn history_git_identity_conflicts(
     let worktree_matches = worktree.is_some_and(|left| {
         container_worktrees
             .iter()
-            .any(|right| same_worktree_path(Path::new(left), Path::new(right)))
+            .any(|right| projection_worktree_paths_match(Path::new(left), Path::new(right)))
     });
     let branch_conflicts = branch.is_some() && !container_branches.is_empty() && !branch_matches;
     let worktree_conflicts =
         worktree.is_some() && !container_worktrees.is_empty() && !worktree_matches;
     branch_conflicts || worktree_conflicts
+}
+
+#[cfg(test)]
+thread_local! {
+    static HISTORY_GIT_IDENTITY_CONFLICT_CHECKS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_history_git_identity_conflict_checks() {
+    HISTORY_GIT_IDENTITY_CONFLICT_CHECKS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn history_git_identity_conflict_checks() -> usize {
+    HISTORY_GIT_IDENTITY_CONFLICT_CHECKS.with(std::cell::Cell::get)
 }
 
 fn find_active_work_history<'a>(
@@ -847,6 +980,7 @@ fn append_paused_work_items(
     works: &[gwt::WorkspaceHistoryView],
     journal_title_by_session: &std::collections::HashMap<String, String>,
 ) {
+    let mut presence = ActiveWorkPresenceIndex::from_active_works(active_works);
     for work in works {
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal closes (Done and
         // Discarded) leave the active Work surface. Both are excluded so a
@@ -854,7 +988,7 @@ fn append_paused_work_items(
         if work.status_category == "done" || work.status_category == "discarded" {
             continue;
         }
-        if active_work_already_present(active_works, work) {
+        if presence.contains_history(work) {
             continue;
         }
         let container = work.execution_containers.first();
@@ -930,6 +1064,11 @@ fn append_paused_work_items(
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
+        presence.register(
+            active_works
+                .last()
+                .expect("a paused Work was appended immediately before indexing"),
+        );
     }
 }
 
@@ -942,30 +1081,64 @@ fn append_paused_work_items(
 /// identities conflict — a stray session ref recorded under another branch's
 /// Work must not swallow the real owner's row (mirrors
 /// `active_work_agent_matches_workspace_row_identity`).
-fn active_work_already_present(
-    active_works: &[gwt::ActiveWorkItemView],
-    work: &gwt::WorkspaceHistoryView,
-) -> bool {
-    active_works.iter().any(|existing| {
-        if existing.id == work.id {
+#[derive(Clone)]
+struct ActiveWorkGitIdentity {
+    branch: Option<String>,
+    worktree_path: Option<String>,
+}
+
+#[derive(Default)]
+struct ActiveWorkPresenceIndex {
+    ids: HashSet<String>,
+    git_identities_by_session: HashMap<String, Vec<ActiveWorkGitIdentity>>,
+}
+
+impl ActiveWorkPresenceIndex {
+    fn from_active_works(active_works: &[gwt::ActiveWorkItemView]) -> Self {
+        let mut index = Self::default();
+        for work in active_works {
+            index.register(work);
+        }
+        index
+    }
+
+    fn register(&mut self, work: &gwt::ActiveWorkItemView) {
+        self.ids.insert(work.id.clone());
+        let identity = ActiveWorkGitIdentity {
+            branch: work.branch.clone(),
+            worktree_path: work.worktree_path.clone(),
+        };
+        for session_id in work
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.trim())
+            .filter(|session_id| !session_id.is_empty())
+        {
+            self.git_identities_by_session
+                .entry(session_id.to_string())
+                .or_default()
+                .push(identity.clone());
+        }
+    }
+
+    fn contains_history(&self, work: &gwt::WorkspaceHistoryView) -> bool {
+        if self.ids.contains(&work.id) {
             return true;
         }
-        let shares_agent_session = existing.agents.iter().any(|existing_agent| {
-            !existing_agent.session_id.trim().is_empty()
-                && work
-                    .agents
-                    .iter()
-                    .any(|history_agent| history_agent.session_id == existing_agent.session_id)
-        });
-        if history_git_identity_conflicts(
-            existing.branch.as_deref(),
-            existing.worktree_path.as_deref(),
-            work,
-        ) {
-            return false;
-        }
-        shares_agent_session
-    })
+        work.agents
+            .iter()
+            .map(|agent| agent.session_id.trim())
+            .filter(|session_id| !session_id.is_empty())
+            .filter_map(|session_id| self.git_identities_by_session.get(session_id))
+            .flatten()
+            .any(|identity| {
+                !history_git_identity_conflicts(
+                    identity.branch.as_deref(),
+                    identity.worktree_path.as_deref(),
+                    work,
+                )
+            })
+    }
 }
 
 pub(super) fn active_work_cleanup_candidate_view_from_candidate(
@@ -1755,7 +1928,7 @@ fn active_work_agent_matches_workspace_row_identity(
         .is_some_and(|(left, right)| left == right);
     let worktree_matches = row_worktree
         .zip(agent_worktree)
-        .is_some_and(|(left, right)| same_worktree_path(left, right) || left == right);
+        .is_some_and(|(left, right)| projection_worktree_paths_match(left, right));
     if branch_matches || worktree_matches {
         return true;
     }
@@ -2069,9 +2242,10 @@ pub(super) fn mark_remote_only_active_works(
 pub(super) fn mark_merged_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
     merged_branches: Option<&HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    dirty_branches: Option<&HashSet<String>>,
 ) {
     for work in active_works.iter_mut() {
-        if active_work_has_dirty_worktree(work) {
+        if active_work_dirty_from_cache(work, dirty_branches).unwrap_or(true) {
             work.merged_into_base = false;
             work.done_equivalent = false;
             continue;
@@ -2115,36 +2289,23 @@ pub(super) fn mark_merged_active_works(
     }
 }
 
-fn active_work_has_dirty_worktree(work: &gwt::ActiveWorkItemView) -> bool {
-    work.worktree_path
+fn active_work_dirty_from_cache(
+    work: &gwt::ActiveWorkItemView,
+    dirty_branches: Option<&HashSet<String>>,
+) -> Option<bool> {
+    let has_worktree = work
+        .worktree_path
         .as_deref()
-        .map(Path::new)
-        .filter(|path| active_work_path_is_git_toplevel(path))
-        .is_some_and(|path| {
-            gwt_git::diff::get_status(path)
-                .map(|entries| !entries.is_empty())
-                .unwrap_or(false)
-        })
-}
-
-fn active_work_path_is_git_toplevel(path: &Path) -> bool {
-    let Ok(path) = dunce::canonicalize(path) else {
-        return false;
-    };
-    let Ok(output) = gwt_core::process::run_git_logged(
-        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
-        Some(&path),
-    ) else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
+        .is_some_and(|path| !path.trim().is_empty());
+    if !has_worktree {
+        return Some(false);
     }
-    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if toplevel.as_os_str().is_empty() {
-        return false;
-    }
-    dunce::canonicalize(toplevel).is_ok_and(|toplevel| toplevel == path)
+    let branch = work
+        .branch
+        .as_deref()
+        .map(normalize_branch_name)
+        .filter(|branch| !branch.is_empty())?;
+    Some(dirty_branches?.contains(&branch))
 }
 
 /// SPEC-2359 US-78: cleanup eligibility is backend-owned per Workspace row.
@@ -2153,8 +2314,9 @@ fn active_work_path_is_git_toplevel(path: &Path) -> bool {
 pub(super) fn mark_workspace_cleanup_candidates(
     active_works: &mut [gwt::ActiveWorkItemView],
     cleanup_ready_branches: Option<&HashMap<String, String>>,
+    dirty_branches: Option<&HashSet<String>>,
     sessions: &[&ActiveAgentSession],
-    live_process_worktree_paths: &HashSet<PathBuf>,
+    live_process_branches: Option<&HashSet<String>>,
 ) {
     for work in active_works.iter_mut() {
         work.cleanup_candidate = None;
@@ -2170,7 +2332,9 @@ pub(super) fn mark_workspace_cleanup_candidates(
         else {
             continue;
         };
-        let Some(reason) = cleanup_reason_for_work(work, cleanup_ready_branches, &branch) else {
+        let Some(reason) =
+            cleanup_reason_for_work(work, cleanup_ready_branches, dirty_branches, &branch)
+        else {
             continue;
         };
         let worktree_path = work.worktree_path.as_deref().map(Path::new);
@@ -2180,10 +2344,11 @@ pub(super) fn mark_workspace_cleanup_candidates(
             work.cleanup_blocked_reason = Some("live_agent".to_string());
             continue;
         }
-        if worktree_path
-            .and_then(normalize_existing_worktree_path)
-            .is_some_and(|path| live_process_worktree_paths.contains(&path))
-        {
+        let Some(live_process_branches) = live_process_branches else {
+            work.cleanup_blocked_reason = Some("process_liveness_unknown".to_string());
+            continue;
+        };
+        if live_process_branches.contains(&branch) {
             work.cleanup_blocked_reason = Some("live_process".to_string());
             continue;
         }
@@ -2200,9 +2365,10 @@ pub(super) fn mark_workspace_cleanup_candidates(
 fn cleanup_reason_for_work(
     work: &gwt::ActiveWorkItemView,
     cleanup_ready_branches: Option<&HashMap<String, String>>,
+    dirty_branches: Option<&HashSet<String>>,
     branch: &str,
 ) -> Option<String> {
-    if active_work_has_dirty_worktree(work) {
+    if active_work_dirty_from_cache(work, dirty_branches).unwrap_or(true) {
         return None;
     }
     if let Some(reason) = cleanup_ready_branches
@@ -2226,82 +2392,15 @@ fn cleanup_reason_for_work(
     None
 }
 
-fn live_process_worktree_paths_for_cleanup(
-    active_works: &[gwt::ActiveWorkItemView],
-    cleanup_ready_branches: Option<&HashMap<String, String>>,
-    projection_cleanup_candidate: Option<&gwt::ActiveWorkCleanupCandidateView>,
-) -> HashSet<PathBuf> {
-    let mut candidate_paths = active_works
-        .iter()
-        .filter(|work| !work.remote_only)
-        .filter(|work| {
-            work.branch
-                .as_deref()
-                .map(normalize_branch_name)
-                .is_some_and(|branch| branch.starts_with("work/"))
-        })
-        .filter(|work| {
-            work.branch
-                .as_deref()
-                .map(normalize_branch_name)
-                .and_then(|branch| cleanup_reason_for_work(work, cleanup_ready_branches, &branch))
-                .is_some()
-        })
-        .filter_map(|work| {
-            work.worktree_path
-                .as_deref()
-                .map(Path::new)
-                .and_then(normalize_existing_worktree_path)
-        })
-        .collect::<Vec<_>>();
-    if let Some(path) = projection_cleanup_candidate
-        .and_then(|candidate| candidate.worktree_path.as_deref())
-        .map(Path::new)
-        .and_then(normalize_existing_worktree_path)
-    {
-        candidate_paths.push(path);
-    }
-    candidate_paths.sort();
-    candidate_paths.dedup();
-    if candidate_paths.is_empty() {
-        return HashSet::new();
-    }
-
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
-    );
-
-    let mut live_paths = HashSet::new();
-    for process in system.processes().values() {
-        let Some(cwd) = process.cwd().and_then(normalize_existing_worktree_path) else {
-            continue;
-        };
-        for candidate in &candidate_paths {
-            if cwd == *candidate || cwd.starts_with(candidate) {
-                live_paths.insert(candidate.clone());
-            }
-        }
-    }
-    live_paths
-}
-
-fn normalize_existing_worktree_path(path: &Path) -> Option<PathBuf> {
-    dunce::canonicalize(path).ok()
-}
-
 fn cleanup_candidate_has_live_process(
     candidate: &gwt::ActiveWorkCleanupCandidateView,
-    live_process_worktree_paths: &HashSet<PathBuf>,
+    live_process_branches: Option<&HashSet<String>>,
 ) -> bool {
-    candidate
-        .worktree_path
-        .as_deref()
-        .map(Path::new)
-        .and_then(normalize_existing_worktree_path)
-        .is_some_and(|path| live_process_worktree_paths.contains(&path))
+    let Some(live_process_branches) = live_process_branches else {
+        return true;
+    };
+    let branch = normalize_branch_name(&candidate.branch);
+    live_process_branches.contains(&branch)
 }
 
 fn paused_work_agent_view_from_history(
@@ -2334,9 +2433,8 @@ pub(super) fn active_agent_session_matches_work(
 ) -> bool {
     let branch_matches = normalized_branch
         .is_some_and(|branch| normalize_branch_name(session.branch_name.trim()) == branch);
-    let worktree_matches = worktree_path.is_some_and(|path| {
-        same_worktree_path(&session.worktree_path, path) || session.worktree_path == path
-    });
+    let worktree_matches = worktree_path
+        .is_some_and(|path| projection_worktree_paths_match(&session.worktree_path, path));
     branch_matches || worktree_matches
 }
 
@@ -2518,13 +2616,73 @@ impl AppRuntime {
     pub(super) fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
+        let projection = self.cached_or_in_memory_active_work_projection_for_tab(tab_id, tab);
         Some(OutboundEvent::reply(
             client_id,
             BackendEvent::ActiveWorkProjection {
                 projection: Box::new(projection),
             },
         ))
+    }
+
+    fn in_memory_active_work_projection_for_tab(
+        &self,
+        tab_id: &str,
+        tab: &ProjectTabRuntime,
+    ) -> gwt::ActiveWorkProjectionView {
+        let sessions = self
+            .active_agent_sessions
+            .values()
+            .filter(|session| session.tab_id == tab_id)
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return empty_active_work_projection_view(tab_id, tab);
+        }
+        active_work_projection_from_live_sessions(tab_id, tab, &sessions, None)
+            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab))
+    }
+
+    fn cached_or_in_memory_active_work_projection_for_tab(
+        &self,
+        tab_id: &str,
+        tab: &ProjectTabRuntime,
+    ) -> gwt::ActiveWorkProjectionView {
+        self.active_work_projection_cache
+            .borrow()
+            .get(tab_id)
+            .cloned()
+            .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab))
+    }
+
+    /// Rebuild the cache for the project whose background completion just
+    /// arrived. Completion events can belong to an inactive tab; rebuilding
+    /// only the active tab leaves the target cache stale, while tab-change is
+    /// intentionally cache-only to keep the GUI event path process-free.
+    pub(crate) fn refresh_active_work_projection_for_project_root(
+        &self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| projection_worktree_paths_match(&tab.project_root, project_root))
+        else {
+            return Vec::new();
+        };
+        let tab_id = tab.id.clone();
+        let projection = self.active_work_projection_for_tab(&tab_id, tab);
+        if self.active_tab_id.as_deref() != Some(tab_id.as_str()) {
+            return Vec::new();
+        }
+        projection
+            .map(|projection| {
+                vec![OutboundEvent::broadcast(
+                    BackendEvent::ActiveWorkProjection {
+                        projection: Box::new(projection),
+                    },
+                )]
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
@@ -2545,9 +2703,7 @@ impl AppRuntime {
     pub(super) fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let projection = self
-            .active_work_projection_for_tab(tab_id, tab)
-            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab));
+        let projection = self.cached_or_in_memory_active_work_projection_for_tab(tab_id, tab);
         Some(OutboundEvent::broadcast(
             BackendEvent::ActiveWorkProjection {
                 projection: Box::new(projection),
@@ -2560,6 +2716,8 @@ impl AppRuntime {
         tab_id: &str,
         tab: &ProjectTabRuntime,
     ) -> Option<gwt::ActiveWorkProjectionView> {
+        #[cfg(test)]
+        FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(count.get() + 1));
         let sessions = self
             .active_agent_sessions
             .values()
@@ -2669,9 +2827,11 @@ impl AppRuntime {
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background merge-scan cache plus the recorded PR state.
+            let dirty_branches = self.work_dirty_branches.get(&tab.project_root);
             mark_merged_active_works(
                 &mut view.active_works,
                 self.work_merged_branches.get(&tab.project_root),
+                dirty_branches,
             );
             // SPEC-3075: fill the rail summary — PR title (top), then the
             // AI-polished summary (FR-006), then the raw branch tip commit
@@ -2690,118 +2850,38 @@ impl AppRuntime {
                 self.local_worktree_branches.borrow().get(&tab.project_root),
             );
             let cleanup_ready_branches = self.work_cleanup_ready_branches.get(&tab.project_root);
-            let live_process_worktree_paths = live_process_worktree_paths_for_cleanup(
-                &view.active_works,
-                cleanup_ready_branches,
-                view.cleanup_candidate.as_ref(),
-            );
+            let live_process_branches = self.work_live_process_branches.get(&tab.project_root);
             if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
-                cleanup_candidate_has_live_process(candidate, &live_process_worktree_paths)
+                cleanup_candidate_has_live_process(candidate, live_process_branches)
             }) {
                 view.cleanup_candidate = None;
             }
             mark_workspace_cleanup_candidates(
                 &mut view.active_works,
                 cleanup_ready_branches,
+                dirty_branches,
                 &sessions,
-                &live_process_worktree_paths,
+                live_process_branches,
             );
+            self.active_work_projection_cache
+                .borrow_mut()
+                .insert(tab_id.to_string(), view.clone());
             return Some(view);
         }
 
-        let first = sessions.first()?;
-        let active_agents = sessions.len();
-        let now = chrono::Utc::now();
-        let mut agents = sessions
-            .iter()
-            .map(|session| {
-                let summary = active_agent_summary_from_session(session, now);
-                active_work_agent_view_from_summary(&summary)
-            })
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-        let active_works = vec![gwt::ActiveWorkItemView {
-            id: tab_id.to_string(),
-            title: format!("{} Work", tab.title),
-            status_category: "active".to_string(),
-            status_text: if active_agents == 1 {
-                "1 active agent".to_string()
-            } else {
-                format!("{active_agents} active agents")
-            },
-            summary: None,
-            progress_summary: None,
-            work_summary: None,
-            owner: None,
-            next_action: Some("Check Board for latest updates".to_string()),
-            active_agents,
-            blocked_agents: 0,
-            branch: Some(first.branch_name.clone()),
-            worktree_path: Some(first.worktree_path.display().to_string()),
-            pr_number: None,
-            pr_url: None,
-            pr_state: None,
-            board_refs: Vec::new(),
-            agents: agents.clone(),
-            // SPEC-2359 Phase W-12 (FR-349): synthesized from live sessions, so
-            // the owning agent is Running and not user-closed → Active.
-            works: Vec::new(),
-            lifecycle_state: work_active_lifecycle_state_wire(
-                gwt_core::workspace_projection::recompute_work_active_lifecycle(
-                    gwt_core::workspace_projection::WorkAgentRuntime::Running,
-                    None,
-                ),
-            )
-            .to_string(),
-            closed_at: None,
-            session_agent_total: 0,
-            merged_into_base: false,
-            workspace_key: None,
-            remote_only: false,
-            done_equivalent: false,
-            cleanup_candidate: None,
-            cleanup_blocked_reason: None,
-            updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        }];
-        Some(gwt::ActiveWorkProjectionView {
-            id: tab_id.to_string(),
-            title: format!("{} workspace", tab.title),
-            status_category: "active".to_string(),
-            status_text: if active_agents == 1 {
-                "1 active agent".to_string()
-            } else {
-                format!("{active_agents} active agents")
-            },
-            summary: None,
-            progress_summary: None,
-            owner: None,
-            next_action: Some("Check Board for latest updates".to_string()),
-            active_agents,
-            blocked_agents: 0,
-            branch: Some(first.branch_name.clone()),
-            worktree_path: Some(first.worktree_path.display().to_string()),
-            pr_number: None,
-            pr_url: None,
-            pr_state: None,
-            pr_created_at: None,
-            board_refs: Vec::new(),
-            journal_entries: Vec::new(),
-            works: Vec::new(),
-            cleanup_candidate: None,
-            managed_hook_health: managed_hook_health_view_for_project(
-                &tab.project_root,
-                &self.sessions_dir,
-                &sessions,
-            ),
-            active_work_count: active_works.len(),
-            active_works,
-            agents,
-            unassigned_agents: Vec::new(),
-        })
+        let view = active_work_projection_from_live_sessions(
+            tab_id,
+            tab,
+            &sessions,
+            managed_hook_health_view_for_project(&tab.project_root, &self.sessions_dir, &sessions),
+        );
+        let mut cache = self.active_work_projection_cache.borrow_mut();
+        if let Some(view) = view.as_ref() {
+            cache.insert(tab_id.to_string(), view.clone());
+        } else {
+            cache.remove(tab_id);
+        }
+        view
     }
 
     pub(crate) fn handle_workspace_projection_changed_events(
@@ -2815,4 +2895,20 @@ impl AppRuntime {
         };
         self.apply_workspace_projection_title_sync(project_root, &projection)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_ACTIVE_WORK_PROJECTION_BUILDS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_full_active_work_projection_builds() {
+    FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn full_active_work_projection_builds() -> usize {
+    FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(std::cell::Cell::get)
 }

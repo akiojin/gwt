@@ -6066,6 +6066,69 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
+/* Issue #3365 — render/receive degradation banner. Shown when a workspace
+   sync step or a WebSocket receive() handler throws: the event stream keeps
+   running (warn-and-continue), so the user needs an explicit signal that
+   the live view may be stale, plus a Reload escape hatch. Sits below the
+   connection overlay (which blocks everything anyway). */
+.render-degradation-banner {
+  position: fixed;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-state-needs-input);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-2);
+  font-size: var(--type-xs);
+}
+
+.render-degradation-banner__title {
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  color: var(--color-state-needs-input);
+  white-space: nowrap;
+}
+
+.render-degradation-banner__detail {
+  color: var(--color-text-muted);
+}
+
+.render-degradation-banner__reload {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-button-border);
+  border-radius: var(--radius-md);
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  font-size: var(--type-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.render-degradation-banner__reload:hover {
+  background: var(--color-button-bg-hover);
+}
+
+.render-degradation-banner__dismiss {
+  padding: 0 var(--space-1);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.render-degradation-banner__dismiss:hover {
+  color: var(--color-text-strong);
+}
+
 /* SPEC-2359 W-17 (FR-398) — pending Resume feedback. */
 .workspace-resume-picker-pending {
   margin-top: 10px;
