@@ -554,7 +554,7 @@ fn install_agent_capability_env_with_binding(
         project_root,
         session_id,
         execution_binding.map_or(
-            AgentCapabilityLaunchAuthority::Inspection,
+            AgentCapabilityLaunchAuthority::Unbound,
             AgentCapabilityLaunchAuthority::Active,
         ),
         endpoints,
@@ -601,7 +601,7 @@ fn issue_preflighted_agent_capability_env(
     endpoints: PreflightedAgentCapabilityEndpoints,
 ) -> Result<(), String> {
     let target = match execution_authority {
-        AgentCapabilityLaunchAuthority::Inspection => issuer.issue(project_root, session_id)?,
+        AgentCapabilityLaunchAuthority::Unbound => issuer.issue(project_root, session_id)?,
         AgentCapabilityLaunchAuthority::Prepared(binding) => {
             issuer.issue_prepared(project_root, session_id, binding.clone())?
         }
@@ -626,7 +626,7 @@ fn issue_preflighted_agent_capability_env(
 
 #[derive(Clone, Copy)]
 enum AgentCapabilityLaunchAuthority<'a> {
-    Inspection,
+    Unbound,
     Prepared(&'a gwt_agent::SessionExecutionBinding),
     Active(&'a gwt_agent::SessionExecutionBinding),
 }
@@ -1231,6 +1231,9 @@ fn persist_finalized_launch_session(
     Ok(())
 }
 
+/// (process launch, session id, branch name, display name, worktree path,
+/// agent id, linked issue number, base branch, runtime target, session mode,
+/// prepared-execution flag, agent project root)
 pub type AgentLaunchCompletion = (
     ProcessLaunch,
     String,
@@ -1241,32 +1244,12 @@ pub type AgentLaunchCompletion = (
     Option<u64>,
     Option<String>,
     gwt_agent::LaunchRuntimeTarget,
-    AgentLaunchDisposition,
+    gwt_agent::SessionMode,
+    bool,
     String,
 );
 
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentLaunchDisposition {
-    WorkProducing,
-    Inspection,
-}
-
-fn launch_disposition(config: &gwt_agent::LaunchConfig) -> AgentLaunchDisposition {
-    match (&config.execution_intent, config.session_mode) {
-        (gwt_agent::ExecutionLaunchIntent::PreparedContinuation(_), _) => {
-            AgentLaunchDisposition::WorkProducing
-        }
-        (
-            gwt_agent::ExecutionLaunchIntent::Automatic,
-            gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue,
-        ) => AgentLaunchDisposition::Inspection,
-        (gwt_agent::ExecutionLaunchIntent::Automatic, gwt_agent::SessionMode::Normal) => {
-            AgentLaunchDisposition::WorkProducing
-        }
-    }
-}
 
 pub(super) fn dispatch_agent_launch_success<F>(
     proxy: AppEventProxy,
@@ -1952,7 +1935,8 @@ impl AppRuntime {
                 linked_issue_number,
                 base_branch,
                 runtime_target,
-                launch_disposition,
+                session_mode,
+                had_prepared_execution,
                 agent_project_root,
             )) => {
                 let issued_capability_token = process_launch
@@ -1966,12 +1950,11 @@ impl AppRuntime {
                 let pending_fresh_execution = if is_continue_work {
                     None
                 } else if let Some(readiness_nonce) = fresh_readiness_nonce.as_deref() {
-                    if launch_disposition != AgentLaunchDisposition::WorkProducing {
+                    if !had_prepared_execution && session_mode != gwt_agent::SessionMode::Normal {
                         self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
                         return self.launch_error_events(
                             window_id,
-                            "an inspection launch cannot carry fresh execution readiness"
-                                .to_string(),
+                            "a resume launch cannot carry fresh execution readiness".to_string(),
                             launch_feedback_context,
                         );
                     }
@@ -2024,8 +2007,8 @@ impl AppRuntime {
                     .and_then(|address| self.tab(&address.tab_id))
                     .map(|tab| tab.project_root.clone())
                     .unwrap_or_else(|| PathBuf::from(&agent_project_root));
-                let materialized_genesis = if launch_disposition
-                    == AgentLaunchDisposition::WorkProducing
+                let materialized_genesis = if (had_prepared_execution
+                    || session_mode == gwt_agent::SessionMode::Normal)
                     && !is_continue_work
                     && !is_fresh_execution_launch
                 {
@@ -2144,11 +2127,6 @@ impl AppRuntime {
                         tab_id: tab_id.clone(),
                     },
                 );
-                if launch_disposition == AgentLaunchDisposition::Inspection {
-                    self.inspection_agent_windows.insert(window_id.clone());
-                } else {
-                    self.inspection_agent_windows.remove(&window_id);
-                }
                 let _ = gwt_agent::persist_session_restore_window_on_startup(
                     &self.sessions_dir,
                     &session_id_for_restore,
@@ -2209,9 +2187,7 @@ impl AppRuntime {
                                 });
                             }
                         }
-                        if launch_disposition == AgentLaunchDisposition::WorkProducing
-                            && !is_fresh_execution_launch
-                        {
+                        if !is_fresh_execution_launch {
                             let linkage_result = match linked_issue_number {
                                 Some(issue_number) => record_issue_branch_link_with_cache_dir(
                                     &worktree_path,
@@ -2243,10 +2219,7 @@ impl AppRuntime {
                             .map(|session| session.session_id.clone())
                             .collect();
                         let active_session = &self.active_agent_sessions[&window_id];
-                        if launch_disposition == AgentLaunchDisposition::WorkProducing
-                            && !is_continue_work
-                            && !is_fresh_execution_launch
-                        {
+                        if !is_continue_work && !is_fresh_execution_launch {
                             if let Some(base_branch) = base_branch.as_deref() {
                                 match save_start_work_workspace_projection(
                                     &project_root,
@@ -3228,10 +3201,10 @@ impl AppRuntime {
                 session.agent_session_id = config.resume_session_id.clone();
             }
             session.update_status(gwt_agent::AgentStatus::Running);
-            // SPEC-3393 FR-012 (AC-12): a Resume/Continue launch recovers
-            // producing authority through the continuation coordinator before
-            // spawn. Failure keeps the observation-only launch (the unlinked
-            // carve-out) — a resume must degrade, never block.
+            // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
+            // recovers producing authority through the continuation
+            // coordinator before spawn. Failure degrades to an unbound,
+            // input-capable launch — a resume must degrade, never block.
             if matches!(
                 config.execution_intent,
                 gwt_agent::ExecutionLaunchIntent::Automatic
@@ -3313,16 +3286,18 @@ impl AppRuntime {
                 session.bind_docker_runtime(&agent_project_root, &project_state_root)?;
             }
 
-            // A plain Resume is inspection-only. Producing authority is
-            // created only for a linked non-ephemeral launch that owns its
-            // execution lifecycle. Continue work creates successor
-            // generations through its coordinator instead of falling through
-            // this genesis-only launch path.
-            let launch_disposition = launch_disposition(&config);
+            // Genesis producing authority is minted only for a fresh linked
+            // non-ephemeral launch that owns its execution lifecycle. Resume
+            // and Continue launches recover producing authority exclusively
+            // through the continuation coordinator; Continue work creates
+            // successor generations through its coordinator instead of
+            // falling through this genesis-only launch path.
+            let session_mode = config.session_mode;
+            let had_prepared_execution = prepared_continuation.is_some();
             let producing_owner = (!config.is_ephemeral
                 && !config.suppress_execution_control
                 && prepared_continuation.is_none()
-                && launch_disposition == AgentLaunchDisposition::WorkProducing)
+                && session_mode == gwt_agent::SessionMode::Normal)
                 .then(|| {
                     config.linked_issue_number.map(|owner_number| {
                         gwt::cli::execution_state::ExecutionOwnerKey {
@@ -3418,7 +3393,8 @@ impl AppRuntime {
                 config.linked_issue_number,
                 config.base_branch.clone(),
                 runtime_target,
-                launch_disposition,
+                session_mode,
+                had_prepared_execution,
                 agent_project_root,
             ))
         })();
@@ -3440,7 +3416,8 @@ impl AppRuntime {
                 linked_issue_number,
                 base_branch,
                 runtime_target,
-                launch_disposition,
+                session_mode,
+                had_prepared_execution,
                 agent_project_root,
             )) => {
                 dispatch_agent_launch_success(
@@ -3456,7 +3433,8 @@ impl AppRuntime {
                         linked_issue_number,
                         base_branch,
                         runtime_target,
-                        launch_disposition,
+                        session_mode,
+                        had_prepared_execution,
                         agent_project_root,
                     ),
                     |proxy, project_index_root| {
@@ -3581,21 +3559,11 @@ impl AppRuntime {
     }
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {
-        let inspection_only = self.inspection_agent_windows.remove(window_id);
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
             self.revoke_agent_capability_for_window(window_id);
             return;
         };
         self.revoke_agent_capability_for_window(window_id);
-        if inspection_only {
-            let _ = gwt_agent::persist_session_status(
-                &self.sessions_dir,
-                &session.session_id,
-                gwt_agent::AgentStatus::Stopped,
-            );
-            self.launch_wizard_cache.mark_stopped(&session.session_id);
-            return;
-        }
         // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
@@ -3702,7 +3670,6 @@ impl AppRuntime {
             return None;
         }
         self.clear_agent_window_startup_restore(window_id);
-        self.inspection_agent_windows.remove(window_id);
         self.recoverable_agent_error_windows.remove(window_id);
         self.window_hook_states.remove(window_id);
         let session = self.active_agent_sessions.remove(window_id);
@@ -4084,57 +4051,6 @@ mod docker_session_persistence_tests {
 mod agent_endpoint_env_tests {
     use super::*;
     use std::ffi::OsString;
-
-    #[test]
-    // SPEC-3393 FR-012: the spawn path upgrades a linked Resume/Continue to a
-    // PreparedContinuation before this mapping is consulted (see
-    // gwt::prepare_resume_producing_authority). The Automatic fallback below is
-    // the unlinked-session carve-out, not the Resume contract.
-    fn resume_disposition_falls_back_to_inspection_without_prepared_continuation() {
-        let resume = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .session_mode(gwt_agent::SessionMode::Resume)
-            .resume_session_id("conversation-existing")
-            .build();
-        let legacy_continue = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
-            .session_mode(gwt_agent::SessionMode::Continue)
-            .build();
-        let normal = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
-        let binding = gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: "session-continuation".to_string(),
-            repo_hash: "repo-hash".to_string(),
-            owner_kind: "spec".to_string(),
-            owner_number: 2359,
-            identity: gwt_agent::ExecutionBindingIdentity {
-                generation_id: "generation-successor".to_string(),
-                binding_id: "binding-operation".to_string(),
-                ledger_head_hash: "head-operation".to_string(),
-            },
-            capability_generation: 2,
-        };
-        let prepared_resume = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .session_mode(gwt_agent::SessionMode::Resume)
-            .resume_session_id("conversation-existing")
-            .prepared_continuation(binding)
-            .build();
-
-        assert_eq!(
-            launch_disposition(&resume),
-            AgentLaunchDisposition::Inspection
-        );
-        assert_eq!(
-            launch_disposition(&legacy_continue),
-            AgentLaunchDisposition::Inspection
-        );
-        assert_eq!(
-            launch_disposition(&normal),
-            AgentLaunchDisposition::WorkProducing
-        );
-        assert_eq!(
-            launch_disposition(&prepared_resume),
-            AgentLaunchDisposition::WorkProducing
-        );
-    }
 
     struct ScopedEnvVar {
         key: &'static str,

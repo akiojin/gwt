@@ -2606,16 +2606,16 @@ fn embedded_web_work_surface_renders_lifecycle_state_badge() {
 }
 
 #[test]
-fn embedded_web_work_detail_keeps_task_first_action_and_inspection_contract() {
+fn embedded_web_work_detail_keeps_task_first_action_and_session_open_contract() {
     let js = workspace_kanban_surface_js();
     let css = styles_components_css();
 
     assert!(
         js.contains("workspace-detail-work-action-rail")
             && js.contains("workspace-detail-work-primary-action")
-            && js.contains("Inspect session")
-            && js.contains("No previous session to inspect. Continue work can start a new one."),
-        "embedded Work detail must keep producing continuation on Work and historical sessions as inspection",
+            && js.contains("Open session")
+            && js.contains("No previous session to open. Continue work can start a new one."),
+        "embedded Work detail must keep producing continuation on Work while historical sessions reopen with input enabled",
     );
     assert!(
         js.contains("createNode(\"button\", \"wizard-button\", \"Launch Agent\")")
@@ -3940,25 +3940,58 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
 }
 
 #[test]
-fn embedded_web_completed_work_resume_surfaces_are_inspection_only() {
+fn embedded_web_first_party_assets_carry_no_inspection_concept() {
+    // Issue #3410 (AC-2): the observation-only Inspection launch mode is
+    // removed as a mechanism. No shipped first-party asset may carry the
+    // concept — neither the blocking copy nor the execution-intent value.
+    let sources: [(&str, &str); 3] = [
+        ("frontend bundle", frontend_bundle_source()),
+        (
+            "workspace-resume-picker-modal.js",
+            workspace_resume_picker_js(),
+        ),
+        (
+            "styles/components.css",
+            include_str!("../web/styles/components.css"),
+        ),
+    ];
+    let banned = [
+        "inspection",
+        "inspect session",
+        "inspect conversation",
+        "inspect this conversation",
+        "session to inspect",
+        "history only",
+    ];
+    for (name, source) in sources {
+        let lowered = source.to_ascii_lowercase();
+        for phrase in banned {
+            assert!(
+                !lowered.contains(phrase),
+                "expected {name} to carry no inspection-mode concept ({phrase:?}) after #3410 removed observation-only launches"
+            );
+        }
+    }
+}
+
+#[test]
+fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
     let picker = workspace_resume_picker_js();
     let wizard = launch_wizard_surface_js();
 
     assert!(
         picker.contains("agent.resume_kind !== \"metadata_only\"")
-            && picker.contains("row.dataset.executionIntent = \"inspection\"")
-            && picker.contains("does not continue the Work"),
-        "expected the Work Resume picker to exclude fresh-start metadata and expose only explicit Inspection rows",
+            && picker.contains("row.dataset.executionIntent = \"resume\""),
+        "expected the Work Resume picker to exclude fresh-start metadata and open sessions as plain input-capable resumes",
     );
     assert!(
         wizard.contains("export function launchWizardStartMethodIntent")
             && wizard.contains("button.dataset.executionIntent = startMethodIntent")
-            && wizard.contains("History only")
-            && wizard.contains("Continue work"),
-        "expected legacy conversation methods in the Launch Wizard to remain Inspection-only and point producing continuation to Continue work",
+            && !wizard.contains("History only"),
+        "expected legacy conversation methods in the Launch Wizard to reopen conversations without an observation-only notice",
     );
     assert!(
         !picker.contains("kind: \"continue_work\"") && !wizard.contains("kind: \"continue_work\""),
-        "Inspection surfaces must never synthesize the producing Continue work request",
+        "Resume surfaces must never synthesize the producing Continue work request",
     );
 }
