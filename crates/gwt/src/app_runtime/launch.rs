@@ -1323,7 +1323,8 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(resume_id) = session.exact_resume_session_id() {
         builder = builder
             .session_mode(gwt_agent::SessionMode::Resume)
-            .resume_session_id(resume_id.to_string());
+            .resume_session_id(resume_id.to_string())
+            .predecessor_session_id(session.id.clone());
     } else {
         builder = builder.session_mode(gwt_agent::SessionMode::Normal);
     }
@@ -3180,6 +3181,15 @@ impl AppRuntime {
                 }
             }
 
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+                && gwt_agent::apply_host_bunx_cache_fast_path(&mut config)
+            {
+                tracing::debug!(
+                    agent = %config.agent_id,
+                    command = %config.command,
+                    "reusing fresh Bun agent package cache"
+                );
+            }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
             // launch argv BEFORE the Windows host shell wrapper rewrites it
@@ -3218,6 +3228,27 @@ impl AppRuntime {
                 session.agent_session_id = config.resume_session_id.clone();
             }
             session.update_status(gwt_agent::AgentStatus::Running);
+            // SPEC-3393 FR-012 (AC-12): a Resume/Continue launch recovers
+            // producing authority through the continuation coordinator before
+            // spawn. Failure keeps the observation-only launch (the unlinked
+            // carve-out) — a resume must degrade, never block.
+            if matches!(
+                config.execution_intent,
+                gwt_agent::ExecutionLaunchIntent::Automatic
+            ) && matches!(
+                config.session_mode,
+                gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
+            ) {
+                if let Some(predecessor) = config.predecessor_session_id.clone() {
+                    if let Some((_, binding)) = gwt::prepare_resume_producing_authority(
+                        Path::new(&project_root),
+                        &predecessor,
+                    ) {
+                        config.execution_intent =
+                            gwt_agent::ExecutionLaunchIntent::PreparedContinuation(binding);
+                    }
+                }
+            }
             let prepared_continuation = match &config.execution_intent {
                 gwt_agent::ExecutionLaunchIntent::Automatic => None,
                 gwt_agent::ExecutionLaunchIntent::PreparedContinuation(binding) => {
@@ -4055,7 +4086,11 @@ mod agent_endpoint_env_tests {
     use std::ffi::OsString;
 
     #[test]
-    fn provider_continuity_is_inspection_unless_continue_work_prepares_execution() {
+    // SPEC-3393 FR-012: the spawn path upgrades a linked Resume/Continue to a
+    // PreparedContinuation before this mapping is consulted (see
+    // gwt::prepare_resume_producing_authority). The Automatic fallback below is
+    // the unlinked-session carve-out, not the Resume contract.
+    fn resume_disposition_falls_back_to_inspection_without_prepared_continuation() {
         let resume = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .session_mode(gwt_agent::SessionMode::Resume)
             .resume_session_id("conversation-existing")

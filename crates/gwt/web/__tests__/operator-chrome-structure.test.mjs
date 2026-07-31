@@ -11,6 +11,11 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
+const workspaceRenderSyncSource = readFileSync(
+  resolve(here, "../workspace-render-sync.js"),
+  "utf8",
+);
 // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (state, interaction
 // guard, builders, renderLaunchWizard, chrome listeners) moved from app.js
 // to launch-wizard-surface.js; wizard render/source patterns are pinned
@@ -1653,9 +1658,12 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
 
 test("renderWorkspace refreshes operator telemetry when windows mount/unmount (SPEC-3038)", () => {
   const body = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the recompute is the render guard's `recompute` hook, which
+  // runs even when a per-window sync step throws — the badge / empty state /
+  // minimap must not freeze behind a poisoned window.
   assert.match(
     body,
-    /recomputeOperatorTelemetry\(\)/,
+    /recompute:\s*recomputeOperatorTelemetry/,
     "window-count badge + empty state must update when windows mount/unmount",
   );
 });
@@ -4198,10 +4206,23 @@ test("Recent Projects render key ignores workspace state", () => {
 
 test("viewport-only workspace_state skips unchanged window reconciliation", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the rendered-key slot lives inside workspaceRenderSync so an
+  // exception mid-sync leaves the key uncommitted (the next workspace_state
+  // retries instead of freezing behind the diff skip).
   assert.match(
     appSource,
-    /let\s+renderedWorkspaceWindowsKey\s*=/,
-    "app.js must track the last reconciled Workspace Windows shell key",
+    /import\s*\{\s*createWorkspaceRenderSync\s*\}\s*from\s*"\/workspace-render-sync\.js"/,
+    "app.js must import the render-key sync guard",
+  );
+  assert.match(
+    appSource,
+    /const\s+workspaceRenderSync\s*=\s*createWorkspaceRenderSync\s*\(/,
+    "app.js must own one workspace render sync guard instance",
+  );
+  assert.match(
+    workspaceRenderSyncSource,
+    /if\s*\(\s*renderedKey\s*===\s*key\s*\)\s*\{\s*return\s*\{\s*skipped:\s*true/,
+    "the render guard must skip an unchanged window key before any sync work",
   );
   assert.match(
     appSource,
@@ -4222,11 +4243,9 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
   const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
   const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
-  const keyIndex = renderWorkspaceBody.indexOf(
-    "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
-  );
+  const keyIndex = renderWorkspaceBody.indexOf("workspaceRenderSync.render({");
   const guardIndex = renderWorkspaceBody.indexOf(
-    "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
+    "key: workspaceWindowsRenderKey(workspace)",
   );
   const classifyIndex = renderWorkspaceBody.indexOf(
     "classifyProjectWindowVisibility",
@@ -4234,6 +4253,12 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
   const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
+  const syncGuardIndex = workspaceRenderSyncSource.indexOf('guard("sync"');
+  const recomputeGuardIndex = workspaceRenderSyncSource.indexOf('guard("recompute"');
+  const afterSyncGuardIndex = workspaceRenderSyncSource.indexOf('guard("after_sync"');
+  const commitWindowKeyIndex = workspaceRenderSyncSource.indexOf(
+    "renderedKey = key;",
+  );
 
   assert.notEqual(
     nextViewportIndex,
@@ -4266,12 +4291,13 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
   assert.ok(
     guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
-    "unchanged window key must return before reconciliation and focus activation",
+    "reconciliation and focus activation must run inside the guarded render call",
   );
-  assert.match(
-    renderWorkspaceBody.slice(guardIndex, classifyIndex),
-    /return\s*;/,
-    "unchanged window key guard must return before reconciliation",
+  assert.ok(
+    commitWindowKeyIndex > syncGuardIndex &&
+      commitWindowKeyIndex > recomputeGuardIndex &&
+      commitWindowKeyIndex > afterSyncGuardIndex,
+    "workspace render sync must commit the window key only after reconciliation, telemetry, and focus all succeed",
   );
 });
 
@@ -5243,9 +5269,12 @@ test("Workspace visibility classification reuses direct id sets", () => {
     /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
     "renderWorkspace must not allocate an active window id array before classification",
   );
+  // Issue #3365: the set is assigned inside the guarded sync callback (the
+  // declaration lives outside so afterSync can reuse it), and topmost focus
+  // reads it optionally because a failed sync may have left it unset.
   assert.match(
     renderWorkspaceBody,
-    /const\s+activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
+    /activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
     "renderWorkspace must derive active window ids as a Set once",
   );
   assert.match(
@@ -5255,7 +5284,7 @@ test("Workspace visibility classification reuses direct id sets", () => {
   );
   assert.match(
     renderWorkspaceBody,
-    /topmostId\s*&&\s*activeWindowIdSet\.has\s*\(\s*topmostId\s*\)/,
+    /topmostId\s*&&\s*activeWindowIdSet\?\.has\s*\(\s*topmostId\s*\)/,
     "renderWorkspace must reuse the active id set for topmost focus membership",
   );
 });

@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy
+
 import chroma_index_runner as runner
 
 REPO_HASH = "abc1234567890def"
@@ -91,6 +93,100 @@ class SearchMultiContractTests(unittest.TestCase):
                 "search-multi must encode the query once and reuse the "
                 f"embedding across scopes (AS-2), calls: {counting.encode.call_args_list}",
             )
+
+    def test_search_multi_accepts_real_model_numpy_float32_query_embedding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            project = self._seed_file_scopes(base, db_root)
+            fake_model = runner._FakeEmbeddingModel()
+            numpy_model = mock.MagicMock()
+            numpy_model.encode.side_effect = lambda values: numpy.asarray(
+                fake_model.encode(values), dtype=numpy.float32
+            )
+
+            with mock.patch.object(
+                runner, "_get_embedding_model", return_value=numpy_model
+            ):
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=WORKTREE_HASH,
+                    project_root=str(project),
+                    query="alpha search",
+                    n_results=5,
+                    scopes=["files", "files-docs"],
+                    db_root=db_root,
+                )
+
+            self.assertTrue(
+                payload.get("ok"),
+                "a healthy store must remain searchable when the real E5 model "
+                f"returns NumPy float32 scalars: {payload}",
+            )
+            self.assertEqual(payload["scopes"]["files"]["state"], "fresh")
+            self.assertEqual(payload["scopes"]["files-docs"]["state"], "fresh")
+
+    def test_search_multi_reports_healthy_query_failure_without_corrupt_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            project = self._seed_file_scopes(base, db_root)
+
+            with mock.patch.object(
+                runner,
+                "_search_scope_collection",
+                side_effect=TypeError(
+                    "private-vector=[0.123456789," + ("9" * 2048) + "]"
+                ),
+            ):
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=WORKTREE_HASH,
+                    project_root=str(project),
+                    query="alpha search",
+                    n_results=5,
+                    scopes=["files"],
+                    db_root=db_root,
+                )
+
+            self.assertFalse(payload.get("ok"), payload)
+            self.assertEqual(payload.get("error_code"), "SEARCH_FAILED", payload)
+            self.assertIs(payload.get("retryable"), False, payload)
+            self.assertEqual(payload.get("affected_scopes"), ["files"], payload)
+            self.assertLessEqual(len((payload.get("error") or "").encode()), 512)
+            self.assertNotIn("private-vector", json.dumps(payload))
+            self.assertNotIn("scopes", payload)
+            self.assertNotIn("scope_results", payload)
+
+    def test_search_multi_reports_query_encoding_failure_without_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            project = self._seed_file_scopes(base, db_root)
+
+            with mock.patch.object(
+                runner.E5EmbeddingFunction,
+                "embed_query",
+                side_effect=ValueError("model emitted a non-finite embedding"),
+            ):
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=WORKTREE_HASH,
+                    project_root=str(project),
+                    query="alpha search",
+                    n_results=5,
+                    scopes=["files", "files-docs"],
+                    db_root=db_root,
+                )
+
+            self.assertFalse(payload.get("ok"), payload)
+            self.assertEqual(payload.get("error_code"), "SEARCH_FAILED", payload)
+            self.assertIs(payload.get("retryable"), False, payload)
+            self.assertEqual(
+                payload.get("affected_scopes"), ["files", "files-docs"], payload
+            )
+            self.assertLessEqual(len((payload.get("error") or "").encode()), 512)
+            self.assertNotIn("non-finite", json.dumps(payload))
 
     def test_search_multi_classifies_missing_and_corrupt_scopes(self):
         with tempfile.TemporaryDirectory() as tmp:

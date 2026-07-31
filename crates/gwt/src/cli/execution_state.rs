@@ -14374,6 +14374,7 @@ mod tests {
             .unwrap_err();
             let message = err.to_string();
             assert!(message.contains("trusted state unhealthy"), "{message}");
+            assert!(message.contains("execution.repair"), "{message}");
             assert!(message.contains("execution.adopt"), "{message}");
             assert!(!message.contains("network"), "{message}");
 

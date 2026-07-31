@@ -513,7 +513,7 @@ mod tests {
             .0;
 
         assert!(
-            !front_door.contains("bootstrap_project_index_for_path"),
+            !front_door.contains("bootstrap_project_index_for_"),
             "GUI front door must not block server startup on Project Index bootstrap"
         );
     }

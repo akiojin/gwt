@@ -511,6 +511,321 @@ pub enum ExecutionLaunchIntent {
     PreparedContinuation(SessionExecutionBinding),
 }
 
+/// Reuse a fresh Bun-created package executable for a host launch.
+///
+/// `bunx <package>@latest` keeps an already-materialized package under the
+/// host temp directory, but still performs package resolution on every
+/// invocation. That repeated resolution is several seconds for Codex on some
+/// hosts. This best-effort fast path runs the validated cached entrypoint with
+/// the same Bun runtime while preserving the requested worktree as the process
+/// cwd.
+///
+/// `latest` cache entries are accepted for at most 24 hours. Missing, stale,
+/// malformed, escaping, non-Bun, non-host, and unsupported-platform entries
+/// leave the launch untouched so the existing bunx/npx path remains the
+/// authoritative fallback.
+pub fn apply_host_bunx_cache_fast_path(config: &mut LaunchConfig) -> bool {
+    #[cfg(unix)]
+    {
+        let temp_root = config
+            .env_vars
+            .get("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        apply_host_bunx_cache_fast_path_from(config, &temp_root, std::time::SystemTime::now())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        false
+    }
+}
+
+#[cfg(unix)]
+fn apply_host_bunx_cache_fast_path_from(
+    config: &mut LaunchConfig,
+    temp_root: &Path,
+    now: std::time::SystemTime,
+) -> bool {
+    apply_host_bunx_cache_fast_path_from_uid(config, temp_root, now, current_effective_uid())
+}
+
+#[cfg(unix)]
+fn current_effective_uid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and does not dereference memory.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn apply_host_bunx_cache_fast_path_from_uid(
+    config: &mut LaunchConfig,
+    temp_root: &Path,
+    now: std::time::SystemTime,
+    effective_uid: u32,
+) -> bool {
+    if config.runtime_target != LaunchRuntimeTarget::Host
+        || command_basename(&config.command) != "bunx"
+    {
+        return false;
+    }
+
+    let Some(package) = config.agent_id.package_name() else {
+        return false;
+    };
+    let Some(version) = config.tool_version.as_deref() else {
+        return false;
+    };
+    if version.is_empty()
+        || version == "installed"
+        || version.contains('/')
+        || version.contains('\\')
+        || version == "."
+        || version == ".."
+    {
+        return false;
+    }
+
+    let version_spec = format!("{package}@{version}");
+    let Some(args) = strip_package_runner_prefix(&config.args, &version_spec) else {
+        return false;
+    };
+    let Some(executable) = find_valid_bunx_cached_executable(
+        temp_root,
+        effective_uid,
+        &config.agent_id,
+        package,
+        version,
+        now,
+    ) else {
+        return false;
+    };
+    let Some(bun_runtime) = resolve_bun_runtime_for_cache_fast_path(config) else {
+        return false;
+    };
+
+    config.command = bun_runtime.to_string_lossy().into_owned();
+    config.args = std::iter::once(executable.to_string_lossy().into_owned())
+        .chain(args)
+        .collect();
+    true
+}
+
+#[cfg(unix)]
+fn resolve_bun_runtime_for_cache_fast_path(config: &LaunchConfig) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cwd = config
+        .working_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let command = Path::new(&config.command);
+    let resolved_bunx = if command.is_absolute() || command.components().count() > 1 {
+        command.to_path_buf()
+    } else {
+        let inherited_path = std::env::var("PATH").ok();
+        let path = config
+            .env_vars
+            .get("PATH")
+            .map(String::as_str)
+            .or(inherited_path.as_deref())?;
+        which::which_in(command, Some(path), &cwd).ok()?
+    };
+    let canonical_bunx = std::fs::canonicalize(resolved_bunx).ok()?;
+    let bun_runtime = if command_basename(canonical_bunx.to_string_lossy().as_ref()) == "bun" {
+        canonical_bunx
+    } else {
+        std::fs::canonicalize(canonical_bunx.parent()?.join("bun")).ok()?
+    };
+    let metadata = std::fs::metadata(&bun_runtime).ok()?;
+    (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(bun_runtime)
+}
+
+#[cfg(unix)]
+fn strip_package_runner_prefix(args: &[String], version_spec: &str) -> Option<Vec<String>> {
+    if args.first().is_some_and(|arg| arg == "--yes")
+        && args.get(1).is_some_and(|arg| arg == version_spec)
+    {
+        return Some(args[2..].to_vec());
+    }
+    args.first()
+        .is_some_and(|arg| arg == version_spec)
+        .then(|| args[1..].to_vec())
+}
+
+#[cfg(unix)]
+fn find_valid_bunx_cached_executable(
+    temp_root: &Path,
+    effective_uid: u32,
+    agent_id: &AgentId,
+    package: &str,
+    version: &str,
+    now: std::time::SystemTime,
+) -> Option<PathBuf> {
+    let canonical_temp_root = private_bunx_temp_root(temp_root, effective_uid)?;
+    let root = bunx_cache_root(&canonical_temp_root, package, version, effective_uid)?;
+    validate_bunx_cache_root(
+        &root,
+        &canonical_temp_root,
+        effective_uid,
+        agent_id,
+        package,
+        version,
+        now,
+    )
+}
+
+#[cfg(unix)]
+fn private_bunx_temp_root(temp_root: &Path, effective_uid: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let canonical = std::fs::canonicalize(temp_root).ok()?;
+    let metadata = std::fs::metadata(&canonical).ok()?;
+    (metadata.is_dir()
+        && bunx_temp_root_permissions_are_trusted(
+            metadata.uid(),
+            metadata.permissions().mode(),
+            effective_uid,
+        ))
+    .then_some(canonical)
+}
+
+#[cfg(unix)]
+fn bunx_temp_root_permissions_are_trusted(owner_uid: u32, mode: u32, effective_uid: u32) -> bool {
+    // Bun's cached JS entrypoints can be mode 0777. A sticky shared /tmp only
+    // protects entry replacement; it does not prevent another user from
+    // opening and rewriting that file. The complete cache ancestry must
+    // therefore start under an effective-user-owned, non-shared temp root.
+    owner_uid == effective_uid && mode & 0o022 == 0
+}
+
+#[cfg(unix)]
+fn bunx_cache_root(
+    temp_root: &Path,
+    package: &str,
+    version: &str,
+    effective_uid: u32,
+) -> Option<PathBuf> {
+    match package
+        .strip_prefix('@')
+        .and_then(|value| value.split_once('/'))
+    {
+        Some((scope, name)) => Some(
+            temp_root
+                .join(format!("bunx-{effective_uid}-@{scope}"))
+                .join(format!("{name}@{version}")),
+        ),
+        None if !package.is_empty() => {
+            Some(temp_root.join(format!("bunx-{effective_uid}-{package}@{version}")))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn owned_unwritable_metadata(path: &Path, effective_uid: u32) -> Option<std::fs::Metadata> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = std::fs::metadata(path).ok()?;
+    (metadata.uid() == effective_uid && metadata.permissions().mode() & 0o022 == 0)
+        .then_some(metadata)
+}
+
+#[cfg(unix)]
+fn owned_unwritable_dir(path: &Path, effective_uid: u32) -> Option<()> {
+    owned_unwritable_metadata(path, effective_uid)?
+        .is_dir()
+        .then_some(())
+}
+
+#[cfg(unix)]
+fn owned_unwritable_file(path: &Path, effective_uid: u32) -> Option<std::fs::Metadata> {
+    let metadata = owned_unwritable_metadata(path, effective_uid)?;
+    metadata.is_file().then_some(metadata)
+}
+
+#[cfg(unix)]
+fn validate_bunx_cache_root(
+    root: &Path,
+    canonical_temp_root: &Path,
+    effective_uid: u32,
+    agent_id: &AgentId,
+    package: &str,
+    version: &str,
+    now: std::time::SystemTime,
+) -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    if !canonical_root.starts_with(canonical_temp_root) {
+        return None;
+    }
+    owned_unwritable_dir(&canonical_root, effective_uid)?;
+
+    let root_package_path = canonical_root.join("package.json");
+    let root_package_metadata = owned_unwritable_file(&root_package_path, effective_uid)?;
+    if version == "latest" {
+        let age = now
+            .duration_since(root_package_metadata.modified().ok()?)
+            .ok()?;
+        if age > std::time::Duration::from_secs(24 * 60 * 60) {
+            return None;
+        }
+    }
+
+    let root_package: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&root_package_path).ok()?).ok()?;
+    let dependency = root_package
+        .get("dependencies")?
+        .get(package)?
+        .as_str()?
+        .trim();
+    if dependency.is_empty() {
+        return None;
+    }
+
+    let node_modules = canonical_root.join("node_modules");
+    owned_unwritable_dir(&node_modules, effective_uid)?;
+    let bin_dir = node_modules.join(".bin");
+    owned_unwritable_dir(&bin_dir, effective_uid)?;
+
+    let mut installed_package_dir = node_modules.clone();
+    for component in package.split('/') {
+        installed_package_dir.push(component);
+        owned_unwritable_dir(&installed_package_dir, effective_uid)?;
+    }
+    let installed_package_path = installed_package_dir.join("package.json");
+    owned_unwritable_file(&installed_package_path, effective_uid)?;
+    let installed_package: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&installed_package_path).ok()?).ok()?;
+    if installed_package.get("name")?.as_str()? != package {
+        return None;
+    }
+    if version != "latest" && installed_package.get("version")?.as_str()? != version {
+        return None;
+    }
+
+    let binary_name = Path::new(agent_id.command()).file_name()?.to_str()?;
+    let executable = bin_dir.join(binary_name);
+    if std::fs::symlink_metadata(&executable).ok()?.uid() != effective_uid {
+        return None;
+    }
+    let executable_metadata = std::fs::metadata(&executable).ok()?;
+    if executable_metadata.uid() != effective_uid
+        || !executable_metadata.is_file()
+        || executable_metadata.permissions().mode() & 0o111 == 0
+    {
+        return None;
+    }
+
+    let canonical_executable = std::fs::canonicalize(&executable).ok()?;
+    if !canonical_executable.starts_with(canonical_root.join("node_modules")) {
+        return None;
+    }
+    Some(canonical_executable)
+}
+
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
@@ -529,6 +844,10 @@ pub struct LaunchConfig {
     pub reasoning_level: Option<String>,
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
+    /// Durable gwt Session id this Resume/Continue launch continues from
+    /// (SPEC-3393 FR-012): lets the launch path recover producing authority
+    /// through the continuation coordinator before spawn.
+    pub predecessor_session_id: Option<String>,
     pub skip_permissions: bool,
     pub fast_mode: bool,
     /// Legacy Codex-only compatibility field. New callers should use
@@ -583,6 +902,7 @@ pub struct AgentLaunchBuilder {
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
+    predecessor_session_id: Option<String>,
     permission_mode: Option<PermissionMode>,
     env_overrides: HashMap<String, String>,
     /// Env table from a `CustomCodingAgent`. Merged into the spawn env AFTER
@@ -633,6 +953,7 @@ impl AgentLaunchBuilder {
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            predecessor_session_id: None,
             permission_mode: None,
             env_overrides: HashMap::new(),
             custom_agent_env: HashMap::new(),
@@ -733,6 +1054,13 @@ impl AgentLaunchBuilder {
 
     pub fn resume_session_id(mut self, id: impl Into<String>) -> Self {
         self.resume_session_id = Some(id.into());
+        self
+    }
+
+    /// See [`LaunchConfig::predecessor_session_id`].
+    #[must_use]
+    pub fn predecessor_session_id(mut self, id: impl Into<String>) -> Self {
+        self.predecessor_session_id = Some(id.into());
         self
     }
 
@@ -960,6 +1288,7 @@ impl AgentLaunchBuilder {
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
+        let predecessor_session_id = self.predecessor_session_id.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
@@ -979,6 +1308,7 @@ impl AgentLaunchBuilder {
             reasoning_level,
             session_mode,
             resume_session_id,
+            predecessor_session_id,
             skip_permissions,
             fast_mode,
             codex_fast_mode,
@@ -2636,6 +2966,303 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).expect("chmod runner");
+    }
+
+    #[cfg(all(not(windows), unix))]
+    fn write_test_bun_runtime(temp_root: &Path) -> (PathBuf, PathBuf) {
+        let bin_dir = temp_root.join("test-bun/bin");
+        std::fs::create_dir_all(&bin_dir).expect("create test Bun bin");
+        let bun = bin_dir.join("bun");
+        let bunx = bin_dir.join("bunx");
+        write_test_runner(&bun);
+        std::os::unix::fs::symlink("bun", &bunx).expect("create bunx symlink");
+        (bun, bunx)
+    }
+
+    #[cfg(all(not(windows), unix))]
+    fn write_test_bunx_cache(
+        temp_root: &Path,
+        version: &str,
+        dependency_name: &str,
+        installed_name: &str,
+    ) -> (PathBuf, std::time::SystemTime) {
+        let cache_root = temp_root
+            .join(format!("bunx-{}-@openai", current_effective_uid()))
+            .join(format!("codex@{version}"));
+        let executable = cache_root.join("node_modules/.bin/codex");
+        std::fs::create_dir_all(executable.parent().expect("bin parent")).expect("create bin dir");
+        let installed_package_dir = cache_root.join("node_modules/@openai/codex");
+        std::fs::create_dir_all(&installed_package_dir).expect("create installed package dir");
+        std::fs::write(
+            cache_root.join("package.json"),
+            format!(r#"{{"dependencies":{{"{dependency_name}":"^0.145.0"}}}}"#),
+        )
+        .expect("write cache package");
+        std::fs::write(
+            installed_package_dir.join("package.json"),
+            format!(r#"{{"name":"{installed_name}","version":"0.145.0"}}"#),
+        )
+        .expect("write installed package");
+        let executable_target = installed_package_dir.join("bin/codex.js");
+        std::fs::create_dir_all(
+            executable_target
+                .parent()
+                .expect("executable target parent"),
+        )
+        .expect("create executable target parent");
+        write_test_runner(&executable_target);
+        let mut target_permissions = std::fs::metadata(&executable_target)
+            .expect("target metadata")
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        target_permissions.set_mode(0o777);
+        std::fs::set_permissions(&executable_target, target_permissions)
+            .expect("mirror Bun executable target mode");
+        std::os::unix::fs::symlink("../@openai/codex/bin/codex.js", &executable)
+            .expect("create Bun-style executable symlink");
+        let modified = std::fs::metadata(cache_root.join("package.json"))
+            .expect("cache metadata")
+            .modified()
+            .expect("cache modified time");
+        (executable, modified)
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn fresh_bunx_latest_cache_runs_entrypoint_with_bun_and_preserves_agent_args() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (executable, modified) =
+            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .working_dir("/tmp/project")
+            .build();
+        let (bun, bunx) = write_test_bun_runtime(temp.path());
+        config.command = bunx.to_string_lossy().into_owned();
+        config.env_vars.insert(
+            "PATH".to_string(),
+            bun.parent()
+                .expect("Bun bin")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let original_working_dir = config.working_dir.clone();
+
+        let changed = apply_host_bunx_cache_fast_path_from(
+            &mut config,
+            temp.path(),
+            modified + std::time::Duration::from_secs(60),
+        );
+
+        assert!(changed);
+        assert_eq!(
+            std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
+            std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
+        );
+        assert_eq!(config.working_dir, original_working_dir);
+        assert_eq!(
+            PathBuf::from(config.args.first().expect("cached entrypoint arg")),
+            std::fs::canonicalize(executable).expect("canonical cached executable")
+        );
+        assert!(!config.args.iter().any(|arg| arg == "@openai/codex@latest"));
+        assert!(config.args.iter().any(|arg| arg == "--no-alt-screen"));
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_falls_back_for_stale_missing_or_wrong_package_cache() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_executable, modified) =
+            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
+        let mut stale = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .build();
+        let original_command = stale.command.clone();
+        let original_args = stale.args.clone();
+
+        assert!(!apply_host_bunx_cache_fast_path_from(
+            &mut stale,
+            temp.path(),
+            modified + std::time::Duration::from_secs(24 * 60 * 60 + 1),
+        ));
+        assert_eq!(stale.command, original_command);
+        assert_eq!(stale.args, original_args);
+
+        let missing = tempfile::tempdir().expect("missing tempdir");
+        assert!(!apply_host_bunx_cache_fast_path_from(
+            &mut stale,
+            missing.path(),
+            modified + std::time::Duration::from_secs(60),
+        ));
+
+        let wrong = tempfile::tempdir().expect("wrong tempdir");
+        let (_executable, wrong_modified) =
+            write_test_bunx_cache(wrong.path(), "latest", "other", "other");
+        assert!(!apply_host_bunx_cache_fast_path_from(
+            &mut stale,
+            wrong.path(),
+            wrong_modified + std::time::Duration::from_secs(60),
+        ));
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_rejects_a_shared_writable_temp_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_executable, modified) =
+            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
+        let original_permissions = std::fs::metadata(temp.path())
+            .expect("temp root metadata")
+            .permissions();
+        let mut shared_permissions = original_permissions.clone();
+        shared_permissions.set_mode(0o777);
+        std::fs::set_permissions(temp.path(), shared_permissions).expect("make temp root shared");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .build();
+
+        let changed = apply_host_bunx_cache_fast_path_from(
+            &mut config,
+            temp.path(),
+            modified + std::time::Duration::from_secs(60),
+        );
+        std::fs::set_permissions(temp.path(), original_permissions)
+            .expect("restore temp root permissions");
+
+        assert!(
+            !changed,
+            "a shared writable temp root must fall back to bunx instead of executing a discovered cache binary"
+        );
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_temp_root_policy_requires_a_private_effective_user_root() {
+        let current_uid = current_effective_uid();
+
+        assert!(bunx_temp_root_permissions_are_trusted(
+            current_uid,
+            0o700,
+            current_uid
+        ));
+        assert!(
+            !bunx_temp_root_permissions_are_trusted(0, 0o1777, current_uid),
+            "sticky /tmp cannot protect Bun's world-writable cached JS target"
+        );
+        assert!(
+            !bunx_temp_root_permissions_are_trusted(current_uid, 0o777, current_uid),
+            "a user-owned shared directory without sticky-root isolation is untrusted"
+        );
+        assert!(
+            !bunx_temp_root_permissions_are_trusted(42, 0o1777, current_uid),
+            "a sticky temp root owned by an unrelated user is untrusted"
+        );
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_rejects_a_foreign_effective_uid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_executable, modified) =
+            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
+        let current_uid = current_effective_uid();
+        let foreign_uid = if current_uid == 0 { 1 } else { 0 };
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .build();
+
+        assert!(
+            !apply_host_bunx_cache_fast_path_from_uid(
+                &mut config,
+                temp.path(),
+                modified + std::time::Duration::from_secs(60),
+                foreign_uid,
+            ),
+            "a cache temp root not owned by the effective user must be ignored"
+        );
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_rejects_a_world_writable_cache_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (executable, modified) =
+            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
+        let bin_dir = executable.parent().expect("bin dir");
+        let mut permissions = std::fs::metadata(bin_dir)
+            .expect("bin dir metadata")
+            .permissions();
+        permissions.set_mode(0o777);
+        std::fs::set_permissions(bin_dir, permissions).expect("make bin dir writable");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .build();
+
+        assert!(
+            !apply_host_bunx_cache_fast_path_from(
+                &mut config,
+                temp.path(),
+                modified + std::time::Duration::from_secs(60),
+            ),
+            "a replaceable .bin entry must fall back to the package runner"
+        );
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn bunx_cache_fast_path_ignores_a_misleading_cache_root_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_executable, modified) =
+            write_test_bunx_cache(temp.path(), "latest", "@openai/codex", "@openai/codex");
+        let correct_root = temp
+            .path()
+            .join(format!("bunx-{}-@openai", current_effective_uid()));
+        let misleading_root = temp.path().join("bunx-evil-@openai");
+        std::fs::rename(correct_root, misleading_root).expect("rename cache root");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .build();
+
+        assert!(
+            !apply_host_bunx_cache_fast_path_from(
+                &mut config,
+                temp.path(),
+                modified + std::time::Duration::from_secs(60),
+            ),
+            "cache lookup must use the exact effective-uid Bun root name"
+        );
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn pinned_bunx_cache_remains_reusable_after_latest_ttl() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (executable, modified) =
+            write_test_bunx_cache(temp.path(), "0.145.0", "@openai/codex", "@openai/codex");
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("0.145.0")
+            .build();
+        let (bun, bunx) = write_test_bun_runtime(temp.path());
+        config.command = bunx.to_string_lossy().into_owned();
+
+        assert!(apply_host_bunx_cache_fast_path_from(
+            &mut config,
+            temp.path(),
+            modified + std::time::Duration::from_secs(30 * 24 * 60 * 60),
+        ));
+        assert_eq!(
+            std::fs::canonicalize(&config.command).expect("canonical Bun runtime"),
+            std::fs::canonicalize(bun).expect("canonical expected Bun runtime")
+        );
+        assert_eq!(
+            PathBuf::from(config.args.first().expect("cached entrypoint arg")),
+            std::fs::canonicalize(executable).expect("canonical cached executable")
+        );
+        assert!(!config.args.iter().any(|arg| arg == "@openai/codex@0.145.0"));
     }
 
     #[cfg(all(not(windows), unix))]

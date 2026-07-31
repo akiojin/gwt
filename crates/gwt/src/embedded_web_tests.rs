@@ -638,12 +638,14 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // render at their own world geometry, so geometry-persist is gated purely
     // on a real dimension change (Tile/Stack/Align). The old
     // restore-from-minimized branch (wasMinimized / windowData.minimized) no
-    // longer exists.
+    // longer exists. Issue #3364 folded the intermediate `dimensionsChanged`
+    // into `shouldPersistTerminalGeometry` (conflict suppression moved to the
+    // renderWorkspace pre-pass).
     assert!(
         html.contains("const previousWidth = parseFloat(element.style.width")
             && html.contains("const previousHeight = parseFloat(element.style.height")
-            && html.contains("const dimensionsChanged =")
             && html.contains("const shouldPersistTerminalGeometry =")
+            && html.contains("previousWidth !== windowData.geometry.width")
             && html.contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
         "expected terminals to persist fitted geometry to backend on window \
              resize (Tile/Stack/Align)",
@@ -778,7 +780,7 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
     // the revealed terminal keeps the stale grid until a manual resize.
     let html = frontend_bundle_source();
     let focus_retry = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
+            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -792,19 +794,90 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
             runtime_init.is_match(html),
             "expected createTerminalRuntime to initialize activationAttempts so the focus-path retry has a bounded counter (Issue #2937)",
         );
+    let refresh_settlement = regex::Regex::new(
+            r#"(?s)const hasAuthoritativePendingRefresh =\s*activeRuntime\.viewportRefreshPending === true;[\s\S]*?const hasPendingRefresh =\s*hasAuthoritativePendingRefresh \|\|[\s\S]*?terminalViewportRefreshScheduler\?\.hasPending\?\.\(windowId\) === true;[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasAuthoritativePendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)"#,
+        )
+        .expect("valid regex");
+    assert!(
+            refresh_settlement.is_match(html),
+            "expected failed authoritative activation to rearm viewportRefreshPending before retry exhaustion and successful activation to clear it before the fast-path return (SPEC-2008 FR-122)",
+        );
+    let persisted_fit_settlement = regex::Regex::new(
+            r#"(?s)runTerminalFitRequest\(\{[\s\S]*?persist,[\s\S]*?markPending:[\s\S]*?clearPending:[\s\S]*?viewportRefreshPending = false[\s\S]*?activate:"#,
+        )
+        .expect("valid regex");
+    assert!(
+            persisted_fit_settlement.is_match(html),
+            "expected successful persisted fits to clear authoritative pending state while failed/hidden fits remain pending (SPEC-2008 FR-122)",
+        );
+    let retry_restart = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?restartRetryBudget\s*=\s*false[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{[\s\S]*?if \(restartRetryBudget\) \{\s*runtime\.activationAttempts = 0;\s*\}[\s\S]*?if \(runtime\.activationFrame !== null\) \{\s*return;"#,
+        )
+        .expect("valid regex");
+    assert!(
+            retry_restart.is_match(html),
+            "expected an external authoritative activation to restart the bounded retry budget before the coalesced-frame early return (SPEC-2008 FR-122)",
+        );
+    for reason in [
+        "force_refresh_retry",
+        "visibility_reveal",
+        "visibility_restore",
+    ] {
+        let external_restart = regex::Regex::new(&format!(
+                r#"(?s)scheduleTerminalFocusActivation\(windowId,\s*\{{[\s\S]*?reason:\s*"{reason}",\s*restartRetryBudget:\s*true"#
+            ))
+            .expect("valid regex");
+        assert!(
+            external_restart.is_match(html),
+            "expected {reason} to restart a previously exhausted activation retry budget (SPEC-2008 FR-122)",
+        );
+    }
+    assert_eq!(
+        html.matches("restartRetryBudget: true").count(),
+        3,
+        "internal retries and topmost focus must not restart the bounded activation retry budget",
+    );
 }
 
 #[test]
-fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
+fn embedded_web_plain_redraw_does_not_clear_authoritative_pending_refresh() {
+    let html = frontend_bundle_source();
+    let fallback_start = html
+        .find("function scheduleTerminalViewportRefresh(")
+        .expect("scheduleTerminalViewportRefresh must exist");
+    let redraw_start = html[fallback_start..]
+        .find("function refreshTerminalViewport(")
+        .map(|offset| fallback_start + offset)
+        .expect("refreshTerminalViewport must follow the scheduler");
+    assert!(
+        !html[fallback_start..redraw_start].contains("viewportRefreshPending = false"),
+        "plain fallback redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
+    );
+
+    let scheduler_start = html
+        .find("terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({")
+        .expect("terminal viewport refresh scheduler must exist");
+    let force_refresh_start = html[scheduler_start..]
+        .find("function forceTerminalViewportRefresh(")
+        .map(|offset| scheduler_start + offset)
+        .expect("forceTerminalViewportRefresh must follow the scheduler");
+    assert!(
+        !html[scheduler_start..force_refresh_start].contains("viewportRefreshPending = false"),
+        "plain scheduled redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
+    );
+}
+
+#[test]
+fn embedded_web_window_pointer_events_finalize_resize_on_mismatch() {
     // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
     // emits pointerup / pointercancel with a pointerId that does not
     // match the one captured at pointerdown. The previous handlers
     // gated finishWindowResize behind a strict pointerId equality
     // check, so a mismatched pointerup left resizeState alive until
     // the 30 second staleness guard finally cleaned it up. This
-    // contract pins the new fallback: any window-level pointerup or
-    // pointercancel that fires while a resize is pending must clean
-    // up resizeState immediately via forceResetResizeState.
+    // contract pins the fallback: any window-level pointerup or
+    // pointercancel that fires while a resize is pending must finalize
+    // the original gesture immediately via forceResetResizeState.
     let html = frontend_bundle_source();
     let pointerup_fallback = regex::Regex::new(
             r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
@@ -823,6 +896,23 @@ fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
             pointercancel_fallback.is_match(html),
             "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
         );
+
+    let force_reset_start = html
+        .find("function forceResetResizeState(reason)")
+        .expect("forceResetResizeState must exist");
+    let next_function_start = html[force_reset_start..]
+        .find("function scheduleTerminalViewportRefresh(")
+        .map(|offset| force_reset_start + offset)
+        .expect("scheduleTerminalViewportRefresh must follow forceResetResizeState");
+    let force_reset_body = &html[force_reset_start..next_function_start];
+    assert!(
+        force_reset_body.contains("finishWindowResize(previous.pointerId);"),
+        "pointerId mismatch must finalize and persist the latest resize geometry",
+    );
+    assert!(
+        !force_reset_body.contains("clearLocalGeometryEdit("),
+        "pointerId mismatch must not discard the local geometry guard before a stale snapshot arrives",
+    );
 }
 
 #[test]
@@ -832,8 +922,11 @@ fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
             r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
         )
         .expect("valid regex");
+    // Issue #3364 — the finalizer commits through the shared
+    // commitWindowGeometryGesture path (guard + optimistic model/minimap
+    // sync + unconditional send) instead of a raw sendGeometry.
     let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)commitWindowGeometryGesture\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
         )
         .expect("valid regex");
 
@@ -3794,13 +3887,21 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
     // longer ends with a maximized-viewport sync. It now recomputes operator
     // telemetry (rail window-count badge / empty-canvas state) after mounting
-    // every window and applying its visibility transition.
+    // every window and applying its visibility transition. Issue #3365: the
+    // loop is a per-window `isolate` callback inside workspaceRenderSync so
+    // one poisoned window cannot block the others, and the telemetry
+    // recompute is the guard's `recompute` hook (guaranteed even on a failed
+    // sync).
     let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*//[^\n]*\n(?:\s*//[^\n]*\n)*\s*recomputeOperatorTelemetry\(\);",
+            r#"(?s)isolate\("ensure_window", workspace\.windows, \(windowData\) => \{(?P<body>.*?)\}\);"#,
         )
         .expect("valid regex");
     let captures = visibility_block.captures(js).expect(
         "expected the workspace.windows visibility loop that applies the visibility transition",
+    );
+    assert!(
+        js.contains("recompute: recomputeOperatorTelemetry"),
+        "expected the render guard to keep operator telemetry recompute wired after the visibility loop",
     );
     let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
     // After SPEC-2008 Phase 24 follow-up, the loop delegates to
