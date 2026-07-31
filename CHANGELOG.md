@@ -1,6 +1,60 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.71.0] - 2026-07-31
+
+### Bug Fixes
+
+- **terminal:** リサイズ後の履歴snapshotを欠落なく保持する
+- **terminal:** 最小幅のwide履歴snapshotを安全に再生する
+- **terminal:** Reveal失敗時のviewport refreshを再armする
+- **terminal:** Viewport再試行の回復契約を維持する
+- **terminal:** Viewport pendingの権威状態を分離する
+- **index:** Allow automatic indexing opt-out
+- **perf:** Keep projections off GUI hot paths
+- **index:** Restore real E5 batch search
+- **agent:** Reuse trusted Bun package cache for launches
+- **perf:** Batch Work event projection ingestion
+- **perf:** Move startup and probes off GUI hot paths
+- **gui:** Preserve resize and render state under races
+- **gui:** ウィンドウD&Dのスナップバックとミニマップ未反映を解消する(#3364)
+- **gui:** RenderWorkspaceのrender key確定を同期成功後へ移し描画例外を隔離・可視化する
+- **gui:** Retry render after telemetry failures
+- **gui:** Process_line/logブロードキャストを消費windowの存在時のみに抑制する (#3366)
+- **gui:** Bound process line backpressure queue
+- **startup:** Keep project indexing off GUI front door (#3170)
+- **agent:** Preserve cache fast path after runner health
+- **gui:** Avoid Git fallback during execution diagnosis
+- **guidance:** Route integrity-failed recovery to execution.repair
+- **gui:** Preserve geometry and projection convergence
+
+### Features
+
+- **resume:** Recover producing authority on automatic resume launches
+
+### Miscellaneous Tasks
+
+- **work:** Record performance issue coordination
+- **work:** Record final verification handoff
+- **work:** Record final verification events
+- **work:** Record concurrent coordination events
+- **work:** Record concurrent agent events
+- **work:** Record final verification progress
+- **work:** Settle final coordination events
+- **work:** Preserve concurrent workflow events
+- **work:** Record final user verification
+- **work:** Record performance delivery
+- **work:** Record review handoff
+
+### Testing
+
+- **gui:** Cover content-fenced resize finalization
+- **gwt:** Retry saved-port rebind races (#3386)
+- **gui:** Cover live briefing dismissal (#2796)
+- **gui:** Align briefing live check with hydration (#2796)
+- **gui:** Resize gestureの並列テストを安定化する
+- **gui:** Harden performance regression coverage
+
 ## [9.70.0] - 2026-07-29
 
 ### Bug Fixes
