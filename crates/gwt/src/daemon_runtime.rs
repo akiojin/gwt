@@ -336,6 +336,7 @@ pub fn send_execution_continuation_via_agent_bridge(
     })?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| {
             AgentBridgeFailure::new(
@@ -782,6 +783,7 @@ mod tests {
         runtime: Runtime,
         shutdown_tx: Option<oneshot::Sender<()>>,
         rx: mpsc::Receiver<(HeaderMap, serde_json::Value)>,
+        redirect_rx: mpsc::Receiver<HeaderMap>,
         forward_url: String,
     }
 
@@ -790,16 +792,35 @@ mod tests {
         tx: mpsc::Sender<(HeaderMap, serde_json::Value)>,
         status: StatusCode,
         body: String,
+        redirect_location: Option<String>,
+        redirect_tx: mpsc::Sender<HeaderMap>,
     }
 
     impl BindingProbeServer {
         fn start(status: StatusCode, body: serde_json::Value) -> Self {
+            Self::start_inner(status, body, None)
+        }
+
+        fn start_redirect() -> Self {
+            Self::start_inner(
+                StatusCode::TEMPORARY_REDIRECT,
+                serde_json::Value::Null,
+                Some("/redirected-continuation".to_string()),
+            )
+        }
+
+        fn start_inner(
+            status: StatusCode,
+            body: serde_json::Value,
+            redirect_location: Option<String>,
+        ) -> Self {
             let runtime = Runtime::new().expect("binding probe runtime");
             let listener = runtime
                 .block_on(TcpListener::bind(("127.0.0.1", 0)))
                 .expect("binding probe listener");
             let address = listener.local_addr().expect("binding probe address");
             let (tx, rx) = mpsc::channel();
+            let (redirect_tx, redirect_rx) = mpsc::channel();
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let app = Router::new()
                 .route(
@@ -840,10 +861,51 @@ mod tests {
                         },
                     ),
                 )
+                .route(
+                    "/internal/execution-continuation",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture execution continuation request");
+                            let mut response = (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response();
+                            if let Some(location) = state.redirect_location.as_deref() {
+                                response.headers_mut().insert(
+                                    axum::http::header::LOCATION,
+                                    axum::http::HeaderValue::from_str(location)
+                                        .expect("valid redirect location"),
+                                );
+                            }
+                            response
+                        },
+                    ),
+                )
+                .route(
+                    "/redirected-continuation",
+                    post(
+                        |headers: HeaderMap, State(state): State<BindingProbeState>| async move {
+                            state
+                                .redirect_tx
+                                .send(headers)
+                                .expect("capture redirected execution continuation request");
+                            StatusCode::OK
+                        },
+                    ),
+                )
                 .with_state(BindingProbeState {
                     tx,
                     status,
                     body: body.to_string(),
+                    redirect_location,
+                    redirect_tx,
                 });
             runtime.spawn(async move {
                 axum::serve(listener, app)
@@ -857,6 +919,7 @@ mod tests {
                 runtime,
                 shutdown_tx: Some(shutdown_tx),
                 rx,
+                redirect_rx,
                 forward_url: format!("http://127.0.0.1:{}/internal/hook-live", address.port()),
             }
         }
@@ -865,6 +928,13 @@ mod tests {
             self.rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("binding probe request")
+        }
+
+        fn assert_no_redirect(&self) {
+            assert!(
+                matches!(self.redirect_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "execution continuation client must not follow redirects"
+            );
         }
     }
 
@@ -932,6 +1002,33 @@ mod tests {
         let debug = format!("{target:?}");
         assert!(!debug.contains("agent-capability-secret-sentinel"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn execution_continuation_never_follows_redirects_or_forwards_its_bearer() {
+        let server = BindingProbeServer::start_redirect();
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "continuation-redirect-secret".to_string(),
+        };
+        let request = crate::AgentExecutionContinuationRequest {
+            schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+            operation_id: "continuation-redirect".to_string(),
+        };
+
+        let error = send_execution_continuation_via_agent_bridge(&target, &request)
+            .expect_err("redirected continuation bridge response must fail closed");
+
+        assert!(!error.contains("continuation-redirect-secret"), "{error}");
+        let (headers, body) = server.receive();
+        assert_eq!(
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer continuation-redirect-secret")
+        );
+        assert_eq!(body["operation_id"], "continuation-redirect");
+        server.assert_no_redirect();
     }
 
     #[test]
