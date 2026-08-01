@@ -607,7 +607,7 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
         work_event_root,
         &current_path,
         &work_items_path,
-        || {
+        |_| {
             let (projection, work_items, persisted) =
                 load_split_root_workspace_state_for_preflight_locked(
                     project_state_root,
@@ -655,13 +655,15 @@ pub fn recover_pending_workspace_state_transaction_for_work_event_root(
         work_event_root,
         &current_path,
         &work_items_path,
-        || {
-            materialize_split_root_workspace_state_paths_locked(
-                project_state_root,
-                work_event_root,
-                &current_path,
-                &work_items_path,
-            )?;
+        |recovered| {
+            if recovered {
+                materialize_split_root_workspace_state_paths_locked(
+                    project_state_root,
+                    work_event_root,
+                    &current_path,
+                    &work_items_path,
+                )?;
+            }
             Ok(())
         },
     )
@@ -1242,29 +1244,46 @@ fn split_root_workspace_state_paths(
     )
 }
 
+fn split_root_workspace_work_items_sources(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    work_items_path: &Path,
+) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for source in [
+        work_items_path.to_path_buf(),
+        legacy_workspace_work_items_path_for_repo_path(project_state_root),
+        gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        legacy_workspace_work_items_path_for_repo_path(work_event_root),
+    ] {
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
 fn with_split_root_workspace_state_lock<T>(
     project_state_root: &Path,
     work_event_root: &Path,
     current_path: &Path,
     work_items_path: &Path,
-    operation: impl FnOnce() -> Result<T>,
+    operation: impl FnOnce(bool) -> Result<T>,
 ) -> Result<T> {
-    let legacy_worktree_work_items = gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let mut lock_targets = vec![
-        current_path.with_file_name("works.json"),
-        work_items_path.to_path_buf(),
-    ];
-    let mut marker_paths = vec![
-        pending_workspace_state_transaction_path(current_path),
-        pending_workspace_state_transaction_path_for_work_items(work_items_path),
-    ];
-    if project_state_root != work_event_root && legacy_worktree_work_items != work_items_path {
-        lock_targets.push(legacy_worktree_work_items.clone());
-        marker_paths.push(pending_workspace_state_transaction_path_for_work_items(
-            &legacy_worktree_work_items,
-        ));
-    }
-    with_workspace_transaction_recovery(lock_targets, marker_paths, operation)
+    let work_item_sources = split_root_workspace_work_items_sources(
+        project_state_root,
+        work_event_root,
+        work_items_path,
+    );
+    let mut lock_targets = vec![current_path.with_file_name("works.json")];
+    lock_targets.extend(work_item_sources.iter().cloned());
+    let mut marker_paths = vec![pending_workspace_state_transaction_path(current_path)];
+    marker_paths.extend(
+        work_item_sources
+            .iter()
+            .map(|path| pending_workspace_state_transaction_path_for_work_items(path)),
+    );
+    with_workspace_transaction_recovery_observed(lock_targets, marker_paths, operation)
 }
 
 /// Materialize legacy project-scoped sources while the caller continuously
@@ -1279,15 +1298,20 @@ fn materialize_split_root_workspace_state_paths_locked(
         &legacy_workspace_projection_path_for_repo_path(project_state_root),
         current_path,
     )?;
-    copy_validated_workspace_work_items_if_needed(
-        &legacy_workspace_work_items_path_for_repo_path(project_state_root),
-        work_items_path,
-    )?;
-    if project_state_root != work_event_root {
-        copy_validated_workspace_work_items_if_needed(
-            &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+    if !work_items_path.exists() {
+        for source in split_root_workspace_work_items_sources(
+            project_state_root,
+            work_event_root,
             work_items_path,
-        )?;
+        )
+        .into_iter()
+        .skip(1)
+        {
+            copy_validated_workspace_work_items_if_needed(&source, work_items_path)?;
+            if work_items_path.exists() {
+                break;
+            }
+        }
     }
 
     // Preserve the destination root's normal migration precedence. Only if it
@@ -1324,12 +1348,11 @@ fn load_split_root_workspace_state_for_preflight_locked(
     };
     projection.project_root = project_state_root.to_path_buf();
 
-    let work_item_sources = [
-        work_items_path.to_path_buf(),
-        legacy_workspace_work_items_path_for_repo_path(project_state_root),
-        gwt_workspace_work_items_path_for_repo_path(work_event_root),
-    ];
-    for source in work_item_sources {
+    for source in split_root_workspace_work_items_sources(
+        project_state_root,
+        work_event_root,
+        work_items_path,
+    ) {
         if let Some(work_items) = load_workspace_work_items_from_path(&source)? {
             return Ok((projection, work_items, true));
         }
@@ -1423,7 +1446,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
         work_event_root,
         &current_path,
         &work_items_path,
-        || {
+        |_| {
             if let Some(receipt) = load_external_workspace_commit_receipt(
                 &current_path,
                 &work_items_path,
@@ -3394,7 +3417,18 @@ fn with_workspace_transaction_recovery<T>(
     base_marker_paths: Vec<PathBuf>,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_workspace_transaction_recovery_observed(base_lock_targets, base_marker_paths, |_| {
+        operation()
+    })
+}
+
+fn with_workspace_transaction_recovery_observed<T>(
+    base_lock_targets: Vec<PathBuf>,
+    base_marker_paths: Vec<PathBuf>,
+    operation: impl FnOnce(bool) -> Result<T>,
+) -> Result<T> {
     let mut operation = Some(operation);
+    let mut recovered = false;
     loop {
         let mut marker_paths = base_marker_paths.clone();
         marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
@@ -3477,11 +3511,12 @@ fn with_workspace_transaction_recovery<T>(
                     &transaction,
                     true,
                 )?;
+                recovered = true;
             }
             let operation = operation
                 .take()
                 .expect("workspace state operation must run exactly once");
-            operation().map(Some)
+            operation(recovered).map(Some)
         })?;
         if let Some(result) = outcome {
             return Ok(result);
