@@ -1272,15 +1272,14 @@ fn resolve_authenticated_session_work_mutation_target(
         session_id,
         observation,
     )?;
-    let current_path =
-        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&authority.project_state_root);
     let work_id = resolve_unique_existing_work_id(
-        &current_path,
+        &authority.project_state_root,
         &authority.work_event_root,
         session_id,
         &authority.branch_identity,
         &authority.worktree_identity,
-        false,
+        &authority.owner,
+        &authority.agent_id,
     )
     .map_err(classify_target_error)?;
     Ok(SessionWorkMutationTarget {
@@ -1290,6 +1289,8 @@ fn resolve_authenticated_session_work_mutation_target(
         branch_identity: authority.branch_identity,
         worktree_identity: authority.worktree_identity,
         work_id,
+        owner: authority.owner,
+        agent_id: authority.agent_id,
     })
 }
 
@@ -1350,6 +1351,8 @@ fn resolve_authenticated_session_terminal_target(
             "workspace.update runtime repository or branch does not match the authenticated Session",
         ));
     }
+    let (owner, agent_id) =
+        durable_session_work_authority(&session).map_err(classify_target_error)?;
     match session.runtime_target {
         LaunchRuntimeTarget::Docker => {
             validate_docker_runtime_observation(&session, observation, &project_state_root)?;
@@ -1375,6 +1378,8 @@ fn resolve_authenticated_session_terminal_target(
         session_id: session.id,
         branch_identity,
         worktree_identity: session_worktree,
+        owner,
+        agent_id,
     })
 }
 
@@ -1519,6 +1524,8 @@ pub(crate) struct SessionWorkMutationTarget {
     pub(crate) branch_identity: String,
     pub(crate) worktree_identity: PathBuf,
     pub(crate) work_id: String,
+    pub(crate) owner: String,
+    pub(crate) agent_id: String,
 }
 
 impl SessionWorkMutationTarget {
@@ -1530,6 +1537,8 @@ impl SessionWorkMutationTarget {
             branch_identity: self.branch_identity.clone(),
             worktree_identity: self.worktree_identity.clone(),
             work_id: self.work_id.clone(),
+            owner: self.owner.clone(),
+            agent_id: self.agent_id.clone(),
         }
     }
 }
@@ -1555,6 +1564,91 @@ pub(crate) fn resolve_session_work_mutation_target(
         )));
     }
     resolve_host_session_work_mutation_target(invocation_cwd, session)
+}
+
+pub(crate) struct ValidatedWorkspaceRecoverySession {
+    pub(crate) session: Session,
+    pub(crate) project_state_root: PathBuf,
+    pub(crate) work_event_root: PathBuf,
+    pub(crate) branch_identity: String,
+    pub(crate) worktree_identity: PathBuf,
+}
+
+pub(crate) enum ValidatedWorkspaceEnsureSession {
+    Host(ValidatedWorkspaceRecoverySession),
+    Docker(ValidatedWorkspaceRecoverySession),
+}
+
+/// Load the exact durable Session identity used to recover a missing Work
+/// projection registration. Recovery intentionally stops before resolving a
+/// Work id: `workspace.ensure` is the operation that materializes that missing
+/// assignment. All Session/repository/container checks remain identical to the
+/// authenticated local `workspace.update` path.
+pub(crate) fn validated_workspace_recovery_session(
+    invocation_cwd: &Path,
+    session_id: &str,
+) -> Result<Option<ValidatedWorkspaceEnsureSession>> {
+    gwt_agent::validate_session_id_path_component(session_id)
+        .map_err(|error| mutation_error(format!("invalid or unsafe Session id: {error}")))?;
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    if !session_path.try_exists().map_err(|error| {
+        mutation_error(format!(
+            "failed to inspect Session ledger for Session {session_id} at {}: {error}",
+            session_path.display()
+        ))
+    })? {
+        return Ok(None);
+    }
+    let session = load_session_for_mutation(session_id)?;
+    if session.id != session_id {
+        return Err(mutation_error(format!(
+            "Session ledger id mismatch: requested {session_id}, loaded {}",
+            session.id
+        )));
+    }
+    let _exact_session = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|error| {
+            mutation_error(format!(
+                "invalid durable Session execution binding for Session {session_id}: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            mutation_error(format!(
+                "durable Session {session_id} has no execution binding"
+            ))
+        })?;
+    let binding = session.execution_binding.as_ref().ok_or_else(|| {
+        mutation_error(format!(
+            "durable Session {session_id} has no execution binding"
+        ))
+    })?;
+    let identity = validate_host_session_identity(invocation_cwd, &session)?;
+    validate_current_execution_binding_authority(&identity.project_state_root, session_id, binding)
+        .map_err(|error| {
+            mutation_error(format!(
+            "durable Session execution binding is not current for Session {session_id}: {error}"
+        ))
+        })?;
+    if session.runtime_target == LaunchRuntimeTarget::Docker {
+        return Ok(Some(ValidatedWorkspaceEnsureSession::Docker(
+            ValidatedWorkspaceRecoverySession {
+                session,
+                project_state_root: identity.project_state_root,
+                work_event_root: identity.work_event_root,
+                branch_identity: identity.branch_identity,
+                worktree_identity: identity.worktree_identity,
+            },
+        )));
+    }
+    Ok(Some(ValidatedWorkspaceEnsureSession::Host(
+        ValidatedWorkspaceRecoverySession {
+            session,
+            project_state_root: identity.project_state_root,
+            work_event_root: identity.work_event_root,
+            branch_identity: identity.branch_identity,
+            worktree_identity: identity.worktree_identity,
+        },
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1635,6 +1729,42 @@ fn resolve_host_session_work_mutation_target(
     invocation_cwd: &Path,
     session: Session,
 ) -> Result<SessionWorkMutationTarget> {
+    let identity = validate_host_session_identity(invocation_cwd, &session)?;
+    let session_id = session.id.as_str();
+    let (owner, agent_id) = durable_session_work_authority(&session)?;
+    let work_id = resolve_unique_existing_work_id(
+        &identity.project_state_root,
+        &identity.work_event_root,
+        session_id,
+        &identity.branch_identity,
+        &identity.worktree_identity,
+        &owner,
+        &agent_id,
+    )?;
+
+    Ok(SessionWorkMutationTarget {
+        project_state_root: identity.project_state_root,
+        work_event_root: identity.work_event_root,
+        session_id: session.id,
+        branch_identity: identity.branch_identity,
+        worktree_identity: identity.worktree_identity,
+        work_id,
+        owner,
+        agent_id,
+    })
+}
+
+struct ValidatedHostSessionIdentity {
+    project_state_root: PathBuf,
+    work_event_root: PathBuf,
+    branch_identity: String,
+    worktree_identity: PathBuf,
+}
+
+fn validate_host_session_identity(
+    invocation_cwd: &Path,
+    session: &Session,
+) -> Result<ValidatedHostSessionIdentity> {
     let session_id = session.id.as_str();
     let invocation_raw = canonicalize_mutation_path(invocation_cwd, "cwd")?;
     let session_worktree = canonicalize_mutation_path(&session.worktree_path, "worktree")?;
@@ -1646,7 +1776,7 @@ fn resolve_host_session_work_mutation_target(
         )));
     }
     let session_git_root = git_toplevel(&session_worktree, "worktree")?;
-    let declared_repo_hash = required_session_repo_hash(&session)?;
+    let declared_repo_hash = required_session_repo_hash(session)?;
     let observed = repo_hash_for_mutation(&session_git_root, "repo hash")?;
     if observed != declared_repo_hash {
         return Err(mutation_error(format!(
@@ -1654,13 +1784,13 @@ fn resolve_host_session_work_mutation_target(
         )));
     }
 
-    let configured_project_state_root = strict_project_state_root(&session)?;
+    let configured_project_state_root = strict_project_state_root(session)?;
     let project_state_root =
         canonicalize_mutation_path(&configured_project_state_root, "canonical repository")?;
     let project_anchor =
         validate_visible_project_state_root(&project_state_root, declared_repo_hash, session_id)?;
 
-    let branch_identity = required_session_branch(&session)?;
+    let branch_identity = required_session_branch(session)?;
     let session_branch = git_branch(&session_git_root, "worktree")?;
     if canonical_branch_identity(&session_branch) != branch_identity {
         return Err(mutation_error(format!(
@@ -1686,7 +1816,7 @@ fn resolve_host_session_work_mutation_target(
         &invocation_git_root,
         declared_repo_hash,
         &branch_identity,
-        &session,
+        session,
     )?;
     if session_worktree != session_git_root {
         return Err(mutation_error(format!(
@@ -1694,24 +1824,11 @@ fn resolve_host_session_work_mutation_target(
         )));
     }
 
-    let current_path =
-        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_state_root);
-    let work_id = resolve_unique_existing_work_id(
-        &current_path,
-        &invocation_git_root,
-        session_id,
-        &branch_identity,
-        &session_worktree,
-        false,
-    )?;
-
-    Ok(SessionWorkMutationTarget {
+    Ok(ValidatedHostSessionIdentity {
         project_state_root,
         work_event_root: invocation_git_root,
-        session_id: session.id,
         branch_identity,
         worktree_identity: session_worktree,
-        work_id,
     })
 }
 
@@ -1977,15 +2094,41 @@ fn canonical_branch_identity(branch: &str) -> String {
     branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
+fn durable_session_work_authority(session: &Session) -> Result<(String, String)> {
+    let owner = if let Some(binding) = session.execution_binding.as_ref() {
+        match binding.owner_kind.as_str() {
+            "spec" => format!("SPEC-{}", binding.owner_number),
+            "issue" => format!("Issue #{}", binding.owner_number),
+            _ => {
+                return Err(workspace_ensure_error(
+                    &session.id,
+                    "durable execution owner kind is invalid",
+                ))
+            }
+        }
+    } else if let Some(number) = session.linked_issue_number {
+        format!("Issue #{number}")
+    } else {
+        return Err(workspace_ensure_error(
+            &session.id,
+            "durable Work owner is missing",
+        ));
+    };
+    Ok((owner, session.agent_id.command().to_string()))
+}
+
 fn resolve_unique_existing_work_id(
-    current_path: &Path,
+    work_items_root: &Path,
     work_event_root: &Path,
     session_id: &str,
     branch_identity: &str,
     worktree_identity: &Path,
-    docker: bool,
+    expected_owner: &str,
+    expected_agent_id: &str,
 ) -> Result<String> {
-    let projection = load_workspace_projection_from_path(current_path)
+    let current_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(work_items_root);
+    let projection = load_workspace_projection_from_path(&current_path)
         .map_err(|error| {
             workspace_ensure_error(
                 session_id,
@@ -2000,10 +2143,38 @@ fn resolve_unique_existing_work_id(
         .ok_or_else(|| {
             workspace_ensure_error(session_id, "canonical Session assignment is missing")
         })?;
+    for candidate in projection
+        .agents
+        .iter()
+        .filter(|candidate| candidate.session_id == session_id)
+    {
+        let same_authority = candidate.agent_id == agent.agent_id
+            && candidate.affiliation_status == agent.affiliation_status
+            && candidate.workspace_id == agent.workspace_id
+            && candidate.branch.as_deref().map(canonical_branch_identity)
+                == agent.branch.as_deref().map(canonical_branch_identity)
+            && candidate
+                .worktree_path
+                .as_deref()
+                .map(normalize_mutation_path)
+                == agent.worktree_path.as_deref().map(normalize_mutation_path);
+        if !same_authority {
+            return Err(workspace_ensure_error(
+                session_id,
+                "canonical Session assignment authority is ambiguous",
+            ));
+        }
+    }
     if !agent.is_assigned() {
         return Err(workspace_ensure_error(
             session_id,
             "latest canonical Session assignment is Unassigned",
+        ));
+    }
+    if agent.agent_id != expected_agent_id {
+        return Err(workspace_ensure_error(
+            session_id,
+            "canonical Session agent identity does not match the durable Session",
         ));
     }
     let work_id = agent
@@ -2034,7 +2205,7 @@ fn resolve_unique_existing_work_id(
     }
 
     let work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_items_root);
     let work_items = load_workspace_work_items_from_path(&work_items_path)
         .map_err(|error| {
             workspace_ensure_error(
@@ -2069,6 +2240,23 @@ fn resolve_unique_existing_work_id(
             &format!("assigned Work {work_id} is terminal"),
         ));
     }
+    if item.owner.as_deref() != Some(expected_owner) {
+        return Err(workspace_ensure_error(
+            session_id,
+            &format!("assigned Work {work_id} owner does not match durable authority"),
+        ));
+    }
+    let session_refs = item
+        .agents
+        .iter()
+        .filter(|agent| agent.session_id == session_id)
+        .collect::<Vec<_>>();
+    if session_refs.len() != 1 || session_refs[0].agent_id.as_deref() != Some(expected_agent_id) {
+        return Err(workspace_ensure_error(
+            session_id,
+            &format!("assigned Work {work_id} agent identity is missing, foreign, or ambiguous"),
+        ));
+    }
     let matching_containers = item
         .execution_containers
         .iter()
@@ -2078,7 +2266,7 @@ fn resolve_unique_existing_work_id(
                 branch_identity,
                 worktree_identity,
                 work_event_root,
-                docker,
+                false,
             )
         })
         .count();
@@ -2094,22 +2282,41 @@ fn resolve_unique_existing_work_id(
             &format!("assigned Work {work_id} has ambiguous matching execution containers"),
         ));
     }
-    let competing_work = work_items.work_items.iter().find(|other| {
-        other.id != work_id
-            && !other.is_terminal()
-            && other
-                .agents
-                .iter()
-                .any(|agent| agent.session_id == session_id)
-    });
-    if let Some(competing_work) = competing_work {
-        return Err(workspace_ensure_error(
-            session_id,
-            &format!(
-                "assigned Work {work_id} is ambiguous with active Work {} for the same Session",
-                competing_work.id
-            ),
-        ));
+    for other in work_items
+        .work_items
+        .iter()
+        .filter(|other| other.id != work_id)
+    {
+        if other
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == session_id)
+        {
+            return Err(workspace_ensure_error(
+                session_id,
+                &format!(
+                    "assigned Work {work_id} is ambiguous with Work {} for the same Session",
+                    other.id
+                ),
+            ));
+        }
+        if other.execution_containers.iter().any(|container| {
+            mutation_container_matches(
+                container,
+                branch_identity,
+                worktree_identity,
+                work_event_root,
+                false,
+            )
+        }) {
+            return Err(workspace_ensure_error(
+                session_id,
+                &format!(
+                    "assigned Work {work_id} execution container is ambiguous with Work {}",
+                    other.id
+                ),
+            ));
+        }
     }
     Ok(work_id)
 }
@@ -2431,6 +2638,7 @@ mod tests {
         let mut session = Session::new(repo, branch, gwt_agent::AgentId::Codex);
         session.id = id.to_string();
         session.project_state_root = Some(repo.to_path_buf());
+        session.linked_issue_number = Some(2359);
         session
     }
 
@@ -2475,9 +2683,22 @@ mod tests {
             now,
         );
         event.title = Some("Session-bound Work".to_string());
+        event.owner = session
+            .execution_binding
+            .as_ref()
+            .map(|binding| match binding.owner_kind.as_str() {
+                "spec" => format!("SPEC-{}", binding.owner_number),
+                _ => format!("Issue #{}", binding.owner_number),
+            })
+            .or_else(|| {
+                session
+                    .linked_issue_number
+                    .map(|number| format!("Issue #{number}"))
+            });
         event.status_category =
             Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
         event.agent_session_id = Some(session.id.clone());
+        event.agent_id = Some(session.agent_id.command().to_string());
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some(session.branch.clone()),
@@ -2492,10 +2713,10 @@ mod tests {
     }
 
     fn save_mutation_work_items(
-        work_event_root: &Path,
+        work_items_root: &Path,
         projection: &gwt_core::workspace_projection::WorkItemsProjection,
     ) {
-        let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+        let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_items_root);
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &path, projection,
         )
@@ -2503,10 +2724,11 @@ mod tests {
     }
 
     fn save_mutation_work_items_with_tracked_events(
+        work_items_root: &Path,
         work_event_root: &Path,
         projection: &gwt_core::workspace_projection::WorkItemsProjection,
     ) {
-        save_mutation_work_items(work_event_root, projection);
+        save_mutation_work_items(work_items_root, projection);
         let events_path = gwt_core::paths::gwt_repo_local_work_events_path(work_event_root);
         for event in projection
             .work_items
@@ -2532,6 +2754,7 @@ mod tests {
             vec![assigned_session_agent(session, work_id, Utc::now())],
         );
         save_mutation_work_items_with_tracked_events(
+            project_state_root,
             work_event_root,
             &mutation_work_items(work_event_root, session, work_id),
         );
@@ -2621,7 +2844,9 @@ mod tests {
                 ))
                 .expect("read journal snapshot"),
                 works: std::fs::read(
-                    gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root),
+                    gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+                        project_state_root,
+                    ),
                 )
                 .expect("read Work projection snapshot"),
                 tracked_events: std::fs::read(gwt_core::paths::gwt_repo_local_work_events_path(
@@ -3572,6 +3797,50 @@ mod tests {
     }
 
     #[test]
+    fn bound_work_terminalization_rejects_foreign_owner_and_agent_identity_without_mutation() {
+        for mismatch in ["owner", "agent"] {
+            with_strict_target_fixture(|repo, session| {
+                let (session, binding) = bind_session_to_current_execution(repo, session);
+                seed_work_mutation_surfaces(repo, repo);
+                let work_id = format!("work-terminal-{mismatch}-mismatch");
+                seed_unique_mutation_target(repo, repo, &session, &work_id);
+                let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+                let mut work_items =
+                    gwt_core::workspace_projection::load_workspace_work_items_from_path(&path)
+                        .expect("load terminal WorkItems")
+                        .expect("terminal WorkItems");
+                let work = work_items
+                    .work_items
+                    .iter_mut()
+                    .find(|item| item.id == work_id)
+                    .expect("terminal Work");
+                match mismatch {
+                    "owner" => work.owner = Some("Issue #9999".to_string()),
+                    "agent" => work.agents[0].agent_id = Some("claude".to_string()),
+                    _ => unreachable!(),
+                }
+                save_mutation_work_items(repo, &work_items);
+                let before = WorkMutationSnapshot::capture(repo, repo);
+
+                let error = apply_bound_authenticated_work_terminalization(
+                    repo,
+                    &session.id,
+                    &binding,
+                    bound_work_terminalization_request(&session),
+                )
+                .expect_err("foreign terminal Work authority must fail closed");
+
+                assert!(matches!(
+                    error.code,
+                    AgentWorkspaceUpdateErrorCode::IdentityConflict
+                        | AgentWorkspaceUpdateErrorCode::TransactionConflict
+                ));
+                assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            });
+        }
+    }
+
+    #[test]
     fn execution_binding_predecessor_and_superseded_authority_cannot_mutate_work() {
         with_strict_target_fixture(|repo, session| {
             let (mut session, predecessor_binding) =
@@ -4372,6 +4641,40 @@ mod tests {
     }
 
     #[test]
+    fn strict_session_work_mutation_target_rejects_foreign_owner_and_agent_identity() {
+        for mismatch in ["owner", "agent"] {
+            with_strict_target_fixture(|repo, session| {
+                let (session, _) = bind_session_to_current_execution(repo, session);
+                let work_id = format!("work-strict-{mismatch}-mismatch");
+                seed_unique_mutation_target(repo, repo, &session, &work_id);
+                let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+                let mut work_items =
+                    gwt_core::workspace_projection::load_workspace_work_items_from_path(&path)
+                        .expect("load strict WorkItems")
+                        .expect("strict WorkItems");
+                let work = work_items
+                    .work_items
+                    .iter_mut()
+                    .find(|item| item.id == work_id)
+                    .expect("strict Work");
+                match mismatch {
+                    "owner" => work.owner = Some("Issue #9999".to_string()),
+                    "agent" => work.agents[0].agent_id = Some("claude".to_string()),
+                    _ => unreachable!(),
+                }
+                save_mutation_work_items(repo, &work_items);
+
+                let error = resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("foreign Work authority must fail closed");
+                assert!(
+                    error.to_string().to_ascii_lowercase().contains(mismatch),
+                    "{mismatch}: {error}"
+                );
+            });
+        }
+    }
+
+    #[test]
     fn strict_session_work_mutation_target_requires_latest_assignment_and_unique_active_work() {
         with_strict_target_fixture(|repo, session| {
             let work_id = "work-required";
@@ -4397,8 +4700,8 @@ mod tests {
             );
             assert_workspace_ensure_error(
                 resolve_session_work_mutation_target(repo, &session.id)
-                    .expect_err("latest Unassigned state"),
-                "unassigned",
+                    .expect_err("superseded conflicting authority must remain ambiguous"),
+                "ambiguous",
             );
 
             save_project_assignments(
@@ -4466,8 +4769,11 @@ mod tests {
                 gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
             foreign_active.work_items[1] = foreign_item;
             save_mutation_work_items(repo, &foreign_active);
-            resolve_session_work_mutation_target(repo, &session.id)
-                .expect("terminal historical Work must not make the active target ambiguous");
+            assert_workspace_ensure_error(
+                resolve_session_work_mutation_target(repo, &session.id)
+                    .expect_err("terminal Session shadow must remain ambiguous"),
+                "ambiguous",
+            );
 
             let mut duplicate = mutation_work_items(repo, session, work_id);
             let mut terminal_duplicate = duplicate.work_items[0].clone();
@@ -5071,10 +5377,16 @@ mod tests {
                 assigned_session_agent(&provider_absent, work_id, Utc::now()),
             ],
         );
-        save_mutation_work_items_with_tracked_events(
-            &repo,
-            &mutation_work_items(&repo, &provider_present, work_id),
+        let mut provider_neutral_work = mutation_work_items(&repo, &provider_present, work_id);
+        let mut second_session_claim = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Claim,
+            work_id,
+            Utc::now(),
         );
+        second_session_claim.agent_session_id = Some(provider_absent.id.clone());
+        second_session_claim.agent_id = Some(provider_absent.agent_id.command().to_string());
+        provider_neutral_work.apply_event(second_session_claim);
+        save_mutation_work_items_with_tracked_events(&repo, &repo, &provider_neutral_work);
 
         for session in [&provider_present, &provider_absent] {
             save_session_fixture(session);

@@ -100,10 +100,17 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
     if canonical_path.exists() || legacy_path == canonical_path || !legacy_path.is_file() {
         return Ok(());
     }
+    let bytes = fs::read(legacy_path)?;
+    write_workspace_file_if_absent(canonical_path, &bytes)
+}
+
+fn write_workspace_file_if_absent(canonical_path: &Path, bytes: &[u8]) -> Result<()> {
+    if canonical_path.exists() {
+        return Ok(());
+    }
     if let Some(parent) = canonical_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = fs::read(legacy_path)?;
     let file_name = canonical_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -115,7 +122,7 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
     ));
     {
         let mut file = fs::File::create(&temp_path)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
     }
     match fs::hard_link(&temp_path, canonical_path) {
@@ -132,6 +139,36 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
             Err(error.into())
         }
     }
+}
+
+fn copy_validated_workspace_projection_if_needed(
+    legacy_path: &Path,
+    canonical_path: &Path,
+) -> Result<()> {
+    if canonical_path.exists() || legacy_path == canonical_path || !legacy_path.is_file() {
+        return Ok(());
+    }
+    let Some(projection) = load_workspace_projection_from_path(legacy_path)? else {
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec_pretty(&projection)
+        .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
+    write_workspace_file_if_absent(canonical_path, &bytes)
+}
+
+fn copy_validated_workspace_work_items_if_needed(
+    legacy_path: &Path,
+    canonical_path: &Path,
+) -> Result<()> {
+    if canonical_path.exists() || legacy_path == canonical_path || !legacy_path.is_file() {
+        return Ok(());
+    }
+    let Some(projection) = load_workspace_work_items_from_path(legacy_path)? else {
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec_pretty(&projection)
+        .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
+    write_workspace_file_if_absent(canonical_path, &bytes)
 }
 
 /// SPEC-2359 Phase W-12 Slice 5b (FR-355): the gitattributes line that joins
@@ -485,12 +522,826 @@ pub fn transact_workspace_state<T>(
     )
 }
 
+/// Single-root transaction with a read-only authority check under the state
+/// lock and before legacy migration writes. This is reserved for callers whose
+/// refusal contract requires byte-for-byte preservation of legacy sources.
+pub fn transact_workspace_state_with_preflight<T>(
+    repo_path: &Path,
+    preflight: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection, bool) -> Result<()>,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
+        let (projection, work_items, persisted) =
+            load_split_root_workspace_state_for_preflight_locked(
+                repo_path,
+                repo_path,
+                &current_path,
+                &work_items_path,
+            )?;
+        preflight(&projection, &work_items, persisted)?;
+        let events_path = materialize_split_root_workspace_state_paths_locked(
+            repo_path,
+            repo_path,
+            &current_path,
+            &work_items_path,
+        )?;
+        let (result, transaction) = build_workspace_state_transaction_locked(
+            &current_path,
+            &work_items_path,
+            &events_path,
+            repo_path,
+            update,
+        )?;
+        persist_workspace_state_transaction_locked(&current_path, &transaction)?;
+        Ok(result)
+    })
+}
+
+/// Split-root variant of [`transact_workspace_state`]. The canonical current
+/// projection and repo-global WorkItems follow `project_state_root`, while the
+/// tracked event alone follows the exact linked worktree. Every legacy
+/// migration runs before the path-injected transaction so recovery cannot
+/// strand historical state.
+pub fn transact_workspace_state_for_work_event_root<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_preflight(
+        project_state_root,
+        work_event_root,
+        |_, _, _| Ok(()),
+        update,
+    )
+}
+
+/// Split-root transaction with a read-only authority check that runs under
+/// the complete old/current/destination lock set before any migration writes.
+/// The preflight view follows the same source precedence as materialization,
+/// allowing security-sensitive callers to reject stale legacy state without
+/// changing either source or destination bytes.
+pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    preflight: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection, bool) -> Result<()>,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        || {
+            let (projection, work_items, persisted) =
+                load_split_root_workspace_state_for_preflight_locked(
+                    project_state_root,
+                    work_event_root,
+                    &current_path,
+                    &work_items_path,
+                )?;
+            preflight(&projection, &work_items, persisted)?;
+            let events_path = materialize_split_root_workspace_state_paths_locked(
+                project_state_root,
+                work_event_root,
+                &current_path,
+                &work_items_path,
+            )?;
+            let (result, transaction) = build_workspace_state_transaction_locked(
+                &current_path,
+                &work_items_path,
+                &events_path,
+                project_state_root,
+                update,
+            )?;
+            persist_workspace_state_transaction_locked(&current_path, &transaction)?;
+            Ok(result)
+        },
+    )
+}
+
 /// Recover an interrupted Workspace state transaction without synthesizing or
 /// mutating Workspace state when no transaction is pending.
 pub fn recover_pending_workspace_state_transaction(repo_path: &Path) -> Result<()> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || Ok(()))
+}
+
+/// Split-root variant of [`recover_pending_workspace_state_transaction`].
+pub fn recover_pending_workspace_state_transaction_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+) -> Result<()> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        || {
+            materialize_split_root_workspace_state_paths_locked(
+                project_state_root,
+                work_event_root,
+                &current_path,
+                &work_items_path,
+            )?;
+            Ok(())
+        },
+    )
+}
+
+/// Resolve and fold a pre-split external Workspace transaction while holding
+/// the current, repo-global WorkItems, and exact-worktree WorkItems locks as
+/// one atomic authority boundary.
+///
+/// The committed receipt is durable before the fold. A retry therefore runs
+/// the idempotent fold again even when the legacy pending marker was already
+/// published and removed by an interrupted prior attempt.
+pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    validate_external_workspace_operation_id(operation_id)?;
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    if legacy_work_items_path == work_items_path {
+        return resolve_workspace_state_external_commit_at(
+            &current_path,
+            &work_items_path,
+            operation_id,
+            decision,
+        );
+    }
+    let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
+        &current_path,
+        &legacy_work_items_path,
+        operation_id,
+    )?
+    else {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    };
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+        &current_path,
+        &legacy_work_items_path,
+        operation_id,
+        decision,
+        std::slice::from_ref(&work_items_path),
+        Some(&work_items_path),
+        |transaction| {
+            merge_committed_legacy_worktree_events_locked(
+                &current_path,
+                &work_items_path,
+                &legacy_work_items_path,
+                work_event_root,
+                transaction,
+            )
+        },
+    )
+}
+
+fn merge_committed_legacy_worktree_events_locked(
+    current_path: &Path,
+    work_items_path: &Path,
+    legacy_work_items_path: &Path,
+    work_event_root: &Path,
+    transaction: Option<&PendingWorkspaceStateTransaction>,
+) -> Result<()> {
+    let legacy = load_workspace_work_items_from_path(legacy_work_items_path)?;
+    let legacy_is_precommit = match transaction {
+        Some(pending)
+            if workspace_state_snapshot_matches_precondition(
+                legacy_work_items_path,
+                pending.work_items_precondition.as_deref(),
+            )? =>
+        {
+            true
+        }
+        Some(pending) if legacy.as_ref() == pending.work_items.as_ref() => false,
+        Some(_) => {
+            return Err(GwtError::Other(
+                "legacy external Workspace migration source is neither the committed pre-state nor the exact post-state"
+                    .to_string(),
+            ));
+        }
+        None => false,
+    };
+    let canonical_was_missing = !work_items_path.exists();
+    let mut canonical = match load_workspace_work_items_from_path(work_items_path)? {
+        Some(canonical) => canonical,
+        None => legacy
+            .clone()
+            .or_else(|| transaction.and_then(|pending| pending.work_items.clone()))
+            .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now())),
+    };
+    let projection = match transaction {
+        Some(pending) => pending.projection.clone(),
+        None => load_workspace_projection_from_path(current_path)?.ok_or_else(|| {
+            GwtError::Other(
+                "legacy external Workspace migration is missing canonical Session authority"
+                    .to_string(),
+            )
+        })?,
+    };
+    let strict_exact_transaction = transaction.is_some();
+    let mut candidates = match transaction {
+        Some(pending) => pending.events.clone(),
+        None => legacy
+            .as_ref()
+            .into_iter()
+            .flat_map(|projection| projection.work_items.iter())
+            .flat_map(|item| item.events.iter().cloned())
+            .collect(),
+    };
+    candidates.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let mut candidate_ids = HashMap::<String, WorkEvent>::new();
+    let mut changed = canonical_was_missing;
+    for event in candidates {
+        if let Some(previous) = candidate_ids.get(&event.id) {
+            if previous != &event {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration found conflicting payloads for event {}",
+                    event.id
+                )));
+            }
+            continue;
+        }
+        candidate_ids.insert(event.id.clone(), event.clone());
+        let canonical_target = unique_legacy_reconciliation_target(
+            &canonical,
+            &event.work_item_id,
+            "canonical WorkItems",
+        )?
+        .cloned();
+        let mut event_already_applied =
+            unique_legacy_reconciliation_event(&canonical, &event, "canonical WorkItems")?;
+        let mut target = canonical_target.clone();
+        let mut seed_snapshot = None;
+
+        if target.is_none() && transaction.is_some() && legacy_is_precommit {
+            if let Some(precommit_target) = legacy
+                .as_ref()
+                .map(|projection| {
+                    unique_legacy_reconciliation_target(
+                        projection,
+                        &event.work_item_id,
+                        "legacy pre-state",
+                    )
+                })
+                .transpose()?
+                .flatten()
+            {
+                validate_legacy_reconciliation_snapshot_target(
+                    legacy
+                        .as_ref()
+                        .expect("pre-state target requires legacy WorkItems"),
+                    precommit_target,
+                    "legacy pre-state",
+                )?;
+                if unique_legacy_reconciliation_event(
+                    legacy
+                        .as_ref()
+                        .expect("pre-state target requires legacy WorkItems"),
+                    &event,
+                    "legacy pre-state",
+                )? {
+                    return Err(GwtError::Other(format!(
+                        "legacy external Workspace migration pre-state already contains pending event {}",
+                        event.id
+                    )));
+                }
+                target = Some(precommit_target.clone());
+                seed_snapshot = Some(precommit_target.clone());
+            }
+        }
+
+        if target.is_none() {
+            let creation_projection = match transaction {
+                Some(pending) => pending.work_items.as_ref(),
+                None => legacy.as_ref(),
+            };
+            let creation_snapshot = creation_projection
+                .map(|projection| {
+                    unique_legacy_reconciliation_target(
+                        projection,
+                        &event.work_item_id,
+                        "legacy post-state",
+                    )
+                })
+                .transpose()?
+                .flatten();
+            if let (Some(projection), Some(snapshot)) = (creation_projection, creation_snapshot) {
+                validate_legacy_reconciliation_snapshot_target(
+                    projection,
+                    snapshot,
+                    "legacy post-state",
+                )?;
+                let independently_materialized = legacy_event_materializes_work(event.kind)
+                    || legacy_snapshot_proves_prior_materialization(snapshot, &event);
+                if independently_materialized
+                    && !unique_legacy_reconciliation_event(projection, &event, "legacy post-state")?
+                {
+                    return Err(GwtError::Other(format!(
+                        "legacy external Workspace migration target Work {} does not prove event {}",
+                        event.work_item_id, event.id
+                    )));
+                }
+                if independently_materialized {
+                    target = Some(snapshot.clone());
+                }
+                if independently_materialized
+                    && ((transaction.is_some() && !legacy_is_precommit)
+                        || (transaction.is_none() && !legacy_event_materializes_work(event.kind)))
+                {
+                    seed_snapshot = Some(snapshot.clone());
+                    event_already_applied = true;
+                }
+            }
+        }
+
+        let Some(target) = target.as_ref() else {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration target Work {} is missing",
+                    event.work_item_id
+                )));
+            }
+            continue;
+        };
+        if canonical_target.is_some()
+            && !event_already_applied
+            && event.updated_at < target.updated_at
+        {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} is older than canonical Work {}",
+                    event.id, event.work_item_id
+                )));
+            }
+            continue;
+        }
+        if let Some(owner) = event.owner.as_deref() {
+            if target.owner.as_deref() != Some(owner) {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration owner conflicts with Work {}",
+                    event.work_item_id
+                )));
+            }
+        }
+        let Some(session_id) = event.agent_session_id.as_deref() else {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} has no Session authority",
+                    event.id
+                )));
+            }
+            continue;
+        };
+        let Some(agent) = resolve_latest_session_bound_agent_authority(
+            &projection,
+            session_id,
+            "legacy external Workspace migration",
+        )?
+        else {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} has no canonical Agent authority",
+                    event.id
+                )));
+            }
+            continue;
+        };
+        if agent.affiliation_status != WorkspaceAgentAffiliationStatus::Assigned
+            || agent.workspace_id.as_deref() != Some(event.work_item_id.as_str())
+            || event.agent_id.as_deref() != Some(agent.agent_id.as_str())
+        {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} conflicts with canonical Agent authority",
+                    event.id
+                )));
+            }
+            continue;
+        }
+        let Some(container) = event.execution_container.as_ref() else {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} has no execution container",
+                    event.id
+                )));
+            }
+            continue;
+        };
+        let Some(container_worktree) = container.worktree_path.as_deref() else {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} has no worktree identity",
+                    event.id
+                )));
+            }
+            continue;
+        };
+        if canonical_session_bound_branch(container.branch.as_deref().unwrap_or_default())
+            != canonical_session_bound_branch(agent.branch.as_deref().unwrap_or_default())
+            || !session_bound_paths_match(Some(container_worktree), agent.worktree_path.as_deref())?
+        {
+            if strict_exact_transaction {
+                return Err(GwtError::Other(format!(
+                    "legacy external Workspace migration event {} conflicts with canonical container authority",
+                    event.id
+                )));
+            }
+            continue;
+        }
+        validate_legacy_reconciliation_target_local_authority(
+            target,
+            session_id,
+            event.agent_id.as_deref().unwrap_or_default(),
+            container.branch.as_deref().unwrap_or_default(),
+            container_worktree,
+            "legacy external Workspace migration",
+            false,
+        )?;
+        if let Some(snapshot) = seed_snapshot {
+            canonical.work_items.push(snapshot);
+            changed = true;
+        }
+        if !event_already_applied
+            && canonical.apply_event(event.clone())
+                == WorkEventApplyOutcome::RejectedSessionConflict
+        {
+            return Err(GwtError::Other(format!(
+                "legacy external Workspace migration rejected Session conflict for event {}",
+                event.id
+            )));
+        }
+        if !event_already_applied {
+            changed = true;
+        }
+        let applied_target = unique_legacy_reconciliation_target(
+            &canonical,
+            &event.work_item_id,
+            "canonical WorkItems after reconciliation",
+        )?
+        .ok_or_else(|| {
+            GwtError::Other(format!(
+                "legacy external Workspace migration target Work {} disappeared",
+                event.work_item_id
+            ))
+        })?;
+        validate_legacy_reconciliation_target_local_authority(
+            applied_target,
+            session_id,
+            event.agent_id.as_deref().unwrap_or_default(),
+            container.branch.as_deref().unwrap_or_default(),
+            container_worktree,
+            "legacy external Workspace migration",
+            true,
+        )?;
+        validate_session_bound_work_authority_uniqueness(
+            &canonical,
+            &event.work_item_id,
+            session_id,
+            container.branch.as_deref().unwrap_or_default(),
+            container_worktree,
+            "legacy external Workspace migration",
+        )?;
+    }
+    if transaction.is_none() {
+        validate_legacy_reconciliation_assigned_targets(
+            &projection,
+            &canonical,
+            work_event_root,
+            "legacy external Workspace receipt reconciliation",
+        )?;
+    }
+    if changed {
+        save_workspace_work_items_projection_to_path(work_items_path, &canonical)?;
+    }
+    Ok(())
+}
+
+fn unique_legacy_reconciliation_target<'a>(
+    work_items: &'a WorkItemsProjection,
+    work_item_id: &str,
+    source: &str,
+) -> Result<Option<&'a WorkItem>> {
+    let mut matches = work_items
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_item_id);
+    let target = matches.next();
+    if matches.next().is_some() {
+        return Err(GwtError::Other(format!(
+            "legacy external Workspace migration target Work {work_item_id} is ambiguous in {source}"
+        )));
+    }
+    Ok(target)
+}
+
+fn unique_legacy_reconciliation_event(
+    work_items: &WorkItemsProjection,
+    expected: &WorkEvent,
+    source: &str,
+) -> Result<bool> {
+    let mut matches = work_items.work_items.iter().flat_map(|item| {
+        item.events
+            .iter()
+            .filter(|event| event.id == expected.id)
+            .map(move |event| (item, event))
+    });
+    let Some((parent, existing)) = matches.next() else {
+        return Ok(false);
+    };
+    if matches.next().is_some() {
+        return Err(GwtError::Other(format!(
+            "legacy external Workspace migration event {} is ambiguous in {source}",
+            expected.id
+        )));
+    }
+    if parent.id != expected.work_item_id || existing != expected {
+        return Err(GwtError::Other(format!(
+            "legacy external Workspace migration event {} conflicts with {source}",
+            expected.id
+        )));
+    }
+    Ok(true)
+}
+
+fn legacy_event_materializes_work(kind: WorkEventKind) -> bool {
+    matches!(kind, WorkEventKind::Start | WorkEventKind::Backfill)
+}
+
+fn legacy_snapshot_proves_prior_materialization(target: &WorkItem, event: &WorkEvent) -> bool {
+    target.events.iter().any(|candidate| {
+        candidate.id != event.id
+            && candidate.updated_at <= event.updated_at
+            && legacy_event_materializes_work(candidate.kind)
+    })
+}
+
+fn validate_legacy_reconciliation_snapshot_target(
+    work_items: &WorkItemsProjection,
+    target: &WorkItem,
+    source: &str,
+) -> Result<()> {
+    for event in &target.events {
+        if event.work_item_id != target.id
+            || !unique_legacy_reconciliation_event(work_items, event, source)?
+        {
+            return Err(GwtError::Other(format!(
+                "legacy external Workspace migration event {} conflicts with target Work {} in {source}",
+                event.id, target.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_legacy_reconciliation_target_local_authority(
+    target: &WorkItem,
+    session_id: &str,
+    agent_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+    require_complete: bool,
+) -> Result<()> {
+    let session_refs = target
+        .agents
+        .iter()
+        .filter(|agent| agent.session_id == session_id)
+        .collect::<Vec<_>>();
+    if session_refs.len() > 1
+        || session_refs
+            .first()
+            .is_some_and(|agent| agent.agent_id.as_deref() != Some(agent_id))
+        || (require_complete && session_refs.len() != 1)
+    {
+        return Err(GwtError::Other(format!(
+            "{context} target Agent authority is missing, foreign, or ambiguous"
+        )));
+    }
+
+    let mut matching_containers = 0;
+    for container in &target.execution_containers {
+        let branch_matches =
+            canonical_session_bound_branch(container.branch.as_deref().unwrap_or_default())
+                == canonical_session_bound_branch(branch_identity);
+        if branch_matches
+            && session_bound_paths_match(
+                container.worktree_path.as_deref(),
+                Some(worktree_identity),
+            )?
+        {
+            matching_containers += 1;
+        }
+    }
+    if matching_containers > 1 || (require_complete && matching_containers != 1) {
+        return Err(GwtError::Other(format!(
+            "{context} target execution container is missing or ambiguous"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_legacy_reconciliation_assigned_targets(
+    projection: &WorkspaceProjection,
+    work_items: &WorkItemsProjection,
+    work_event_root: &Path,
+    context: &str,
+) -> Result<()> {
+    let session_ids = projection
+        .agents
+        .iter()
+        .map(|agent| agent.session_id.as_str())
+        .collect::<HashSet<_>>();
+    for session_id in session_ids {
+        let Some(agent) =
+            resolve_latest_session_bound_agent_authority(projection, session_id, context)?
+        else {
+            continue;
+        };
+        if agent.affiliation_status != WorkspaceAgentAffiliationStatus::Assigned
+            || !session_bound_paths_match(agent.worktree_path.as_deref(), Some(work_event_root))?
+        {
+            continue;
+        }
+        let work_id = agent
+            .workspace_id
+            .as_deref()
+            .filter(|work_id| !work_id.trim().is_empty())
+            .ok_or_else(|| {
+                GwtError::Other(format!(
+                    "{context} Assigned Session {session_id} has no Work identity"
+                ))
+            })?;
+        let target = unique_legacy_reconciliation_target(work_items, work_id, context)?
+            .ok_or_else(|| {
+                GwtError::Other(format!(
+                    "{context} Assigned Work {work_id} is missing after reconciliation"
+                ))
+            })?;
+        let branch_identity = agent.branch.as_deref().unwrap_or_default();
+        validate_legacy_reconciliation_target_local_authority(
+            target,
+            session_id,
+            &agent.agent_id,
+            branch_identity,
+            work_event_root,
+            context,
+            true,
+        )?;
+        validate_session_bound_work_authority_uniqueness(
+            work_items,
+            work_id,
+            session_id,
+            branch_identity,
+            work_event_root,
+            context,
+        )?;
+    }
+    Ok(())
+}
+
+/// Resolve the split-root paths. Current and WorkItems share the stable project
+/// identity; only the tracked event is worktree-local. Deriving WorkItems from
+/// `work_event_root` would create a second SOT whenever the Project State root
+/// is a Workspace Home rather than a Git worktree.
+fn split_root_workspace_state_paths(
+    project_state_root: &Path,
+    _work_event_root: &Path,
+) -> (PathBuf, PathBuf) {
+    (
+        gwt_workspace_projection_path_for_repo_path(project_state_root),
+        gwt_workspace_work_items_path_for_repo_path(project_state_root),
+    )
+}
+
+fn with_split_root_workspace_state_lock<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    current_path: &Path,
+    work_items_path: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let legacy_worktree_work_items = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let mut lock_targets = vec![
+        current_path.with_file_name("works.json"),
+        work_items_path.to_path_buf(),
+    ];
+    let mut marker_paths = vec![
+        pending_workspace_state_transaction_path(current_path),
+        pending_workspace_state_transaction_path_for_work_items(work_items_path),
+    ];
+    if project_state_root != work_event_root && legacy_worktree_work_items != work_items_path {
+        lock_targets.push(legacy_worktree_work_items.clone());
+        marker_paths.push(pending_workspace_state_transaction_path_for_work_items(
+            &legacy_worktree_work_items,
+        ));
+    }
+    with_workspace_transaction_recovery(lock_targets, marker_paths, operation)
+}
+
+/// Materialize legacy project-scoped sources while the caller continuously
+/// holds the repo-global current/WorkItems lock.
+fn materialize_split_root_workspace_state_paths_locked(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    current_path: &Path,
+    work_items_path: &Path,
+) -> Result<PathBuf> {
+    copy_validated_workspace_projection_if_needed(
+        &legacy_workspace_projection_path_for_repo_path(project_state_root),
+        current_path,
+    )?;
+    copy_validated_workspace_work_items_if_needed(
+        &legacy_workspace_work_items_path_for_repo_path(project_state_root),
+        work_items_path,
+    )?;
+    if project_state_root != work_event_root {
+        copy_validated_workspace_work_items_if_needed(
+            &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+            work_items_path,
+        )?;
+    }
+
+    // Preserve the destination root's normal migration precedence. Only if it
+    // still has no tracked log do we consult the former single-root sources,
+    // newest placement first.
+    let events_path = repo_local_work_events_path_with_migration_locked(work_event_root)?;
+    if !events_path.exists() {
+        for source in [
+            gwt_repo_local_work_events_path(project_state_root),
+            gwt_workspace_work_events_path_for_repo_path(project_state_root),
+            legacy_workspace_work_events_path_for_repo_path(project_state_root),
+        ] {
+            copy_legacy_workspace_file_if_needed(&source, &events_path)?;
+            if events_path.exists() {
+                break;
+            }
+        }
+    }
+    Ok(events_path)
+}
+
+fn load_split_root_workspace_state_for_preflight_locked(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    current_path: &Path,
+    work_items_path: &Path,
+) -> Result<(WorkspaceProjection, WorkItemsProjection, bool)> {
+    let mut projection = match load_workspace_projection_from_path(current_path)? {
+        Some(projection) => projection,
+        None => load_workspace_projection_from_path(
+            &legacy_workspace_projection_path_for_repo_path(project_state_root),
+        )?
+        .unwrap_or_else(|| WorkspaceProjection::default_for_project(project_state_root)),
+    };
+    projection.project_root = project_state_root.to_path_buf();
+
+    let work_item_sources = [
+        work_items_path.to_path_buf(),
+        legacy_workspace_work_items_path_for_repo_path(project_state_root),
+        gwt_workspace_work_items_path_for_repo_path(work_event_root),
+    ];
+    for source in work_item_sources {
+        if let Some(work_items) = load_workspace_work_items_from_path(&source)? {
+            return Ok((projection, work_items, true));
+        }
+    }
+    Ok((
+        projection,
+        WorkItemsProjection {
+            updated_at: Utc::now(),
+            work_items: Vec::new(),
+        },
+        false,
+    ))
 }
 
 /// Stage one Workspace/Work transition under a durable external operation id,
@@ -529,6 +1380,97 @@ pub fn transact_workspace_state_with_commit<T>(
     )
 }
 
+/// Split-root variant of [`transact_workspace_state_with_commit`]. It shares
+/// the same legacy/pending recovery and root routing as
+/// [`transact_workspace_state_for_work_event_root`] before staging the
+/// externally committed transition.
+pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    external_operation_id: &str,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<T> {
+    validate_external_workspace_operation_id(external_operation_id)?;
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
+        &current_path,
+        &work_items_path,
+        external_operation_id,
+    )?
+    else {
+        return Err(GwtError::Other(format!(
+            "external workspace operation {external_operation_id} is already in flight; retry"
+        )));
+    };
+    if let Some(receipt) = load_external_workspace_commit_receipt(
+        &current_path,
+        &work_items_path,
+        external_operation_id,
+    )? {
+        return Err(GwtError::Other(format!(
+            "external workspace operation {external_operation_id} was already resolved as {:?}",
+            receipt.resolution
+        )));
+    }
+    let result = with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        || {
+            if let Some(receipt) = load_external_workspace_commit_receipt(
+                &current_path,
+                &work_items_path,
+                external_operation_id,
+            )? {
+                return Err(GwtError::Other(format!(
+                    "external workspace operation {external_operation_id} was resolved as {:?} during transaction recovery",
+                    receipt.resolution
+                )));
+            }
+            let events_path = materialize_split_root_workspace_state_paths_locked(
+                project_state_root,
+                work_event_root,
+                &current_path,
+                &work_items_path,
+            )?;
+            let (result, mut transaction) = build_workspace_state_transaction_locked(
+                &current_path,
+                &work_items_path,
+                &events_path,
+                project_state_root,
+                update,
+            )?;
+            transaction.external_commit = Some(ExternalWorkspaceCommit {
+                operation_id: external_operation_id.to_string(),
+                phase: ExternalWorkspaceCommitPhase::Prepared,
+                reconciliation_work_items_path: None,
+            });
+            write_workspace_state_transaction_markers(&transaction, true)?;
+            Ok(result)
+        },
+    )?;
+    commit()?;
+    let resolution = resolve_workspace_state_external_commit_at_locked(
+        &current_path,
+        &work_items_path,
+        external_operation_id,
+        ExternalWorkspaceCommitDecision::Commit,
+    )?;
+    if resolution != ExternalWorkspaceCommitResolution::Committed {
+        return Err(GwtError::Other(format!(
+            "external workspace operation {external_operation_id} lost its staged transaction before publication: {resolution:?}"
+        )));
+    }
+    Ok(result)
+}
+
 const WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 3;
 const MIN_WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 1;
 const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
@@ -548,6 +1490,11 @@ enum ExternalWorkspaceCommitPhase {
 struct ExternalWorkspaceCommit {
     operation_id: String,
     phase: ExternalWorkspaceCommitPhase,
+    /// A committed legacy transaction must not be published until its exact
+    /// events are folded into this canonical WorkItems path. Ordinary recovery
+    /// keeps the marker when this obligation is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reconciliation_work_items_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -834,6 +1781,7 @@ pub fn transact_workspace_state_at_with_commit<T>(
         transaction.external_commit = Some(ExternalWorkspaceCommit {
             operation_id: external_operation_id.to_string(),
             phase: ExternalWorkspaceCommitPhase::Prepared,
+            reconciliation_work_items_path: None,
         });
         write_workspace_state_transaction_markers(&transaction, true)?;
         Ok(result)
@@ -992,6 +1940,14 @@ fn external_workspace_transaction_payload_hash(
         .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
     if let Some(phase) = value.pointer_mut("/external_commit/phase") {
         *phase = serde_json::Value::String("prepared".to_string());
+    }
+    if let Some(external) = value
+        .pointer_mut("/external_commit")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        // Reconciliation routing is a publication obligation added by the
+        // resolving version, not part of the externally staged Work payload.
+        external.remove("reconciliation_work_items_path");
     }
     let bytes = serde_json::to_vec(&value)
         .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
@@ -1249,8 +2205,8 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let journal_path = gwt_workspace_journal_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
-    let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
     // SkipTracked leaves the git-tracked events.jsonl completely untouched — it
     // does not even run the legacy→repo-local migration, so a settled worktree
     // stays byte-for-byte clean.
@@ -1327,6 +2283,8 @@ pub struct SessionBoundWorkspaceMutationTarget {
     pub branch_identity: String,
     pub worktree_identity: PathBuf,
     pub work_id: String,
+    pub owner: String,
+    pub agent_id: String,
 }
 
 /// Host-authenticated Session/runtime identity used for terminalization.
@@ -1342,6 +2300,8 @@ pub struct SessionBoundWorkspaceTerminalTarget {
     pub session_id: String,
     pub branch_identity: String,
     pub worktree_identity: PathBuf,
+    pub owner: String,
+    pub agent_id: String,
 }
 
 impl std::fmt::Debug for SessionBoundWorkspaceTerminalTarget {
@@ -1394,7 +2354,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
 
     let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
     let journal_path = gwt_workspace_journal_path_for_repo_path(&target.project_state_root);
-    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.work_event_root);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
     let events_path = match tracked_event_policy {
         TrackedWorkEventPolicy::Persist => {
             Some(gwt_repo_local_work_events_path(&target.work_event_root))
@@ -1533,10 +2493,16 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     validate_session_bound_target_identity_shape(target)?;
+    if target.owner.trim().is_empty() || target.agent_id.trim().is_empty() {
+        return Err(GwtError::Other(
+            "Session-bound Work terminalization received incomplete Work authority".to_string(),
+        ));
+    }
 
     let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
-    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.work_event_root);
-    let events_path = gwt_workspace_work_events_closed_path_for_repo_path(&target.work_event_root);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
+    let events_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root);
     for (path, label) in [
         (&current_path, "current projection"),
         (&work_items_path, "WorkItems projection"),
@@ -1613,11 +2579,21 @@ fn resolve_session_bound_terminal_target_locked(
     work_items: &WorkItemsProjection,
     target: &SessionBoundWorkspaceTerminalTarget,
 ) -> Result<LockedSessionBoundTerminalTarget> {
-    let Some(agent) = projection.latest_agent_for_session(&target.session_id) else {
+    let Some(agent) = resolve_unambiguous_session_bound_agent(
+        projection,
+        &target.session_id,
+        "Session-bound Work terminalization",
+    )?
+    else {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
     };
     if agent.affiliation_status != WorkspaceAgentAffiliationStatus::Assigned {
         return Ok(LockedSessionBoundTerminalTarget::NoTarget);
+    }
+    if agent.agent_id != target.agent_id {
+        return Err(GwtError::Other(
+            "Session-bound Work terminalization agent identity changed before commit".to_string(),
+        ));
     }
     let Some(work_id) = agent
         .workspace_id
@@ -1653,6 +2629,24 @@ fn resolve_session_bound_terminal_target_locked(
             "Session-bound Work terminalization target became ambiguous".to_string(),
         ));
     }
+    if item.owner.as_deref() != Some(target.owner.as_str()) {
+        return Err(GwtError::Other(
+            "Session-bound Work terminalization owner authority changed before commit".to_string(),
+        ));
+    }
+    let session_refs = item
+        .agents
+        .iter()
+        .filter(|agent| agent.session_id == target.session_id)
+        .collect::<Vec<_>>();
+    if session_refs.len() != 1
+        || session_refs[0].agent_id.as_deref() != Some(target.agent_id.as_str())
+    {
+        return Err(GwtError::Other(
+            "Session-bound Work terminalization agent identity changed or became ambiguous"
+                .to_string(),
+        ));
+    }
     let mut matching_containers = 0;
     for container in &item.execution_containers {
         let branch_matches =
@@ -1673,19 +2667,14 @@ fn resolve_session_bound_terminal_target_locked(
                 .to_string(),
         ));
     }
-    if work_items.work_items.iter().any(|other| {
-        other.id != work_id
-            && !other.is_terminal()
-            && other
-                .agents
-                .iter()
-                .any(|agent| agent.session_id == target.session_id)
-    }) {
-        return Err(GwtError::Other(
-            "Session-bound Work terminalization Session is attached to multiple active Works"
-                .to_string(),
-        ));
-    }
+    validate_session_bound_work_authority_uniqueness(
+        work_items,
+        work_id,
+        &target.session_id,
+        &target.branch_identity,
+        &target.worktree_identity,
+        "Session-bound Work terminalization",
+    )?;
     Ok(LockedSessionBoundTerminalTarget::Existing(
         work_id.to_string(),
     ))
@@ -1704,6 +2693,11 @@ fn validate_session_bound_target_shape(
     if target.work_id.trim().is_empty() {
         return Err(GwtError::Other(
             "Session-bound workspace transaction received an incomplete target".to_string(),
+        ));
+    }
+    if target.owner.trim().is_empty() || target.agent_id.trim().is_empty() {
+        return Err(GwtError::Other(
+            "Session-bound workspace transaction received incomplete Work authority".to_string(),
         ));
     }
     if update.agent_session_id.as_deref() != Some(target.session_id.as_str()) {
@@ -1781,15 +2775,23 @@ fn validate_session_bound_target_locked(
     owner_claim: Option<&str>,
     allow_terminal: bool,
 ) -> Result<LockedSessionBoundTarget> {
-    let agent = projection
-        .latest_agent_for_session(&target.session_id)
-        .filter(|agent| {
-            agent.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned
-                && agent.workspace_id.as_deref() == Some(target.work_id.as_str())
-        })
-        .ok_or_else(|| {
-            GwtError::Other("Session-bound workspace assignment changed before commit".to_string())
-        })?;
+    let agent = resolve_unambiguous_session_bound_agent(
+        projection,
+        &target.session_id,
+        "Session-bound workspace",
+    )?
+    .filter(|agent| {
+        agent.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned
+            && agent.workspace_id.as_deref() == Some(target.work_id.as_str())
+    })
+    .ok_or_else(|| {
+        GwtError::Other("Session-bound workspace assignment changed before commit".to_string())
+    })?;
+    if agent.agent_id != target.agent_id {
+        return Err(GwtError::Other(
+            "Session-bound workspace agent identity changed before commit".to_string(),
+        ));
+    }
     if canonical_session_bound_branch(agent.branch.as_deref().unwrap_or_default())
         != canonical_session_bound_branch(&target.branch_identity)
         || !session_bound_paths_match(
@@ -1812,6 +2814,23 @@ fn validate_session_bound_target_locked(
     if matches.next().is_some() || (item.is_terminal() && !allow_terminal) {
         return Err(GwtError::Other(
             "Session-bound workspace target is ambiguous or terminal".to_string(),
+        ));
+    }
+    if item.owner.as_deref() != Some(target.owner.as_str()) {
+        return Err(GwtError::Other(
+            "Session-bound workspace owner authority changed before commit".to_string(),
+        ));
+    }
+    let session_refs = item
+        .agents
+        .iter()
+        .filter(|agent| agent.session_id == target.session_id)
+        .collect::<Vec<_>>();
+    if session_refs.len() != 1
+        || session_refs[0].agent_id.as_deref() != Some(target.agent_id.as_str())
+    {
+        return Err(GwtError::Other(
+            "Session-bound workspace agent identity changed or became ambiguous".to_string(),
         ));
     }
 
@@ -1840,18 +2859,14 @@ fn validate_session_bound_target_locked(
         )
     })?;
 
-    if work_items.work_items.iter().any(|other| {
-        other.id != target.work_id
-            && !other.is_terminal()
-            && other
-                .agents
-                .iter()
-                .any(|agent| agent.session_id == target.session_id)
-    }) {
-        return Err(GwtError::Other(
-            "Session-bound workspace Session is attached to multiple active Works".to_string(),
-        ));
-    }
+    validate_session_bound_work_authority_uniqueness(
+        work_items,
+        &target.work_id,
+        &target.session_id,
+        &target.branch_identity,
+        &target.worktree_identity,
+        "Session-bound workspace",
+    )?;
 
     let target_owner = item.owner.clone();
     validate_session_bound_owner_claim(owner_claim, target_owner.as_deref())?;
@@ -1892,6 +2907,117 @@ fn session_bound_paths_match(left: Option<&Path>, right: Option<&Path>) -> Resul
             })
     };
     Ok(canonicalize(left)? == canonicalize(right)?)
+}
+
+fn session_bound_optional_paths_match(left: Option<&Path>, right: Option<&Path>) -> Result<bool> {
+    match (left, right) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => session_bound_paths_match(Some(left), Some(right)),
+        _ => Ok(false),
+    }
+}
+
+fn resolve_unambiguous_session_bound_agent<'a>(
+    projection: &'a WorkspaceProjection,
+    session_id: &str,
+    context: &str,
+) -> Result<Option<&'a WorkspaceAgentSummary>> {
+    let Some(latest) = projection.latest_agent_for_session(session_id) else {
+        return Ok(None);
+    };
+    for candidate in projection
+        .agents
+        .iter()
+        .filter(|agent| agent.session_id == session_id)
+    {
+        if !session_bound_agent_authority_matches(candidate, latest)? {
+            return Err(GwtError::Other(format!(
+                "{context} projection authority became ambiguous for Session {session_id}"
+            )));
+        }
+    }
+    Ok(Some(latest))
+}
+
+/// Legacy projections may retain superseded rows for one Session. Migration
+/// may use the latest authority generation, but tied latest rows must agree so
+/// an ambiguous current generation can never authorize an event fold.
+fn resolve_latest_session_bound_agent_authority<'a>(
+    projection: &'a WorkspaceProjection,
+    session_id: &str,
+    context: &str,
+) -> Result<Option<&'a WorkspaceAgentSummary>> {
+    let Some(latest) = projection.latest_agent_for_session(session_id) else {
+        return Ok(None);
+    };
+    for candidate in projection
+        .agents
+        .iter()
+        .filter(|agent| agent.session_id == session_id && agent.updated_at == latest.updated_at)
+    {
+        if !session_bound_agent_authority_matches(candidate, latest)? {
+            return Err(GwtError::Other(format!(
+                "{context} projection authority became ambiguous for Session {session_id}"
+            )));
+        }
+    }
+    Ok(Some(latest))
+}
+
+fn session_bound_agent_authority_matches(
+    candidate: &WorkspaceAgentSummary,
+    expected: &WorkspaceAgentSummary,
+) -> Result<bool> {
+    Ok(candidate.agent_id == expected.agent_id
+        && candidate.affiliation_status == expected.affiliation_status
+        && candidate.workspace_id == expected.workspace_id
+        && canonical_session_bound_branch(candidate.branch.as_deref().unwrap_or_default())
+            == canonical_session_bound_branch(expected.branch.as_deref().unwrap_or_default())
+        && session_bound_optional_paths_match(
+            candidate.worktree_path.as_deref(),
+            expected.worktree_path.as_deref(),
+        )?)
+}
+
+fn validate_session_bound_work_authority_uniqueness(
+    work_items: &WorkItemsProjection,
+    target_work_id: &str,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+) -> Result<()> {
+    for other in work_items
+        .work_items
+        .iter()
+        .filter(|item| item.id != target_work_id)
+    {
+        if other
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == session_id)
+        {
+            return Err(GwtError::Other(format!(
+                "{context} Session is attached to multiple Works"
+            )));
+        }
+        for container in &other.execution_containers {
+            let branch_matches =
+                canonical_session_bound_branch(container.branch.as_deref().unwrap_or_default())
+                    == canonical_session_bound_branch(branch_identity);
+            if branch_matches
+                && session_bound_paths_match(
+                    container.worktree_path.as_deref(),
+                    Some(worktree_identity),
+                )?
+            {
+                return Err(GwtError::Other(format!(
+                    "{context} execution container is attached to multiple Works"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn canonical_session_bound_branch(branch: &str) -> String {
@@ -2329,6 +3455,12 @@ fn with_workspace_transaction_recovery<T>(
                             external_commit.operation_id
                         )));
                     }
+                    if external_commit.reconciliation_work_items_path.is_some() {
+                        return Err(GwtError::Other(format!(
+                            "workspace state transaction external commit requires canonical reconciliation for operation {}",
+                            external_commit.operation_id
+                        )));
+                    }
                 }
                 let required_locks = [
                     transaction.current_path.with_file_name("works.json"),
@@ -2383,24 +3515,42 @@ fn find_pending_workspace_state_transaction(
                 "transaction marker set contains multiple transaction ids",
             ));
         }
-        if !workspace_state_transactions_match_except_external_phase(existing, &transaction)? {
+        if !workspace_state_transactions_match_except_external_publication_state(
+            existing,
+            &transaction,
+        )? {
             return Err(malformed_workspace_state_transaction_error(
                 marker_path,
                 "transaction marker copies disagree",
             ));
         }
-        let existing_phase = existing
-            .external_commit
-            .as_ref()
-            .map(|external| external.phase);
-        let candidate_phase = transaction
-            .external_commit
-            .as_ref()
-            .map(|external| external.phase);
-        if existing_phase == Some(ExternalWorkspaceCommitPhase::Prepared)
-            && candidate_phase == Some(ExternalWorkspaceCommitPhase::Committed)
-        {
-            selected = Some(transaction);
+        let existing_external = existing.external_commit.as_ref();
+        let candidate_external = transaction.external_commit.as_ref();
+        let existing_reconciliation =
+            existing_external.and_then(|external| external.reconciliation_work_items_path.as_ref());
+        let candidate_reconciliation = candidate_external
+            .and_then(|external| external.reconciliation_work_items_path.as_ref());
+        if matches!(
+            (existing_reconciliation, candidate_reconciliation),
+            (Some(left), Some(right)) if left != right
+        ) {
+            return Err(malformed_workspace_state_transaction_error(
+                marker_path,
+                "transaction marker copies disagree on canonical reconciliation path",
+            ));
+        }
+        let candidate_committed = candidate_external
+            .is_some_and(|external| external.phase == ExternalWorkspaceCommitPhase::Committed);
+        let selected = selected
+            .as_mut()
+            .expect("selected transaction was initialized above");
+        if let Some(external) = selected.external_commit.as_mut() {
+            if candidate_committed {
+                external.phase = ExternalWorkspaceCommitPhase::Committed;
+            }
+            if external.reconciliation_work_items_path.is_none() {
+                external.reconciliation_work_items_path = candidate_reconciliation.cloned();
+            }
         }
     }
     Ok(selected)
@@ -2460,7 +3610,7 @@ fn malformed_workspace_state_transaction_error(marker_path: &Path, message: &str
     }
 }
 
-fn workspace_state_transactions_match_except_external_phase(
+fn workspace_state_transactions_match_except_external_publication_state(
     left: &PendingWorkspaceStateTransaction,
     right: &PendingWorkspaceStateTransaction,
 ) -> Result<bool> {
@@ -2471,6 +3621,12 @@ fn workspace_state_transactions_match_except_external_phase(
     for value in [&mut left, &mut right] {
         if let Some(phase) = value.pointer_mut("/external_commit/phase") {
             *phase = serde_json::Value::String("prepared".to_string());
+        }
+        if let Some(external) = value
+            .pointer_mut("/external_commit")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            external.remove("reconciliation_work_items_path");
         }
     }
     Ok(left == right)
@@ -2665,14 +3821,37 @@ fn resolve_workspace_state_external_commit_at_locked(
     operation_id: &str,
     decision: ExternalWorkspaceCommitDecision,
 ) -> Result<ExternalWorkspaceCommitResolution> {
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+        current_path,
+        work_items_path,
+        operation_id,
+        decision,
+        &[],
+        None,
+        |_| Ok(()),
+    )
+}
+
+fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    additional_lock_targets: &[PathBuf],
+    reconciliation_work_items_path: Option<&Path>,
+    mut on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
+) -> Result<ExternalWorkspaceCommitResolution> {
     let requested_resolution = match decision {
         ExternalWorkspaceCommitDecision::Commit => ExternalWorkspaceCommitResolution::Committed,
         ExternalWorkspaceCommitDecision::Reject => ExternalWorkspaceCommitResolution::Rejected,
     };
-    let base_lock_targets = vec![
+    let mut base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
     ];
+    base_lock_targets.extend_from_slice(additional_lock_targets);
+    base_lock_targets.sort();
+    base_lock_targets.dedup();
     let base_marker_paths = vec![
         pending_workspace_state_transaction_path(current_path),
         pending_workspace_state_transaction_path_for_work_items(work_items_path),
@@ -2685,25 +3864,13 @@ fn resolve_workspace_state_external_commit_at_locked(
         )?);
         marker_paths.sort();
         marker_paths.dedup();
-        let Some(discovered) = find_pending_workspace_state_transaction(&marker_paths)? else {
-            return match load_external_workspace_commit_receipt(
-                current_path,
-                work_items_path,
-                operation_id,
-            )? {
-                Some(receipt) if receipt.resolution == requested_resolution => {
-                    Ok(receipt.resolution)
-                }
-                Some(receipt) => Err(GwtError::Other(format!(
-                    "external workspace operation {operation_id} was already resolved as {:?}",
-                    receipt.resolution
-                ))),
-                None => Ok(ExternalWorkspaceCommitResolution::Missing),
-            };
-        };
+        let discovered = find_pending_workspace_state_transaction(&marker_paths)?;
         let mut lock_targets = base_lock_targets.clone();
-        lock_targets.push(discovered.current_path.with_file_name("works.json"));
-        lock_targets.push(discovered.work_items_path.clone());
+        if let Some(discovered) = discovered.as_ref() {
+            lock_targets.push(discovered.current_path.with_file_name("works.json"));
+            lock_targets.push(discovered.work_items_path.clone());
+            marker_paths.extend(pending_workspace_state_transaction_paths(discovered));
+        }
         lock_targets.sort();
         lock_targets.dedup();
 
@@ -2711,7 +3878,6 @@ fn resolve_workspace_state_external_commit_at_locked(
             marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
                 &lock_targets,
             )?);
-            marker_paths.extend(pending_workspace_state_transaction_paths(&discovered));
             marker_paths.sort();
             marker_paths.dedup();
             let Some(mut transaction) = find_pending_workspace_state_transaction(&marker_paths)?
@@ -2722,6 +3888,9 @@ fn resolve_workspace_state_external_commit_at_locked(
                     operation_id,
                 )? {
                     Some(receipt) if receipt.resolution == requested_resolution => {
+                        if receipt.resolution == ExternalWorkspaceCommitResolution::Committed {
+                            on_committed(None)?;
+                        }
                         Ok(Some(receipt.resolution))
                     }
                     Some(receipt) => Err(GwtError::Other(format!(
@@ -2746,6 +3915,7 @@ fn resolve_workspace_state_external_commit_at_locked(
                     "pending workspace state transaction is not externally coordinated".to_string(),
                 ));
             };
+            let external_phase = external_commit.phase;
             if external_commit.operation_id != operation_id {
                 return Err(GwtError::Other(format!(
                     "pending workspace state transaction belongs to external operation {}, not {}",
@@ -2758,6 +3928,34 @@ fn resolve_workspace_state_external_commit_at_locked(
                 return Err(GwtError::Other(format!(
                     "external workspace operation {operation_id} is bound to a different current/work-items path pair"
                 )));
+            }
+            if decision == ExternalWorkspaceCommitDecision::Commit {
+                let pending_reconciliation = transaction
+                    .external_commit
+                    .as_ref()
+                    .and_then(|external| external.reconciliation_work_items_path.as_deref());
+                match (pending_reconciliation, reconciliation_work_items_path) {
+                    (Some(existing), Some(requested)) if existing != requested => {
+                        return Err(GwtError::Other(format!(
+                            "external workspace operation {operation_id} is bound to a different canonical reconciliation path"
+                        )));
+                    }
+                    (Some(_), None) => {
+                        return Err(GwtError::Other(format!(
+                            "external workspace operation {operation_id} requires canonical reconciliation"
+                        )));
+                    }
+                    (Some(_), Some(_)) | (None, None) => {}
+                    (None, Some(reconciliation_path)) => {
+                        transaction
+                            .external_commit
+                            .as_mut()
+                            .expect("external metadata was checked above")
+                            .reconciliation_work_items_path =
+                            Some(reconciliation_path.to_path_buf());
+                        write_workspace_state_transaction_markers(&transaction, false)?;
+                    }
+                }
             }
             if let Some(receipt) =
                 load_external_workspace_commit_receipt(current_path, work_items_path, operation_id)?
@@ -2785,7 +3983,7 @@ fn resolve_workspace_state_external_commit_at_locked(
                         &transaction,
                         ExternalWorkspaceCommitResolution::Committed,
                     )?;
-                    if external_commit.phase == ExternalWorkspaceCommitPhase::Prepared {
+                    if external_phase == ExternalWorkspaceCommitPhase::Prepared {
                         transaction
                             .external_commit
                             .as_mut()
@@ -2793,14 +3991,19 @@ fn resolve_workspace_state_external_commit_at_locked(
                             .phase = ExternalWorkspaceCommitPhase::Committed;
                         write_workspace_state_transaction_markers(&transaction, false)?;
                     }
+                    on_committed(Some(&transaction))?;
+                    let mut publication = transaction.clone();
+                    if let Some(external) = publication.external_commit.as_mut() {
+                        external.reconciliation_work_items_path = None;
+                    }
                     apply_workspace_state_transaction_locked(
-                        &transaction.current_path,
-                        &transaction,
+                        &publication.current_path,
+                        &publication,
                         true,
                     )?;
                 }
                 ExternalWorkspaceCommitDecision::Reject => {
-                    if external_commit.phase == ExternalWorkspaceCommitPhase::Committed {
+                    if external_phase == ExternalWorkspaceCommitPhase::Committed {
                         return Err(GwtError::Other(format!(
                             "cannot reject committed external workspace operation {operation_id}"
                         )));
@@ -3807,19 +5010,19 @@ pub fn emit_workspace_done_event_for_session(
 
 pub fn emit_workspace_done_event_for_session_outcome(
     project_state_root: &Path,
-    work_event_root: &Path,
+    _work_event_root: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
-    let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
     emit_workspace_done_event_for_session_outcome_paths(
         &current_path,
         &work_items_path,
-        &gwt_workspace_work_events_closed_path_for_repo_path(work_event_root),
+        &gwt_workspace_work_events_closed_path_for_repo_path(project_state_root),
         session_id,
         legacy_work_item_id,
         updated_at,
@@ -3847,19 +5050,19 @@ pub fn emit_workspace_discard_event_for_session(
 
 pub fn emit_workspace_discard_event_for_session_outcome(
     project_state_root: &Path,
-    work_event_root: &Path,
+    _work_event_root: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
-    let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
     emit_workspace_discard_event_for_session_outcome_paths(
         &current_path,
         &work_items_path,
-        &gwt_workspace_work_events_closed_path_for_repo_path(work_event_root),
+        &gwt_workspace_work_events_closed_path_for_repo_path(project_state_root),
         session_id,
         legacy_work_item_id,
         updated_at,

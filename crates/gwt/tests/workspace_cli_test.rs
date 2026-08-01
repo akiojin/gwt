@@ -480,6 +480,7 @@ fn register_agent_at_home(home: &Path, project: &Path) {
     let mut session = Session::new(&project_root, BRANCH, AgentId::Codex);
     session.id = SESSION.to_string();
     session.project_state_root = Some(project_root.clone());
+    session.linked_issue_number = Some(3412);
     assert!(
         session.repo_hash.is_some(),
         "fixture origin must set repo hash"
@@ -518,6 +519,7 @@ fn register_agent_at_home(home: &Path, project: &Path) {
     event.title = Some("workspace cli coverage".to_string());
     event.intent = Some("registering".to_string());
     event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = Some("Issue #3412".to_string());
     event.agent_session_id = Some(SESSION.to_string());
     event.agent_id = Some("codex".to_string());
     event.display_name = Some("Codex".to_string());
