@@ -26,45 +26,28 @@ const DIRECT_STOP_SETTLEMENT_RESERVE: Duration = Duration::from_millis(750);
 
 pub fn handle_with_input<E: CliEnv>(env: &mut E, input: &str) -> HookOutput {
     let deadline = CaptureBudgetProfile::StrictStop.resolution_deadline();
-    let worktree_root = env.repo_path().to_path_buf();
-    // SPEC-3248 (hooks v2 P3): whether this Stop gate fires is a lane policy,
-    // resolved from the worktree lane file (source of truth) via the shared
-    // HookContext. A lane whose profile disables `self_improvement_stop`
-    // (intake today) suppresses the gate. Replaces the SPEC-3247 ad-hoc
-    // `SessionKind::from_env().is_intake()` branch.
-    let suppress = !super::context::HookContext::for_worktree(&worktree_root)
-        .lane
-        .policy_flags
-        .self_improvement_stop;
-    evaluate_with_deadline(env, stop_hook_active_from(input), suppress, &deadline)
+    evaluate_with_deadline(env, stop_hook_active_from(input), &deadline)
 }
 
 /// Decide the self-improvement Stop output.
 ///
-/// SPEC-3247 FR-003 / AS-4 → SPEC-3248 (hooks v2): this is a producing-work Stop
-/// gate. A lane whose profile disables `self_improvement_stop` (intake today)
-/// must never be forced to handle improvement candidates before stopping, so
-/// `suppressed_by_lane` short-circuits to [`HookOutput::Silent`] alongside the
-/// existing `stop_hook_active` / non-gwt-repo guards.
-pub fn evaluate_with_env<E: CliEnv>(
-    env: &mut E,
-    stop_hook_active: bool,
-    suppressed_by_lane: bool,
-) -> HookOutput {
+/// SPEC-3247 FR-003 / AS-4: this is a producing-work Stop gate guarded by the
+/// existing `stop_hook_active` / non-gwt-repo checks. The lane suppression
+/// branch was removed by SPEC #3245 (FR-007) — every session evaluates the
+/// same way.
+pub fn evaluate_with_env<E: CliEnv>(env: &mut E, stop_hook_active: bool) -> HookOutput {
     let deadline = CaptureBudgetProfile::StrictStop.resolution_deadline();
-    evaluate_with_deadline(env, stop_hook_active, suppressed_by_lane, &deadline)
+    evaluate_with_deadline(env, stop_hook_active, &deadline)
 }
 
 fn evaluate_with_deadline<E: CliEnv>(
     env: &mut E,
     stop_hook_active: bool,
-    suppressed_by_lane: bool,
     deadline: &ResolutionDeadline,
 ) -> HookOutput {
     evaluate_with_deadline_and_reserve(
         env,
         stop_hook_active,
-        suppressed_by_lane,
         deadline,
         DIRECT_STOP_SETTLEMENT_RESERVE,
     )
@@ -79,12 +62,11 @@ fn evaluate_with_deadline<E: CliEnv>(
 pub fn evaluate_with_deadline_and_reserve<E: CliEnv>(
     env: &mut E,
     stop_hook_active: bool,
-    suppressed_by_lane: bool,
     deadline: &ResolutionDeadline,
     settlement_reserve: Duration,
 ) -> HookOutput {
     let worktree_root = env.repo_path().to_path_buf();
-    if stop_hook_active || suppressed_by_lane {
+    if stop_hook_active {
         return HookOutput::Silent;
     }
     match is_gwt_repository_with_deadline(&worktree_root, deadline) {
@@ -905,7 +887,7 @@ mod tests {
             ResolutionDeadline::new(Duration::from_millis(50), Duration::from_millis(250));
         let started = std::time::Instant::now();
 
-        let output = evaluate_with_deadline(&mut env, false, false, &deadline);
+        let output = evaluate_with_deadline(&mut env, false, &deadline);
 
         let HookOutput::SystemMessage(reason) = output else {
             panic!("contended candidate store must warn without blocking");

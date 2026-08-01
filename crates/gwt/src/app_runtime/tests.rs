@@ -14274,10 +14274,6 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
         "production launch must not return before the canonical five-second deadline: {elapsed:?}",
     );
     assert!(
-        !repo.join(gwt_skills::LANE_FILE_RELATIVE).exists(),
-        "runner health must fail before lane materialization",
-    );
-    assert!(
         !repo.join(".codex").exists(),
         "runner health must fail before managed Codex asset mutation",
     );

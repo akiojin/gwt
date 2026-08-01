@@ -1032,7 +1032,6 @@ mod tests {
 
         // Intake artifact gate settlement paths (FR-017).
         let intake = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(intake.path(), &gwt_skills::INTAKE_PROFILE).expect("lane");
         for operation in [
             "issue.create",
             "issue.comment",
@@ -1058,8 +1057,6 @@ mod tests {
         // Execution-side gates (execution control, obligations, evidence,
         // PR handoff) advertise these operations in their block messages.
         let execution = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(execution.path(), &gwt_skills::EXECUTION_PROFILE)
-            .expect("lane");
         for operation in [
             "verify.plan",
             "verify.run",
@@ -1092,7 +1089,6 @@ mod tests {
     #[test]
     fn ownerless_read_only_loops_and_bookkeeping_writes_pass() {
         let repo = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::EXECUTION_PROFILE).expect("lane");
         let context = WorkflowContext::unknown();
 
         for command in [
@@ -1549,8 +1545,6 @@ mod tests {
         }
 
         let repo = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
-            .expect("pin execution lane");
 
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),

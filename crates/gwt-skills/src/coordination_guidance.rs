@@ -12,7 +12,6 @@
 
 use std::{io, path::Path};
 
-use crate::session_kind::SessionKind;
 use crate::settings_local::write_text_atomically;
 
 /// Skill identifier (matches the `.claude/skills/<name>/` directory
@@ -376,12 +375,9 @@ English のまま。
 "#;
 
 /// Render the full SKILL.md content (frontmatter + managed markers + body).
-/// Idempotent and pure. Since SPEC #3245 (FR-004) the guidance is a single
-/// body for every session kind — lane-specific variants are gone; the `kind`
-/// parameter remains only until the lane mechanism itself is removed in
-/// Stage C (FR-007).
-pub fn render_skill_md(kind: SessionKind) -> String {
-    let _ = kind;
+/// Idempotent and pure. Since SPEC #3245 the guidance is a single body for
+/// every session (FR-004) and the lane mechanism itself is gone (FR-007).
+pub fn render_skill_md() -> String {
     format!(
         "---\nname: {name}\ndescription: {description}\n---\n\n{begin}\n\n{body}\n{end}\n",
         name = SKILL_NAME,
@@ -402,35 +398,29 @@ pub fn render_skill_md(kind: SessionKind) -> String {
 /// - Idempotent: subsequent calls produce byte-identical files.
 /// - User-edited content is overwritten by design — this is a gwt-managed
 ///   asset.
-pub fn generate_coordination_guidance(worktree: &Path, kind: SessionKind) -> io::Result<()> {
-    generate_coordination_guidance_for_claude(worktree, kind)?;
-    generate_coordination_guidance_for_codex(worktree, kind)?;
+pub fn generate_coordination_guidance(worktree: &Path) -> io::Result<()> {
+    generate_coordination_guidance_for_claude(worktree)?;
+    generate_coordination_guidance_for_codex(worktree)?;
     Ok(())
 }
 
 /// Materialize the gwt-coordination SKILL.md under `.claude/skills/` only.
 /// Used by the orchestrator when the target set includes `ClaudeCode` but
 /// may exclude `Codex`.
-pub fn generate_coordination_guidance_for_claude(
-    worktree: &Path,
-    kind: SessionKind,
-) -> io::Result<()> {
-    write_skill_md(&worktree.join(".claude").join("skills"), kind)
+pub fn generate_coordination_guidance_for_claude(worktree: &Path) -> io::Result<()> {
+    write_skill_md(&worktree.join(".claude").join("skills"))
 }
 
 /// Materialize the gwt-coordination SKILL.md under `.codex/skills/` only.
 /// Used by the orchestrator when the target set includes `Codex` but may
 /// exclude `ClaudeCode`.
-pub fn generate_coordination_guidance_for_codex(
-    worktree: &Path,
-    kind: SessionKind,
-) -> io::Result<()> {
-    write_skill_md(&worktree.join(".codex").join("skills"), kind)
+pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<()> {
+    write_skill_md(&worktree.join(".codex").join("skills"))
 }
 
-fn write_skill_md(skills_root: &Path, kind: SessionKind) -> io::Result<()> {
+fn write_skill_md(skills_root: &Path) -> io::Result<()> {
     let path = skills_root.join(SKILL_NAME).join("SKILL.md");
-    write_text_atomically(&path, &render_skill_md(kind))
+    write_text_atomically(&path, &render_skill_md())
 }
 
 #[cfg(test)]
@@ -480,7 +470,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_contains_required_canonical_phrases() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         for phrase in required_phrases() {
             assert!(
                 rendered.contains(phrase),
@@ -500,7 +490,7 @@ mod tests {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
             assert!(
-                render_skill_md(SessionKind::Execution).contains(phrase),
+                render_skill_md().contains(phrase),
                 "generated guidance: {phrase}"
             );
         }
@@ -508,7 +498,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_uses_json_envelope_for_work_identity_examples() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("gwtd <<'JSON'"),
             "Work update examples must use the JSON envelope entrypoint"
@@ -543,7 +533,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_uses_english_canonical_body() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("When you cross a reasoning milestone"),
             "generated SKILL.md must use English canonical prose"
@@ -556,7 +546,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_documents_broadcast_param_contract() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("params.broadcast:true"),
             "generated SKILL.md must document the explicit repo-wide broadcast parameter"
@@ -571,27 +561,25 @@ mod tests {
         );
     }
 
-    // SPEC #3245 FR-004: the guidance is a single body — session kind no
-    // longer selects a variant, and the Work-state instruction is present
-    // for every kind (#3379 contradiction resolved by unification).
+    // SPEC #3245 FR-004/FR-007: one guidance body for every session — the
+    // Work-state instruction is always present and the curation framing is
+    // gone (#3379 contradiction resolved by unification).
     #[test]
-    fn guidance_is_identical_for_every_session_kind() {
-        let intake = render_skill_md(SessionKind::Intake);
-        let execution = render_skill_md(SessionKind::Execution);
-        assert_eq!(intake, execution, "single guidance for every kind");
+    fn guidance_is_a_single_body_with_work_state_instructions() {
+        let body = render_skill_md();
         assert!(
-            intake.contains("\"operation\":\"workspace.update\""),
+            body.contains("\"operation\":\"workspace.update\""),
             "the single guidance keeps the workspace.update instruction"
         );
         assert!(
-            !intake.contains("intake sessions produce no Work"),
+            !body.contains("intake sessions produce no Work"),
             "curation framing must be gone"
         );
     }
 
     #[test]
     fn render_skill_md_starts_with_yaml_frontmatter() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.starts_with("---\n"),
             "SKILL.md must start with YAML frontmatter delimiter (---\\n)"
@@ -612,7 +600,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_wraps_body_in_managed_markers() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         let begin_idx = rendered
             .find(MANAGED_BEGIN)
             .expect("managed begin marker missing");
@@ -628,7 +616,7 @@ mod tests {
     #[test]
     fn generate_writes_skill_md_to_claude_and_codex_paths() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
 
         let claude = tmp
             .path()
@@ -662,7 +650,7 @@ mod tests {
     #[test]
     fn generate_for_claude_only_does_not_touch_codex_path() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance_for_claude(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance_for_claude(tmp.path()).unwrap();
 
         assert!(
             tmp.path()
@@ -685,7 +673,7 @@ mod tests {
     #[test]
     fn generate_for_codex_only_does_not_touch_claude_path() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance_for_codex(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance_for_codex(tmp.path()).unwrap();
 
         assert!(
             tmp.path()
@@ -708,7 +696,7 @@ mod tests {
     #[test]
     fn generate_is_idempotent() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
         let first = std::fs::read_to_string(
             tmp.path()
                 .join(".claude/skills")
@@ -717,7 +705,7 @@ mod tests {
         )
         .unwrap();
 
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
         let second = std::fs::read_to_string(
             tmp.path()
                 .join(".claude/skills")
@@ -743,7 +731,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "stale content from prior version\n").unwrap();
 
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(
@@ -794,7 +782,7 @@ mod tests {
 
     #[test]
     fn rendered_skill_md_propagates_activity_rule_to_emitted_file() {
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         for phrase in [
             "PR check in progress",
             "verifying tests",
@@ -803,7 +791,7 @@ mod tests {
         ] {
             assert!(
                 rendered.contains(phrase),
-                "render_skill_md(SessionKind::Execution) must propagate activity Bad example / rule: {phrase}"
+                "render_skill_md() must propagate activity Bad example / rule: {phrase}"
             );
         }
     }
@@ -811,7 +799,7 @@ mod tests {
     #[test]
     fn generate_writes_byte_identical_skill_md_with_activity_rule_to_both_targets() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
 
         let claude = tmp
             .path()
@@ -869,7 +857,7 @@ mod tests {
         // name must be "Work", not "Workspace". The public gwtd argv
         // subcommand has since been replaced by JSON envelopes, so generated
         // guidance must not reintroduce the legacy CLI form.
-        let rendered = render_skill_md(SessionKind::Execution);
+        let rendered = render_skill_md();
         assert!(
             rendered.contains("## Work (current state)"),
             "current-state section heading must use the Work concept name"

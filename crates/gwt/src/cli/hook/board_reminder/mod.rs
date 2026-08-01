@@ -1441,7 +1441,6 @@ mod tests {
         let progress_reminder = texts::progress_summary_reminder(&language, false, false);
 
         // Execution (signal unset -> default Execution): both Work reminders fire.
-        let _clear = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
         let exec = compute_plan("UserPromptSubmit", &session, Utc::now())
             .expect("compute plan")
             .expect("plan");
@@ -1458,7 +1457,6 @@ mod tests {
         // SPEC #3245 FR-004 (#3379): the intake kind no longer suppresses the
         // Work-state reminders — every session gets the identical reminder
         // set, so guidance and reminders can never contradict each other.
-        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
         let intake = compute_plan("UserPromptSubmit", &session, Utc::now())
             .expect("compute plan")
             .expect("plan");

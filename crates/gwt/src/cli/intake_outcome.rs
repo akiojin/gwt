@@ -274,13 +274,12 @@ pub(super) fn run<E: CliEnv>(
 // issue.spec.edit success paths)
 // ---------------------------------------------------------------------------
 
-/// Best-effort auto-record after a successful Issue/SPEC operation (FR-013).
+/// Best-effort auto-record after a successful Issue/SPEC operation.
 ///
-/// The gate is self-contained: it fires only when the resolved lane for the
-/// worktree is intake and `GWT_SESSION_ID` is set, so GUI/argv invocations
-/// and execution sessions never write outcome state. Failures are logged and
-/// swallowed — the GitHub operation already succeeded and its exit code must
-/// not change (Board posts never reach this path, FR-013/FR-017).
+/// Non-enforcing bookkeeping (SPEC #3245 FR-001): every session with
+/// `GWT_SESSION_ID` records the outcome uniformly — no lane condition.
+/// Failures are logged and swallowed — the GitHub operation already succeeded
+/// and its exit code must not change (Board posts never reach this path).
 pub(crate) fn auto_record_issue_operation(
     repo_path: &Path,
     source_operation: &str,
@@ -301,10 +300,6 @@ pub(crate) fn auto_record_issue_operation(
             &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
             source_operation,
         );
-    }
-    let profile = gwt_skills::resolve_lane_for_worktree(&worktree);
-    if profile.id != "intake" {
-        return;
     }
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()

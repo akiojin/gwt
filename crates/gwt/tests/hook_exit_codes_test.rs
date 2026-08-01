@@ -239,8 +239,6 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
-    gwt_skills::write_lane_file(tmp.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let sessions_dir = tmp.path().join(".gwt").join("sessions");
     let mut session = Session::new(tmp.path(), "feature/demo", AgentId::Codex);
     session.agent_session_id = Some("agent-123".to_string());
@@ -426,29 +424,26 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
     assert_eq!(runtime_state.source_event, "Stop");
 }
 
-// SPEC #3245 AC-1 (T-107): intake session signals — the `GWT_SESSION_KIND`
-// env and the `.gwt/session-kind.json` lane file together — must not change
-// hook dispatch behavior. PreToolUse lets a production edit through and Stop
-// does not block, exactly like an execution session.
+// SPEC #3245 AC-1/AC-4 (T-107): the lane mechanism is gone — a leftover
+// `.gwt/session-kind.json` from a pre-removal worktree is inert. PreToolUse
+// lets a production edit through and Stop does not block, with or without
+// the stale file.
 #[test]
-fn intake_signals_do_not_alter_hook_dispatch_behavior() {
+fn stale_lane_file_does_not_alter_hook_dispatch_behavior() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let _session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
 
-    fn run(kind: Option<&str>, event: &str, stdin: String) -> (i32, String) {
+    fn run(stale_lane_file: bool, event: &str, stdin: String) -> (i32, String) {
         let tmp = tempfile::tempdir().unwrap();
-        let profile = match kind {
-            Some("intake") => &gwt_skills::INTAKE_PROFILE,
-            _ => gwt_skills::LaneRegistry::default_profile(),
-        };
-        gwt_skills::write_lane_file(tmp.path(), profile).unwrap();
-        let _kind_env = match kind {
-            Some(kind) => ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, kind),
-            None => ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV),
-        };
+        if stale_lane_file {
+            // SPEC #3245 FR-007: a leftover pre-removal lane file is inert.
+            let lane = tmp.path().join(".gwt/session-kind.json");
+            std::fs::create_dir_all(lane.parent().unwrap()).unwrap();
+            std::fs::write(&lane, r#"{"version":1,"id":"intake"}"#).unwrap();
+        }
         let mut env = TestEnv::new(tmp.path().join("cache"));
         env.repo_path = tmp.path().to_path_buf();
         env.stdin = stdin;
@@ -474,22 +469,25 @@ fn intake_signals_do_not_alter_hook_dispatch_behavior() {
     })
     .to_string();
 
-    for kind in [Some("intake"), None] {
-        let (code, stdout) = run(kind, "PreToolUse", edit_stdin.clone());
+    for stale_lane_file in [true, false] {
+        let (code, stdout) = run(stale_lane_file, "PreToolUse", edit_stdin.clone());
         assert_eq!(
             code, 0,
-            "a production edit must pass for kind {kind:?}: {stdout}"
+            "a production edit must pass (stale_lane_file={stale_lane_file}): {stdout}"
         );
         assert!(
             !stdout.contains("\"permissionDecision\":\"deny\""),
-            "no code-edit guard may fire for kind {kind:?}: {stdout}"
+            "no code-edit guard may fire (stale_lane_file={stale_lane_file}): {stdout}"
         );
 
-        let (code, stdout) = run(kind, "Stop", stop_stdin.clone());
-        assert_ne!(code, 2, "Stop must not block for kind {kind:?}: {stdout}");
+        let (code, stdout) = run(stale_lane_file, "Stop", stop_stdin.clone());
+        assert_ne!(
+            code, 2,
+            "Stop must not block (stale_lane_file={stale_lane_file}): {stdout}"
+        );
         assert!(
             !stdout.contains("\"decision\":\"block\""),
-            "no Stop gate may fire for kind {kind:?}: {stdout}"
+            "no Stop gate may fire (stale_lane_file={stale_lane_file}): {stdout}"
         );
     }
 }

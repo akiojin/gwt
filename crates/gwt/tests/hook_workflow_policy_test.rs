@@ -65,7 +65,6 @@ fn evaluate_direct_stop_with_test_budget(env: &mut DefaultCliEnv) -> HookOutput 
     gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
         env,
         false,
-        false,
         &deadline,
         DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
     )
@@ -108,7 +107,6 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
     let home = tempfile::tempdir().expect("temp home");
     let _home = ScopedGwtHome::set(home.path());
     let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
-    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
 
     f(&home)
 }
@@ -326,7 +324,7 @@ fn gwt_self_improvement_stop_retries_one_candidate_with_the_strict_budget() {
 
         env.clear_owner_client_access_log();
         fail_next_owner_corpus_with_timeout(&env);
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("unresolved strict Stop resolution must block");
@@ -418,7 +416,7 @@ fn direct_stop_retries_pending_owner_status_without_rerunning_owner_resolution()
         std::fs::set_permissions(&active_segment, std::fs::Permissions::from_mode(0o400))
             .expect("make Board event segment read-only");
 
-        let blocked = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let blocked = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
 
         std::fs::set_permissions(&active_segment, std::fs::Permissions::from_mode(0o600))
             .expect("restore Board event segment permissions");
@@ -441,7 +439,7 @@ fn direct_stop_retries_pending_owner_status_without_rerunning_owner_resolution()
         );
         assert_eq!(env.owner_client_access_count(), 0);
 
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
 
         assert_eq!(output, HookOutput::Silent);
         assert_eq!(
@@ -629,7 +627,6 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
             &mut env,
             false,
-            false,
             &deadline,
             DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
         );
@@ -768,7 +765,7 @@ fn gwt_self_improvement_stop_attempts_at_most_one_unresolved_candidate() {
 
         env.clear_owner_client_access_log();
         fail_next_owner_corpus_with_timeout(&env);
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
         let first_attempted = env
             .last_owner_client_candidate_id()
             .expect("first attempted candidate id");
@@ -789,7 +786,7 @@ fn gwt_self_improvement_stop_attempts_at_most_one_unresolved_candidate() {
 
         env.clear_owner_client_access_log();
         fail_next_owner_corpus_with_timeout(&env);
-        let second_output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let second_output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
         let second_attempted = env
             .last_owner_client_candidate_id()
             .expect("second attempted candidate id");
@@ -815,7 +812,7 @@ fn gwt_self_improvement_stop_warns_for_a_corrupt_candidate_store_without_rewriti
         std::fs::write(&store_path, b"{not-json").expect("write corrupt candidate store");
 
         let before = std::fs::read(&store_path).expect("read corrupt candidate store");
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
 
         let HookOutput::SystemMessage(reason) = output else {
             panic!("a corrupt gwt candidate store must warn without blocking");
@@ -839,7 +836,7 @@ fn gwt_self_improvement_stop_warns_when_repo_probe_cannot_run() {
         let empty_path = tempfile::tempdir().expect("empty PATH directory");
         let _path = ScopedEnvVar::set("PATH", empty_path.path());
 
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false);
 
         let HookOutput::SystemMessage(reason) = output else {
             panic!("a failed gwt repository probe must warn without blocking");
@@ -865,8 +862,6 @@ fn structured_prompt_obligation_still_blocks_stop() {
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE)
-            .expect("write execution lane");
 
         let prompt = json!({
             "prompt": "バグを修正して、検証してください",
@@ -914,8 +909,6 @@ fn completion_and_history_prose_do_not_block_stop() {
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE)
-            .expect("write execution lane");
         let transcript = worktree.path().join("transcript.jsonl");
         std::fs::write(
             &transcript,
@@ -973,19 +966,11 @@ fn gwt_self_improvement_stop_ignores_legacy_high_confidence_candidate_without_ty
         let mut env = self_improvement_test_env(repo.path());
 
         assert_eq!(
-            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false),
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false),
             HookOutput::Silent,
             "legacy free-form evidence must migrate to needs-evidence without blocking Stop"
         );
 
-        // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
-        // (Curate) session must NOT block Stop — intake owns no Work and is not the
-        // producing-work self-improvement loop.
-        assert_eq!(
-            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, true),
-            HookOutput::Silent,
-            "intake sessions must not be forced to handle improvement candidates"
-        );
         assert_eq!(env.owner_client_access_count(), 0);
     });
 }
@@ -1040,7 +1025,7 @@ fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
         let mut env = self_improvement_test_env(repo.path());
 
         assert_eq!(
-            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false),
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false),
             HookOutput::Silent
         );
         assert_eq!(env.owner_client_access_count(), 0);
@@ -1077,7 +1062,7 @@ fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
         let mut env = self_improvement_test_env(repo.path());
 
         assert_eq!(
-            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false),
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false),
             HookOutput::Silent
         );
         assert_eq!(env.owner_client_access_count(), 0);
@@ -1114,7 +1099,7 @@ fn gwt_self_improvement_stop_respects_stop_hook_active() {
         let mut env = self_improvement_test_env(repo.path());
 
         assert_eq!(
-            gwt_self_improvement_stop::evaluate_with_env(&mut env, true, false),
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, true),
             HookOutput::Silent
         );
         assert_eq!(env.owner_client_access_count(), 0);
@@ -1836,7 +1821,6 @@ fn assert_ownerless_silent(
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let decision = evaluate(event, context);
     assert!(
         decision.is_none(),

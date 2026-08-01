@@ -607,10 +607,11 @@ mod tests {
     }
 
     // SPEC #3245 FR-001 / AC-1: the intake completion hard gate is removed.
-    // An intake-lane session that registers nothing must stop exactly like an
-    // execution session — no artifact outcome requirement, no auto-capture.
+    // A session that registers nothing stops exactly like an execution
+    // session — no artifact outcome requirement, no auto-capture. Uniform
+    // gates (e.g. the P11 obligation gate) apply to everyone equally.
     #[test]
-    fn intake_lane_stop_never_blocks_on_artifact_outcome() {
+    fn intake_shaped_stop_never_hits_the_artifact_gate() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -628,7 +629,6 @@ mod tests {
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::INTAKE_PROFILE).unwrap();
 
         let prompt_input = serde_json::json!({
             "prompt": "このバグ報告を Issue に登録して",
@@ -651,10 +651,19 @@ mod tests {
 
         let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
             .expect("stop hook output");
-        assert!(
-            !matches!(output, HookOutput::StopBlock { .. }),
-            "intake sessions must stop like every other session (SPEC #3245 AC-1), got {output:?}"
-        );
+        // The uniform prompt-to-action obligation gate (SPEC-3248 P11) may
+        // legitimately fire — exactly as it would for an execution session.
+        // What must never fire again is the removed intake artifact gate.
+        if let HookOutput::StopBlock { reason } = &output {
+            assert!(
+                !reason.contains("Intake artifact gate"),
+                "the removed intake artifact gate must not contribute: {reason}"
+            );
+            assert!(
+                reason.contains("Producing obligations"),
+                "only the uniform obligation gate may block here: {reason}"
+            );
+        }
         assert!(
             crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
             "no auto-capture side effect may fire for the removed gate"
@@ -682,7 +691,6 @@ mod tests {
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
-        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE).unwrap();
 
         // Launch materialization wrote the record (plain Issue — no
         // build.start was ever called, T-109).
@@ -730,8 +738,6 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let worktree = tempfile::tempdir().unwrap();
-        gwt_skills::write_lane_file(worktree.path(), gwt_skills::LaneRegistry::default_profile())
-            .expect("pin execution lane");
         let sessions_dir = worktree.path().join(".gwt").join("sessions");
         let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
         session.agent_session_id = Some("agent-123".to_string());
