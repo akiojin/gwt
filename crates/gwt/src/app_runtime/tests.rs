@@ -57,13 +57,13 @@ use super::{
     reset_local_issue_monitor_fallback_commit_count, reset_local_issue_monitor_remote_scan_count,
     save_resumed_workspace_projection, save_start_work_workspace_projection,
     save_workspace_launch_projection, ActiveAgentSession, AgentKanbanLaunchTarget,
-    AgentLaunchCompletion, AgentLaunchDisposition, AppEventProxy, AppRuntime,
-    AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome, DispatchTarget,
-    IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
-    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
-    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
-    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
+    CachedContinueWorkOutcome, DispatchTarget, IssueMonitorProfileSaveContext,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch,
+    ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
+    WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -239,7 +239,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
 }
 
 #[test]
-fn inspection_agent_window_rejects_fast_path_terminal_input_and_attachment_staging() {
+fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -258,48 +258,52 @@ fn inspection_agent_window_rejects_fast_path_terminal_input_and_attachment_stagi
     runtime
         .active_agent_sessions
         .insert(window_id.clone(), session);
-    runtime.inspection_agent_windows.insert(window_id.clone());
     insert_test_pane_runtime(&mut runtime, &window_id);
     let pane = runtime
         .runtimes
         .get(&window_id)
-        .expect("inspection runtime")
+        .expect("resumed runtime")
         .pane
         .clone();
 
     runtime.register_pty_writer(&window_id, &pane);
 
     assert!(
-        !runtime
+        runtime
             .pty_writers
             .read()
             .expect("PTY writer registry")
             .contains_key(&window_id),
-        "inspection-only panes must not bypass event-loop input authorization through the WebSocket PTY fast path"
+        "a resumed agent window must register its PTY writer so the WebSocket fast path delivers input"
     );
 
     let terminal_events = runtime.terminal_input_events(&window_id, "mutating prompt\r");
-    assert!(terminal_events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalOutput { id, data_base64 }
-            if id == &window_id
-                && String::from_utf8_lossy(
-                    &base64::engine::general_purpose::STANDARD
-                        .decode(data_base64)
-                        .expect("decode inspection denial")
-                )
-                .contains("inspection-only")
-    )));
+    assert!(
+        terminal_events.is_empty(),
+        "terminal input into a resumed agent window must reach the PTY without a denial event: {terminal_events:?}"
+    );
+
+    let pane_send_events = runtime.pane_send_input_to_window_events(
+        "client-1".to_string(),
+        &window_id,
+        "pane input\r",
+    );
+    assert!(
+        pane_send_events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: true, .. })),
+        "pane.write into a resumed agent window must succeed: {pane_send_events:?}"
+    );
 
     let attachment_events =
-        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("blocked.png"));
-    assert!(attachment_events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::TerminalOutput { id, .. } if id == &window_id
-    )));
+        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("pasted.png"));
     assert!(
-        !repo.join(".gwt").join("drop-files").exists(),
-        "inspection must reject attachments before staging any bytes"
+        attachment_events.is_empty(),
+        "attachment staging into a resumed agent window must inject its prompt without denial: {attachment_events:?}"
+    );
+    assert!(
+        repo.join(".gwt").join("drop-files").exists(),
+        "attachment bytes must be staged for a resumed agent window"
     );
 }
 
@@ -2910,7 +2914,6 @@ fn sample_runtime_with_events(
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
-        inspection_agent_windows: HashSet::new(),
         work_merged_branches: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
@@ -4077,7 +4080,8 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
         None,
         None,
         gwt_agent::LaunchRuntimeTarget::Host,
-        AgentLaunchDisposition::WorkProducing,
+        gwt_agent::SessionMode::Normal,
+        false,
         temp.path().display().to_string(),
     );
 
@@ -7399,7 +7403,8 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
             Some(owner.number),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             repo.display().to_string(),
         )),
     );
@@ -7577,7 +7582,8 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
             Some(owner.number),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             repo.display().to_string(),
         )),
     );
@@ -9665,10 +9671,6 @@ fn linked_workspace_resume_routes_through_authority_producing_continuation() {
             if request.initial_session_id == pending.binding.session_id
     ));
     assert_eq!(pending.binding.owner_number, owner.number);
-    assert!(
-        runtime.inspection_agent_windows.is_empty(),
-        "linked Resume must not materialize a permanently Inspection pane"
-    );
 }
 
 #[test]
@@ -16536,7 +16538,8 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
             Some(fixture.owner.number),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             fixture.repo.display().to_string(),
         )),
     );
@@ -17246,7 +17249,8 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
             Some(42),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             repo.display().to_string(),
         )),
     );
@@ -17379,7 +17383,8 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
             Some(42),
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             repo.display().to_string(),
         )),
     );
@@ -17848,7 +17853,8 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
             None,
             Some("origin/main".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             worktree.display().to_string(),
         )),
     );
@@ -17935,7 +17941,8 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
             None,
             Some("origin/develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             repo.display().to_string(),
         )),
     );
@@ -18014,7 +18021,8 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
             Some(2359),
             None,
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Resume,
+            true,
             worktree.display().to_string(),
         )),
     );
@@ -18045,12 +18053,12 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
 }
 
 #[test]
-fn app_runtime_inspection_resume_launch_completion_does_not_mutate_work_projection() {
+fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
     let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
-    let worktree = temp.path().join("repo-work-20260507-inspection");
+    let worktree = temp.path().join("repo-work-20260507-resume");
     fs::create_dir_all(&repo).expect("create repo");
     fs::create_dir_all(&worktree).expect("create worktree");
     init_repo(&repo);
@@ -18066,9 +18074,9 @@ fn app_runtime_inspection_resume_launch_completion_does_not_mutate_work_projecti
     runtime.pending_workspace_resume_contexts.insert(
         window_id.clone(),
         WorkspaceResumeContext {
-            title: Some("Historical inspection".to_string()),
-            owner: Some("SPEC-2359".to_string()),
-            summary: Some("Inspect the prior conversation only.".to_string()),
+            title: Some("Resumed session".to_string()),
+            owner: None,
+            summary: Some("Resume the prior conversation.".to_string()),
             next_action: None,
         },
     );
@@ -18099,38 +18107,127 @@ fn app_runtime_inspection_resume_launch_completion_does_not_mutate_work_projecti
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
             },
-            "session-inspection".to_string(),
+            "session-unlinked-resume".to_string(),
             "work/issue-2359".to_string(),
             "Codex".to_string(),
             worktree,
             gwt_agent::AgentId::Codex,
-            Some(2359),
+            None,
             None,
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::Inspection,
+            gwt_agent::SessionMode::Resume,
+            false,
             repo.display().to_string(),
         )),
     );
 
     assert!(
         runtime.active_agent_sessions.contains_key(&window_id),
-        "inspection still owns a visible pane"
+        "the resumed session owns a visible pane"
     );
-    assert!(
-        runtime.inspection_agent_windows.contains(&window_id),
-        "the runtime must fence every input path for the inspection pane"
+    let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load projection")
+        .expect("an unlinked resume must create or update the Workspace projection");
+    assert_eq!(projection.title, "Resumed session");
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work projection")
+        .expect("an unlinked resume must append its Work events");
+    assert_eq!(
+        work_items.work_items[0].events[0].kind,
+        gwt_core::workspace_projection::WorkEventKind::Resume
     );
-    assert!(
-        gwt_core::workspace_projection::load_workspace_projection(&repo)
-            .expect("load projection")
-            .is_none(),
-        "inspection must not create or update the Workspace projection"
+}
+
+#[test]
+fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authentication() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-stale-binding");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
     );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    // A durable Session left behind by an earlier producing execution keeps
+    // its (now stale) execution binding. Resuming it without an owner link
+    // must degrade to an unbound launch, never hard-fail on genesis
+    // authentication.
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/stale-binding", gwt_agent::AgentId::Codex);
+    session.id = "session-stale-binding".to_string();
+    session.linked_issue_number = Some(4242);
+    session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: "session-stale-binding".to_string(),
+        repo_hash: session
+            .repo_hash
+            .clone()
+            .unwrap_or_else(|| "stale-repo-hash".to_string()),
+        owner_kind: "issue".to_string(),
+        owner_number: 4242,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "gen-stale".to_string(),
+            binding_id: "binding-stale".to_string(),
+            ledger_head_hash: "ledger-stale".to_string(),
+        },
+        capability_generation: 1,
+    });
+    session
+        .save(&temp.path().join("sessions"))
+        .expect("persist stale-bound session");
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(worktree.clone()),
+            },
+            "session-stale-binding".to_string(),
+            "work/stale-binding".to_string(),
+            "Codex".to_string(),
+            worktree,
+            gwt_agent::AgentId::Codex,
+            None,
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            gwt_agent::SessionMode::Resume,
+            false,
+            repo.display().to_string(),
+        )),
+    );
+
     assert!(
-        gwt_core::workspace_projection::load_workspace_work_items(&repo)
-            .expect("load Work projection")
-            .is_none(),
-        "inspection must not append a Work Resume event"
+        runtime.active_agent_sessions.contains_key(&window_id),
+        "an automatic resume must never hard-fail on a stale producing binding left by an earlier execution: {events:?}"
     );
 }
 
@@ -18239,7 +18336,8 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
             Some(3096),
             Some("develop".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             worktree.display().to_string(),
         )),
     );
@@ -18337,7 +18435,8 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             None,
             Some("origin/main".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             worktree_one.display().to_string(),
         )),
     );
@@ -18353,7 +18452,8 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             None,
             Some("origin/main".to_string()),
             gwt_agent::LaunchRuntimeTarget::Host,
-            AgentLaunchDisposition::WorkProducing,
+            gwt_agent::SessionMode::Normal,
+            false,
             worktree_two.display().to_string(),
         )),
     );
@@ -31314,7 +31414,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
             })
             .expect("launch complete")
     };
-    let Ok((process, _, _, _, _, _, _, _, runtime_target, _, _)) = result else {
+    let Ok((process, _, _, _, _, _, _, _, runtime_target, _, _, _)) = result else {
         panic!("Issue Monitor auto launch failed: {result:?}");
     };
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);

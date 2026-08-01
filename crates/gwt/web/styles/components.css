@@ -2537,7 +2537,7 @@ kbd.op-kbd {
 }
 
 /* Each Session row is a list element: label + meta on the left, its own
-   inspection control on the right. Producing continuation stays on the Work. */
+   resume control on the right. Producing continuation stays on the Work. */
 .workspace-detail-session {
   display: flex;
   flex-wrap: wrap;

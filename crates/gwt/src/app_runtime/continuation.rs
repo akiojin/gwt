@@ -3679,7 +3679,6 @@ impl AppRuntime {
         {
             return false;
         }
-        self.inspection_agent_windows.remove(window_id);
         if let Some(session) = self.active_agent_sessions.remove(window_id) {
             self.revoke_agent_capability_for_window(window_id);
             let _ = gwt_agent::persist_session_status(

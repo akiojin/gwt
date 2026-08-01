@@ -502,8 +502,10 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
 /// conversation while a coordinator starts a new producing generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ExecutionLaunchIntent {
-    /// Preserve the legacy launch classifier. Resume/Continue remain
-    /// inspection-only unless an explicit coordinator supplies a binding.
+    /// Launch without a pre-authorized producing binding. The launch path
+    /// recovers producing authority through the continuation coordinator when
+    /// the session is linked; otherwise the session launches unbound with
+    /// input enabled.
     #[default]
     Automatic,
     /// Launch a producing continuation already authorized by the execution
@@ -2609,14 +2611,14 @@ mod tests {
     fn ordinary_resume_defaults_to_automatic_execution_intent() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
-            .resume_session_id("conversation-inspection")
+            .resume_session_id("conversation-existing")
             .build();
 
         assert_eq!(config.session_mode, SessionMode::Resume);
         assert_eq!(
             config.execution_intent,
             ExecutionLaunchIntent::Automatic,
-            "Automatic preserves the existing classifier where Resume is inspection-only"
+            "an ordinary Resume stays Automatic: producing authority is recovered by the continuation coordinator, or the launch proceeds unbound with input enabled"
         );
     }
 
