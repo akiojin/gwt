@@ -425,3 +425,71 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
     assert_eq!(runtime_state.status, "Idle");
     assert_eq!(runtime_state.source_event, "Stop");
 }
+
+// SPEC #3245 AC-1 (T-107): intake session signals — the `GWT_SESSION_KIND`
+// env and the `.gwt/session-kind.json` lane file together — must not change
+// hook dispatch behavior. PreToolUse lets a production edit through and Stop
+// does not block, exactly like an execution session.
+#[test]
+fn intake_signals_do_not_alter_hook_dispatch_behavior() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
+
+    fn run(kind: Option<&str>, event: &str, stdin: String) -> (i32, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = match kind {
+            Some("intake") => &gwt_skills::INTAKE_PROFILE,
+            _ => gwt_skills::LaneRegistry::default_profile(),
+        };
+        gwt_skills::write_lane_file(tmp.path(), profile).unwrap();
+        let _kind_env = match kind {
+            Some(kind) => ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, kind),
+            None => ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV),
+        };
+        let mut env = TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = tmp.path().to_path_buf();
+        env.stdin = stdin;
+        let code = dispatch(
+            &mut env,
+            &argv(&["gwt", "__internal", "daemon-hook", "event", event]),
+        );
+        (code, String::from_utf8(env.stdout).unwrap())
+    }
+
+    let edit_stdin = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "crates/gwt/src/lib.rs",
+            "old_string": "a",
+            "new_string": "b"
+        }
+    })
+    .to_string();
+    let stop_stdin = serde_json::json!({
+        "session_id": "agent-x",
+        "stop_hook_active": false
+    })
+    .to_string();
+
+    for kind in [Some("intake"), None] {
+        let (code, stdout) = run(kind, "PreToolUse", edit_stdin.clone());
+        assert_eq!(
+            code, 0,
+            "a production edit must pass for kind {kind:?}: {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"deny\""),
+            "no code-edit guard may fire for kind {kind:?}: {stdout}"
+        );
+
+        let (code, stdout) = run(kind, "Stop", stop_stdin.clone());
+        assert_ne!(code, 2, "Stop must not block for kind {kind:?}: {stdout}");
+        assert!(
+            !stdout.contains("\"decision\":\"block\""),
+            "no Stop gate may fire for kind {kind:?}: {stdout}"
+        );
+    }
+}
