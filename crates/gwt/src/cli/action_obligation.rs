@@ -566,6 +566,8 @@ pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::test_support::ScopedGwtHome;
+
     use super::*;
 
     // T-240 core: request-form producing prompts arm typed kinds; status
@@ -718,6 +720,8 @@ mod tests {
     // untouched.
     #[test]
     fn revive_deferred_reopens_only_deferred_kinds() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
@@ -778,7 +782,51 @@ mod tests {
     }
 
     #[test]
+    fn revival_record_roundtrip_ignores_parallel_process_home_change() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
+
+        let process_home = tempfile::tempdir().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let process_home_path = process_home.path().to_path_buf();
+        let mutator = std::thread::spawn(move || {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", &process_home_path);
+            let _userprofile =
+                gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &process_home_path);
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let revival = std::panic::catch_unwind(|| {
+            revive_deferred(dir.path(), "sess-other", &[ObligationKind::IssueUpdate])
+        });
+        let release = release_tx.send(());
+        let mutation = mutator.join();
+        let outcome = match (revival, release, mutation) {
+            (Err(payload), _, _) => std::panic::resume_unwind(payload),
+            (Ok(_), Err(error), _) => panic!("failed to release process HOME mutator: {error}"),
+            (Ok(_), Ok(()), Err(payload)) => std::panic::resume_unwind(payload),
+            (Ok(outcome), Ok(()), Ok(())) => outcome,
+        };
+
+        let recorded = load_revival_record(dir.path(), "sess-other")
+            .unwrap()
+            .expect("revival outcome must stay readable after process HOME is restored");
+        assert_eq!(recorded.result, outcome);
+    }
+
+    #[test]
     fn revive_deferred_reports_persist_failed_truthfully() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         fs::create_dir_all(state_path(dir.path()).parent().unwrap()).unwrap();
@@ -801,6 +849,8 @@ mod tests {
 
     #[test]
     fn revival_record_write_failure_cannot_report_revived() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
