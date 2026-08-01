@@ -124,11 +124,6 @@ impl IntakeOutcome {
         }
         Ok(())
     }
-
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        self.validate().is_ok()
-    }
 }
 
 /// Persisted per-worktree intake outcome state. One intake session owns a
@@ -142,25 +137,6 @@ pub struct IntakeOutcomeState {
     pub required_since: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<IntakeOutcome>,
-}
-
-impl IntakeOutcomeState {
-    /// FR-016: does this state hold a valid outcome fresh enough for the
-    /// latest prompt? (`required_since` absent means no prompt marked the
-    /// requirement dirty yet — any valid outcome passes.)
-    #[must_use]
-    pub fn has_fresh_valid_outcome(&self) -> bool {
-        let Some(outcome) = &self.outcome else {
-            return false;
-        };
-        if !outcome.is_valid() {
-            return false;
-        }
-        match self.required_since {
-            Some(required_since) => outcome.recorded_at >= required_since,
-            None => true,
-        }
-    }
 }
 
 /// Resolve the state-file path for a worktree.

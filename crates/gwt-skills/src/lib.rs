@@ -29,10 +29,10 @@ pub use coordination_guidance::{
     generate_coordination_guidance_for_codex,
 };
 pub use distribute::{
-    apply_reduced_skill_set, distribute_to_worktree, distribute_to_worktree_for_targets,
+    distribute_to_worktree, distribute_to_worktree_for_targets,
     distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
     prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
-    TrackedAssetWritePolicy, CURATION_EXCLUDED_SKILLS,
+    TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{

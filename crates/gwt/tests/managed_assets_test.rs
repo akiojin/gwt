@@ -14,13 +14,12 @@ use gwt_skills::{CodexHookDiscoveryMode, SessionKind};
 use serde_json::Value;
 use tempfile::tempdir;
 
-/// SPEC-3247 AS-2 / AS-3 (delivery wiring): materializing managed assets with
-/// `SessionKind::Intake` writes a coordination SKILL.md that omits the
-/// `workspace.update` Work-state instruction and frames curation, while
-/// `SessionKind::Execution` keeps the producing-work instruction. This guards
-/// the boundary a regression to a hardcoded kind would otherwise pass silently.
+/// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
+/// session kind. Every materialization gets the single guidance including the
+/// `workspace.update` Work-state instruction; the curation framing that told
+/// intake sessions they "produce no Work" is gone (#3379 contradiction).
 #[test]
-fn session_kind_selects_intake_or_execution_coordination_guidance() {
+fn coordination_guidance_is_identical_for_all_session_kinds() {
     fn materialize_and_read(kind: SessionKind) -> String {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
@@ -43,27 +42,26 @@ fn session_kind_selects_intake_or_execution_coordination_guidance() {
     }
 
     let intake = materialize_and_read(SessionKind::Intake);
-    assert!(
-        !intake.contains(r#""operation":"workspace.update""#),
-        "intake materialized guidance must omit the workspace.update Work-state instruction"
-    );
-    assert!(
-        intake.contains("intake sessions produce no Work"),
-        "intake materialized guidance must frame curation"
-    );
-
     let execution = materialize_and_read(SessionKind::Execution);
+    assert_eq!(
+        intake, execution,
+        "guidance must be identical for every session kind (single guidance, FR-004)"
+    );
     assert!(
-        execution.contains(r#""operation":"workspace.update""#),
-        "execution materialized guidance must keep the workspace.update Work-state instruction"
+        intake.contains(r#""operation":"workspace.update""#),
+        "the single guidance must keep the workspace.update Work-state instruction"
+    );
+    assert!(
+        !intake.contains("intake sessions produce no Work"),
+        "the curation framing must be gone from the single guidance"
     );
 }
 
-/// SPEC-3248 P4 (FR-011): materializing with `SessionKind::Intake` applies the
-/// reduced (curation) skill set — implementation skills are dropped, curation
-/// skills stay; execution keeps the full set.
+/// SPEC #3245 FR-003 / AC-1: every session kind receives the full skill set.
+/// The reduced (curation) skill set is removed — implementation skills stay
+/// available in intake-kind materializations too.
 #[test]
-fn intake_materialize_applies_reduced_skill_set() {
+fn intake_materialize_keeps_full_skill_set() {
     fn materialize(kind: SessionKind) -> tempfile::TempDir {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
@@ -84,15 +82,18 @@ fn intake_materialize_applies_reduced_skill_set() {
 
     let intake = materialize(SessionKind::Intake);
     assert!(
-        !intake.path().join(".claude/skills/gwt-build-spec").exists(),
-        "intake must drop the implementation skill gwt-build-spec"
+        intake
+            .path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "intake must keep the implementation skill gwt-build-spec (full set)"
     );
     assert!(
         intake
             .path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists(),
-        "intake must keep curation skills"
+        "intake must keep registration skills"
     );
 
     let execution = materialize(SessionKind::Execution);
@@ -105,13 +106,11 @@ fn intake_materialize_applies_reduced_skill_set() {
     );
 }
 
-/// #3377 (AC): a worktree whose lane file says intake keeps the reduced
-/// (curation) skill set when re-materialized by a process WITHOUT
-/// `GWT_SESSION_KIND` in its env (e.g. the GUI front door). Before #3399 the
-/// resolver read only the env, fell back to Execution, and wrote
-/// implementation skills back into the intake worktree.
+/// SPEC #3245 FR-003: an intake lane file no longer changes the distributed
+/// skill set — envless re-materialization (e.g. the GUI front door) writes
+/// the full set exactly like every other worktree.
 #[test]
-fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
+fn envless_rematerialize_keeps_full_skill_set_for_intake_lane_file() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
     gwt_skills::write_lane_file(dir.path(), &gwt_skills::INTAKE_PROFILE)
@@ -127,14 +126,16 @@ fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
         .expect("materialize managed assets");
 
     assert!(
-        !dir.path().join(".claude/skills/gwt-build-spec").exists(),
-        "intake lane file must keep the reduced skill set without env"
+        dir.path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "an intake lane file must not reduce the distributed skill set"
     );
     assert!(
         dir.path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists(),
-        "intake must keep curation skills"
+        "registration skills stay distributed everywhere"
     );
 }
 

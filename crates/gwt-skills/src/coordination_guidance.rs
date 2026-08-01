@@ -375,112 +375,21 @@ English のまま。
     JSON
 "#;
 
-/// Curate-lane replacement for the producing-work `## Work (current state)`
-/// section. An intake session is branchless and ephemeral and owns no Work,
-/// so it is never told to run `workspace.update` (SPEC-3247 FR-002). Ends with
-/// a blank line so it slots in ahead of `## Git environment`.
-const INTAKE_WORK_SECTION_EN: &str = r#"## Work (intake sessions produce no Work)
-
-This is a Curate-lane **intake** session: branchless and ephemeral. It owns no
-Work, so there is no Work state to maintain. Do not run `workspace.update` —
-the ephemeral worktree is discarded when the session ends, and Work state
-belongs to Execute-lane sessions.
-
-Coordinate through curation, not Work updates:
-
-- Register Issues/SPECs, discuss, and plan through the `gwt-*` skills
-  (`gwt-register-issue`, `gwt-discussion`, `gwt-plan-spec`, `gwt-search`).
-- Use the Board (above) to share status, claim scope, and hand off. Board
-  posts are how an intake session externalizes state — not `workspace.update`.
-- Leave implementation, verification, and PRs to Execute-lane sessions, opened
-  from a Workspace or picked up by the Issue Monitor.
-
-Every curation prompt must settle in a durable artifact outcome before the
-session stops — the intake artifact gate blocks Stop otherwise (SPEC-3248
-FR-016/FR-017):
-
-- Create or update the owner Issue/SPEC via JSON operations `issue.create`,
-  `issue.comment`, `issue.spec.create`, or `issue.spec.edit` (successful
-  operations record the outcome automatically), or record an explicit
-  decision with JSON operation `intake.outcome.record` — `kind:"no_action"`
-  requires a non-empty `reason`; Issue/SPEC kinds require `number`. Board
-  posts and prose answers never satisfy the gate.
-- When curated work spans multiple Issues/SPECs, select exactly one Primary
-  Execution Owner and classify every related owner before completing the
-  artifact: `bundled-required` (must ship in the Primary's PR — copy its
-  tasks/acceptance into the Primary), `dependent-follow-up` (separate PR with
-  explicit ordering, never a Primary completion blocker), or
-  `reference-only`. A single-Issue Execution launch must be able to implement
-  the full bundled scope from the Primary owner alone.
-
-"#;
-
-/// Render the full SKILL.md content (frontmatter + managed markers + body) for
-/// a target worktree and [`SessionKind`]. Idempotent and pure.
-///
-/// - [`SessionKind::Execution`] emits the canonical producing-work body
-///   ([`SKILL_BODY_EN`]) unchanged.
-/// - [`SessionKind::Intake`] swaps the `## Work (current state)` section for a
-///   curation-framed one and drops the trailing `workspace.update` example, so
-///   an intake session is never asked to maintain Work state.
+/// Render the full SKILL.md content (frontmatter + managed markers + body).
+/// Idempotent and pure. Since SPEC #3245 (FR-004) the guidance is a single
+/// body for every session kind — lane-specific variants are gone; the `kind`
+/// parameter remains only until the lane mechanism itself is removed in
+/// Stage C (FR-007).
 pub fn render_skill_md(kind: SessionKind) -> String {
+    let _ = kind;
     format!(
         "---\nname: {name}\ndescription: {description}\n---\n\n{begin}\n\n{body}\n{end}\n",
         name = SKILL_NAME,
         description = SKILL_DESCRIPTION,
         begin = MANAGED_BEGIN,
-        body = render_body(kind),
+        body = SKILL_BODY_EN,
         end = MANAGED_END,
     )
-}
-
-/// Assemble the lane-specific guidance body. For [`SessionKind::Execution`]
-/// this is [`SKILL_BODY_EN`] verbatim; for [`SessionKind::Intake`] the Work
-/// section and the trailing `workspace.update` example are removed.
-fn render_body(kind: SessionKind) -> String {
-    match kind {
-        SessionKind::Execution => SKILL_BODY_EN.to_string(),
-        SessionKind::Intake => intake_body(),
-    }
-}
-
-fn intake_body() -> String {
-    let work_start = SKILL_BODY_EN
-        .find("## Work (current state)")
-        .expect("execution guidance must contain the Work (current state) section");
-    let git_start = SKILL_BODY_EN
-        .find("## Git environment")
-        .expect("execution guidance must contain the Git environment section");
-    debug_assert!(
-        work_start < git_start,
-        "Work section must precede Git environment section"
-    );
-    let mut body = String::with_capacity(SKILL_BODY_EN.len());
-    body.push_str(&SKILL_BODY_EN[..work_start]);
-    body.push_str(INTAKE_WORK_SECTION_EN);
-    body.push_str(&SKILL_BODY_EN[git_start..]);
-    // After swapping the Work section, the only remaining
-    // `"operation":"workspace.update"` JSON reference is the trailing example
-    // (INTAKE_WORK_SECTION_EN names workspace.update only in backtick prose, not
-    // the JSON operation string). Guard that invariant so a future edit that
-    // reintroduces a workspace.update example earlier in the body — which would
-    // make the position-based truncation over-delete — trips in debug builds.
-    debug_assert_eq!(
-        body.matches("\"operation\":\"workspace.update\"").count(),
-        1,
-        "intake body must have exactly one workspace.update JSON reference (the trailing example) before truncation"
-    );
-    // Drop that trailing example so an intake session never sees a Work-state
-    // example (SPEC-3247 FR-002).
-    if let Some(op_pos) = body.find("\"operation\":\"workspace.update\"") {
-        if let Some(fence) = body[..op_pos].rfind("    gwtd <<'JSON'") {
-            body.truncate(fence);
-            let trimmed_len = body.trim_end().len();
-            body.truncate(trimmed_len);
-            body.push('\n');
-        }
-    }
-    body
 }
 
 /// Materialize the gwt-coordination SKILL.md under both `.claude/skills/`
@@ -501,7 +410,7 @@ pub fn generate_coordination_guidance(worktree: &Path, kind: SessionKind) -> io:
 
 /// Materialize the gwt-coordination SKILL.md under `.claude/skills/` only.
 /// Used by the orchestrator when the target set includes `ClaudeCode` but
-/// may exclude `Codex`. The [`SessionKind`] selects the lane-specific body.
+/// may exclude `Codex`.
 pub fn generate_coordination_guidance_for_claude(
     worktree: &Path,
     kind: SessionKind,
@@ -511,7 +420,7 @@ pub fn generate_coordination_guidance_for_claude(
 
 /// Materialize the gwt-coordination SKILL.md under `.codex/skills/` only.
 /// Used by the orchestrator when the target set includes `Codex` but may
-/// exclude `ClaudeCode`. The [`SessionKind`] selects the lane-specific body.
+/// exclude `ClaudeCode`.
 pub fn generate_coordination_guidance_for_codex(
     worktree: &Path,
     kind: SessionKind,
@@ -597,96 +506,6 @@ mod tests {
         }
     }
 
-    // SPEC-3248 P7A (T-088/T-091 guidance contract): the intake variant
-    // carries the artifact-outcome gate contract and the multi-owner
-    // classification rules, so a curation session can settle its prompts and
-    // a single-Issue Execution launch can rely on bundled scope living in
-    // the Primary owner.
-    #[test]
-    fn intake_guidance_carries_artifact_outcome_and_owner_classification() {
-        let intake = render_skill_md(SessionKind::Intake);
-        for required in [
-            "intake.outcome.record",
-            "no_action",
-            "Board\n  posts and prose answers never satisfy the gate",
-            "Primary\n  Execution Owner",
-            "bundled-required",
-            "dependent-follow-up",
-            "reference-only",
-        ] {
-            assert!(
-                intake.contains(required),
-                "intake guidance must contain '{required}'"
-            );
-        }
-    }
-
-    #[test]
-    fn intake_guidance_omits_work_state_instructions_execution_keeps_them() {
-        // SPEC-3247 FR-002 / AS-2 / AS-3: the intake (Curate) variant must not
-        // instruct or exemplify `workspace.update` (an intake session owns no
-        // Work), while the execution variant keeps the full producing-work
-        // Work-state guidance unchanged.
-        let intake = render_skill_md(SessionKind::Intake);
-        let execution = render_skill_md(SessionKind::Execution);
-
-        // Execution keeps the Work-state section and workspace.update.
-        assert!(
-            execution.contains("## Work (current state)"),
-            "execution guidance must keep the producing-work Work section"
-        );
-        assert!(
-            execution.contains("\"operation\":\"workspace.update\""),
-            "execution guidance must keep the workspace.update instruction"
-        );
-
-        // Intake drops the workspace.update *instruction* and example (the
-        // JSON operation) and the producing-work Work section. It may still
-        // name workspace.update in prose to forbid it, which is intentional.
-        assert!(
-            !intake.contains("\"operation\":\"workspace.update\""),
-            "intake guidance must not instruct or exemplify workspace.update"
-        );
-        assert!(
-            !intake.contains("## Work (current state)"),
-            "intake guidance must not carry the producing-work Work section"
-        );
-        assert!(
-            intake.contains("intake sessions produce no Work"),
-            "intake guidance must state that intake produces no Work"
-        );
-        assert!(
-            intake.contains("Do not run `workspace.update`"),
-            "intake guidance should explicitly forbid workspace.update"
-        );
-        assert!(
-            intake.contains("gwt-register-issue"),
-            "intake guidance must point at the curation skills"
-        );
-
-        // Shared contract stays intact in both lanes (Board audience, branch
-        // prohibition), so intake is not a stripped-down guidance. Assert the
-        // downstream sections that follow the Work section all survive, so an
-        // over-truncation regression in intake_body() would be caught here.
-        for shared in [
-            "## Board (coordination history)",
-            "git worktree add/remove",
-            "Do not post tool-level updates",
-            "## Git environment",
-            "## Skills",
-            "\"operation\":\"search\"",
-            "## Persisted Work files",
-            "## Language",
-            "## Examples",
-            "kind\":\"handoff\"",
-        ] {
-            assert!(
-                intake.contains(shared),
-                "intake guidance must keep shared contract phrase: {shared}"
-            );
-        }
-    }
-
     #[test]
     fn render_skill_md_uses_json_envelope_for_work_identity_examples() {
         let rendered = render_skill_md(SessionKind::Execution);
@@ -749,6 +568,24 @@ mod tests {
         assert!(
             !rendered.contains("mention 省略 → broadcast"),
             "generated SKILL.md must not claim that omitting mentions creates a broadcast post"
+        );
+    }
+
+    // SPEC #3245 FR-004: the guidance is a single body — session kind no
+    // longer selects a variant, and the Work-state instruction is present
+    // for every kind (#3379 contradiction resolved by unification).
+    #[test]
+    fn guidance_is_identical_for_every_session_kind() {
+        let intake = render_skill_md(SessionKind::Intake);
+        let execution = render_skill_md(SessionKind::Execution);
+        assert_eq!(intake, execution, "single guidance for every kind");
+        assert!(
+            intake.contains("\"operation\":\"workspace.update\""),
+            "the single guidance keeps the workspace.update instruction"
+        );
+        assert!(
+            !intake.contains("intake sessions produce no Work"),
+            "curation framing must be gone"
         );
     }
 
