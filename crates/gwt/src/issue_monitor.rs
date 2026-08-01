@@ -6624,6 +6624,37 @@ mod tests {
         );
     }
 
+    // SPEC #3245 FR-006 / AC-3: an Issue produced by the gwt-register-issue
+    // template (mandatory `- [ ] AC-N:` checkbox block + the `auto-merge`
+    // label applied by default) passes the autonomous-eligibility predicate,
+    // and the explicit opt-out (no auto-merge label) stays on the human gate.
+    #[test]
+    fn registration_template_issue_passes_autonomous_eligibility_by_default() {
+        use gwt_git::branch_protection::BranchProtectionStatus;
+        let template_body = "## Summary\n\nfix the thing\n\n## Background\n\ncontext\n\n\
+## Spec Status\n\nALIGNED — narrow bug\n\n## Related SPECs\n\n- None\n\n\
+## Acceptance Criteria\n\n- [ ] AC-1: the failing call succeeds\n- [ ] AC-2: regression test stays GREEN\n\n\
+## Expected Outcome\n\ngreen\n\n## Notes\n\n(none)\n";
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(template_body);
+        assert!(
+            criteria.machine_checkable,
+            "the template's AC block must classify as machine-checkable"
+        );
+        let verified = BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert_eq!(
+            autonomous_eligibility(true, true, &criteria, &verified, false, 0, 3),
+            EligibilityDecision::Eligible,
+            "template defaults (AC block + auto-merge label) must be eligible"
+        );
+        assert_eq!(
+            autonomous_eligibility(true, false, &criteria, &verified, false, 0, 3),
+            EligibilityDecision::HumanGate("issue lacks the auto-merge label".to_string()),
+            "the explicit opt-out (label removed) must stay on the human gate"
+        );
+    }
+
     #[test]
     fn autonomous_eligibility_truth_table() {
         // SPEC #3200 FR-003/004/005, Sc 2/3/4: two-stage-opt-in negatives →

@@ -95,6 +95,13 @@ fn intake_materialize_keeps_full_skill_set() {
             .exists(),
         "intake must keep registration skills"
     );
+    assert!(
+        intake
+            .path()
+            .join(".claude/skills/gwt-register-spec/SKILL.md")
+            .exists(),
+        "intake must keep the register-spec alias too (FR-005)"
+    );
 
     let execution = materialize(SessionKind::Execution);
     assert!(

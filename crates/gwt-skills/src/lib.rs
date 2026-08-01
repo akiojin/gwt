@@ -725,6 +725,44 @@ mod tests {
         }
     }
 
+    // SPEC #3245 FR-006 / AC-3: the registration template produces
+    // autonomous-eligible Issues by default — a mandatory `- [ ] AC-N:`
+    // checkbox structure plus the `auto-merge` label applied by default with
+    // an explicit opt-out. The `issue.create` operation itself stays neutral
+    // (labels optional, no unconditional default).
+    #[test]
+    fn registration_template_defaults_to_autonomous_eligible_issues() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-register-issue/SKILL.md",
+            ".codex/skills/gwt-register-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("## Acceptance Criteria"),
+                "expected a mandatory Acceptance Criteria section in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("- [ ] AC-1:"),
+                "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("\"labels\":[\"auto-merge\"]"),
+                "expected the auto-merge label applied by default at issue.create: {relative}"
+            );
+            assert!(
+                issue_skill.contains("opt-out") || issue_skill.contains("opt out"),
+                "expected an explicit auto-merge opt-out path: {relative}"
+            );
+            assert!(
+                issue_skill.contains("Issue Monitor"),
+                "expected the Issue Monitor eligibility alignment note: {relative}"
+            );
+        }
+    }
+
     #[test]
     fn local_github_issue_workflows_use_canonical_gwt_surfaces() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
