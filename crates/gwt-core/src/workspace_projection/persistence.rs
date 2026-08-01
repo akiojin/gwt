@@ -2694,6 +2694,7 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
                         "exact Work terminal confirmation lost its canonical Work".to_string(),
                     )
                 })?;
+            validate_exact_work_machine_local_close_events_read_only(item, &events_path)?;
             let requested_kind = match close_kind {
                 WorkCloseKind::Done => WorkEventKind::Done,
                 WorkCloseKind::Discarded => WorkEventKind::Discard,
@@ -6060,6 +6061,14 @@ fn read_workspace_work_event_records_from_path(path: &Path) -> Result<Vec<WorkEv
 // this writer-owned log and never runs for shared/tracked rebuild input.
 fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec<WorkEvent>> {
     repair_jsonl_tail(path)?;
+    read_machine_local_workspace_work_events_from_path_read_only(path)
+}
+
+// Confirm-only authority readback must validate the writer-owned ledger
+// without repairing its tail or otherwise changing durable bytes.
+fn read_machine_local_workspace_work_events_from_path_read_only(
+    path: &Path,
+) -> Result<Vec<WorkEvent>> {
     let content = match fs::read(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -6074,6 +6083,59 @@ fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec
             })
         })
         .collect()
+}
+
+fn machine_local_close_event_matches_projected_lifecycle(
+    durable: &WorkEvent,
+    projected: &WorkEvent,
+) -> bool {
+    // Resume-owner repair may sanitize the descriptive identity fields, and
+    // legacy mega-item decomposition may re-key work_item_id. Neither repair
+    // may change the lifecycle identity or terminal semantics below.
+    durable.kind == projected.kind
+        && durable.progress_summary == projected.progress_summary
+        && durable.status_category == projected.status_category
+        && durable.agent_session_id == projected.agent_session_id
+        && durable.agent_id == projected.agent_id
+        && durable.display_name == projected.display_name
+        && durable.board_entry_id == projected.board_entry_id
+        && durable.execution_container == projected.execution_container
+        && durable.related_work_item_id == projected.related_work_item_id
+        && durable.updated_at == projected.updated_at
+}
+
+fn validate_exact_work_machine_local_close_events_read_only(
+    item: &WorkItem,
+    path: &Path,
+) -> Result<()> {
+    let mut projected_events = HashMap::new();
+    for event in &item.events {
+        if projected_events.insert(event.id.as_str(), event).is_some() {
+            return Err(GwtError::Other(format!(
+                "exact Work terminal confirmation found duplicate projected event {}",
+                event.id
+            )));
+        }
+    }
+    for durable_event in read_machine_local_workspace_work_events_from_path_read_only(path)? {
+        let projected_event = projected_events.get(durable_event.id.as_str());
+        if projected_event.is_none() && durable_event.work_item_id != item.id {
+            continue;
+        }
+        let projected_event = projected_event.ok_or_else(|| {
+            GwtError::Other(format!(
+                "exact Work terminal confirmation found unprojected machine-local close event {}",
+                durable_event.id
+            ))
+        })?;
+        if !machine_local_close_event_matches_projected_lifecycle(&durable_event, projected_event) {
+            return Err(GwtError::Other(format!(
+                "exact Work terminal confirmation found divergent machine-local close event {}",
+                durable_event.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn append_workspace_work_events_to_path(path: &Path, events: &[WorkEvent]) -> Result<()> {
