@@ -607,7 +607,7 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
         work_event_root,
         &current_path,
         &work_items_path,
-        || {
+        |_| {
             let (projection, work_items, persisted) =
                 load_split_root_workspace_state_for_preflight_locked(
                     project_state_root,
@@ -655,13 +655,15 @@ pub fn recover_pending_workspace_state_transaction_for_work_event_root(
         work_event_root,
         &current_path,
         &work_items_path,
-        || {
-            materialize_split_root_workspace_state_paths_locked(
-                project_state_root,
-                work_event_root,
-                &current_path,
-                &work_items_path,
-            )?;
+        |recovered| {
+            if recovered {
+                materialize_split_root_workspace_state_paths_locked(
+                    project_state_root,
+                    work_event_root,
+                    &current_path,
+                    &work_items_path,
+                )?;
+            }
             Ok(())
         },
     )
@@ -1175,12 +1177,37 @@ fn validate_legacy_reconciliation_assigned_targets(
     work_event_root: &Path,
     context: &str,
 ) -> Result<()> {
+    let canonical_work_event_root = canonical_session_bound_path(work_event_root)?;
     let session_ids = projection
         .agents
         .iter()
         .map(|agent| agent.session_id.as_str())
         .collect::<HashSet<_>>();
     for session_id in session_ids {
+        let Some(latest) = projection.latest_agent_for_session(session_id) else {
+            continue;
+        };
+        let latest_targets_work_event_root = projection
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent.session_id == session_id
+                    && agent.updated_at == latest.updated_at
+                    && agent.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned
+            })
+            .try_fold(false, |matched, agent| {
+                if matched {
+                    Ok(true)
+                } else {
+                    session_bound_candidate_path_matches(
+                        agent.worktree_path.as_deref(),
+                        &canonical_work_event_root,
+                    )
+                }
+            })?;
+        if !latest_targets_work_event_root {
+            continue;
+        }
         let Some(agent) =
             resolve_latest_session_bound_agent_authority(projection, session_id, context)?
         else {
@@ -1242,29 +1269,46 @@ fn split_root_workspace_state_paths(
     )
 }
 
+fn split_root_workspace_work_items_sources(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    work_items_path: &Path,
+) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for source in [
+        work_items_path.to_path_buf(),
+        legacy_workspace_work_items_path_for_repo_path(project_state_root),
+        gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        legacy_workspace_work_items_path_for_repo_path(work_event_root),
+    ] {
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
 fn with_split_root_workspace_state_lock<T>(
     project_state_root: &Path,
     work_event_root: &Path,
     current_path: &Path,
     work_items_path: &Path,
-    operation: impl FnOnce() -> Result<T>,
+    operation: impl FnOnce(bool) -> Result<T>,
 ) -> Result<T> {
-    let legacy_worktree_work_items = gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let mut lock_targets = vec![
-        current_path.with_file_name("works.json"),
-        work_items_path.to_path_buf(),
-    ];
-    let mut marker_paths = vec![
-        pending_workspace_state_transaction_path(current_path),
-        pending_workspace_state_transaction_path_for_work_items(work_items_path),
-    ];
-    if project_state_root != work_event_root && legacy_worktree_work_items != work_items_path {
-        lock_targets.push(legacy_worktree_work_items.clone());
-        marker_paths.push(pending_workspace_state_transaction_path_for_work_items(
-            &legacy_worktree_work_items,
-        ));
-    }
-    with_workspace_transaction_recovery(lock_targets, marker_paths, operation)
+    let work_item_sources = split_root_workspace_work_items_sources(
+        project_state_root,
+        work_event_root,
+        work_items_path,
+    );
+    let mut lock_targets = vec![current_path.with_file_name("works.json")];
+    lock_targets.extend(work_item_sources.iter().cloned());
+    let mut marker_paths = vec![pending_workspace_state_transaction_path(current_path)];
+    marker_paths.extend(
+        work_item_sources
+            .iter()
+            .map(|path| pending_workspace_state_transaction_path_for_work_items(path)),
+    );
+    with_workspace_transaction_recovery_observed(lock_targets, marker_paths, operation)
 }
 
 /// Materialize legacy project-scoped sources while the caller continuously
@@ -1279,15 +1323,20 @@ fn materialize_split_root_workspace_state_paths_locked(
         &legacy_workspace_projection_path_for_repo_path(project_state_root),
         current_path,
     )?;
-    copy_validated_workspace_work_items_if_needed(
-        &legacy_workspace_work_items_path_for_repo_path(project_state_root),
-        work_items_path,
-    )?;
-    if project_state_root != work_event_root {
-        copy_validated_workspace_work_items_if_needed(
-            &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+    if !work_items_path.exists() {
+        for source in split_root_workspace_work_items_sources(
+            project_state_root,
+            work_event_root,
             work_items_path,
-        )?;
+        )
+        .into_iter()
+        .skip(1)
+        {
+            copy_validated_workspace_work_items_if_needed(&source, work_items_path)?;
+            if work_items_path.exists() {
+                break;
+            }
+        }
     }
 
     // Preserve the destination root's normal migration precedence. Only if it
@@ -1324,12 +1373,11 @@ fn load_split_root_workspace_state_for_preflight_locked(
     };
     projection.project_root = project_state_root.to_path_buf();
 
-    let work_item_sources = [
-        work_items_path.to_path_buf(),
-        legacy_workspace_work_items_path_for_repo_path(project_state_root),
-        gwt_workspace_work_items_path_for_repo_path(work_event_root),
-    ];
-    for source in work_item_sources {
+    for source in split_root_workspace_work_items_sources(
+        project_state_root,
+        work_event_root,
+        work_items_path,
+    ) {
         if let Some(work_items) = load_workspace_work_items_from_path(&source)? {
             return Ok((projection, work_items, true));
         }
@@ -1423,7 +1471,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
         work_event_root,
         &current_path,
         &work_items_path,
-        || {
+        |_| {
             if let Some(receipt) = load_external_workspace_commit_receipt(
                 &current_path,
                 &work_items_path,
@@ -2897,16 +2945,36 @@ fn session_bound_paths_match(left: Option<&Path>, right: Option<&Path>) -> Resul
     let (Some(left), Some(right)) = (left, right) else {
         return Ok(false);
     };
-    let canonicalize = |path: &Path| {
-        fs::canonicalize(path)
-            .map(|path| crate::paths::normalize_windows_child_process_path(&path))
-            .map_err(|_| {
-                GwtError::Other(
-                    "Session-bound workspace path could not be canonicalized".to_string(),
-                )
-            })
+    Ok(canonical_session_bound_path(left)? == canonical_session_bound_path(right)?)
+}
+
+fn canonical_session_bound_path(path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(path)
+        .map(|path| crate::paths::normalize_windows_child_process_path(&path))
+        .map_err(|_| {
+            GwtError::Other("Session-bound workspace path could not be canonicalized".to_string())
+        })
+}
+
+/// Compare persisted candidate state with an already-canonical authority.
+/// A removed candidate cannot own current authority, while every other I/O
+/// failure remains fail-closed.
+fn session_bound_candidate_path_matches(
+    candidate: Option<&Path>,
+    canonical_authority: &Path,
+) -> Result<bool> {
+    let Some(candidate) = candidate else {
+        return Ok(false);
     };
-    Ok(canonicalize(left)? == canonicalize(right)?)
+    match fs::canonicalize(candidate) {
+        Ok(path) => {
+            Ok(crate::paths::normalize_windows_child_process_path(&path) == canonical_authority)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(GwtError::Other(
+            "Session-bound workspace path could not be canonicalized".to_string(),
+        )),
+    }
 }
 
 fn session_bound_optional_paths_match(left: Option<&Path>, right: Option<&Path>) -> Result<bool> {
@@ -2987,6 +3055,7 @@ fn validate_session_bound_work_authority_uniqueness(
     worktree_identity: &Path,
     context: &str,
 ) -> Result<()> {
+    let canonical_worktree_identity = canonical_session_bound_path(worktree_identity)?;
     for other in work_items
         .work_items
         .iter()
@@ -3006,9 +3075,9 @@ fn validate_session_bound_work_authority_uniqueness(
                 canonical_session_bound_branch(container.branch.as_deref().unwrap_or_default())
                     == canonical_session_bound_branch(branch_identity);
             if branch_matches
-                && session_bound_paths_match(
+                && session_bound_candidate_path_matches(
                     container.worktree_path.as_deref(),
-                    Some(worktree_identity),
+                    &canonical_worktree_identity,
                 )?
             {
                 return Err(GwtError::Other(format!(
@@ -3394,7 +3463,18 @@ fn with_workspace_transaction_recovery<T>(
     base_marker_paths: Vec<PathBuf>,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_workspace_transaction_recovery_observed(base_lock_targets, base_marker_paths, |_| {
+        operation()
+    })
+}
+
+fn with_workspace_transaction_recovery_observed<T>(
+    base_lock_targets: Vec<PathBuf>,
+    base_marker_paths: Vec<PathBuf>,
+    operation: impl FnOnce(bool) -> Result<T>,
+) -> Result<T> {
     let mut operation = Some(operation);
+    let mut recovered = false;
     loop {
         let mut marker_paths = base_marker_paths.clone();
         marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
@@ -3477,11 +3557,12 @@ fn with_workspace_transaction_recovery<T>(
                     &transaction,
                     true,
                 )?;
+                recovered = true;
             }
             let operation = operation
                 .take()
                 .expect("workspace state operation must run exactly once");
-            operation().map(Some)
+            operation(recovered).map(Some)
         })?;
         if let Some(result) = outcome {
             return Ok(result);
@@ -3925,9 +4006,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
             if transaction.current_path != current_path
                 || transaction.work_items_path != work_items_path
             {
-                return Err(GwtError::Other(format!(
-                    "external workspace operation {operation_id} is bound to a different current/work-items path pair"
-                )));
+                return Err(GwtError::ExternalWorkspacePathPairMismatch {
+                    operation_id: operation_id.to_string(),
+                });
             }
             if decision == ExternalWorkspaceCommitDecision::Commit {
                 let pending_reconciliation = transaction

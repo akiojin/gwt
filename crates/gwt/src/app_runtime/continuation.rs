@@ -487,12 +487,9 @@ pub(super) fn resolve_split_workspace_state_external_commit(
                 decision,
             )
         }
-        Err(gwt_core::error::GwtError::Other(message))
-            if message
-                == format!(
-                    "external workspace operation {operation_id} is bound to a different current/work-items path pair"
-                ) =>
-        {
+        Err(gwt_core::error::GwtError::ExternalWorkspacePathPairMismatch {
+            operation_id: bound_operation_id,
+        }) if bound_operation_id == operation_id => {
             resolve_legacy_split_workspace_state_external_commit(
                 project_root,
                 work_event_root,

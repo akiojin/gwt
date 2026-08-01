@@ -18531,9 +18531,18 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
     let project_state_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
     let project_state_dir = project_state_path.parent().expect("project-state dir");
-    fs::create_dir_all(project_state_dir.parent().expect("project dir")).expect("project dir");
-    fs::write(project_state_dir, b"block projection directory")
-        .expect("block project-state writes");
+    fs::create_dir_all(project_state_dir).expect("create project-state directory");
+    fs::create_dir(&project_state_path).expect("block only the current projection target");
+    let repo_global_work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+    let repo_global_close_events_path =
+        gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&project_root);
+    assert!(
+        project_state_dir.is_dir()
+            && repo_global_work_items_path.parent() == Some(project_state_dir)
+            && repo_global_close_events_path.parent() == Some(project_state_dir),
+        "the projection failure fixture must leave sibling Work paths structurally writable"
+    );
     let (command, args) = if cfg!(windows) {
         (
             "cmd".to_string(),

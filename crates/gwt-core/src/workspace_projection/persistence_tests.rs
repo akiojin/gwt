@@ -946,6 +946,63 @@ fn workspace_state_transaction_for_work_event_root_migrates_single_root_state() 
 }
 
 #[test]
+fn split_root_transaction_migrates_legacy_worktree_workspace_work_items() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let (project_state_root, work_event_root) =
+        init_test_workspace_home_with_linked_worktree(temp.path());
+    let now = Utc.with_ymd_and_hms(2026, 8, 1, 3, 15, 0).unwrap();
+
+    let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
+    let legacy_worktree_works = legacy_workspace_work_items_path_for_repo_path(&work_event_root);
+    let topology_dependent_shadow = gwt_workspace_work_items_path_for_repo_path(&work_event_root);
+    let mut work_items = WorkItemsProjection::empty(now);
+    let mut start = WorkEvent::new(WorkEventKind::Start, "work-legacy-worktree", now);
+    start.id = "event-legacy-worktree".to_string();
+    start.title = Some("Legacy exact-worktree Work".to_string());
+    work_items.apply_event(start);
+    save_workspace_work_items_projection_to_path(&legacy_worktree_works, &work_items)
+        .expect("legacy exact-worktree WorkItems");
+    let legacy_bytes = std::fs::read(&legacy_worktree_works).expect("legacy exact-worktree bytes");
+
+    assert!(!repo_global_works.exists());
+    assert!(!topology_dependent_shadow.exists());
+    transact_workspace_state_for_work_event_root(
+        &project_state_root,
+        &work_event_root,
+        |_, existing, persisted| {
+            assert!(
+                persisted,
+                "legacy exact-worktree WorkItems are durable state"
+            );
+            assert!(existing
+                .work_items
+                .iter()
+                .any(|item| item.id == "work-legacy-worktree"));
+            Ok(((), Vec::new()))
+        },
+    )
+    .expect("migrate legacy exact-worktree WorkItems into repo-global state");
+
+    assert!(load_workspace_work_items_from_path(&repo_global_works)
+        .unwrap()
+        .unwrap()
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-legacy-worktree"));
+    assert_eq!(
+        std::fs::read(&legacy_worktree_works).expect("legacy source remains immutable"),
+        legacy_bytes
+    );
+    assert!(
+        !topology_dependent_shadow.exists(),
+        "migration must not retain a second WorkItems SOT"
+    );
+}
+
+#[test]
 fn workspace_state_transaction_for_work_event_root_recovers_v1_single_root_marker() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1020,6 +1077,110 @@ fn workspace_state_transaction_for_work_event_root_recovers_v1_single_root_marke
     assert!(std::fs::read_to_string(split_root_events)
         .expect("split-root recovered events")
         .contains("event-v1-recovery"));
+}
+
+#[test]
+fn split_root_recovery_without_pending_transaction_leaves_worktree_read_only() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let (project_state_root, work_event_root) =
+        init_test_workspace_home_with_linked_worktree(temp.path());
+    let now = Utc.with_ymd_and_hms(2026, 8, 1, 3, 45, 0).unwrap();
+
+    let legacy_events = gwt_workspace_work_events_path_for_repo_path(&project_state_root);
+    let mut event = WorkEvent::new(WorkEventKind::Start, "work-no-pending-recovery", now);
+    event.id = "event-no-pending-recovery".to_string();
+    append_workspace_work_event_to_path(&legacy_events, &event).expect("legacy event source");
+    let legacy_bytes = std::fs::read(&legacy_events).expect("legacy event bytes");
+    let tracked_events = gwt_repo_local_work_events_path(&work_event_root);
+    let attributes = work_event_root.join(".gitattributes");
+    assert!(!tracked_events.exists());
+    assert!(!attributes.exists());
+
+    recover_pending_workspace_state_transaction_for_work_event_root(
+        &project_state_root,
+        &work_event_root,
+    )
+    .expect("no pending transaction is a read-only no-op");
+
+    assert_eq!(
+        std::fs::read(&legacy_events).expect("legacy source remains immutable"),
+        legacy_bytes
+    );
+    assert!(
+        !tracked_events.exists(),
+        "recovery without a transaction must not migrate tracked events"
+    );
+    assert!(
+        !attributes.exists(),
+        "recovery without a transaction must not dirty the checkout"
+    );
+}
+
+#[test]
+fn split_root_recovery_with_pending_transaction_migrates_recovered_events() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let (project_state_root, work_event_root) =
+        init_test_workspace_home_with_linked_worktree(temp.path());
+    let now = Utc.with_ymd_and_hms(2026, 8, 1, 4, 0, 0).unwrap();
+
+    let current_path = gwt_workspace_projection_path_for_repo_path(&project_state_root);
+    let repo_global_works = gwt_workspace_work_items_path_for_repo_path(&project_state_root);
+    let single_root_events = gwt_repo_local_work_events_path(&project_state_root);
+    let tracked_events = gwt_repo_local_work_events_path(&work_event_root);
+    let mut projection = WorkspaceProjection::default_for_project(&project_state_root);
+    projection.title = "Recovered split-root pending state".to_string();
+    let mut event = WorkEvent::new(WorkEventKind::Start, "work-pending-split-recovery", now);
+    event.id = "event-pending-split-recovery".to_string();
+    let mut work_items = WorkItemsProjection::empty(now);
+    work_items.apply_event(event.clone());
+    let pending = PendingWorkspaceStateTransaction {
+        version: 1,
+        transaction_id: None,
+        current_path: current_path.clone(),
+        work_items_path: repo_global_works.clone(),
+        current_precondition: None,
+        work_items_precondition: None,
+        projection,
+        work_items: Some(work_items),
+        events_path: Some(single_root_events),
+        events: vec![event],
+        journal_path: None,
+        journal_entries: Vec::new(),
+        external_commit: None,
+    };
+    write_pending_transaction_markers(&pending);
+
+    recover_pending_workspace_state_transaction_for_work_event_root(
+        &project_state_root,
+        &work_event_root,
+    )
+    .expect("recover and migrate pending split-root transaction");
+
+    assert_eq!(
+        load_workspace_projection_from_path(&current_path)
+            .unwrap()
+            .unwrap()
+            .title,
+        "Recovered split-root pending state"
+    );
+    assert!(load_workspace_work_items_from_path(&repo_global_works)
+        .unwrap()
+        .unwrap()
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-pending-split-recovery"));
+    assert!(std::fs::read_to_string(&tracked_events)
+        .expect("tracked recovered events")
+        .contains("event-pending-split-recovery"));
+    assert!(pending_workspace_state_transaction_paths(&pending)
+        .iter()
+        .all(|path| !path.exists()));
 }
 
 #[test]
@@ -1406,8 +1567,12 @@ fn workspace_state_transaction_resolver_rejects_a_cross_pair_operation_match() {
         ExternalWorkspaceCommitDecision::Reject,
     );
     assert!(
-        mismatched.is_err(),
-        "sharing one path and operation id must not authorize another path pair"
+        matches!(
+            mismatched,
+            Err(GwtError::ExternalWorkspacePathPairMismatch { operation_id })
+                if operation_id == "continue-operation-cross-pair"
+        ),
+        "sharing one path and operation id must return the typed path-pair mismatch"
     );
     assert!(
         pending_workspace_state_transaction_path(&current).exists()
@@ -3769,6 +3934,119 @@ fn t812_inject_authority_ambiguity(fixture: &T812Fixture, ambiguity: T812Authori
 }
 
 #[test]
+fn legacy_reconciliation_assigned_target_scope_ignores_unresolvable_unrelated_agent() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let mut projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    let mut stale = projection.agents[0].clone();
+    stale.session_id = "unrelated-stale-session".to_string();
+    stale.workspace_id = Some("work-unrelated-stale".to_string());
+    stale.worktree_path = Some(temp.path().join("deleted-unrelated-worktree"));
+    stale.updated_at += chrono::Duration::seconds(1);
+    projection.agents.push(stale);
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+
+    validate_legacy_reconciliation_assigned_targets(
+        &projection,
+        &work_items,
+        &fixture.target.work_event_root,
+        "legacy receipt reconciliation test",
+    )
+    .expect("an unrelated deleted Agent worktree must be outside reconciliation scope");
+}
+
+#[test]
+fn legacy_reconciliation_assigned_target_scope_rejects_unresolvable_authoritative_root() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+
+    let result = validate_legacy_reconciliation_assigned_targets(
+        &projection,
+        &work_items,
+        &temp.path().join("deleted-authoritative-worktree"),
+        "legacy receipt reconciliation test",
+    );
+
+    assert!(
+        result.is_err(),
+        "an unresolvable authoritative work-event root must fail closed"
+    );
+}
+
+#[test]
+fn session_bound_work_authority_uniqueness_ignores_unresolvable_foreign_container() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    t812_inject_authority_ambiguity(&fixture, T812AuthorityAmbiguity::TerminalContainerShadow);
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+    work_items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == "work-terminal-container-shadow")
+        .expect("foreign container shadow")
+        .execution_containers[0]
+        .worktree_path = Some(temp.path().join("deleted-foreign-worktree"));
+
+    validate_session_bound_work_authority_uniqueness(
+        &work_items,
+        T812_TARGET_WORK_ID,
+        T812_SESSION_ID,
+        T812_TARGET_BRANCH,
+        &fixture.target.worktree_identity,
+        "Session-bound workspace test",
+    )
+    .expect("a deleted foreign container cannot be current Work authority");
+}
+
+#[test]
+fn session_bound_work_authority_uniqueness_rejects_unresolvable_authoritative_target() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    t812_inject_authority_ambiguity(&fixture, T812AuthorityAmbiguity::TerminalContainerShadow);
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+
+    let result = validate_session_bound_work_authority_uniqueness(
+        &work_items,
+        T812_TARGET_WORK_ID,
+        T812_SESSION_ID,
+        T812_TARGET_BRANCH,
+        &temp.path().join("deleted-authoritative-worktree"),
+        "Session-bound workspace test",
+    );
+
+    assert!(
+        result.is_err(),
+        "an unresolvable authoritative target must fail closed"
+    );
+}
+
+#[test]
 fn session_bound_update_rejects_conflicting_current_and_terminal_authority_shadows() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
@@ -3995,7 +4273,7 @@ fn legacy_external_commit_waits_for_canonical_lock_before_publication() {
         "legacy Work must not publish before the canonical lock is acquired"
     );
 
-    canonical_lock.unlock().expect("release canonical lock");
+    FileExt::unlock(&canonical_lock).expect("release canonical lock");
     assert_eq!(
         result_rx
             .recv_timeout(Duration::from_secs(5))
@@ -7766,7 +8044,7 @@ fn record_workspace_work_event_does_not_advance_projection_when_append_fails() {
 
 #[test]
 fn record_workspace_work_event_waits_for_the_projection_transaction_lock() {
-    use fs2::FileExt as _;
+    use fs2::FileExt;
     use std::fs::OpenOptions;
     use std::sync::mpsc::TryRecvError;
     use std::time::Duration;
@@ -7809,7 +8087,7 @@ fn record_workspace_work_event_waits_for_the_projection_transaction_lock() {
         TryRecvError::Empty,
         "writer must not enter the projection transaction while the lock is held"
     );
-    lock.unlock().expect("release transaction lock");
+    FileExt::unlock(&lock).expect("release transaction lock");
     rx.recv_timeout(Duration::from_secs(2))
         .expect("writer result")
         .expect("writer succeeds after lock release");

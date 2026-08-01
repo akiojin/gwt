@@ -2131,7 +2131,7 @@ fn load_session_for_mutation(session_id: &str) -> Result<Session> {
     })
 }
 
-fn normalize_mutation_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_mutation_path(path: &Path) -> PathBuf {
     let path = normalize_windows_child_process_path(path);
     let path = dunce::canonicalize(&path).unwrap_or(path);
     normalize_windows_child_process_path(&path)
@@ -2252,7 +2252,7 @@ fn validate_project_state_anchor(
     )))
 }
 
-fn canonical_branch_identity(branch: &str) -> String {
+pub(crate) fn canonical_branch_identity(branch: &str) -> String {
     let branch = branch.trim();
     let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     let branch = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
