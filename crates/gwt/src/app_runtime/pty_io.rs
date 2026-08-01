@@ -43,15 +43,6 @@ fn stop_all_before_joining<I, T>(
 }
 
 impl AppRuntime {
-    pub(crate) fn inspection_input_denied_events(&self, window_id: &str) -> Vec<OutboundEvent> {
-        let message =
-            "\r\n[gwt] This Session is inspection-only. Use Continue work before sending input.\r\n";
-        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
-            id: window_id.to_string(),
-            data_base64: base64::engine::general_purpose::STANDARD.encode(message),
-        })]
-    }
-
     /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
     /// streamed output was dropped under client queue pressure, restoring
     /// display consistency for the affected client only.
@@ -125,19 +116,6 @@ impl AppRuntime {
         window_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(window_id) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::PaneSendResult {
-                    ok: false,
-                    window_id: Some(window_id.to_string()),
-                    error: Some(
-                        "the target Session is inspection-only; use Continue work before sending input"
-                            .to_string(),
-                    ),
-                },
-            )];
-        }
         let write_result = match self.runtimes.get(window_id) {
             None => Err(format!("no live runtime for pane {window_id}")),
             Some(runtime) => runtime
@@ -171,9 +149,6 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        if self.inspection_agent_windows.contains(id) {
-            return self.inspection_input_denied_events(id);
-        }
         let write_result = {
             let Some(runtime) = self.runtimes.get(id) else {
                 tracing::debug!(
@@ -230,14 +205,6 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
-        if self.inspection_agent_windows.contains(id) {
-            // Inspection panes must always return through `terminal_input_events`,
-            // where the immutable inspection boundary is enforced. Publishing
-            // their raw PTY handle here would let the WebSocket fast path bypass
-            // that check.
-            self.deregister_pty_writer(id);
-            return;
-        }
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",

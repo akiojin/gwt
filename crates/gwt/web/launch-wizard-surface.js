@@ -27,14 +27,16 @@ import {
   buildToggleField,
 } from "/launch-controls.js";
 
-// SPEC-2359 W-24 (FR-572): conversation history and Execution generation are
-// independent intents. The legacy resume methods may open history, but only
-// Work-level Continue work may create or recover a producing generation.
+// SPEC-2359 W-24 (FR-572) / #3410: conversation history and Execution
+// generation are independent intents. The legacy resume methods reopen the
+// conversation with input enabled; producing authority is recovered by the
+// backend continuation coordinator, and Work-level Continue work owns
+// successor generations.
 export function launchWizardStartMethodIntent(methodKind) {
   switch (methodKind) {
     case "continue_last_session":
     case "open_session_picker":
-      return "inspection";
+      return "resume";
     case "focus_running_session":
       return "focus";
     default:
@@ -1069,7 +1071,7 @@ export function createLaunchWizardSurface({
               title: "Available",
               copy: isIntakeWizard
                 ? "Other ways to prepare or resume this intake session."
-                : "Other ways to start, inspect, or focus this agent.",
+                : "Other ways to start, resume, or focus this agent.",
             },
             {
               id: "unavailable",
@@ -1128,7 +1130,7 @@ export function createLaunchWizardSurface({
                   "div",
                   "start-method-title",
                   isStartMethodPending
-                    ? startMethodIntent === "inspection"
+                    ? startMethodIntent === "resume"
                       ? "Opening..."
                       : startMethodIntent === "focus"
                         ? "Focusing..."
@@ -1143,15 +1145,6 @@ export function createLaunchWizardSurface({
               button.appendChild(
                 createNode("div", "start-method-summary", method.summary || ""),
               );
-              if (startMethodIntent === "inspection") {
-                button.appendChild(
-                  createNode(
-                    "div",
-                    "start-method-detail",
-                    "History only — this does not continue the Work. Use Continue work on the Work surface to start working again.",
-                  ),
-                );
-              }
               const detail = method.enabled === false
                 ? method.disabled_reason
                 : method.detail;

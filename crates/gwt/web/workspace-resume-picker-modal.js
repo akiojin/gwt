@@ -1,14 +1,15 @@
 // SPEC-2359 US-42 — Workspace Resume Picker modal.
 //
 // Rendered when the user opens a historical Session from the Work surface.
-// Lists conversation-capable candidates so the user can inspect one in-place.
-// This path preserves conversation history without creating a producing
-// Execution generation; Work-level Continue work owns that transition.
+// Lists conversation-capable candidates so the user can reopen one in-place
+// with input enabled. Producing continuation authority is recovered by the
+// backend continuation coordinator when the session is linked; Work-level
+// Continue work owns successor generations.
 
 import { createFocusTrap } from "./focus-trap.js";
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
-function isInspectionResumeCandidate(agent) {
+function isResumableSessionCandidate(agent) {
   return Boolean(agent?.session_id) && agent.resume_kind !== "metadata_only";
 }
 
@@ -116,29 +117,29 @@ export function renderWorkspaceResumePicker({
   dialogEl.removeAttribute("aria-label");
   while (dialogEl.firstChild) dialogEl.removeChild(dialogEl.firstChild);
 
-  const title = createNode("h2", "workspace-resume-picker-title", "Inspect Session");
+  const title = createNode("h2", "workspace-resume-picker-title", "Open Session");
   title.id = "workspace-resume-picker-title";
   dialogEl.appendChild(title);
   dialogEl.appendChild(
     createNode(
       "p",
       "workspace-resume-picker-subtitle",
-      "Open a previous conversation for history only. This does not continue the Work; use Continue work to start working again.",
+      "Open a previous conversation and keep talking in it. Use Continue work to start a new linked execution for this Work.",
     ),
   );
 
   // SPEC-2359 W-24 (FR-572): metadata-only entries used to act as an implicit
-  // fresh start. Fresh producing continuation now belongs exclusively to the
+  // fresh start. Fresh producing continuation still belongs exclusively to the
   // Work-level Continue work transaction, so this modal lists only sessions
-  // that can be opened as Inspection.
+  // whose conversation can actually be reopened.
   const agents = Array.isArray(state.agents)
-    ? state.agents.filter((agent) => isInspectionResumeCandidate(agent))
+    ? state.agents.filter((agent) => isResumableSessionCandidate(agent))
     : [];
   if (agents.length === 0) {
     const empty = createNode(
       "div",
       "workspace-resume-picker-empty",
-      "No sessions are available for inspection. Use Continue work to start working again.",
+      "No sessions are available to resume. Use Continue work to start working again.",
     );
     empty.setAttribute("role", "status");
     dialogEl.appendChild(empty);
@@ -148,7 +149,7 @@ export function renderWorkspaceResumePicker({
       const row = createNode("button", "workspace-resume-picker-row");
       row.type = "button";
       row.dataset.sessionId = agent.session_id;
-      row.dataset.executionIntent = "inspection";
+      row.dataset.executionIntent = "resume";
       const heading = createNode("div", "workspace-resume-picker-row-heading");
       heading.appendChild(
         createNode(
@@ -187,7 +188,7 @@ export function renderWorkspaceResumePicker({
       );
       row.setAttribute(
         "aria-label",
-        `Inspect ${agent.display_name || agent.agent_id} Session (${lifecycleTag?.label || resumeLabel})`,
+        `Open ${agent.display_name || agent.agent_id} Session (${lifecycleTag?.label || resumeLabel})`,
       );
       row.appendChild(heading);
 
@@ -243,7 +244,7 @@ export function renderWorkspaceResumePicker({
     const pending = createNode(
       "div",
       "workspace-resume-picker-pending",
-      "Opening for inspection... waiting for the agent window.",
+      "Opening session... waiting for the agent window.",
     );
     pending.setAttribute("role", "status");
     pending.setAttribute("aria-live", "polite");
@@ -362,7 +363,7 @@ export function createWorkspaceResumePickerController({
       launchPending
       && !launchPending.begin(
         `session:${agent.session_id}`,
-        "Inspect session",
+        "Open session",
         operationId,
       )
     ) {
@@ -452,7 +453,7 @@ export function createWorkspaceResumePickerController({
       }
       state.pendingSessionId = null;
       state.pendingOperationId = null;
-      state.error = event?.message || "Failed to open the selected session for inspection.";
+      state.error = event?.message || "Failed to open the selected session.";
       render();
     },
     dismiss: close,
