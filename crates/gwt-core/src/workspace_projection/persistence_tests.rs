@@ -1567,8 +1567,12 @@ fn workspace_state_transaction_resolver_rejects_a_cross_pair_operation_match() {
         ExternalWorkspaceCommitDecision::Reject,
     );
     assert!(
-        mismatched.is_err(),
-        "sharing one path and operation id must not authorize another path pair"
+        matches!(
+            mismatched,
+            Err(GwtError::ExternalWorkspacePathPairMismatch { operation_id })
+                if operation_id == "continue-operation-cross-pair"
+        ),
+        "sharing one path and operation id must return the typed path-pair mismatch"
     );
     assert!(
         pending_workspace_state_transaction_path(&current).exists()
@@ -3930,6 +3934,119 @@ fn t812_inject_authority_ambiguity(fixture: &T812Fixture, ambiguity: T812Authori
 }
 
 #[test]
+fn legacy_reconciliation_assigned_target_scope_ignores_unresolvable_unrelated_agent() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let mut projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    let mut stale = projection.agents[0].clone();
+    stale.session_id = "unrelated-stale-session".to_string();
+    stale.workspace_id = Some("work-unrelated-stale".to_string());
+    stale.worktree_path = Some(temp.path().join("deleted-unrelated-worktree"));
+    stale.updated_at += chrono::Duration::seconds(1);
+    projection.agents.push(stale);
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+
+    validate_legacy_reconciliation_assigned_targets(
+        &projection,
+        &work_items,
+        &fixture.target.work_event_root,
+        "legacy receipt reconciliation test",
+    )
+    .expect("an unrelated deleted Agent worktree must be outside reconciliation scope");
+}
+
+#[test]
+fn legacy_reconciliation_assigned_target_scope_rejects_unresolvable_authoritative_root() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let projection = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+
+    let result = validate_legacy_reconciliation_assigned_targets(
+        &projection,
+        &work_items,
+        &temp.path().join("deleted-authoritative-worktree"),
+        "legacy receipt reconciliation test",
+    );
+
+    assert!(
+        result.is_err(),
+        "an unresolvable authoritative work-event root must fail closed"
+    );
+}
+
+#[test]
+fn session_bound_work_authority_uniqueness_ignores_unresolvable_foreign_container() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    t812_inject_authority_ambiguity(&fixture, T812AuthorityAmbiguity::TerminalContainerShadow);
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+    work_items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == "work-terminal-container-shadow")
+        .expect("foreign container shadow")
+        .execution_containers[0]
+        .worktree_path = Some(temp.path().join("deleted-foreign-worktree"));
+
+    validate_session_bound_work_authority_uniqueness(
+        &work_items,
+        T812_TARGET_WORK_ID,
+        T812_SESSION_ID,
+        T812_TARGET_BRANCH,
+        &fixture.target.worktree_identity,
+        "Session-bound workspace test",
+    )
+    .expect("a deleted foreign container cannot be current Work authority");
+}
+
+#[test]
+fn session_bound_work_authority_uniqueness_rejects_unresolvable_authoritative_target() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    t812_inject_authority_ambiguity(&fixture, T812AuthorityAmbiguity::TerminalContainerShadow);
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+
+    let result = validate_session_bound_work_authority_uniqueness(
+        &work_items,
+        T812_TARGET_WORK_ID,
+        T812_SESSION_ID,
+        T812_TARGET_BRANCH,
+        &temp.path().join("deleted-authoritative-worktree"),
+        "Session-bound workspace test",
+    );
+
+    assert!(
+        result.is_err(),
+        "an unresolvable authoritative target must fail closed"
+    );
+}
+
+#[test]
 fn session_bound_update_rejects_conflicting_current_and_terminal_authority_shadows() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
@@ -4156,7 +4273,7 @@ fn legacy_external_commit_waits_for_canonical_lock_before_publication() {
         "legacy Work must not publish before the canonical lock is acquired"
     );
 
-    canonical_lock.unlock().expect("release canonical lock");
+    FileExt::unlock(&canonical_lock).expect("release canonical lock");
     assert_eq!(
         result_rx
             .recv_timeout(Duration::from_secs(5))
@@ -7927,7 +8044,7 @@ fn record_workspace_work_event_does_not_advance_projection_when_append_fails() {
 
 #[test]
 fn record_workspace_work_event_waits_for_the_projection_transaction_lock() {
-    use fs2::FileExt as _;
+    use fs2::FileExt;
     use std::fs::OpenOptions;
     use std::sync::mpsc::TryRecvError;
     use std::time::Duration;
@@ -7970,7 +8087,7 @@ fn record_workspace_work_event_waits_for_the_projection_transaction_lock() {
         TryRecvError::Empty,
         "writer must not enter the projection transaction while the lock is held"
     );
-    lock.unlock().expect("release transaction lock");
+    FileExt::unlock(&lock).expect("release transaction lock");
     rx.recv_timeout(Duration::from_secs(2))
         .expect("writer result")
         .expect("writer succeeds after lock release");

@@ -1526,13 +1526,13 @@ fn validate_workspace_ensure_recovery_state(
         let identity_matches = agent
             .branch
             .as_deref()
-            .map(workspace_ensure_branch_identity)
+            .map(crate::agent_project_state::canonical_branch_identity)
             .as_deref()
             == Some(recovery.branch_identity.as_str())
             && agent
                 .worktree_path
                 .as_deref()
-                .and_then(|path| dunce::canonicalize(path).ok())
+                .map(crate::agent_project_state::normalize_mutation_path)
                 .as_deref()
                 == Some(recovery.worktree_identity.as_path());
         if !identity_matches {
@@ -1686,23 +1686,16 @@ fn workspace_execution_container_matches_recovery(
     let branch_matches = container
         .branch
         .as_deref()
-        .map(workspace_ensure_branch_identity)
+        .map(crate::agent_project_state::canonical_branch_identity)
         .as_deref()
         == Some(recovery.branch_identity.as_str());
     let worktree_matches = container
         .worktree_path
         .as_deref()
-        .and_then(|path| dunce::canonicalize(path).ok())
+        .map(crate::agent_project_state::normalize_mutation_path)
         .as_deref()
         == Some(recovery.worktree_identity.as_path());
     branch_matches && worktree_matches
-}
-
-fn workspace_ensure_branch_identity(branch: &str) -> String {
-    let branch = branch.trim();
-    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-    let branch = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
-    branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4648,6 +4641,83 @@ pub(crate) mod tests {
             std::fs::read(events_path).expect("event log after retry"),
             before_retry,
             "response-loss retry must not duplicate recovery events"
+        );
+    }
+
+    #[test]
+    fn workspace_ensure_bound_host_retry_accepts_powershell_worktree_aliases() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let session_id = "session-powershell-worktree-alias";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            session_id,
+            Some("Issue #3412"),
+            "codex",
+        );
+        let canonical_worktree = dunce::canonicalize(&worktree).expect("canonical worktree");
+        let powershell_alias = PathBuf::from(format!(
+            r"Microsoft.PowerShell.Core\FileSystem::{}",
+            canonical_worktree.display()
+        ));
+
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
+        let mut agent = assigned_agent_with_window(session_id, "window-host", &worktree);
+        agent.workspace_id = Some(work_id.clone());
+        agent.worktree_path = Some(powershell_alias.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&project_root, &projection)
+            .expect("save aliased Host assignment");
+
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let mut work_items =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .expect("load exact WorkItems")
+                .expect("exact WorkItems");
+        let item = work_items
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == work_id)
+            .expect("exact Work");
+        item.execution_containers[0].worktree_path = Some(powershell_alias);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &works_path,
+            &work_items,
+        )
+        .expect("save aliased WorkItems");
+
+        let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+        let before_events = std::fs::read(&events_path).expect("seeded Host event log");
+        let retry = ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Existing aliased Host Work".to_string(),
+                current_focus: Some("Keep the existing assignment".to_string()),
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("equivalent PowerShell worktree aliases must retain durable authority");
+
+        assert_eq!(
+            retry.disposition,
+            WorkspaceEnsureDisposition::AlreadyAssigned
+        );
+        assert_eq!(retry.workspace_id, work_id);
+        assert_eq!(
+            std::fs::read(events_path).expect("Host event log after retry"),
+            before_events,
+            "AlreadyAssigned retry must not append a Work event"
         );
     }
 

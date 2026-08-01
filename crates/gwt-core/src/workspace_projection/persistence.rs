@@ -1177,12 +1177,37 @@ fn validate_legacy_reconciliation_assigned_targets(
     work_event_root: &Path,
     context: &str,
 ) -> Result<()> {
+    let canonical_work_event_root = canonical_session_bound_path(work_event_root)?;
     let session_ids = projection
         .agents
         .iter()
         .map(|agent| agent.session_id.as_str())
         .collect::<HashSet<_>>();
     for session_id in session_ids {
+        let Some(latest) = projection.latest_agent_for_session(session_id) else {
+            continue;
+        };
+        let latest_targets_work_event_root = projection
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent.session_id == session_id
+                    && agent.updated_at == latest.updated_at
+                    && agent.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned
+            })
+            .try_fold(false, |matched, agent| {
+                if matched {
+                    Ok(true)
+                } else {
+                    session_bound_candidate_path_matches(
+                        agent.worktree_path.as_deref(),
+                        &canonical_work_event_root,
+                    )
+                }
+            })?;
+        if !latest_targets_work_event_root {
+            continue;
+        }
         let Some(agent) =
             resolve_latest_session_bound_agent_authority(projection, session_id, context)?
         else {
@@ -2920,16 +2945,36 @@ fn session_bound_paths_match(left: Option<&Path>, right: Option<&Path>) -> Resul
     let (Some(left), Some(right)) = (left, right) else {
         return Ok(false);
     };
-    let canonicalize = |path: &Path| {
-        fs::canonicalize(path)
-            .map(|path| crate::paths::normalize_windows_child_process_path(&path))
-            .map_err(|_| {
-                GwtError::Other(
-                    "Session-bound workspace path could not be canonicalized".to_string(),
-                )
-            })
+    Ok(canonical_session_bound_path(left)? == canonical_session_bound_path(right)?)
+}
+
+fn canonical_session_bound_path(path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(path)
+        .map(|path| crate::paths::normalize_windows_child_process_path(&path))
+        .map_err(|_| {
+            GwtError::Other("Session-bound workspace path could not be canonicalized".to_string())
+        })
+}
+
+/// Compare persisted candidate state with an already-canonical authority.
+/// A removed candidate cannot own current authority, while every other I/O
+/// failure remains fail-closed.
+fn session_bound_candidate_path_matches(
+    candidate: Option<&Path>,
+    canonical_authority: &Path,
+) -> Result<bool> {
+    let Some(candidate) = candidate else {
+        return Ok(false);
     };
-    Ok(canonicalize(left)? == canonicalize(right)?)
+    match fs::canonicalize(candidate) {
+        Ok(path) => {
+            Ok(crate::paths::normalize_windows_child_process_path(&path) == canonical_authority)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(GwtError::Other(
+            "Session-bound workspace path could not be canonicalized".to_string(),
+        )),
+    }
 }
 
 fn session_bound_optional_paths_match(left: Option<&Path>, right: Option<&Path>) -> Result<bool> {
@@ -3010,6 +3055,7 @@ fn validate_session_bound_work_authority_uniqueness(
     worktree_identity: &Path,
     context: &str,
 ) -> Result<()> {
+    let canonical_worktree_identity = canonical_session_bound_path(worktree_identity)?;
     for other in work_items
         .work_items
         .iter()
@@ -3029,9 +3075,9 @@ fn validate_session_bound_work_authority_uniqueness(
                 canonical_session_bound_branch(container.branch.as_deref().unwrap_or_default())
                     == canonical_session_bound_branch(branch_identity);
             if branch_matches
-                && session_bound_paths_match(
+                && session_bound_candidate_path_matches(
                     container.worktree_path.as_deref(),
-                    Some(worktree_identity),
+                    &canonical_worktree_identity,
                 )?
             {
                 return Err(GwtError::Other(format!(
@@ -3960,9 +4006,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
             if transaction.current_path != current_path
                 || transaction.work_items_path != work_items_path
             {
-                return Err(GwtError::Other(format!(
-                    "external workspace operation {operation_id} is bound to a different current/work-items path pair"
-                )));
+                return Err(GwtError::ExternalWorkspacePathPairMismatch {
+                    operation_id: operation_id.to_string(),
+                });
             }
             if decision == ExternalWorkspaceCommitDecision::Commit {
                 let pending_reconciliation = transaction
