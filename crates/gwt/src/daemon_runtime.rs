@@ -505,6 +505,7 @@ pub fn send_work_terminalization_via_agent_bridge(
     let url = target.work_terminalization_url()?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "failed to build the Host Work terminalization bridge client".to_string())?;
     let response = client

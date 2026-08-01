@@ -5065,6 +5065,92 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
 }
 
 #[test]
+fn exact_terminal_compatibility_preserves_split_root_legacy_terminal_bytes() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let target = SessionBoundWorkspaceTerminalTarget {
+        project_state_root: fixture.target.project_state_root.clone(),
+        work_event_root: fixture.target.work_event_root.clone(),
+        session_id: fixture.target.session_id.clone(),
+        branch_identity: fixture.target.branch_identity.clone(),
+        worktree_identity: fixture.target.worktree_identity.clone(),
+        owner: fixture.target.owner.clone(),
+        agent_id: fixture.target.agent_id.clone(),
+    };
+
+    let legacy_work_items_path =
+        gwt_workspace_work_items_path_for_repo_path(&target.work_event_root);
+    let legacy_close_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&target.work_event_root);
+    let mut legacy = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load canonical WorkItems")
+        .expect("canonical WorkItems");
+    let mut legacy_discard = WorkEvent::new(
+        WorkEventKind::Discard,
+        T812_TARGET_WORK_ID,
+        Utc.with_ymd_and_hms(2026, 7, 22, 1, 1, 0).unwrap(),
+    );
+    legacy_discard.agent_session_id = Some(T812_SESSION_ID.to_string());
+    assert_eq!(
+        legacy.apply_event(legacy_discard.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+    save_workspace_work_items_projection_to_path(&legacy_work_items_path, &legacy)
+        .expect("seed stale legacy WorkItems");
+    fs::create_dir_all(legacy_close_path.parent().expect("legacy close parent"))
+        .expect("create legacy close parent");
+    fs::write(
+        &legacy_close_path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&legacy_discard).expect("serialize legacy close")
+        ),
+    )
+    .expect("seed stale legacy close ledger");
+    let legacy_before = [
+        fs::read(&legacy_work_items_path).expect("read legacy WorkItems before"),
+        fs::read(&legacy_close_path).expect("read legacy close before"),
+    ];
+
+    assert_eq!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .expect("close the exact canonical Work"),
+        WorkspaceTerminalEventOutcome::Emitted
+    );
+    assert_eq!(
+        [
+            fs::read(&legacy_work_items_path).expect("read legacy WorkItems after"),
+            fs::read(&legacy_close_path).expect("read legacy close after"),
+        ],
+        legacy_before,
+        "exact compatibility must preserve the stale linked-worktree authority bytes"
+    );
+    let canonical = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load canonical WorkItems after close")
+        .expect("canonical WorkItems after close");
+    let canonical_work = canonical
+        .work_items
+        .iter()
+        .find(|work| work.id == T812_TARGET_WORK_ID)
+        .expect("canonical exact Work");
+    assert_eq!(
+        canonical_work.status_category,
+        WorkspaceStatusCategory::Done
+    );
+    assert!(!canonical_work.discarded);
+}
+
+#[test]
 fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
