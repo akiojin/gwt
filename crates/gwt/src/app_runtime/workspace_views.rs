@@ -14,8 +14,7 @@
 //!   `workspace_resume_context_from_journal` and the branch-existence checks
 //!   consumed by `wizard.rs` through `super`)
 //! - Launch-side projection persistence helpers
-//!   (`save_unassigned_workspace_launch_projection`,
-//!   `save_start_work_workspace_projection`,
+//!   (`save_start_work_workspace_projection`,
 //!   `save_resumed_workspace_projection`)
 //! - [`AppRuntime::active_work_projection_for_tab`] and the projection
 //!   reply / broadcast / prune handlers
@@ -416,17 +415,25 @@ fn workspace_agent_summary_work_id(
     )
 }
 
-/// SPEC-2359 Phase W-12 Slice 2 (FR-348): the canonical Work identity for an
-/// active agent. `agent_session_id` is the primary key so that "1 agent
-/// session : 1 Work" holds — two agents on the same branch but with distinct
-/// `session_id`s resolve to distinct Work rows. Legacy agents that report an
-/// empty `session_id` fall back to the historical branch/worktree-derived
-/// identity, then `workspace_id`, then the provided `legacy_fallback`.
+/// Resolve the Work identity for an active agent. A persisted assignment wins
+/// only when the repo-global WorkItems SOT contains that Work; this keeps a
+/// launch-published canonical id stable across Active → Paused. Older
+/// projection-only agents retain the session-derived identity fallback.
 fn active_work_agent_work_id(
     project_root: &Path,
     agent: &gwt::ActiveWorkAgentView,
+    works: &[gwt::WorkspaceHistoryView],
     legacy_fallback: Option<&str>,
 ) -> Option<String> {
+    if let Some(workspace_id) = agent
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|workspace_id| works.iter().any(|work| work.id == *workspace_id))
+    {
+        return Some(workspace_id.to_string());
+    }
     let session_id = agent.session_id.trim();
     if !session_id.is_empty() {
         return Some(format!("work-session-{session_id}"));
@@ -744,7 +751,7 @@ fn active_work_items_from_projection(
     let mut grouped: Vec<(String, Vec<gwt::ActiveWorkAgentView>)> = Vec::new();
     for agent in agents {
         let work_id =
-            active_work_agent_work_id(&projection.project_root, agent, Some(&projection.id))
+            active_work_agent_work_id(&projection.project_root, agent, works, Some(&projection.id))
                 .unwrap_or_else(|| projection.id.clone());
         if let Some((_, group_agents)) = grouped.iter_mut().find(|(id, _)| id == &work_id) {
             group_agents.push(agent.clone());
@@ -1501,17 +1508,17 @@ pub(super) fn workspace_resume_context_from_journal(
 /// Work item matches the container, the context is neutral — never the
 /// shared identity.
 pub(super) fn workspace_resume_context_for_work_item(
-    repo_path: &Path,
+    project_state_root: &Path,
     branch: Option<&str>,
     worktree_path: &Path,
 ) -> WorkspaceResumeContext {
-    let item = gwt_core::workspace_projection::load_workspace_work_items(repo_path)
+    let item = gwt_core::workspace_projection::load_workspace_work_items(project_state_root)
         .ok()
         .flatten()
         .and_then(|projection| {
             gwt_core::workspace_projection::find_work_item_for_container(
                 &projection,
-                repo_path,
+                project_state_root,
                 branch,
                 Some(worktree_path),
             )
@@ -2493,34 +2500,31 @@ fn linked_issue_number_for_branch(
     store.branches.get(branch_name).copied()
 }
 
-fn save_unassigned_workspace_launch_projection(
-    project_root: &Path,
-    session: &ActiveAgentSession,
-) -> Result<(), String> {
-    let now = chrono::Utc::now();
-    gwt_core::workspace_projection::mutate_workspace_projection(project_root, |projection| {
-        projection.register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
-        projection.updated_at = now;
-        Ok(())
-    })
-    .map_err(|error| error.to_string())
-}
-
 pub(super) fn save_start_work_workspace_projection(
     project_root: &Path,
     session: &ActiveAgentSession,
-    _base_branch: &str,
+    base_branch: &str,
     linked_issue_number: Option<u64>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    if workspace_resume_context.is_none() {
-        return save_unassigned_workspace_launch_projection(project_root, session);
+    if workspace_resume_context.is_none() && linked_issue_number.is_none() {
+        let now = chrono::Utc::now();
+        return gwt_core::workspace_projection::mutate_workspace_projection(
+            project_root,
+            |projection| {
+                projection
+                    .register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
+                projection.updated_at = now;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string());
     }
     save_workspace_launch_projection(
         project_root,
         session,
-        Some(_base_branch),
+        Some(base_branch),
         linked_issue_number,
         workspace_resume_context,
         WorkspaceLaunchProjectionKind::StartWork,
@@ -2786,15 +2790,16 @@ impl AppRuntime {
                 .borrow_mut()
                 .load(&self.sessions_dir);
             let session_index = work_session_index(&agent_sessions);
-            let workspaces = self
+            // Current and WorkItems share the stable Project State identity.
+            // The exact worktree is an event destination, never a second
+            // WorkItems discovery root.
+            let work_items = self
                 .work_items_cache
                 .borrow_mut()
                 .load_or_synthesize(&tab.project_root)
-                .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
-                    updated_at,
-                    work_items: Vec::new(),
-                })
-                .work_items
+                .map(|items| items.work_items)
+                .unwrap_or_default();
+            let workspaces = work_items
                 .iter()
                 .map(|item| {
                     workspace_work_item_view_from_item(item, &session_index, &tab.project_root)

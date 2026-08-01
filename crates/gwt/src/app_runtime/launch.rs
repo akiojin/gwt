@@ -2118,7 +2118,7 @@ impl AppRuntime {
                     ActiveAgentSession {
                         window_id: window_id.clone(),
                         session_id,
-                        agent_id: agent_id.to_string(),
+                        agent_id: agent_id.command().to_string(),
                         branch_name,
                         display_name,
                         worktree_path: worktree_path.clone(),
@@ -2218,12 +2218,12 @@ impl AppRuntime {
                             .values()
                             .map(|session| session.session_id.clone())
                             .collect();
-                        let active_session = &self.active_agent_sessions[&window_id];
+                        let active_session = self.active_agent_sessions[&window_id].clone();
                         if !is_continue_work && !is_fresh_execution_launch {
                             if let Some(base_branch) = base_branch.as_deref() {
                                 match save_start_work_workspace_projection(
                                     &project_root,
-                                    active_session,
+                                    &active_session,
                                     base_branch,
                                     linked_issue_number,
                                     workspace_resume_context.as_ref(),
@@ -2238,14 +2238,14 @@ impl AppRuntime {
                                             project_root = %project_root.display(),
                                             branch = %active_session.branch_name,
                                             error = %error,
-                                            "workspace projection update skipped after Start Work launch"
+                                            "workspace projection update failed before Start Work launch readiness"
                                         );
                                     }
                                 }
                             } else if let Some(context) = workspace_resume_context.as_ref() {
                                 match save_resumed_workspace_projection(
                                     &project_root,
-                                    active_session,
+                                    &active_session,
                                     None,
                                     linked_issue_number,
                                     context,
@@ -2260,31 +2260,47 @@ impl AppRuntime {
                                             project_root = %project_root.display(),
                                             branch = %active_session.branch_name,
                                             error = %error,
-                                            "workspace projection update skipped after Workspace Resume launch"
+                                            "workspace projection update failed before Workspace Resume launch readiness"
                                         );
                                     }
                                 }
                             }
                         }
-                        if let Some(genesis) = materialized_genesis
-                            .as_ref()
-                            .filter(|_| !workspace_projection_updated)
+                        if !workspace_projection_updated
+                            && (workspace_projection_error.is_some()
+                                || materialized_genesis.is_some())
                         {
                             let detail = workspace_projection_error.unwrap_or_else(|| {
                                 "genesis launch did not publish its Work projection".to_string()
                             });
-                            let rollback = self.rollback_materialized_genesis_after_registration(
-                                &window_id,
-                                &project_root,
-                                genesis,
-                                "genesis Work publication failed before launch readiness",
-                            );
-                            let detail = match rollback {
-                                Ok(()) => detail,
-                                Err(error) => format!(
-                                    "{detail}; failed genesis recovery retained exact evidence for retry: {error}"
-                                ),
+                            let detail = if let Some(genesis) = materialized_genesis.as_ref() {
+                                match self.rollback_materialized_genesis_after_registration(
+                                    &window_id,
+                                    &project_root,
+                                    genesis,
+                                    "genesis Work publication failed before launch readiness",
+                                ) {
+                                    Ok(()) => detail,
+                                    Err(error) => format!(
+                                        "{detail}; failed genesis recovery retained exact evidence for retry: {error}"
+                                    ),
+                                }
+                            } else {
+                                detail
                             };
+                            let failed_session_id = active_session.session_id.clone();
+                            let failed_window_id = active_session.window_id.clone();
+                            if self
+                                .discard_failed_genesis_active_session(
+                                    &failed_window_id,
+                                    &failed_session_id,
+                                )
+                                .is_some()
+                            {
+                                self.stop_window_runtime_without_session_projection(
+                                    &failed_window_id,
+                                );
+                            }
                             return self.launch_error_events_with_continue_work(
                                 window_id,
                                 detail,
@@ -2299,16 +2315,30 @@ impl AppRuntime {
                                 let mut detail = format!(
                                     "genesis launch readiness could not be committed: {error}"
                                 );
-                                if let Err(rollback_error) = self
+                                let rollback_failed = if let Err(rollback_error) = self
                                     .rollback_materialized_genesis_after_registration(
                                         &window_id,
                                         &project_root,
                                         genesis,
                                         "genesis recovery receipt could not be settled",
-                                    )
-                                {
+                                    ) {
                                     detail = format!(
                                         "{detail}; failed genesis recovery retained exact evidence for retry: {rollback_error}"
+                                    );
+                                    true
+                                } else {
+                                    false
+                                };
+                                if rollback_failed
+                                    && self
+                                        .discard_failed_genesis_active_session(
+                                            &active_session.window_id,
+                                            &active_session.session_id,
+                                        )
+                                        .is_some()
+                                {
+                                    self.stop_window_runtime_without_session_projection(
+                                        &active_session.window_id,
                                     );
                                 }
                                 return self.launch_error_events_with_continue_work(
@@ -3797,13 +3827,16 @@ impl AppRuntime {
         if session_id.is_empty() {
             return;
         }
-        let work_id = format!("work-session-{session_id}");
         let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
             .ok()
             .flatten();
         let agent_summary = projection
             .as_ref()
             .and_then(|projection| projection.latest_agent_for_session(session_id));
+        let assigned_work_id = agent_summary
+            .filter(|agent| agent.is_assigned())
+            .and_then(|agent| agent.workspace_id.clone());
+        let fallback_work_id = format!("work-session-{session_id}");
         // #3065: owner / summary / the title fallback must come from the
         // session's own Work item (resolved by branch container inside the
         // background thread below), never from the repo-shared projection —
@@ -3856,14 +3889,15 @@ impl AppRuntime {
             }
         });
         // Close-latency root fix (2026-06-12): the record loads + saves the
-        // home works.json (megabytes once a project has hundreds of Works).
+        // repo-global Project State WorkItems projection (megabytes once a
+        // project has hundreds of Works).
         // Doing that synchronously on the UI event loop made every agent
         // window × stall for seconds (sampled: serde to_vec_pretty dominating
         // the close handler). Inputs are gathered synchronously above from
         // the in-memory projection; the file IO runs on a background thread
         // and the workspace projection watcher broadcasts the refreshed rows
         // once the write lands.
-        let project_root = project_root.to_path_buf();
+        let work_items_root = project_root.to_path_buf();
         let session_id = session_id.to_string();
         let log_session_id = session.session_id.clone();
         let lookup_branch = execution_container
@@ -3876,29 +3910,37 @@ impl AppRuntime {
             // #3065: resolve identity from the session's own Work item. The
             // works.json IO already happens on this background thread for the
             // record itself, so the lookup adds no UI-loop cost.
-            let own_item = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+            let works = gwt_core::workspace_projection::load_workspace_work_items(&work_items_root)
                 .ok()
-                .flatten()
-                .and_then(|works| {
-                    gwt_core::workspace_projection::find_work_item_for_container(
-                        &works,
-                        &project_root,
-                        lookup_branch.as_deref(),
-                        lookup_worktree.as_deref(),
-                    )
-                    .map(|item| {
-                        (
-                            item.title.clone(),
-                            item.summary.clone().or_else(|| item.intent.clone()),
-                            item.owner.clone(),
-                        )
+                .flatten();
+            let work_id = assigned_work_id
+                .filter(|work_id| {
+                    works.as_ref().is_some_and(|works| {
+                        works.work_items.iter().any(|item| item.id == *work_id)
                     })
-                });
+                })
+                .unwrap_or(fallback_work_id);
+            let own_item = works.as_ref().and_then(|works| {
+                gwt_core::workspace_projection::find_work_item_for_container(
+                    works,
+                    &work_items_root,
+                    lookup_branch.as_deref(),
+                    lookup_worktree.as_deref(),
+                )
+                .map(|item| {
+                    (
+                        item.title.clone(),
+                        item.summary.clone().or_else(|| item.intent.clone()),
+                        item.owner.clone(),
+                    )
+                })
+            });
             let (item_title, summary, owner) = own_item.unwrap_or((String::new(), None, None));
             let title =
                 agent_title.or_else(|| Some(item_title).filter(|value| !value.trim().is_empty()));
+            let updated_at = chrono::Utc::now();
             if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
-                &project_root,
+                &work_items_root,
                 &work_id,
                 title.as_deref(),
                 summary.as_deref(),
@@ -3906,11 +3948,11 @@ impl AppRuntime {
                 &board_refs,
                 execution_container,
                 Some(&session_id),
-                chrono::Utc::now(),
+                updated_at,
             ) {
                 tracing::warn!(
                     error = %error,
-                    project_root = %project_root.display(),
+                    work_items_root = %work_items_root.display(),
                     session_id = %log_session_id,
                     work_id = %work_id,
                     "failed to persist Paused Work for stopped Agent session"

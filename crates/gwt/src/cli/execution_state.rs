@@ -2493,6 +2493,92 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     })
 }
 
+/// Execute one active-generation operation beneath the canonical
+/// worktree-global -> owner -> Session lease hierarchy.
+///
+/// Use this variant when `operation` must update a worktree-global trusted
+/// record (for example a terminal Work settlement receipt). The resolved
+/// trusted directory is passed to the callback so it can write through the
+/// already-held global lease without attempting a nested acquisition.
+pub fn with_current_active_session_execution_identity_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "worktree-global and owner leases must be acquired before the Session lease; retry outside the nested Session operation",
+        ));
+    }
+    let binding = &expected.execution_binding;
+    if expected.session_id != binding.session_id
+        || gwt_agent::validate_session_id_path_component(&expected.session_id).is_err()
+    {
+        return Ok(None);
+    }
+    let owner = match binding.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: binding.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let session_path = sessions_dir.join(format!("{}.toml", expected.session_id));
+    let route_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => session,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if gwt_agent::SessionExecutionIdentity::from_session(&route_session)
+        .ok()
+        .flatten()
+        .as_ref()
+        != Some(expected)
+    {
+        return Ok(None);
+    }
+    let context = match GenerationTransactionContext::resolve(&expected.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(
+        &context.worktree_trusted_dir,
+        || {
+            context.validate_unchanged()?;
+            with_resolved_generation_owner_lease(&context, |context| {
+                gwt_agent::with_session_lease(sessions_dir, &expected.session_id, |session| {
+                    let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
+                        Ok(path) => path,
+                        Err(_) => return Ok(None),
+                    };
+                    if gwt_agent::SessionExecutionIdentity::from_session(session)
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        != Some(expected)
+                        || canonical_worktree != context.worktree
+                        || !current_active_execution_binding_matches_context(
+                            context,
+                            &expected.session_id,
+                            &binding.identity,
+                        )?
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some(operation(&context.worktree_trusted_dir)))
+                })
+            })
+        },
+    )
+}
+
 /// Reachable repair guidance for an integrity failure.
 #[must_use]
 pub(crate) fn integrity_repair_guidance(_status: ExecutionControlStatus) -> &'static str {

@@ -747,6 +747,28 @@ pub fn prepare_work_event_settlement_record(
     journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
 ) -> io::Result<WorkEventSettlementRecord> {
     let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+        prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            worktree,
+            session_id,
+            event,
+            journal_entry,
+        )
+    })
+}
+
+/// Reserve a terminal Work mutation while the caller holds the worktree-global
+/// trusted-store lease. Compatibility continuations use this beneath the
+/// canonical global -> owner -> Session hierarchy so settlement preparation
+/// cannot invert the activation lock order.
+pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
+    trusted_dir: &Path,
+    worktree: &Path,
+    session_id: &str,
+    event: &gwt_core::workspace_projection::WorkEvent,
+    journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> io::Result<WorkEventSettlementRecord> {
     if event.kind != gwt_core::workspace_projection::WorkEventKind::Done
         || event.id.trim().is_empty()
         || event.work_item_id.trim().is_empty()
@@ -762,33 +784,31 @@ pub fn prepare_work_event_settlement_record(
         ));
     }
 
-    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
-        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
-        let current_binding = current_execution_context(worktree)?.1;
-        let (record_session_id, execution_binding) =
-            match load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?
-                .filter(|record| record.obligation_open)
-            {
-                Some(record) => (record.session_id, record.execution_binding),
-                None => (session_id.to_string(), current_binding),
-            };
-        let record = WorkEventSettlementRecord {
-            schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
-            session_id: record_session_id,
-            execution_binding,
-            obligation_open: true,
-            status: WorkEventSettlementStatus::PendingMutation {
-                event_id: event.id.clone(),
-                work_id: event.work_item_id.clone(),
-                journal_entry_id: journal_entry.id.clone(),
-                event_session_id: session_id.to_string(),
-            },
-            updated_at: Utc::now(),
+    require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
+    let current_binding = current_execution_context(worktree)?.1;
+    let (record_session_id, execution_binding) =
+        match load_work_event_settlement_record_from_resolved_dir(trusted_dir)?
+            .filter(|record| record.obligation_open)
+        {
+            Some(record) => (record.session_id, record.execution_binding),
+            None => (session_id.to_string(), current_binding),
         };
-        require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
-        persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
-        Ok(record)
-    })
+    let record = WorkEventSettlementRecord {
+        schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
+        session_id: record_session_id,
+        execution_binding,
+        obligation_open: true,
+        status: WorkEventSettlementStatus::PendingMutation {
+            event_id: event.id.clone(),
+            work_id: event.work_item_id.clone(),
+            journal_entry_id: journal_entry.id.clone(),
+            event_session_id: session_id.to_string(),
+        },
+        updated_at: Utc::now(),
+    };
+    require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
+    persist_work_event_settlement_record_to_resolved_dir(trusted_dir, &record)?;
+    Ok(record)
 }
 
 /// Evaluate and atomically persist the machine-local settlement status.

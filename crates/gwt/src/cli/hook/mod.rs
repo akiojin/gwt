@@ -40,6 +40,7 @@ pub mod state_file_stop_check;
 pub mod work_event_settlement_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
+pub(crate) use workspace_identity::register_session_in_projection;
 pub mod worktree;
 
 use std::io::{self, Read};
