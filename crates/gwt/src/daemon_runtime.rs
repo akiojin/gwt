@@ -16,10 +16,11 @@ use crate::cli::hook::{
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentBridgeFailureReason {
+pub(crate) enum AgentBridgeFailureReason {
     TransportFailure,
     AuthorityMismatch,
     ReceiptMismatch,
+    WorkspaceEnsureRequired,
     OperationRejected,
 }
 
@@ -29,26 +30,118 @@ impl AgentBridgeFailureReason {
             Self::TransportFailure => "transport_failure",
             Self::AuthorityMismatch => "authority_mismatch",
             Self::ReceiptMismatch => "receipt_mismatch",
+            Self::WorkspaceEnsureRequired => "workspace_ensure_required",
             Self::OperationRejected => "operation_rejected",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentBridgeFailure {
+pub(crate) struct AgentBridgeFailure {
     reason: AgentBridgeFailureReason,
+    http_status: Option<reqwest::StatusCode>,
+    error_code: Option<crate::AgentWorkspaceUpdateErrorCode>,
+    bridge_code: Option<String>,
+    bridge_reason: Option<String>,
+    exact_workspace_ensure_required: bool,
     message: &'static str,
 }
 
 impl AgentBridgeFailure {
     fn new(reason: AgentBridgeFailureReason, message: &'static str) -> Self {
-        Self { reason, message }
+        Self {
+            reason,
+            http_status: None,
+            error_code: None,
+            bridge_code: None,
+            bridge_reason: None,
+            exact_workspace_ensure_required: false,
+            message,
+        }
+    }
+
+    fn rejected(
+        reason: AgentBridgeFailureReason,
+        status: reqwest::StatusCode,
+        response: Option<&WorkspaceBridgeDiagnosticResponse>,
+        exact_workspace_ensure_required: bool,
+        message: &'static str,
+    ) -> Self {
+        let bridge_code = response.and_then(|response| safe_bridge_token(&response.code));
+        let bridge_reason = response.and_then(|response| safe_bridge_token(&response.reason));
+        Self {
+            reason,
+            http_status: Some(status),
+            error_code: bridge_code
+                .as_deref()
+                .and_then(parse_workspace_update_error_code),
+            bridge_code,
+            bridge_reason,
+            exact_workspace_ensure_required,
+            message,
+        }
+    }
+
+    pub(crate) fn is_exact_workspace_ensure_required(&self) -> bool {
+        self.exact_workspace_ensure_required
+            && self.reason == AgentBridgeFailureReason::WorkspaceEnsureRequired
+            && self.http_status == Some(reqwest::StatusCode::CONFLICT)
+            && self.error_code
+                == Some(crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired)
+            && self.bridge_reason.as_deref() == Some("workspace_ensure_required")
     }
 }
 
 impl std::fmt::Display for AgentBridgeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "[{}] {}", self.reason.as_str(), self.message)
+        write!(formatter, "[{}] {}", self.reason.as_str(), self.message)?;
+        if self.http_status.is_some() || self.bridge_code.is_some() || self.bridge_reason.is_some()
+        {
+            formatter.write_str(" (")?;
+            let mut separator = "";
+            if let Some(status) = self.http_status {
+                write!(formatter, "http_status={}", status.as_u16())?;
+                separator = ", ";
+            }
+            if let Some(code) = self.bridge_code.as_deref() {
+                write!(formatter, "{separator}code={code}")?;
+                separator = ", ";
+            }
+            if let Some(reason) = self.bridge_reason.as_deref() {
+                write!(formatter, "{separator}bridge_reason={reason}")?;
+            }
+            formatter.write_str(")")?;
+        }
+        Ok(())
+    }
+}
+
+fn safe_bridge_token(value: &Option<String>) -> Option<String> {
+    value.as_deref().and_then(|value| {
+        (!value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+        .then(|| value.to_string())
+    })
+}
+
+fn parse_workspace_update_error_code(code: &str) -> Option<crate::AgentWorkspaceUpdateErrorCode> {
+    match code {
+        "invalid_request" => Some(crate::AgentWorkspaceUpdateErrorCode::InvalidRequest),
+        "relaunch_required" => Some(crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired),
+        "execution_binding_mismatch" => {
+            Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch)
+        }
+        "workspace_ensure_required" => {
+            Some(crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired)
+        }
+        "provenance_mismatch" => Some(crate::AgentWorkspaceUpdateErrorCode::ProvenanceMismatch),
+        "identity_conflict" => Some(crate::AgentWorkspaceUpdateErrorCode::IdentityConflict),
+        "transaction_conflict" => Some(crate::AgentWorkspaceUpdateErrorCode::TransactionConflict),
+        "internal" => Some(crate::AgentWorkspaceUpdateErrorCode::Internal),
+        _ => None,
     }
 }
 
@@ -57,6 +150,23 @@ struct AgentBridgeErrorResponse {
     code: crate::AgentWorkspaceUpdateErrorCode,
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceBridgeDiagnosticResponse {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceBridgeErrorResponse {
+    code: crate::AgentWorkspaceUpdateErrorCode,
+    reason: String,
+    #[serde(default, rename = "message")]
+    _message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,18 +399,18 @@ pub fn send_execution_continuation_via_agent_bridge(
     Ok(receipt)
 }
 
-pub fn send_workspace_update_via_agent_bridge(
+pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
     target: &HookForwardTarget,
     request: &crate::AgentWorkspaceUpdateRequest,
-) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
+) -> Result<crate::AgentWorkspaceUpdateReceipt, AgentBridgeFailure> {
     let url = target.workspace_update_url().map_err(|_| {
         AgentBridgeFailure::new(
             AgentBridgeFailureReason::TransportFailure,
             "Host workspace bridge target is invalid",
         )
-        .to_string()
     })?;
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|_| {
@@ -308,7 +418,6 @@ pub fn send_workspace_update_via_agent_bridge(
                 AgentBridgeFailureReason::TransportFailure,
                 "failed to build the Host workspace bridge client",
             )
-            .to_string()
         })?;
     let response = client
         .post(url)
@@ -320,27 +429,46 @@ pub fn send_workspace_update_via_agent_bridge(
                 AgentBridgeFailureReason::TransportFailure,
                 "Host workspace bridge is unavailable; the update was not retried locally and its outcome may be unknown",
             )
-            .to_string()
         })?;
     let status = response.status();
     if !status.is_success() {
-        let reason = response
-            .json::<AgentBridgeErrorResponse>()
-            .map(|error| {
-                if error.code == crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
-                    || error.reason.as_deref() == Some("authority_mismatch")
-                {
-                    AgentBridgeFailureReason::AuthorityMismatch
-                } else {
-                    AgentBridgeFailureReason::OperationRejected
-                }
-            })
-            .unwrap_or(AgentBridgeFailureReason::OperationRejected);
-        return Err(AgentBridgeFailure::new(
+        let body = response.bytes().ok();
+        let diagnostic = body.as_deref().and_then(|body| {
+            serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(body).ok()
+        });
+        let strict = body
+            .as_deref()
+            .and_then(|body| serde_json::from_slice::<WorkspaceBridgeErrorResponse>(body).ok());
+        let exact_workspace_ensure_required = strict.as_ref().is_some_and(|error| {
+            status == reqwest::StatusCode::CONFLICT
+                && error.code == crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+                && error.reason == "workspace_ensure_required"
+        });
+        let diagnostic_code = diagnostic
+            .as_ref()
+            .and_then(|error| safe_bridge_token(&error.code))
+            .as_deref()
+            .and_then(parse_workspace_update_error_code);
+        let diagnostic_reason = diagnostic
+            .as_ref()
+            .and_then(|error| safe_bridge_token(&error.reason));
+        let reason = if exact_workspace_ensure_required {
+            AgentBridgeFailureReason::WorkspaceEnsureRequired
+        } else if diagnostic_code
+            == Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch)
+            || diagnostic_reason.as_deref() == Some("authority_mismatch")
+        {
+            AgentBridgeFailureReason::AuthorityMismatch
+        } else {
+            AgentBridgeFailureReason::OperationRejected
+        };
+        return Err(AgentBridgeFailure::rejected(
             reason,
+            status,
+            diagnostic.as_ref(),
+            exact_workspace_ensure_required,
             "Host workspace bridge rejected the update; no local fallback was attempted",
-        )
-        .to_string());
+        ));
     }
     let receipt = response
         .json::<crate::AgentWorkspaceUpdateReceipt>()
@@ -349,16 +477,25 @@ pub fn send_workspace_update_via_agent_bridge(
                 AgentBridgeFailureReason::ReceiptMismatch,
                 "Host workspace bridge returned an invalid success response; no local fallback was attempted",
             )
-            .to_string()
         })?;
-    if receipt.schema_version != crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION {
+    if receipt.schema_version != crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION
+        || receipt.work_id.trim().is_empty()
+        || receipt.journal_entry_id.trim().is_empty()
+    {
         return Err(AgentBridgeFailure::new(
             AgentBridgeFailureReason::ReceiptMismatch,
-            "Host workspace bridge returned an unsupported response schema; no local fallback was attempted",
-        )
-        .to_string());
+            "Host workspace bridge returned invalid receipt evidence; no local fallback was attempted",
+        ));
     }
     Ok(receipt)
+}
+
+pub fn send_workspace_update_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceUpdateRequest,
+) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
+    send_workspace_update_via_agent_bridge_detailed(target, request)
+        .map_err(|error| error.to_string())
 }
 
 pub fn send_work_terminalization_via_agent_bridge(
@@ -906,6 +1043,110 @@ mod tests {
             .expect_err("authority mismatch must be typed");
         assert!(authority.contains("authority_mismatch"), "{authority}");
         authority_server.receive();
+
+        let ensure_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "workspace_ensure_required",
+                "reason": "workspace_ensure_required",
+                "message": "old Host uses the legacy WorkItems scope"
+            }),
+        );
+        let ensure_target = HookForwardTarget {
+            url: ensure_server.forward_url.clone(),
+            token: "ensure-secret".to_string(),
+        };
+        let ensure = send_workspace_update_via_agent_bridge_detailed(&ensure_target, &request)
+            .expect_err("exact ensure-required rejection must stay typed");
+        assert_eq!(ensure.http_status, Some(StatusCode::CONFLICT));
+        assert_eq!(
+            ensure.error_code,
+            Some(crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired)
+        );
+        assert_eq!(
+            ensure.bridge_reason.as_deref(),
+            Some("workspace_ensure_required")
+        );
+        assert!(
+            ensure.is_exact_workspace_ensure_required(),
+            "exact 409/code/reason must retain the bounded compatibility signal: {ensure}"
+        );
+        let ensure_diagnostic = ensure.to_string();
+        assert!(
+            ensure_diagnostic.contains("http_status=409"),
+            "{ensure_diagnostic}"
+        );
+        assert!(
+            ensure_diagnostic.contains("code=workspace_ensure_required"),
+            "{ensure_diagnostic}"
+        );
+        assert!(
+            ensure_diagnostic.contains("bridge_reason=workspace_ensure_required"),
+            "{ensure_diagnostic}"
+        );
+        ensure_server.receive();
+
+        let lookalike_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "workspace_ensure_required",
+                "reason": "different_reason",
+                "message": "must remain a diagnostic, never compatibility authority"
+            }),
+        );
+        let lookalike_target = HookForwardTarget {
+            url: lookalike_server.forward_url.clone(),
+            token: "lookalike-secret".to_string(),
+        };
+        let lookalike =
+            send_workspace_update_via_agent_bridge_detailed(&lookalike_target, &request)
+                .expect_err("a non-exact typed rejection must fail closed");
+        assert!(!lookalike.is_exact_workspace_ensure_required());
+        let lookalike_diagnostic = lookalike.to_string();
+        assert!(
+            lookalike_diagnostic.contains("http_status=409"),
+            "{lookalike_diagnostic}"
+        );
+        assert!(
+            lookalike_diagnostic.contains("code=workspace_ensure_required"),
+            "{lookalike_diagnostic}"
+        );
+        assert!(
+            lookalike_diagnostic.contains("bridge_reason=different_reason"),
+            "{lookalike_diagnostic}"
+        );
+        lookalike_server.receive();
+
+        let future_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "future_workspace_state",
+                "reason": "future_host_reason",
+                "message": "rolling-version diagnostic",
+                "future_field": true
+            }),
+        );
+        let future_target = HookForwardTarget {
+            url: future_server.forward_url.clone(),
+            token: "future-secret".to_string(),
+        };
+        let future = send_workspace_update_via_agent_bridge_detailed(&future_target, &request)
+            .expect_err("an unknown rolling-version rejection must stay diagnostic");
+        assert!(!future.is_exact_workspace_ensure_required());
+        let future_diagnostic = future.to_string();
+        assert!(
+            future_diagnostic.contains("http_status=409"),
+            "{future_diagnostic}"
+        );
+        assert!(
+            future_diagnostic.contains("code=future_workspace_state"),
+            "{future_diagnostic}"
+        );
+        assert!(
+            future_diagnostic.contains("bridge_reason=future_host_reason"),
+            "{future_diagnostic}"
+        );
+        future_server.receive();
 
         let receipt_server = BindingProbeServer::start(
             StatusCode::OK,

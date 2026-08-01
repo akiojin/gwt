@@ -114,8 +114,7 @@ fn invoke_fresh_execution_pre_work_commit_hook() {
 fn invoke_fresh_execution_pre_work_commit_hook() {}
 
 use super::workspace::{
-    active_agent_summary_from_session, apply_workspace_launch_transition,
-    WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
+    apply_workspace_launch_transition, WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
 };
 use super::{
     launch_config_from_persisted_session, non_empty_workspace_text, AppRuntime, BackendEvent,
@@ -459,15 +458,61 @@ fn reject_continue_work_workspace_commit(
     }
 }
 
-fn resolve_split_workspace_state_external_commit(
+pub(super) fn resolve_split_workspace_state_external_commit(
     project_root: &Path,
     work_event_root: &Path,
     operation_id: &str,
     decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
-    gwt_core::workspace_projection::resolve_workspace_state_external_commit_at(
-        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root),
-        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root),
+    let current_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root);
+    let canonical_work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
+    let legacy_work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let canonical = gwt_core::workspace_projection::resolve_workspace_state_external_commit_at(
+        &current_path,
+        &canonical_work_items_path,
+        operation_id,
+        decision,
+    );
+    if legacy_work_items_path == canonical_work_items_path {
+        return canonical;
+    }
+    match canonical {
+        Ok(gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing) => {
+            resolve_legacy_split_workspace_state_external_commit(
+                project_root,
+                work_event_root,
+                operation_id,
+                decision,
+            )
+        }
+        Err(gwt_core::error::GwtError::Other(message))
+            if message
+                == format!(
+                    "external workspace operation {operation_id} is bound to a different current/work-items path pair"
+                ) =>
+        {
+            resolve_legacy_split_workspace_state_external_commit(
+                project_root,
+                work_event_root,
+                operation_id,
+                decision,
+            )
+        }
+        other => other,
+    }
+}
+
+fn resolve_legacy_split_workspace_state_external_commit(
+    project_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
+    gwt_core::workspace_projection::resolve_legacy_workspace_state_external_commit_for_work_event_root(
+        project_root,
+        work_event_root,
         operation_id,
         decision,
     )
@@ -478,9 +523,24 @@ fn split_workspace_state_external_commit_resolution(
     work_event_root: &Path,
     operation_id: &str,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
+    let current_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root);
+    let canonical_work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
+    let legacy_work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let canonical = gwt_core::workspace_projection::workspace_state_external_commit_resolution_at(
+        &current_path,
+        &canonical_work_items_path,
+        operation_id,
+    )?;
+    if canonical != gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing
+        || legacy_work_items_path == canonical_work_items_path
+    {
+        return Ok(canonical);
+    }
     gwt_core::workspace_projection::workspace_state_external_commit_resolution_at(
-        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root),
-        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        &current_path,
+        &legacy_work_items_path,
         operation_id,
     )
 }
@@ -1702,8 +1762,11 @@ fn compensate_genesis_workspace_projection(
         expected_binding,
         authority,
     )?;
-    gwt_core::workspace_projection::recover_pending_workspace_state_transaction(project_root)
-        .map_err(|error| error.to_string())?;
+    gwt_core::workspace_projection::recover_pending_workspace_state_transaction_for_work_event_root(
+        project_root,
+        worktree_path,
+    )
+    .map_err(|error| error.to_string())?;
     genesis_compensation_authority_matches(
         worktree_path,
         owner,
@@ -1809,8 +1872,9 @@ fn compensate_genesis_workspace_projection(
         );
     }
 
-    gwt_core::workspace_projection::transact_workspace_state(
+    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
         project_root,
+        worktree_path,
         |projection, work_items, _persisted| {
             genesis_compensation_authority_matches(
                 worktree_path,
@@ -2139,7 +2203,7 @@ fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool 
     {
         return false;
     }
-    gwt_core::workspace_projection::load_workspace_work_items(&pending.worktree_path)
+    gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
         .ok()
         .flatten()
         .is_some_and(|projection| {
@@ -2170,11 +2234,9 @@ fn transact_pending_continue_work_with_activation(
     live_session_ids: &HashSet<String>,
     activate: &mut dyn FnMut() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    gwt_core::workspace_projection::transact_workspace_state_at_with_commit(
-        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&pending.project_root),
-        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&pending.worktree_path),
-        &gwt_core::paths::gwt_repo_local_work_events_path(&pending.worktree_path),
+    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
         &pending.project_root,
+        &pending.worktree_path,
         &pending.operation_id,
         |projection, work_items, _| {
             let matching = work_items
@@ -2237,6 +2299,17 @@ fn fresh_execution_commit_readback_matches(
         .ok()
         .flatten()
         == Some(session.execution_binding.identity.clone())
+}
+
+fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
+    match owner.kind {
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
+            format!("SPEC-{}", owner.number)
+        }
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
+            format!("Issue #{}", owner.number)
+        }
+    }
 }
 
 fn resolve_activated_fresh_execution_commit(
@@ -4771,7 +4844,7 @@ impl AppRuntime {
                                 && record.primary_session_id == candidate_session_id
                         });
                     let work_matches = gwt_core::workspace_projection::load_workspace_work_items(
-                        &target.worktree_path,
+                        &target.project_root,
                     )
                     .ok()
                     .flatten()
@@ -6077,60 +6150,47 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &pending.session_identity,
                 |activate| {
-                    gwt_core::workspace_projection::transact_workspace_state_at_with_commit(
-                        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(
-                            &pending.project_root,
-                        ),
-                        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
-                            &pending.worktree_path,
-                        ),
-                        &gwt_core::paths::gwt_repo_local_work_events_path(&pending.worktree_path),
+                    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
                         &pending.project_root,
+                        &pending.worktree_path,
                         &pending.operation_id,
                         |projection, _work_items, _| {
                             let now = chrono::Utc::now();
-                            let events = if let Some(context) = pending.resume_context.as_ref() {
-                                let event = apply_workspace_launch_transition(
-                                    projection,
-                                    &active_session,
-                                    WorkspaceLaunchTransition {
-                                        work_id: gwt_core::workspace_projection::canonical_work_id(
-                                            &pending.project_root,
-                                            Some(active_session.branch_name.as_str()),
-                                            Some(active_session.worktree_path.as_path()),
-                                        ),
-                                        base_branch: pending.base_branch.as_deref(),
-                                        linked_issue_number: pending.linked_issue_number,
-                                        resume_context: Some(context),
-                                        kind: if pending.base_branch.is_some() {
-                                            WorkspaceLaunchProjectionKind::StartWork
-                                        } else {
-                                            WorkspaceLaunchProjectionKind::Resume {
-                                                created_by_start_work: active_session
-                                                    .branch_name
-                                                    .starts_with("work/"),
-                                            }
-                                        },
-                                        live_session_ids: &live_session_ids,
-                                        now,
-                                    },
-                                );
-                                vec![event]
-                            } else {
-                                projection.retain_live_agents_keep_shells(
-                                    live_session_ids.iter().map(String::as_str),
-                                    now,
-                                );
-                                let mut summary =
-                                    active_agent_summary_from_session(&active_session, now);
-                                summary.affiliation_status = gwt_core::workspace_projection::
-                                    WorkspaceAgentAffiliationStatus::Unassigned;
-                                summary.workspace_id = None;
-                                projection.register_unassigned_agent(summary);
-                                projection.updated_at = now;
-                                Vec::new()
+                            let owner_context = WorkspaceResumeContext {
+                                title: None,
+                                owner: Some(workspace_owner_label(pending.owner)),
+                                summary: None,
+                                next_action: None,
                             };
-                            Ok(((), events))
+                            let event = apply_workspace_launch_transition(
+                                projection,
+                                &active_session,
+                                WorkspaceLaunchTransition {
+                                    work_id: gwt_core::workspace_projection::canonical_work_id(
+                                        &pending.project_root,
+                                        Some(active_session.branch_name.as_str()),
+                                        Some(active_session.worktree_path.as_path()),
+                                    ),
+                                    base_branch: pending.base_branch.as_deref(),
+                                    linked_issue_number: pending.linked_issue_number,
+                                    resume_context: pending
+                                        .resume_context
+                                        .as_ref()
+                                        .or(Some(&owner_context)),
+                                    kind: if pending.base_branch.is_some() {
+                                        WorkspaceLaunchProjectionKind::StartWork
+                                    } else {
+                                        WorkspaceLaunchProjectionKind::Resume {
+                                            created_by_start_work: active_session
+                                                .branch_name
+                                                .starts_with("work/"),
+                                        }
+                                    },
+                                    live_session_ids: &live_session_ids,
+                                    now,
+                                },
+                            );
+                            Ok(((), vec![event]))
                         },
                         || {
                             activate()
@@ -6429,7 +6489,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let work_readback =
-            gwt_core::workspace_projection::load_workspace_work_items(&pending.worktree_path)
+            gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
                 .ok()
                 .flatten()
                 .is_some_and(|projection| {
