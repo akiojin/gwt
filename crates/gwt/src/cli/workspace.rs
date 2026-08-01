@@ -2,10 +2,14 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use gwt_core::error::GwtError;
-use gwt_core::paths::gwt_projects_dir;
+use gwt_core::paths::{
+    gwt_projects_dir, gwt_workspace_projection_path_for_repo_path,
+    gwt_workspace_work_items_path_for_repo_path,
+};
 use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
-    load_or_synthesize_workspace_work_items, transact_workspace_state,
+    load_or_synthesize_workspace_work_items, load_workspace_projection_from_path,
+    load_workspace_work_items_from_path, transact_workspace_state,
     transact_workspace_state_for_work_event_root_with_preflight,
     update_workspace_projection_with_journal_for_resolved_work_target, ClassifiedProjection,
     PruneAction, PruneSkipReason, TrackedWorkEventPolicy, WorkEvent, WorkEventKind, WorkItem,
@@ -316,6 +320,384 @@ pub(super) struct WorkspaceEnsureResult {
     pub disposition: WorkspaceEnsureDisposition,
 }
 
+struct WorkspaceUpdateBridgeAuthority {
+    identity: gwt_agent::SessionExecutionIdentity,
+    project_state_root: std::path::PathBuf,
+    work_id: String,
+    owner: Option<String>,
+    known_journal_entry_ids: Option<Vec<String>>,
+    known_work_event_ids: Vec<String>,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    docker_runtime_binding: Option<gwt_agent::DockerRuntimeBinding>,
+    local_continuation_eligible: bool,
+}
+
+fn snapshot_workspace_update_bridge_authority(
+    repo_path: &std::path::Path,
+    session_id: &str,
+) -> Option<WorkspaceUpdateBridgeAuthority> {
+    let recovery =
+        crate::agent_project_state::validated_workspace_recovery_session(repo_path, session_id)
+            .ok()??;
+    let (recovery, policy, host_recovery) = match recovery {
+        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) => {
+            (recovery, WorkspaceEnsurePolicy::HostMayBootstrap, true)
+        }
+        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Docker(recovery) => {
+            (recovery, WorkspaceEnsurePolicy::DockerExistingOnly, false)
+        }
+    };
+    let projection = load_workspace_projection_from_path(
+        &gwt_workspace_projection_path_for_repo_path(&recovery.project_state_root),
+    )
+    .ok()??;
+    let work_items = load_workspace_work_items_from_path(
+        &gwt_workspace_work_items_path_for_repo_path(&recovery.project_state_root),
+    )
+    .ok()??;
+    let expected_owner =
+        resolve_workspace_ensure_owner(Some(&recovery.session), None, None).ok()?;
+    let input = WorkspaceEnsureInput {
+        agent_session: session_id.to_string(),
+        title_summary: String::new(),
+        current_focus: None,
+        spec: None,
+        issue: None,
+        topic: None,
+        boundary: None,
+    };
+    let WorkspaceEnsureAuthorityState::ExactExisting {
+        canonical_id: work_id,
+    } = validate_workspace_ensure_recovery_state(
+        &recovery,
+        &input,
+        expected_owner.as_deref(),
+        policy,
+        &projection,
+        &work_items,
+    )
+    .ok()?
+    else {
+        return None;
+    };
+    let known_journal_entry_ids =
+        match gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+            &recovery.project_state_root,
+            usize::MAX,
+        ) {
+            Ok(entries) => Some(entries.into_iter().map(|entry| entry.id).collect()),
+            Err(_) => None,
+        };
+    let known_work_event_ids = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .map(|item| item.events.iter().map(|event| event.id.clone()).collect())
+        .unwrap_or_default();
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&recovery.session).ok()??;
+    let runtime_target = recovery.session.runtime_target;
+    let docker_runtime_binding = recovery.session.docker_runtime_binding.clone();
+    let local_continuation_eligible = host_recovery
+        && runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+        && docker_runtime_binding.is_none();
+    Some(WorkspaceUpdateBridgeAuthority {
+        identity,
+        project_state_root: recovery.project_state_root,
+        work_id,
+        owner: expected_owner,
+        known_journal_entry_ids,
+        known_work_event_ids,
+        runtime_target,
+        docker_runtime_binding,
+        local_continuation_eligible,
+    })
+}
+
+fn validate_workspace_update_bridge_receipt(
+    session_id: &str,
+    authority: &WorkspaceUpdateBridgeAuthority,
+    request: &crate::AgentWorkspaceUpdateRequest,
+    receipt: &crate::AgentWorkspaceUpdateReceipt,
+) -> Result<(), String> {
+    if receipt.work_id != authority.work_id {
+        return Err(
+            "[receipt_mismatch] Host workspace bridge returned a receipt for a different Work; no local fallback was attempted"
+                .to_string(),
+        );
+    }
+    if authority
+        .known_journal_entry_ids
+        .as_ref()
+        .is_some_and(|ids| ids.iter().any(|id| id == &receipt.journal_entry_id))
+    {
+        return Err(
+            "[receipt_mismatch] Host workspace bridge returned stale journal receipt evidence; no local fallback was attempted"
+                .to_string(),
+        );
+    }
+    if let Some(known_journal_entry_ids) = authority.known_journal_entry_ids.as_ref() {
+        if let Ok(entries) = gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+            &authority.project_state_root,
+            usize::MAX,
+        ) {
+            let receipt_entries = entries
+                .iter()
+                .filter(|entry| entry.id == receipt.journal_entry_id)
+                .collect::<Vec<_>>();
+            match receipt_entries.as_slice() {
+                [entry]
+                    if !known_journal_entry_ids
+                        .iter()
+                        .any(|id| id == &entry.id)
+                        && workspace_journal_entry_matches_update(
+                            session_id, authority, request, entry,
+                        ) =>
+                {
+                    return Ok(());
+                }
+                [] => {}
+                _ => {
+                    return Err(
+                        "[receipt_mismatch] Host workspace bridge receipt journal does not match the authenticated update; no local fallback was attempted"
+                            .to_string(),
+                    )
+                }
+            }
+        }
+    }
+    validate_workspace_update_work_event_readback(
+        session_id,
+        authority,
+        request,
+        &receipt.journal_entry_id,
+    )
+}
+
+fn workspace_journal_entry_matches_update(
+    session_id: &str,
+    authority: &WorkspaceUpdateBridgeAuthority,
+    request: &crate::AgentWorkspaceUpdateRequest,
+    entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> bool {
+    let canonical_entry_root = dunce::canonicalize(&entry.project_root).ok();
+    let intent = &request.intent;
+    canonical_entry_root.as_deref() == Some(authority.project_state_root.as_path())
+        && entry.agent_session_id.as_deref() == Some(session_id)
+        && entry.owner == authority.owner
+        && entry.title == intent.title
+        && entry.status_category == intent.status_category
+        && entry.status_text == intent.status_text
+        && entry.next_action == intent.next_action
+        && entry.summary == intent.summary
+        && entry.progress_summary == intent.progress_summary
+        && entry.agent_current_focus == intent.current_focus
+        && entry.agent_title_summary == intent.title_summary
+}
+
+fn validate_workspace_update_work_event_readback(
+    session_id: &str,
+    authority: &WorkspaceUpdateBridgeAuthority,
+    request: &crate::AgentWorkspaceUpdateRequest,
+    receipt_evidence_id: &str,
+) -> Result<(), String> {
+    let work_items = load_workspace_work_items_from_path(
+        &gwt_workspace_work_items_path_for_repo_path(&authority.project_state_root),
+    )
+    .map_err(|_| {
+        "[receipt_mismatch] Host workspace bridge Work event evidence could not be read; no local fallback was attempted"
+            .to_string()
+    })?
+    .ok_or_else(|| {
+        "[receipt_mismatch] Host workspace bridge Work event evidence is missing; no local fallback was attempted"
+            .to_string()
+    })?;
+    let matching_works = work_items
+        .work_items
+        .iter()
+        .filter(|item| item.id == authority.work_id)
+        .collect::<Vec<_>>();
+    let [work] = matching_works.as_slice() else {
+        return Err(
+            "[receipt_mismatch] Host workspace bridge Work event evidence is ambiguous; no local fallback was attempted"
+                .to_string(),
+        );
+    };
+    let expected_kind = match request.intent.status_category {
+        Some(WorkspaceStatusCategory::Done) => WorkEventKind::Done,
+        Some(WorkspaceStatusCategory::Blocked) => WorkEventKind::Blocked,
+        _ => WorkEventKind::Update,
+    };
+    let expected_title = request
+        .intent
+        .title
+        .as_ref()
+        .or(request.intent.title_summary.as_ref());
+    let expected_summary = request
+        .intent
+        .summary
+        .as_ref()
+        .or(request.intent.status_text.as_ref());
+    let matching_new_events = work
+        .events
+        .iter()
+        .filter(|event| {
+            event.id == receipt_evidence_id
+                && !authority
+                    .known_work_event_ids
+                    .iter()
+                    .any(|id| id == &event.id)
+                && event.kind == expected_kind
+                && event.work_item_id == authority.work_id
+                && event.agent_session_id.as_deref() == Some(session_id)
+                && event.owner == authority.owner
+                && event.title.as_ref() == expected_title
+                && event.intent == request.intent.current_focus
+                && event.summary.as_ref() == expected_summary
+                && event.progress_summary == request.intent.progress_summary
+                && event.status_category == request.intent.status_category
+                && event.next_action == request.intent.next_action
+        })
+        .count();
+    if matching_new_events != 1 {
+        return Err(
+            "[receipt_mismatch] Host workspace bridge receipt did not identify one exact new Work event; no local fallback was attempted"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn continue_workspace_update_after_typed_ensure_required(
+    session_id: &str,
+    authority: WorkspaceUpdateBridgeAuthority,
+    request: crate::AgentWorkspaceUpdateRequest,
+) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
+    if !authority.local_continuation_eligible {
+        return Err(
+            "typed workspace.ensure compatibility continuation is available only for an exact Host Session authority"
+                .to_string(),
+        );
+    }
+    let binding = authority.identity.execution_binding.clone();
+    let work_id = authority.work_id.clone();
+    let project_state_root = authority.project_state_root.clone();
+    let work_event_root = authority.identity.worktree_path.clone();
+    let expected_runtime_target = authority.runtime_target;
+    let expected_docker_runtime_binding = authority.docker_runtime_binding.clone();
+    let terminal_update = request.intent.status_category == Some(WorkspaceStatusCategory::Done);
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let result = crate::cli::execution_state::with_current_active_session_execution_identity_global_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &authority.identity,
+        |settlement_trusted_dir| -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
+            let current = gwt_agent::Session::load(&session_path).map_err(|_| {
+                "typed workspace.ensure compatibility continuation could not reload the durable Session runtime authority"
+                    .to_string()
+            })?;
+            if current.runtime_target != expected_runtime_target
+                || current.docker_runtime_binding != expected_docker_runtime_binding
+                || current.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+                || current.docker_runtime_binding.is_some()
+            {
+                return Err(
+                    "typed workspace.ensure compatibility continuation was refused because the Session runtime target or Docker binding changed"
+                        .to_string(),
+                );
+            }
+            crate::agent_project_state::apply_bound_authenticated_workspace_update_for_exact_work_with_held_global_lease(
+                &project_state_root,
+                session_id,
+                &binding,
+                &work_id,
+                settlement_trusted_dir,
+                request,
+            )
+            .map_err(|error| {
+                format!("typed workspace.ensure compatibility continuation was refused: {error}")
+            })
+        },
+    )
+    .map_err(|_| {
+        "typed workspace.ensure compatibility continuation could not validate the durable authority"
+            .to_string()
+    })?;
+    let result = result.ok_or_else(|| {
+        "typed workspace.ensure compatibility continuation was refused because the Session or execution binding changed"
+            .to_string()
+    })?;
+    let receipt = result?;
+    if terminal_update {
+        if let Err(error) = crate::cli::verification_record::save_work_event_settlement_record(
+            &work_event_root,
+            session_id,
+            true,
+        ) {
+            tracing::warn!(
+                ?error,
+                "terminal compatibility continuation persisted; retaining the write-ahead settlement receipt after refresh failure"
+            );
+        }
+    }
+    publish_workspace_change(&project_state_root);
+    Ok(receipt)
+}
+
+struct LocalWorkspaceUpdateTransaction<'a> {
+    invocation_repo_path: &'a Path,
+    session_id: &'a str,
+    target: &'a crate::agent_project_state::SessionWorkMutationTarget,
+    tracked_event_policy: TrackedWorkEventPolicy,
+    opens_work_settlement: bool,
+}
+
+fn persist_local_workspace_update(
+    transaction: &LocalWorkspaceUpdateTransaction<'_>,
+    update: WorkspaceProjectionUpdate,
+    settlement_trusted_dir: Option<&Path>,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkspaceJournalEntry> {
+    let persistence_target = transaction.target.persistence_target();
+    update_workspace_projection_with_journal_for_resolved_work_target(
+        &persistence_target,
+        update,
+        transaction.tracked_event_policy,
+        |_, _| {
+            let refreshed = crate::agent_project_state::resolve_session_work_mutation_target(
+                transaction.invocation_repo_path,
+                transaction.session_id,
+            )?;
+            if refreshed != *transaction.target {
+                return Err(GwtError::Other(
+                    "Session-bound workspace target changed before commit".to_string(),
+                ));
+            }
+            Ok(())
+        },
+        |event, journal_entry| {
+            if !transaction.opens_work_settlement {
+                return Ok(());
+            }
+            let trusted_dir = settlement_trusted_dir.ok_or_else(|| {
+                GwtError::Other(
+                    "workspace.update terminal Work event settlement lease is missing".to_string(),
+                )
+            })?;
+            crate::cli::verification_record::prepare_work_event_settlement_record_with_held_lease(
+                trusted_dir,
+                &transaction.target.work_event_root,
+                &transaction.target.session_id,
+                event,
+                journal_entry,
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                GwtError::Other(format!(
+                    "workspace.update could not reserve the terminal Work event settlement obligation before mutation: {error}"
+                ))
+            })
+        },
+    )
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: WorkspaceCommand,
@@ -370,18 +752,48 @@ pub(super) fn run<E: CliEnv>(
             if let Some(target) =
                 crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
             {
+                // Snapshot any locally readable exact durable authority before contacting the
+                // Host. A 2xx receipt must read back as a new matching journal entry. Only an
+                // exact Host snapshot may authorize the one typed old-Host compatibility
+                // continuation whose outcome is known to be pre-mutation.
+                let bridge_authority =
+                    snapshot_workspace_update_bridge_authority(env.repo_path(), &session_id);
                 let observation = crate::observe_agent_runtime(env.repo_path())
                     .map_err(|error| string_error(error.to_string()))?;
                 let request = crate::AgentWorkspaceUpdateRequest {
                     schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
-                    claimed_session_id: session_id,
+                    claimed_session_id: session_id.clone(),
                     observation,
                     intent,
                 };
-                let receipt = crate::daemon_runtime::send_workspace_update_via_agent_bridge(
-                    &target, &request,
-                )
-                .map_err(string_error)?;
+                let receipt =
+                    match crate::daemon_runtime::send_workspace_update_via_agent_bridge_detailed(
+                        &target, &request,
+                    ) {
+                        Ok(receipt) => {
+                            if let Some(authority) = bridge_authority.as_ref() {
+                                validate_workspace_update_bridge_receipt(
+                                    &session_id,
+                                    authority,
+                                    &request,
+                                    &receipt,
+                                )
+                                .map_err(string_error)?;
+                            }
+                            receipt
+                        }
+                        Err(error) if error.is_exact_workspace_ensure_required() => {
+                            let authority =
+                                bridge_authority.ok_or_else(|| string_error(error.to_string()))?;
+                            continue_workspace_update_after_typed_ensure_required(
+                                &session_id,
+                                authority,
+                                request,
+                            )
+                            .map_err(string_error)?
+                        }
+                        Err(error) => return Err(string_error(error.to_string())),
+                    };
                 out.push_str(&format!(
                     "workspace updated: {}\n",
                     receipt.journal_entry_id
@@ -429,43 +841,44 @@ pub(super) fn run<E: CliEnv>(
                 agent_current_focus: intent.current_focus,
                 agent_title_summary: intent.title_summary,
             };
-            let persistence_target = target.persistence_target();
-            let entry = update_workspace_projection_with_journal_for_resolved_work_target(
-                &persistence_target,
-                update,
+            let transaction = LocalWorkspaceUpdateTransaction {
+                invocation_repo_path: env.repo_path(),
+                session_id: &session_id,
+                target: &target,
                 tracked_event_policy,
-                |_, _| {
-                    let refreshed =
-                        crate::agent_project_state::resolve_session_work_mutation_target(
-                            env.repo_path(),
-                            &session_id,
-                        )?;
-                    if refreshed != target {
-                        return Err(GwtError::Other(
-                            "Session-bound workspace target changed before commit".to_string(),
-                        ));
-                    }
-                    Ok(())
-                },
-                |event, journal_entry| {
-                    if !opens_work_settlement {
-                        return Ok(());
-                    }
-                    crate::cli::verification_record::prepare_work_event_settlement_record(
-                        &target.work_event_root,
-                        &target.session_id,
-                        event,
-                        journal_entry,
+                opens_work_settlement,
+            };
+            let entry = if !opens_work_settlement {
+                persist_local_workspace_update(&transaction, update, None)
+                    .map_err(|error| string_error(error.to_string()))?
+            } else {
+                let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(
+                    &target.work_event_root,
+                )
+                .ok_or_else(|| {
+                    string_error(
+                        "workspace.update could not resolve the terminal Work event settlement store before mutation"
+                            .to_string(),
                     )
-                    .map(|_| ())
-                    .map_err(|error| {
-                        GwtError::Other(format!(
-                            "workspace.update could not reserve the terminal Work event settlement obligation before mutation: {error}"
+                })?;
+                let nested = crate::cli::trusted_store::with_write_lease_for_resolved_dir(
+                    &trusted_dir,
+                    || -> std::io::Result<_> {
+                        Ok(persist_local_workspace_update(
+                            &transaction,
+                            update,
+                            Some(&trusted_dir),
                         ))
-                    })
-                },
-            )
-            .map_err(|error| string_error(error.to_string()))?;
+                    },
+                )
+                .map_err(|_| {
+                    string_error(
+                        "workspace.update could not acquire the terminal Work event settlement lease before mutation"
+                            .to_string(),
+                    )
+                })?;
+                nested.map_err(|error| string_error(error.to_string()))?
+            };
             if opens_work_settlement {
                 if let Err(error) =
                     crate::cli::verification_record::save_work_event_settlement_record(
@@ -2754,6 +3167,146 @@ pub(crate) mod tests {
             record.status.severity(),
             crate::cli::verification_record::WorkEventSettlementSeverity::Warning
         );
+    }
+
+    #[test]
+    fn typed_ensure_required_continuation_keeps_split_roots_and_settlement_evidence_aligned() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_state_root = temp.path().join("workspace-home");
+        let worktree = project_state_root.join("work").join("issue-3412");
+        let session_id = "session-typed-split-root";
+        write_bound_projectionless_session(session_id, &worktree, &project_state_root, 3412);
+
+        let ensured = ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Typed split-root continuation".to_string(),
+                current_focus: Some("Ensure the exact durable assignment".to_string()),
+                spec: None,
+                issue: Some(3412),
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("ensure exact split-root Host authority");
+        assert_eq!(ensured.disposition, WorkspaceEnsureDisposition::Created);
+
+        let project_state_root =
+            dunce::canonicalize(&project_state_root).expect("canonical Project State root");
+        let worktree = dunce::canonicalize(&worktree).expect("canonical linked worktree");
+        assert_ne!(project_state_root, worktree);
+
+        let legacy_worktree_dir =
+            gwt_core::paths::gwt_project_dir_for_repo_path(&worktree).join("workspace");
+        std::fs::create_dir_all(&legacy_worktree_dir).expect("create legacy worktree state");
+        let legacy_worktree_current = legacy_worktree_dir.join("current.json");
+        let legacy_worktree_works = legacy_worktree_dir.join("works.json");
+        std::fs::write(&legacy_worktree_current, b"legacy worktree current")
+            .expect("seed legacy worktree current");
+        std::fs::write(&legacy_worktree_works, b"legacy worktree works")
+            .expect("seed legacy worktree Works");
+        let legacy_before = [
+            std::fs::read(&legacy_worktree_current).expect("read legacy current before"),
+            std::fs::read(&legacy_worktree_works).expect("read legacy Works before"),
+        ];
+
+        let authority = snapshot_workspace_update_bridge_authority(&worktree, session_id)
+            .expect("exact ensured Host authority snapshot");
+        assert_eq!(authority.project_state_root, project_state_root);
+        let expected_work_id = authority.work_id.clone();
+        let expected_execution_identity = authority.identity.execution_binding.identity.clone();
+        let receipt = continue_workspace_update_after_typed_ensure_required(
+            session_id,
+            authority,
+            crate::AgentWorkspaceUpdateRequest {
+                schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session_id.to_string(),
+                observation: crate::observe_agent_runtime(&worktree)
+                    .expect("observe exact linked worktree"),
+                intent: crate::AgentWorkspaceUpdateIntent {
+                    status_category: Some(WorkspaceStatusCategory::Done),
+                    summary: Some("Typed split-root continuation completed".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("apply the bounded typed continuation");
+        assert_eq!(receipt.work_id, expected_work_id);
+
+        let current = load_workspace_projection(&project_state_root)
+            .expect("load repo-global current")
+            .expect("repo-global current exists");
+        assert_eq!(current.status_category, WorkspaceStatusCategory::Done);
+        let works = load_workspace_work_items(&project_state_root)
+            .expect("load repo-global Works")
+            .expect("repo-global Works exist");
+        assert_eq!(
+            works
+                .work_items
+                .iter()
+                .find(|work| work.id == expected_work_id)
+                .expect("exact Work exists")
+                .status_category,
+            WorkspaceStatusCategory::Done
+        );
+
+        let tracked_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+        let tracked_events = std::fs::read_to_string(&tracked_events_path)
+            .expect("read worktree-local tracked events")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<WorkEvent>(line).expect("tracked event JSON"))
+            .collect::<Vec<_>>();
+        let done_event = tracked_events
+            .iter()
+            .find(|event| event.kind == WorkEventKind::Done)
+            .expect("typed continuation emits one Done event");
+        assert_eq!(done_event.work_item_id, expected_work_id);
+        assert!(
+            !gwt_core::paths::gwt_repo_local_work_events_path(&project_state_root).exists(),
+            "Project State root must not receive a tracked Work event"
+        );
+        assert_eq!(
+            [
+                std::fs::read(&legacy_worktree_current).expect("read legacy current after"),
+                std::fs::read(&legacy_worktree_works).expect("read legacy Works after"),
+            ],
+            legacy_before,
+            "typed continuation must not write legacy linked-worktree projections"
+        );
+
+        let journal = gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+            &project_state_root,
+            1,
+        )
+        .expect("load repo-global journal")
+        .into_iter()
+        .next()
+        .expect("typed continuation journal entry");
+        assert_eq!(journal.id, receipt.journal_entry_id);
+        let settlement =
+            crate::cli::verification_record::load_work_event_settlement_record(&worktree)
+                .expect("load typed continuation settlement")
+                .expect("typed continuation settlement exists");
+        assert!(settlement.obligation_open);
+        assert_eq!(settlement.session_id, session_id);
+        assert_eq!(
+            settlement.execution_binding.as_ref(),
+            Some(&expected_execution_identity)
+        );
+        assert!(matches!(
+            settlement.status,
+            crate::cli::verification_record::WorkEventSettlementStatus::Blocked(
+                crate::cli::verification_record::WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
+                    environment: crate::cli::verification_record::WorkEventSettlementEnvironment::MissingUpstream,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]

@@ -869,6 +869,7 @@ pub fn apply_authenticated_workspace_update(
             crate::cli::verification_record::save_work_event_settlement_record(
                 worktree, session_id, true,
             )
+            .map(|_| ())
         },
     )
 }
@@ -883,34 +884,88 @@ pub fn apply_bound_authenticated_workspace_update(
         authenticated_project_root,
         authenticated_session_id,
         authenticated_binding,
+        None,
         request,
         |_| {},
         |worktree, session_id| {
             crate::cli::verification_record::save_work_event_settlement_record(
                 worktree, session_id, true,
             )
+            .map(|_| ())
         },
     )
+}
+
+#[cfg(test)]
+pub(crate) fn apply_bound_authenticated_workspace_update_for_exact_work(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    authenticated_work_id: &str,
+    request: AgentWorkspaceUpdateRequest,
+) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
+    apply_bound_authenticated_workspace_update_inner(
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+        Some(authenticated_work_id),
+        request,
+        |_| {},
+        |worktree, session_id| {
+            crate::cli::verification_record::save_work_event_settlement_record(
+                worktree, session_id, true,
+            )
+            .map(|_| ())
+        },
+    )
+}
+
+pub(crate) fn apply_bound_authenticated_workspace_update_for_exact_work_with_held_global_lease(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    authenticated_binding: &SessionExecutionBinding,
+    authenticated_work_id: &str,
+    settlement_trusted_dir: &Path,
+    request: AgentWorkspaceUpdateRequest,
+) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
+    apply_authenticated_workspace_update_with_binding(
+        authenticated_project_root,
+        authenticated_session_id,
+        Some(authenticated_binding),
+        Some(authenticated_work_id),
+        request,
+        |_| {},
+        WorkspaceUpdateSettlementHooks {
+            held_global_trusted_dir: Some(settlement_trusted_dir),
+            refresh: skip_workspace_update_settlement_refresh,
+        },
+    )
+}
+
+fn skip_workspace_update_settlement_refresh(
+    _worktree: &Path,
+    _session_id: &str,
+) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn apply_authenticated_workspace_update_inner(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
     request: AgentWorkspaceUpdateRequest,
-    refresh_settlement: impl FnOnce(
-        &Path,
-        &str,
-    ) -> std::io::Result<
-        crate::cli::verification_record::WorkEventSettlementRecord,
-    >,
+    refresh_settlement: impl FnOnce(&Path, &str) -> std::io::Result<()>,
 ) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
     apply_authenticated_workspace_update_with_binding(
         authenticated_project_root,
         authenticated_session_id,
         None,
+        None,
         request,
         |_| {},
-        refresh_settlement,
+        WorkspaceUpdateSettlementHooks {
+            held_global_trusted_dir: None,
+            refresh: refresh_settlement,
+        },
     )
 }
 
@@ -918,38 +973,46 @@ fn apply_bound_authenticated_workspace_update_inner(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
     authenticated_binding: &SessionExecutionBinding,
+    authenticated_work_id: Option<&str>,
     request: AgentWorkspaceUpdateRequest,
     after_resolve: impl FnOnce(&SessionWorkMutationTarget),
-    refresh_settlement: impl FnOnce(
-        &Path,
-        &str,
-    ) -> std::io::Result<
-        crate::cli::verification_record::WorkEventSettlementRecord,
-    >,
+    refresh_settlement: impl FnOnce(&Path, &str) -> std::io::Result<()>,
 ) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
     apply_authenticated_workspace_update_with_binding(
         authenticated_project_root,
         authenticated_session_id,
         Some(authenticated_binding),
+        authenticated_work_id,
         request,
         after_resolve,
-        refresh_settlement,
+        WorkspaceUpdateSettlementHooks {
+            held_global_trusted_dir: None,
+            refresh: refresh_settlement,
+        },
     )
 }
 
-fn apply_authenticated_workspace_update_with_binding(
+struct WorkspaceUpdateSettlementHooks<'a, Refresh> {
+    held_global_trusted_dir: Option<&'a Path>,
+    refresh: Refresh,
+}
+
+fn apply_authenticated_workspace_update_with_binding<Refresh>(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
     authenticated_binding: Option<&SessionExecutionBinding>,
+    authenticated_work_id: Option<&str>,
     request: AgentWorkspaceUpdateRequest,
     after_resolve: impl FnOnce(&SessionWorkMutationTarget),
-    refresh_settlement: impl FnOnce(
-        &Path,
-        &str,
-    ) -> std::io::Result<
-        crate::cli::verification_record::WorkEventSettlementRecord,
-    >,
-) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError> {
+    settlement_hooks: WorkspaceUpdateSettlementHooks<'_, Refresh>,
+) -> std::result::Result<AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateError>
+where
+    Refresh: FnOnce(&Path, &str) -> std::io::Result<()>,
+{
+    let WorkspaceUpdateSettlementHooks {
+        held_global_trusted_dir,
+        refresh: refresh_settlement,
+    } = settlement_hooks;
     if request.schema_version != AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION {
         return Err(AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::InvalidRequest,
@@ -976,7 +1039,14 @@ fn apply_authenticated_workspace_update_with_binding(
         authenticated_project_root,
         authenticated_session_id,
         &observation,
+        authenticated_work_id.is_some(),
     )?;
+    if authenticated_work_id.is_some_and(|work_id| work_id != target.work_id) {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::IdentityConflict,
+            "workspace.update canonical Work changed after the compatibility authority snapshot",
+        ));
+    }
     after_resolve(&target);
     let tracked_event_policy = if crate::cli::execution_state::is_completed(&target.work_event_root)
     {
@@ -987,7 +1057,6 @@ fn apply_authenticated_workspace_update_with_binding(
     let opens_work_settlement = tracked_event_policy == TrackedWorkEventPolicy::Persist
         && request.intent.status_category
             == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
-    let persistence_target = target.persistence_target();
     let update = WorkspaceProjectionUpdate {
         title: request.intent.title,
         status_category: request.intent.status_category,
@@ -1000,17 +1069,97 @@ fn apply_authenticated_workspace_update_with_binding(
         agent_current_focus: request.intent.current_focus,
         agent_title_summary: request.intent.title_summary,
     };
+    let transaction = AuthenticatedWorkspaceUpdateTransaction {
+        authenticated_project_root,
+        authenticated_session_id,
+        authenticated_binding,
+        authenticated_work_id,
+        observation: &observation,
+        target: &target,
+        tracked_event_policy,
+        opens_work_settlement,
+    };
+    let persisted = if !opens_work_settlement {
+        persist_authenticated_workspace_update(&transaction, update, None)?
+    } else if let Some(trusted_dir) = held_global_trusted_dir {
+        persist_authenticated_workspace_update(&transaction, update, Some(trusted_dir))?
+    } else {
+        let trusted_dir =
+            crate::cli::trusted_store::trusted_dir_for_worktree(&target.work_event_root)
+                .ok_or_else(|| {
+                    AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host could not resolve the terminal Work event settlement store before mutation",
+            )
+                })?;
+        let nested = crate::cli::trusted_store::with_write_lease_for_resolved_dir(
+            &trusted_dir,
+            || -> std::io::Result<_> {
+                Ok(persist_authenticated_workspace_update(
+                    &transaction,
+                    update,
+                    Some(&trusted_dir),
+                ))
+            },
+        )
+        .map_err(|_| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host could not acquire the terminal Work event settlement lease before mutation",
+            )
+        })?;
+        nested?
+    };
+    if opens_work_settlement {
+        if let Err(error) = refresh_settlement(&target.work_event_root, &target.session_id) {
+            tracing::warn!(
+                ?error,
+                "terminal Work event persisted; retaining the write-ahead settlement receipt after refresh failure"
+            );
+        }
+    }
+    Ok(AgentWorkspaceUpdateReceipt {
+        schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+        work_id: target.work_id,
+        journal_entry_id: persisted.receipt_evidence_id,
+    })
+}
+
+struct AuthenticatedWorkspaceUpdateTransaction<'a> {
+    authenticated_project_root: &'a Path,
+    authenticated_session_id: &'a str,
+    authenticated_binding: Option<&'a SessionExecutionBinding>,
+    authenticated_work_id: Option<&'a str>,
+    observation: &'a AgentRuntimeObservation,
+    target: &'a SessionWorkMutationTarget,
+    tracked_event_policy: TrackedWorkEventPolicy,
+    opens_work_settlement: bool,
+}
+
+struct PersistedAuthenticatedWorkspaceUpdate {
+    receipt_evidence_id: String,
+}
+
+fn persist_authenticated_workspace_update(
+    transaction: &AuthenticatedWorkspaceUpdateTransaction<'_>,
+    update: WorkspaceProjectionUpdate,
+    settlement_trusted_dir: Option<&Path>,
+) -> std::result::Result<PersistedAuthenticatedWorkspaceUpdate, AgentWorkspaceUpdateError> {
+    let persistence_target = transaction.target.persistence_target();
     let mut revalidation_error_code = None;
     let mut settlement_prepare_failed = false;
-    let entry = update_workspace_projection_with_journal_for_resolved_work_target(
+    let mut target_was_current = false;
+    let mut work_event_id = None;
+    let journal_entry = update_workspace_projection_with_journal_for_resolved_work_target(
         &persistence_target,
         update,
-        tracked_event_policy,
-        |_, _| {
-            if let Some(binding) = authenticated_binding {
+        transaction.tracked_event_policy,
+        |projection, _| {
+            target_was_current = projection.id == transaction.target.work_id;
+            if let Some(binding) = transaction.authenticated_binding {
                 validate_current_execution_binding_authority(
-                    authenticated_project_root,
-                    authenticated_session_id,
+                    transaction.authenticated_project_root,
+                    transaction.authenticated_session_id,
                     binding,
                 )
                 .map_err(|error| {
@@ -1021,9 +1170,10 @@ fn apply_authenticated_workspace_update_with_binding(
                 })?;
             }
             let refreshed = resolve_authenticated_session_work_mutation_target(
-                authenticated_project_root,
-                authenticated_session_id,
-                &observation,
+                transaction.authenticated_project_root,
+                transaction.authenticated_session_id,
+                transaction.observation,
+                transaction.authenticated_work_id.is_some(),
             )
             .map_err(|error| {
                 revalidation_error_code = Some(error.code);
@@ -1031,7 +1181,7 @@ fn apply_authenticated_workspace_update_with_binding(
                     "authenticated Session-bound workspace target revalidation failed".to_string(),
                 )
             })?;
-            if refreshed != target {
+            if refreshed != *transaction.target {
                 return Err(GwtError::Other(
                     "authenticated Session-bound workspace target changed before commit"
                         .to_string(),
@@ -1040,12 +1190,20 @@ fn apply_authenticated_workspace_update_with_binding(
             Ok(())
         },
         |event, journal_entry| {
-            if !opens_work_settlement {
+            work_event_id = Some(event.id.clone());
+            if !transaction.opens_work_settlement {
                 return Ok(());
             }
-            crate::cli::verification_record::prepare_work_event_settlement_record(
-                &target.work_event_root,
-                &target.session_id,
+            let trusted_dir = settlement_trusted_dir.ok_or_else(|| {
+                settlement_prepare_failed = true;
+                GwtError::Other(
+                    "Host terminal Work event settlement lease is missing".to_string(),
+                )
+            })?;
+            crate::cli::verification_record::prepare_work_event_settlement_record_with_held_lease(
+                trusted_dir,
+                &transaction.target.work_event_root,
+                &transaction.target.session_id,
                 event,
                 journal_entry,
             )
@@ -1071,18 +1229,18 @@ fn apply_authenticated_workspace_update_with_binding(
             )
         }
     })?;
-    if opens_work_settlement {
-        if let Err(error) = refresh_settlement(&target.work_event_root, &target.session_id) {
-            tracing::warn!(
-                ?error,
-                "terminal Work event persisted; retaining the write-ahead settlement receipt after refresh failure"
-            );
-        }
-    }
-    Ok(AgentWorkspaceUpdateReceipt {
-        schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
-        work_id: target.work_id,
-        journal_entry_id: entry.id,
+    let receipt_evidence_id = if target_was_current {
+        journal_entry.id
+    } else {
+        work_event_id.ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host workspace transaction committed without durable Work event evidence",
+            )
+        })?
+    };
+    Ok(PersistedAuthenticatedWorkspaceUpdate {
+        receipt_evidence_id,
     })
 }
 
@@ -1266,6 +1424,7 @@ fn resolve_authenticated_session_work_mutation_target(
     authenticated_project_root: &Path,
     session_id: &str,
     observation: &AgentRuntimeObservation,
+    require_single_session_assignment: bool,
 ) -> std::result::Result<SessionWorkMutationTarget, AgentWorkspaceUpdateError> {
     let authority = resolve_authenticated_session_terminal_target(
         authenticated_project_root,
@@ -1278,8 +1437,11 @@ fn resolve_authenticated_session_work_mutation_target(
         session_id,
         &authority.branch_identity,
         &authority.worktree_identity,
-        &authority.owner,
-        &authority.agent_id,
+        SessionWorkAuthorityExpectation {
+            owner: &authority.owner,
+            agent_id: &authority.agent_id,
+            require_single_session_assignment,
+        },
     )
     .map_err(classify_target_error)?;
     Ok(SessionWorkMutationTarget {
@@ -1738,8 +1900,11 @@ fn resolve_host_session_work_mutation_target(
         session_id,
         &identity.branch_identity,
         &identity.worktree_identity,
-        &owner,
-        &agent_id,
+        SessionWorkAuthorityExpectation {
+            owner: &owner,
+            agent_id: &agent_id,
+            require_single_session_assignment: false,
+        },
     )?;
 
     Ok(SessionWorkMutationTarget {
@@ -2117,14 +2282,19 @@ fn durable_session_work_authority(session: &Session) -> Result<(String, String)>
     Ok((owner, session.agent_id.command().to_string()))
 }
 
+struct SessionWorkAuthorityExpectation<'a> {
+    owner: &'a str,
+    agent_id: &'a str,
+    require_single_session_assignment: bool,
+}
+
 fn resolve_unique_existing_work_id(
     work_items_root: &Path,
     work_event_root: &Path,
     session_id: &str,
     branch_identity: &str,
     worktree_identity: &Path,
-    expected_owner: &str,
-    expected_agent_id: &str,
+    expected: SessionWorkAuthorityExpectation<'_>,
 ) -> Result<String> {
     let current_path =
         gwt_core::paths::gwt_workspace_projection_path_for_repo_path(work_items_root);
@@ -2138,16 +2308,23 @@ fn resolve_unique_existing_work_id(
         .ok_or_else(|| {
             workspace_ensure_error(session_id, "canonical Session assignment is missing")
         })?;
+    let session_assignments = projection
+        .agents
+        .iter()
+        .filter(|candidate| candidate.session_id == session_id)
+        .collect::<Vec<_>>();
+    if expected.require_single_session_assignment && session_assignments.len() != 1 {
+        return Err(workspace_ensure_error(
+            session_id,
+            "canonical Session assignment authority is ambiguous",
+        ));
+    }
     let agent = projection
         .latest_agent_for_session(session_id)
         .ok_or_else(|| {
             workspace_ensure_error(session_id, "canonical Session assignment is missing")
         })?;
-    for candidate in projection
-        .agents
-        .iter()
-        .filter(|candidate| candidate.session_id == session_id)
-    {
+    for candidate in session_assignments {
         let same_authority = candidate.agent_id == agent.agent_id
             && candidate.affiliation_status == agent.affiliation_status
             && candidate.workspace_id == agent.workspace_id
@@ -2171,7 +2348,7 @@ fn resolve_unique_existing_work_id(
             "latest canonical Session assignment is Unassigned",
         ));
     }
-    if agent.agent_id != expected_agent_id {
+    if agent.agent_id != expected.agent_id {
         return Err(workspace_ensure_error(
             session_id,
             "canonical Session agent identity does not match the durable Session",
@@ -2240,7 +2417,7 @@ fn resolve_unique_existing_work_id(
             &format!("assigned Work {work_id} is terminal"),
         ));
     }
-    if item.owner.as_deref() != Some(expected_owner) {
+    if item.owner.as_deref() != Some(expected.owner) {
         return Err(workspace_ensure_error(
             session_id,
             &format!("assigned Work {work_id} owner does not match durable authority"),
@@ -2251,7 +2428,7 @@ fn resolve_unique_existing_work_id(
         .iter()
         .filter(|agent| agent.session_id == session_id)
         .collect::<Vec<_>>();
-    if session_refs.len() != 1 || session_refs[0].agent_id.as_deref() != Some(expected_agent_id) {
+    if session_refs.len() != 1 || session_refs[0].agent_id.as_deref() != Some(expected.agent_id) {
         return Err(workspace_ensure_error(
             session_id,
             &format!("assigned Work {work_id} agent identity is missing, foreign, or ambiguous"),
@@ -4003,6 +4180,7 @@ mod tests {
                 repo,
                 &session.id,
                 &binding,
+                None,
                 bound_workspace_update_request(&session),
                 |_| {
                     gwt_agent::rotate_session_execution_capability(&sessions_dir, &session_id)
@@ -4016,6 +4194,80 @@ mod tests {
                 WorkMutationSnapshot::capture(repo, repo),
                 before,
                 "commit-time binding failure must leave Work byte-equivalent"
+            );
+        });
+    }
+
+    #[test]
+    fn execution_binding_exact_work_update_rejects_a_different_target_without_mutation() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-binding-exact-target");
+            let before = WorkMutationSnapshot::capture(repo, repo);
+
+            let error = apply_bound_authenticated_workspace_update_for_exact_work(
+                repo,
+                &session.id,
+                &binding,
+                "work-binding-foreign-target",
+                bound_workspace_update_request(&session),
+            )
+            .expect_err("a compatibility continuation must stay on its snapshotted Work");
+
+            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::IdentityConflict);
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before,
+                "an exact-Work mismatch must preserve every Work mutation surface"
+            );
+        });
+    }
+
+    #[test]
+    fn execution_binding_exact_work_update_rejects_duplicate_identical_current_assignment_without_mutation(
+    ) {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            let work_id = "work-binding-duplicate-current-assignment";
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, work_id);
+
+            let current_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(repo);
+            let mut current = load_workspace_projection_from_path(&current_path)
+                .expect("load current projection")
+                .expect("current projection");
+            let duplicate = current
+                .agents
+                .iter()
+                .find(|agent| agent.session_id == session.id)
+                .expect("current Session assignment")
+                .clone();
+            current.agents.push(duplicate);
+            gwt_core::workspace_projection::save_workspace_projection_to_path(
+                &current_path,
+                &current,
+            )
+            .expect("save duplicate identical current Session assignment");
+            let before = WorkMutationSnapshot::capture(repo, repo);
+
+            let error = apply_bound_authenticated_workspace_update_for_exact_work(
+                repo,
+                &session.id,
+                &binding,
+                work_id,
+                bound_workspace_update_request(&session),
+            )
+            .expect_err("duplicate identical current assignments must be rejected as ambiguous");
+
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+            );
+            assert_eq!(
+                WorkMutationSnapshot::capture(repo, repo),
+                before,
+                "ambiguous duplicate current assignments must preserve every Work mutation surface"
             );
         });
     }
