@@ -1008,15 +1008,10 @@ impl AppRuntime {
         // instead of falling back to the agent's default display name.
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
-        let resume_context_root = if session_worktree_exists {
-            session.worktree_path.as_path()
-        } else {
-            project_root.as_path()
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            &project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -1174,15 +1169,10 @@ impl AppRuntime {
         }
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
-        let resume_context_root = if session.worktree_path.as_path().exists() {
-            session.worktree_path.as_path()
-        } else {
-            project_root.as_path()
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            &project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -2367,15 +2357,10 @@ impl AppRuntime {
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok(None);
         }
-        let resume_context_root = if session.worktree_path.as_path().exists() {
-            session.worktree_path.as_path()
-        } else {
-            project_root
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
         let launch_index = self
             .tab(tab_id)

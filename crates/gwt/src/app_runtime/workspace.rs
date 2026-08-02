@@ -231,8 +231,9 @@ pub(super) fn save_workspace_launch_projection(
         Some(session.branch_name.as_str()),
         Some(session.worktree_path.as_path()),
     );
-    gwt_core::workspace_projection::transact_workspace_state(
+    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
         project_root,
+        &session.worktree_path,
         |projection, _work_items, _work_items_persisted| {
             let work_event = apply_workspace_launch_transition(
                 projection,
