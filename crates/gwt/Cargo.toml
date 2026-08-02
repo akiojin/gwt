@@ -48,7 +48,7 @@ axum = { version = "0.8", features = ["ws"] }
 # the cross-platform NSApp / GTK / Windows message-pump glue. The wry
 # WebView dependency was removed alongside the tray migration; muda is
 # still pulled in transitively by tray-icon for menu construction.
-tao = "0.35"
+tao = "0.36"
 base64.workspace = true
 regex.workspace = true
 rfd = "0.17"
