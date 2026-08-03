@@ -943,7 +943,7 @@ test("Work without Session history keeps one Continue work action and renders on
   assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 1);
   assert.equal(
     group.querySelector(".workspace-detail-session-guidance").textContent,
-    "No previous session to inspect. Continue work can start a new one.",
+    "No previous session to open. Continue work can start a new one.",
   );
 });
 
@@ -1026,7 +1026,7 @@ test("Task-first Work layout separates purpose, producing intent, and lifecycle 
   );
   assert.equal(
     group.querySelector('[data-action="resume-session"]').textContent,
-    "Inspect session",
+    "Open session",
     "Session history does not compete with the producing Continue work intent",
   );
   assert.deepEqual(
@@ -1137,7 +1137,7 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
   );
 });
 
-test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-581)", () => {
+test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", () => {
   const projection = continuationProjection({ sessions: [{
     agent_session_id: "inspect-conversation",
     started_at: "2026-07-26T03:00:00Z",
@@ -1169,7 +1169,7 @@ test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-5
   assert.equal(begins.length, 1);
   assert.equal(
     begins[0].label,
-    "Inspect session",
+    "Open session",
     "timeout notices must not regress to the old Resume wording",
   );
 });
@@ -1234,7 +1234,7 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
-test("Non-resumable Sessions stay Inspection-only while Continue work owns fallback (SPEC-2359)", () => {
+test("Non-resumable Sessions show no Resume control while Continue work owns fallback (SPEC-2359)", () => {
   const projection = continuationProjection({ sessions: [
     { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
     { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },

@@ -133,6 +133,8 @@ use knowledge::knowledge_error_event;
 use knowledge::KnowledgeRefreshTask;
 pub use knowledge::{KnowledgeLoadRequest, KnowledgeSearchRequest, ProjectIndexSearchRequest};
 #[cfg(test)]
+pub(crate) use launch::AgentLaunchCompletion;
+#[cfg(test)]
 use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
@@ -140,8 +142,6 @@ use launch::{
     maybe_register_codex_managed_hook_trust_for_launch,
 };
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
-#[cfg(test)]
-pub(crate) use launch::{AgentLaunchCompletion, AgentLaunchDisposition};
 pub use launch::{AgentLaunchResult, LaunchWizardMemoryCache, ProcessLaunch};
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
@@ -653,9 +653,6 @@ pub struct AppRuntime {
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
-    /// Historical provider conversations that are deliberately detached from
-    /// Work execution authority. Input and attachment paths fail closed.
-    pub(crate) inspection_agent_windows: HashSet<String>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -1270,7 +1267,6 @@ impl AppRuntime {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
-            inspection_agent_windows: HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),

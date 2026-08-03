@@ -62,7 +62,7 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{
-    build_frontend_sync_events, AgentLaunchDisposition, KnowledgeLoadRequest, LaunchWizardSession,
+    build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
@@ -1301,10 +1301,9 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
-        AgentLaunchDisposition, AppEventProxy, AppRuntime, AttachmentUploadStore,
-        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
-        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
-        ProjectTabRuntime, UserEvent, WindowAddress,
+        AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
+        DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1944,25 +1943,6 @@ mod tests {
             }
             other => panic!("expected pane_send_result, got {other:?}"),
         }
-
-        runtime
-            .inspection_agent_windows
-            .insert("tab-1::claude-1".to_string());
-        let inspection_denied = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            gwt::FrontendEvent::PaneSendInput {
-                session_id: "session-a".to_string(),
-                text: "continue changing files\r".to_string(),
-            },
-        );
-        assert!(matches!(
-            inspection_denied.first().map(|event| &event.event),
-            Some(gwt::BackendEvent::PaneSendResult {
-                ok: false,
-                error: Some(error),
-                ..
-            }) if error.contains("inspection-only")
-        ));
     }
 
     #[test]
@@ -2660,7 +2640,6 @@ mod tests {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
-            inspection_agent_windows: std::collections::HashSet::new(),
             work_merged_branches: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
@@ -4009,7 +3988,8 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
-                AgentLaunchDisposition::WorkProducing,
+                gwt_agent::SessionMode::Normal,
+                false,
                 repo.display().to_string(),
             )),
         );
@@ -5108,7 +5088,8 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
-                AgentLaunchDisposition::WorkProducing,
+                gwt_agent::SessionMode::Normal,
+                false,
                 repo.display().to_string(),
             )),
         );
@@ -5149,7 +5130,8 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
-                AgentLaunchDisposition::WorkProducing,
+                gwt_agent::SessionMode::Normal,
+                false,
                 repo.display().to_string(),
             )),
         );

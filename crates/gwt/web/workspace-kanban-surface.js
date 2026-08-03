@@ -1213,7 +1213,7 @@ export function createWorkspaceKanbanSurface({
           createNode(
             "div",
             "workspace-overview-empty workspace-detail-session-guidance",
-            "No previous session to inspect. Continue work can start a new one.",
+            "No previous session to open. Continue work can start a new one.",
           ),
         );
       }
@@ -1424,16 +1424,16 @@ export function createWorkspaceKanbanSurface({
     if (session && session.resumable === false) {
       return null;
     }
-    const button = createNode("button", "wizard-button is-compact", "Inspect session");
+    const button = createNode("button", "wizard-button is-compact", "Open session");
     button.type = "button";
     button.dataset.action = "resume-session";
     button.dataset.sessionId = work.session_id;
     const agentSessionId = session && session.agent_session_id;
     if (agentSessionId) {
       button.dataset.agentSessionId = agentSessionId;
-      button.setAttribute("aria-label", `Inspect conversation ${agentSessionId}`);
+      button.setAttribute("aria-label", `Open conversation ${agentSessionId}`);
     } else {
-      button.setAttribute("aria-label", "Inspect this conversation");
+      button.setAttribute("aria-label", "Open this conversation");
     }
     if (isWorkResumePending(work.session_id)) {
       markResumeButtonPending(button);
@@ -1457,7 +1457,7 @@ export function createWorkspaceKanbanSurface({
     // agent_session_id (this Session row).
     if (
       launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Inspect session", operationId)
+      && !launchPending.begin(workPendingKey(sessionId), "Open session", operationId)
     ) {
       return;
     }
@@ -1570,7 +1570,7 @@ export function createWorkspaceKanbanSurface({
 
     // E4: expose the row's identity / state / resumability to assistive tech.
     const stateLabel = active ? "Current" : "Past";
-    const resumableLabel = resume ? "resumable" : "history only";
+    const resumableLabel = resume ? "resumable" : "not resumable";
     const ariaParts = [`Session ${fullId}`.trim(), stateLabel, resumableLabel];
     if (relative) {
       ariaParts.push(`started ${relative}`);
