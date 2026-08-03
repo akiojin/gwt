@@ -9341,6 +9341,34 @@ fn continue_work_handoff_context_carries_safe_lineage_and_redacts_private_text()
 }
 
 #[test]
+fn current_codex_session_reconstruction_enables_default_mode_questions_once() {
+    let mut session = gwt_agent::Session::new(
+        "/tmp/worktree",
+        "work/issue-1921",
+        gwt_agent::AgentId::Codex,
+    );
+    session.launch_args = vec!["resume".to_string(), "stored-session".to_string()];
+
+    assert_eq!(
+        session.schema_version,
+        gwt_agent::Session::CURRENT_SCHEMA_VERSION
+    );
+    let config = super::launch_config_from_persisted_session(&session);
+
+    assert_eq!(
+        config
+            .args
+            .iter()
+            .filter(|arg| {
+                arg.as_str() == "--config=features.default_mode_request_user_input=true"
+            })
+            .count(),
+        1,
+        "current persisted Sessions must rebuild through the canonical Codex launch contract"
+    );
+}
+
+#[test]
 fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_conversations() {
     let _env_guard = env_test_lock()
         .lock()

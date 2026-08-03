@@ -753,6 +753,17 @@ mod tests {
             "Codex preset must launch with --no-alt-screen so inline scrollback survives \
              Plan-mode input waits (regression guard for Issue #2091)"
         );
+        assert_eq!(
+            result
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "Codex preset must enable native Default-mode selection questions exactly once"
+        );
     }
 
     #[test]

@@ -758,12 +758,12 @@ impl Session {
     /// Idempotent migration helper for pre-Phase-53 session TOML files.
     /// Walks the `schema_version` forward to
     /// [`Session::CURRENT_SCHEMA_VERSION`], injecting any missing canonical
-    /// launch args (such as Codex's `--no-alt-screen`) along the way.
+    /// launch args (such as Codex's inline and selection-UI defaults) along the way.
     pub fn migrate_legacy_launch_args(&mut self) {
         if self.schema_version < 1 {
             // Schema 0 -> 1: apply canonical default args at the correct
             // runner prefix position so legacy sessions written before
-            // SPEC-1921 FR-064 pick up agent-neutral defaults (Issue #2091).
+            // SPEC-1921 FR-064 pick up canonical defaults (Issue #2091).
             normalize_launch_args(&self.agent_id, &self.launch_command, &mut self.launch_args);
             self.schema_version = 1;
         }
@@ -3241,10 +3241,10 @@ display_name = "Claude Code"
     }
 
     #[test]
-    fn migrate_legacy_launch_args_injects_no_alt_screen_for_codex() {
+    fn migrate_legacy_launch_args_injects_canonical_defaults_for_codex_exe() {
         let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
         session.schema_version = 0;
-        session.launch_command = "codex".into();
+        session.launch_command = "C:/Users/example/bin/codex.exe".into();
         session.launch_args = vec![
             "--model=gpt-5.4".to_string(),
             "resume".to_string(),
@@ -3258,6 +3258,7 @@ display_name = "Claude Code"
             session.launch_args,
             vec![
                 "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
@@ -3373,7 +3374,7 @@ display_name = "Claude Code"
     }
 
     #[test]
-    fn load_and_migrate_legacy_codex_toml_injects_no_alt_screen_into_launch_args() {
+    fn load_and_migrate_legacy_codex_toml_injects_canonical_defaults_into_launch_args() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-codex.toml");
         write_legacy_codex_session_file(
@@ -3394,10 +3395,18 @@ display_name = "Claude Code"
                 .any(|arg| arg == "--no-alt-screen"),
             "legacy Codex sessions loaded through load_and_migrate should preserve inline scrollback"
         );
+        assert!(
+            loaded
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--config=features.default_mode_request_user_input=true"),
+            "legacy Codex sessions should enable selection UI in Default mode"
+        );
         assert_eq!(
             loaded.launch_args,
             vec![
                 "--no-alt-screen".to_string(),
+                "--config=features.default_mode_request_user_input=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
