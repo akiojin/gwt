@@ -16,6 +16,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
+import { parseHTML } from "linkedom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -39,18 +41,27 @@ async function importSurfaceModule() {
   );
 }
 
-function createSurface(mod, sent, preset = "issue") {
+function createSurface(mod, sent, preset = "issue", options = {}) {
   const windowData = { id: "win-1", preset };
+  const directSend = options.sendKnowledgeSemanticSearchNow
+    || ((message) => {
+      sent.push(message);
+      return true;
+    });
   return mod.createKnowledgeKanbanSurface({
-    send: (message) => sent.push(message),
-    createNode: () => ({ appendChild() {}, classList: { add() {} } }),
-    createKnowledgeMarkdownBody: () => ({ appendChild() {} }),
-    windowMap: new Map(),
+    send: options.send || ((message) => sent.push(message)),
+    sendKnowledgeSemanticSearchNow: directSend,
+    createNode: options.createNode || (() => ({ appendChild() {}, classList: { add() {} } })),
+    createKnowledgeMarkdownBody:
+      options.createKnowledgeMarkdownBody || (() => ({ appendChild() {} })),
+    windowMap: options.windowMap || new Map(),
     workspaceWindowById: (id) => (id === "win-1" ? windowData : null),
     getWorkspaceWindows: () => [windowData],
     pendingIndexOpenTargetsByPreset: new Map(),
-    knowledgeKindForPreset: (windowPreset) =>
-      windowPreset === "issue" || windowPreset === "spec" ? windowPreset : null,
+    knowledgeKindForPreset:
+      options.knowledgeKindForPreset ||
+      ((windowPreset) =>
+        windowPreset === "issue" || windowPreset === "spec" ? "issue" : null),
     focusWindowLocally() {},
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
@@ -92,6 +103,7 @@ function detailFor(row, body) {
 }
 
 function seedListAndAuthoritativeA(surface, kind) {
+  surface.ensureKnowledgeBridgeState("win-1", kind);
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_entries",
     id: "win-1",
@@ -117,10 +129,10 @@ for (const kind of ["issue", "spec"]) {
     const mod = await importSurfaceModule();
     const sent = [];
     const surface = createSurface(mod, sent, kind);
-    const state = seedListAndAuthoritativeA(surface, kind);
+    const state = seedListAndAuthoritativeA(surface, "issue");
     assert.equal(state.detail.number, ROW_A.number);
 
-    surface.requestKnowledgeDetail("win-1", kind, ROW_B.number);
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
 
     // Same click turn — before any backend response arrives.
     assert.equal(state.selectedNumber, ROW_B.number);
@@ -132,7 +144,9 @@ for (const kind of ["issue", "spec"]) {
       "preview identity must be row B within the click turn (FR-101)",
     );
     assert.equal(state.detail.title, ROW_B.title);
+    assert.equal(state.detail.subtitle, `#${ROW_B.number}`);
     assert.equal(state.detail.state, ROW_B.state);
+    assert.equal(state.detail.phase, ROW_B.phase);
     assert.deepEqual(state.detail.labels, ROW_B.labels);
     assert.equal(
       state.detail.launch_issue_number,
@@ -156,9 +170,9 @@ for (const kind of ["issue", "spec"]) {
     const mod = await importSurfaceModule();
     const sent = [];
     const surface = createSurface(mod, sent, kind);
-    const state = seedListAndAuthoritativeA(surface, kind);
+    const state = seedListAndAuthoritativeA(surface, "issue");
 
-    surface.requestKnowledgeDetail("win-1", kind, ROW_A.number);
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_A.number);
 
     assert.equal(state.selectedNumber, ROW_A.number);
     assert.ok(
@@ -301,6 +315,71 @@ test("a request-ID-less legacy detail is fenced while a newer selection is pendi
     "a request-ID-less legacy detail is accepted only for the current number when no newer selection is pending",
   );
   assert.equal(state.detail?.number, ROW_B.number);
+});
+
+test("a request-ID-less detail is rejected after any explicit selection, even for the current number", async () => {
+  const mod = await importSurfaceModule();
+  const sent = [];
+  const surface = createSurface(mod, sent);
+  const state = seedListAndAuthoritativeA(surface, "issue");
+
+  surface.requestKnowledgeDetail("win-1", "issue", ROW_A.number);
+  const preserved = state.detail;
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_detail",
+    id: "win-1",
+    knowledge_kind: "issue",
+    detail: detailFor(ROW_A, "Uncorrelated replacement"),
+  });
+
+  assert.equal(state.detail, preserved);
+  assert.ok(
+    state.detail.sections.some((section) => section.body === "Alpha body"),
+    "selectionGeneration > 0 must reject every ID-less detail",
+  );
+});
+
+test("a refresh does not invalidate the current explicit detail request", async () => {
+  const mod = await importSurfaceModule();
+  const sent = [];
+  const surface = createSurface(mod, sent);
+  const state = seedListAndAuthoritativeA(surface, "issue");
+
+  surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+  const detailRequestId = sent.at(-1).request_id;
+  surface.requestKnowledgeBridge("win-1", "issue", true);
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_detail",
+    id: "win-1",
+    knowledge_kind: "issue",
+    request_id: detailRequestId,
+    detail: detailFor(ROW_B, "Fresh beta body"),
+  });
+
+  assert.equal(state.detail?.number, ROW_B.number);
+  assert.ok(state.detail.sections.some((section) => section.body === "Fresh beta body"));
+});
+
+test("a late load error cannot surface after a newer explicit selection", async () => {
+  const mod = await importSurfaceModule();
+  const sent = [];
+  const surface = createSurface(mod, sent);
+  const state = seedListAndAuthoritativeA(surface, "issue");
+
+  surface.requestKnowledgeBridge("win-1", "issue", true);
+  const loadRequestId = sent.at(-1).request_id;
+  surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_error",
+    id: "win-1",
+    knowledge_kind: "issue",
+    request_id: loadRequestId,
+    message: "stale refresh error",
+  });
+
+  assert.equal(state.selectedNumber, ROW_B.number);
+  assert.equal(state.detail?.number, ROW_B.number);
+  assert.equal(state.error, "", "a prior selection generation cannot surface its error");
 });
 
 // ---------------------------------------------------------------------------
@@ -505,14 +584,21 @@ test("row selection does not cancel or reset the retry window (T-951, AS-17.2)",
   await withPatchedTimersAsync(async ({ timers, fire }) => {
     const sent = [];
     const surface = createSurface(mod, sent);
-    seedListAndAuthoritativeA(surface, "issue");
+    const state = seedListAndAuthoritativeA(surface, "issue");
     const requestId = startSearch(surface, sent, { fire });
     surface.applyKnowledgeReceiveEvent(
       searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
     );
+    const retryOrdinal = state.semanticRetryIndex;
 
     surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
 
+    assert.equal(
+      state.semanticRetryIndex,
+      retryOrdinal,
+      "selecting a row must preserve the typed retry ordinal",
+    );
+    assert.equal(state.semanticRetryActive, true);
     assert.equal(
       timers.filter(
         (timer) => !timer.cleared && !timer.fired && timer.delay === 5000,
@@ -567,6 +653,171 @@ test("query change and clear invalidate the pending retry (T-952, AS-17.2)", asy
   });
 });
 
+test("SEARCH_UNAVAILABLE is the second exact typed transient code", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, {
+        semantic_retry: {
+          error_code: "SEARCH_UNAVAILABLE",
+          retryable: true,
+        },
+      }),
+    );
+    assert.equal(
+      timers.filter((timer) => !timer.cleared && !timer.fired && timer.delay === 5000).length,
+      1,
+    );
+  });
+});
+
+test("auto refresh waits for every semantic search owner before loading (T-951, AS-17.2)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ intervals }) => {
+    const originalDocument = globalThis.document;
+    const { document: domDocument } = parseHTML("<html><body></body></html>");
+    globalThis.document = domDocument;
+    try {
+      const sent = [];
+      const body = domDocument.createElement("div");
+      domDocument.body.appendChild(body);
+      const windowMap = new Map([["win-1", body]]);
+      const createNode = (tag, className, textContent = "") => {
+        const node = domDocument.createElement(tag);
+        node.className = className || "";
+        node.textContent = textContent;
+        return node;
+      };
+      const surface = createSurface(mod, sent, "issue", {
+        windowMap,
+        createNode,
+        createKnowledgeMarkdownBody: (value) =>
+          createNode("div", "knowledge-markdown", String(value || "")),
+      });
+      const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+      state.entries = [ROW_A, ROW_B];
+      state.baseEntries = [ROW_A, ROW_B];
+      state.selectedNumber = ROW_A.number;
+      state.detail = detailFor(ROW_A, "Alpha body");
+      state.refreshEnabled = true;
+
+      surface.mountKnowledgeWindow({ id: "win-1", preset: "issue" }, body);
+      assert.equal(intervals.length, 1, "mount must install one auto-refresh owner");
+      assert.equal(sent.length, 0, "the seeded surface must not need an initial load");
+
+      const ownerCases = [
+        ["semanticRetryTimer", 991],
+        ["pendingSearchTimer", 992],
+        ["inFlightSearchIntent", { generation: 1, kind: "issue", query: "alpha" }],
+        ["queuedSearchIntent", { generation: 1, kind: "issue", query: "alpha" }],
+        ["semanticRetryActive", true],
+      ];
+      for (const [field, value] of ownerCases) {
+        state[field] = value;
+        intervals[0].callback();
+        assert.equal(
+          sent.filter((message) => message.kind === "load_knowledge_bridge").length,
+          0,
+          `auto refresh must not interrupt ${field}`,
+        );
+        state[field] = field === "semanticRetryActive" ? false : null;
+      }
+
+      intervals[0].callback();
+      assert.equal(
+        sent.filter((message) => message.kind === "load_knowledge_bridge").length,
+        1,
+        "auto refresh may load only after every semantic search owner releases",
+      );
+      surface.clearKnowledgeBridgeState("win-1");
+    } finally {
+      globalThis.document = originalDocument;
+    }
+  });
+});
+
+test("A→B→A ignores the first A completion and dispatches only the latest intent", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+
+    state.query = "alpha";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+    fire((timer) => timer.delay === 250);
+    const firstA = sent.at(-1);
+
+    state.query = "beta";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+    state.query = "alpha";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(firstA.request_id, {
+        entries: [{ ...ROW_A, title: "Stale alpha" }],
+      }),
+    );
+
+    assert.notEqual(
+      state.entries[0]?.title,
+      "Stale alpha",
+      "matching request id and query are insufficient after A→B→A",
+    );
+    assert.equal(sent.length > 0, true);
+    const latestA = sent.at(-1);
+    assert.notEqual(latestA.request_id, firstA.request_id);
+    assert.equal(latestA.query, "alpha");
+    assert.equal(state.searchInFlight, true);
+  });
+});
+
+test("a forced callback from a cancelled retry generation is inert", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire, forceFire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+    const staleTimer = timers.find((timer) => timer.delay === 5000);
+
+    state.query = "beta";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+    const sentBefore = sent.length;
+    forceFire(staleTimer);
+
+    assert.equal(sent.length, sentBefore, "a cancelled callback must fail its generation fence");
+  });
+});
+
+test("changing knowledge kind invalidates an Issue retry owner", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire, forceFire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+    const staleTimer = timers.find((timer) => timer.delay === 5000);
+
+    surface.ensureKnowledgeBridgeState("win-1", "pr");
+    const sentBefore = sent.length;
+    forceFire(staleTimer);
+
+    assert.equal(sent.length, sentBefore);
+    assert.equal(state.kind, "pr");
+  });
+});
+
 test("window destroy invalidates the retry window (T-952, AS-17.2)", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async ({ timers, fire }) => {
@@ -590,6 +841,77 @@ test("window destroy invalidates the retry window (T-952, AS-17.2)", async () =>
   });
 });
 
+test("a late receive event cannot resurrect a destroyed Knowledge window", async () => {
+  const mod = await importSurfaceModule();
+  const sent = [];
+  const surface = createSurface(mod, sent);
+  seedListAndAuthoritativeA(surface, "issue");
+  surface.clearKnowledgeBridgeState("win-1");
+
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_entries",
+    id: "win-1",
+    knowledge_kind: "issue",
+    entries: [ROW_B],
+    selected_number: ROW_B.number,
+    refresh_enabled: true,
+  });
+
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+});
+
+test("a prior live window response cannot contaminate a remounted window with the same id", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    const oldRequestId = sent.at(-1).request_id;
+    surface.clearKnowledgeBridgeState("win-1");
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    const remounted = surface.knowledgeBridgeStateMap.get("win-1");
+
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_entries",
+      id: "win-1",
+      knowledge_kind: "issue",
+      request_id: oldRequestId,
+      entries: [ROW_A],
+      selected_number: ROW_A.number,
+      refresh_enabled: true,
+    });
+
+    assert.deepEqual(remounted.baseEntries, []);
+    assert.equal(remounted.loading, true);
+  });
+});
+
+test("an OPEN-to-closed send race never falls back to generic pending send", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ fire }) => {
+    const pending = [];
+    const directAttempts = [];
+    const surface = createSurface(mod, pending, "issue", {
+      send: (message) => pending.push(message),
+      sendKnowledgeSemanticSearchNow: (message) => {
+        directAttempts.push(message);
+        return false;
+      },
+    });
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    pending.length = 0;
+
+    state.query = "alpha";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+    fire((timer) => timer.delay === 250);
+
+    assert.equal(directAttempts.length, 1, "the semantic path attempted one atomic direct send");
+    assert.equal(pending.length, 0, "failed direct send must not enter the generic pending queue");
+    assert.equal(state.searchInFlight, false);
+    assert.equal(state.semanticRetryActive, true, "reconnect owns the unsent live intent");
+  });
+});
+
 test("offline retries never enter the generic pending queue; reconnect restarts at 5s (T-952)", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async ({ timers, fire }) => {
@@ -598,6 +920,11 @@ test("offline retries never enter the generic pending queue; reconnect restarts 
     const windowData = { id: "win-1", preset: "issue" };
     const surface = mod.createKnowledgeKanbanSurface({
       send: (message) => sent.push(message),
+      sendKnowledgeSemanticSearchNow: (message) => {
+        if (!online.value) return false;
+        sent.push(message);
+        return true;
+      },
       createNode: () => ({ appendChild() {}, classList: { add() {} } }),
       createKnowledgeMarkdownBody: () => ({ appendChild() {} }),
       windowMap: new Map(),
@@ -611,7 +938,6 @@ test("offline retries never enter the generic pending queue; reconnect restarts 
       openIssueLaunchWizard() {},
       visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
       launchPending: {},
-      isTransportOnline: () => online.value,
     });
     const state = seedListAndAuthoritativeA(surface, "issue");
     const requestId = startSearch(surface, sent, { fire });
@@ -656,6 +982,152 @@ test("offline retries never enter the generic pending queue; reconnect restarts 
   });
 });
 
+test("disconnect while a request is in flight restarts the same live query at 5s", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    startSearch(surface, sent, { fire });
+    assert.equal(state.searchInFlight, true);
+
+    surface.handleKnowledgeTransportChange(false);
+    surface.handleKnowledgeTransportChange(true);
+
+    assert.equal(state.searchInFlight, false);
+    assert.equal(
+      timers.filter((timer) => !timer.cleared && !timer.fired && timer.delay === 5000).length,
+      1,
+    );
+  });
+});
+
+for (const semanticRetry of [
+  { error_code: "SEARCH_FAILED", retryable: false },
+  { error_code: "SEARCH_FAILED", retryable: true },
+  { error_code: "INDEX_NOT_READY", retryable: false },
+  { error_code: "FUTURE_CODE", retryable: true },
+  { retryable: true },
+  "INDEX_NOT_READY",
+]) {
+  test(`non-transient or malformed retry directive stays silent without retry: ${JSON.stringify(semanticRetry)}`, async () => {
+    const mod = await importSurfaceModule();
+    await withPatchedTimersAsync(async ({ timers, fire }) => {
+      const sent = [];
+      const surface = createSurface(mod, sent);
+      const state = seedListAndAuthoritativeA(surface, "issue");
+      const requestId = startSearch(surface, sent, { fire });
+      surface.applyKnowledgeReceiveEvent(
+        searchResultsEvent(requestId, { semantic_retry: semanticRetry }),
+      );
+
+      assert.equal(state.error, "");
+      assert.equal(
+        timers.filter((timer) => !timer.cleared && !timer.fired && timer.delay >= 5000).length,
+        0,
+      );
+    });
+  });
+}
+
+test("PR selection retains the baseline full-render/full-view contract", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const originalDocument = globalThis.document;
+    const { document: domDocument } = parseHTML("<html><body></body></html>");
+    globalThis.document = domDocument;
+    try {
+      const sent = [];
+      const body = domDocument.createElement("div");
+      domDocument.body.appendChild(body);
+      const windowMap = new Map([["win-1", body]]);
+      const createNode = (tag, className, textContent = "") => {
+        const node = domDocument.createElement(tag);
+        node.className = className || "";
+        node.textContent = textContent;
+        return node;
+      };
+      const surface = createSurface(mod, sent, "pr", {
+        windowMap,
+        knowledgeKindForPreset: () => "pr",
+        createNode,
+        createKnowledgeMarkdownBody: (value) =>
+          createNode("div", "knowledge-markdown", String(value || "")),
+      });
+      const state = surface.ensureKnowledgeBridgeState("win-1", "pr");
+      state.entries = [ROW_A, ROW_B];
+      state.baseEntries = [ROW_A, ROW_B];
+      state.selectedNumber = ROW_A.number;
+      state.detail = detailFor(ROW_A, "Alpha PR body");
+      state.refreshEnabled = true;
+
+      surface.mountKnowledgeWindow({ id: "win-1", preset: "pr" }, body);
+      sent.length = 0;
+      const originalCards = [...body.querySelectorAll(".kanban-card")];
+      const rowB = body.querySelector(`[data-issue-number="${ROW_B.number}"]`);
+      assert.ok(rowB, "the PR fixture must render row B");
+
+      rowB.click();
+
+      assert.equal(state.selectedNumber, ROW_B.number);
+      assert.equal(state.detailLoading, true);
+      assert.equal(
+        state.selectionGeneration,
+        0,
+        "PR selection must not opt into the Issue/SPEC generation contract",
+      );
+      assert.equal(
+        state.detail?.number,
+        ROW_A.number,
+        "PR must retain its authoritative detail until the baseline full view completes",
+      );
+      assert.equal(sent.length, 1);
+      assert.deepEqual(sent[0], {
+        kind: "select_knowledge_bridge_entry",
+        id: "win-1",
+        knowledge_kind: "pr",
+        request_id: state.detailRequestId,
+        number: ROW_B.number,
+      });
+      assert.notStrictEqual(
+        body.querySelectorAll(".kanban-card")[0],
+        originalCards[0],
+        "PR selection must keep the legacy immediate full render",
+      );
+
+      const refreshedRowB = { ...ROW_B, title: "Beta PR refreshed" };
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_entries",
+        id: "win-1",
+        knowledge_kind: "pr",
+        request_id: state.detailRequestId,
+        entries: [ROW_A, refreshedRowB],
+        selected_number: ROW_B.number,
+        empty_message: "",
+        refresh_enabled: true,
+      });
+      assert.equal(
+        state.baseEntries[1]?.title,
+        refreshedRowB.title,
+        "the PR select request id must accept its legacy full-list completion",
+      );
+
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_detail",
+        id: "win-1",
+        knowledge_kind: "pr",
+        request_id: state.detailRequestId,
+        detail: detailFor(refreshedRowB, "Beta PR body"),
+      });
+      assert.equal(state.detail?.number, ROW_B.number);
+      assert.equal(state.detailLoading, false);
+      surface.clearKnowledgeBridgeState("win-1");
+    } finally {
+      globalThis.document = originalDocument;
+    }
+  });
+});
+
 test("a new query filters baseEntries locally before semantic results arrive (T-952, AS-17.7)", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async ({ fire }) => {
@@ -691,17 +1163,120 @@ test("a new query filters baseEntries locally before semantic results arrive (T-
   });
 });
 
+test("500-row selection keeps list node identity and updates the right pane within p95 50ms", async () => {
+  const mod = await importSurfaceModule();
+  const { document, window } = parseHTML(`
+    <section id="knowledge-window">
+      <button data-action="refresh-knowledge"></button>
+      <input class="knowledge-search" />
+      <button data-issue-filter="open"></button>
+      <button data-issue-filter="closed"></button>
+      <button data-issue-filter="all"></button>
+      <div class="knowledge-status"></div>
+      <div class="knowledge-list"></div>
+      <div class="knowledge-detail-pane"></div>
+    </section>
+  `);
+  const originalDocument = globalThis.document;
+  globalThis.document = document;
+  try {
+    const element = document.getElementById("knowledge-window");
+    const windowMap = new Map([["win-1", element]]);
+    const sent = [];
+    const createNode = (tagName, className = "", text = "") => {
+      const node = document.createElement(tagName);
+      if (className) node.className = className;
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      return node;
+    };
+    const surface = createSurface(mod, sent, "issue", {
+      windowMap,
+      createNode,
+      createKnowledgeMarkdownBody: () => document.createElement("div"),
+    });
+    const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+    state.entries = Array.from({ length: 500 }, (_, index) => ({
+      number: index + 1,
+      title: `Issue ${index + 1}`,
+      state: "open",
+      labels: index % 2 === 0 ? ["bug"] : ["gwt-spec"],
+      phase: "backlog",
+    }));
+    state.baseEntries = state.entries.slice();
+    state.refreshEnabled = true;
+    surface.renderKnowledgeBridge("win-1");
+
+    state.searching = true;
+    surface.renderKnowledgeBridge("win-1");
+    assert.equal(
+      element.querySelector(".knowledge-status")?.textContent,
+      "",
+      "Issue/SPEC semantic progress must not create a visible status",
+    );
+    assert.equal(
+      element.querySelector(".knowledge-status")?.classList.contains("visible"),
+      false,
+    );
+    state.searching = false;
+    surface.renderKnowledgeBridge("win-1");
+
+    const list = element.querySelector(".knowledge-list");
+    const originalRows = [...list.children];
+    assert.equal(originalRows.length, 500);
+    const samples = [];
+    for (let index = 0; index < 40; index += 1) {
+      const target = originalRows[(index * 13) % originalRows.length];
+      const started = performance.now();
+      target.dispatchEvent(new window.Event("click", { bubbles: true }));
+      samples.push(performance.now() - started);
+      assert.equal(
+        element.querySelector(".knowledge-detail-title")?.textContent,
+        `Issue ${((index * 13) % originalRows.length) + 1}`,
+        "the clicked identity must be visible in the same synchronous turn",
+      );
+      assert.equal(
+        element.querySelector(".knowledge-detail-subtitle")?.textContent,
+        `#${((index * 13) % originalRows.length) + 1}`,
+      );
+      assert.ok(element.querySelector(".knowledge-detail-empty")?.textContent.includes("Loading detail"));
+    }
+
+    assert.deepEqual(
+      [...list.children],
+      originalRows,
+      "selection must not replace or reorder any list row node",
+    );
+    samples.sort((left, right) => left - right);
+    const p95 = samples[Math.ceil(samples.length * 0.95) - 1];
+    assert.ok(p95 < 50, `selection p95 ${p95.toFixed(2)}ms must stay below 50ms`);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 function withPatchedTimersAsync(run) {
   const timers = [];
+  const intervals = [];
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
   globalThis.setTimeout = (callback, delay) => {
     timers.push({ callback, delay, cleared: false, fired: false });
-    return timers.length - 1;
+    return timers.length;
   };
   globalThis.clearTimeout = (id) => {
-    if (typeof id === "number" && timers[id]) {
-      timers[id].cleared = true;
+    if (typeof id === "number" && timers[id - 1]) {
+      timers[id - 1].cleared = true;
+    }
+  };
+  globalThis.setInterval = (callback, delay) => {
+    intervals.push({ callback, delay, cleared: false });
+    return intervals.length;
+  };
+  globalThis.clearInterval = (id) => {
+    if (typeof id === "number" && intervals[id - 1]) {
+      intervals[id - 1].cleared = true;
     }
   };
   const fire = (predicate) => {
@@ -712,11 +1287,18 @@ function withPatchedTimersAsync(run) {
     timer.fired = true;
     timer.callback();
   };
+  const forceFire = (timer) => {
+    assert.ok(timer, "expected a timer callback to force-fire");
+    timer.fired = true;
+    timer.callback();
+  };
   const finish = () => {
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
   };
-  return Promise.resolve(run({ timers, fire })).finally(finish);
+  return Promise.resolve(run({ timers, intervals, fire, forceFire })).finally(finish);
 }
 
 function withPatchedTimers(run) {
@@ -725,11 +1307,11 @@ function withPatchedTimers(run) {
   const originalClearTimeout = globalThis.clearTimeout;
   globalThis.setTimeout = (callback, delay) => {
     timers.push({ callback, delay, cleared: false, fired: false });
-    return timers.length - 1;
+    return timers.length;
   };
   globalThis.clearTimeout = (id) => {
-    if (typeof id === "number" && timers[id]) {
-      timers[id].cleared = true;
+    if (typeof id === "number" && timers[id - 1]) {
+      timers[id - 1].cleared = true;
     }
   };
   const fire = (predicate) => {

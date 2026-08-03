@@ -28,6 +28,10 @@ import { createFocusTrap } from "/focus-trap.js";
 
 export function createKnowledgeKanbanSurface({
   send,
+  // Semantic search must never use the reconnect queue. This dependency
+  // performs one atomic OPEN check + socket.send and reports whether the
+  // frame was written; a false result is owned by the retry lifecycle.
+  sendKnowledgeSemanticSearchNow = () => false,
   createNode,
   createKnowledgeMarkdownBody,
   windowMap,
@@ -41,9 +45,6 @@ export function createKnowledgeKanbanSurface({
   openIssueLaunchWizard,
   visibleBounds,
   launchPending,
-  // SPEC #3170 FR-099: transport probe so offline semantic retries are
-  // skipped instead of entering the generic pending WebSocket queue.
-  isTransportOnline = () => true,
 }) {
       const knowledgeBridgeStateMap = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
@@ -181,7 +182,7 @@ export function createKnowledgeKanbanSurface({
       function ensureKnowledgeBridgeState(windowId, knowledgeKind) {
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
-            kind: knowledgeKind,
+            kind: normalizeKnowledgeKind(knowledgeKind),
             entries: [],
             baseEntries: [],
             selectedNumber: null,
@@ -196,6 +197,12 @@ export function createKnowledgeKanbanSurface({
             semanticRetryIndex: 0,
             semanticRetryGeneration: 0,
             semanticRetryActive: false,
+            semanticRetryTyped: false,
+            searchGeneration: 0,
+            searchIntentKind: normalizeKnowledgeKind(knowledgeKind),
+            searchIntentQuery: "",
+            inFlightSearchIntent: null,
+            queuedSearchIntent: null,
             detail: null,
             query: "",
             loading: false,
@@ -204,7 +211,12 @@ export function createKnowledgeKanbanSurface({
             detailLoading: false,
             pendingSearchTimer: null,
             loadRequestId: 0,
+            ownedLoadRequestIds: new Set(),
+            loadSelectionGeneration: 0,
+            loadSelectedNumber: null,
             detailRequestId: 0,
+            detailRequestSelectionGeneration: 0,
+            detailRequestNumber: null,
             searchRequestId: 0,
             inFlightSearchRequestId: 0,
             searchInFlight: false,
@@ -230,7 +242,11 @@ export function createKnowledgeKanbanSurface({
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
-        state.kind = knowledgeKind || state.kind;
+        const nextKind = normalizeKnowledgeKind(knowledgeKind || state.kind);
+        if (state.kind && nextKind && state.kind !== nextKind) {
+          invalidateKnowledgeSearchOwner(state, nextKind, state.query.trim());
+        }
+        state.kind = nextKind || state.kind;
         if (state.hideDone === undefined) {
           state.hideDone = readKanbanHideDonePreference();
         }
@@ -248,17 +264,25 @@ export function createKnowledgeKanbanSurface({
           state.loading ||
           state.refreshing ||
           state.searching ||
-          state.searchInFlight
+          state.searchInFlight ||
+          state.pendingSearchTimer !== null ||
+          state.semanticRetryTimer !== null ||
+          Boolean(state.inFlightSearchIntent) ||
+          Boolean(state.queuedSearchIntent) ||
+          state.semanticRetryActive === true
         );
       }
 
       function ensureKnowledgeAutoRefresh(windowId, knowledgeKind) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        if (state.autoRefreshTimer) {
+        if (state.autoRefreshTimer !== null) {
           return;
         }
         state.autoRefreshTimer = setInterval(() => {
-          if (!windowMap.get(windowId)) {
+          if (
+            knowledgeBridgeStateMap.get(windowId) !== state ||
+            !windowMap.get(windowId)
+          ) {
             clearInterval(state.autoRefreshTimer);
             state.autoRefreshTimer = null;
             return;
@@ -294,7 +318,7 @@ export function createKnowledgeKanbanSurface({
 
       function clearKnowledgeBridgeState(windowId) {
         const state = knowledgeBridgeStateMap.get(windowId);
-        if (state?.pendingSearchTimer) {
+        if (state?.pendingSearchTimer !== null && state?.pendingSearchTimer !== undefined) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
@@ -302,17 +326,24 @@ export function createKnowledgeKanbanSurface({
         invalidateKnowledgeSemanticRetry(state);
         if (state) {
           state.queuedSearchQuery = "";
+          state.queuedSearchIntent = null;
+          state.inFlightSearchIntent = null;
+          state.searchGeneration = (state.searchGeneration || 0) + 1;
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
           state.queuedLoadRefresh = false;
           state.loadRecoveryRetryCount = 0;
-          if (state.loadRecoveryTimer) {
+          if (state.loadRecoveryTimer !== null) {
             clearTimeout(state.loadRecoveryTimer);
             state.loadRecoveryTimer = null;
           }
           state.pendingPhaseUpdates?.clear();
           state.dndSnapshot = null;
+          if (state.autoRefreshTimer !== null) {
+            clearInterval(state.autoRefreshTimer);
+            state.autoRefreshTimer = null;
+          }
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
@@ -325,7 +356,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeLoadRecoveryTimer(state) {
-        if (!state.loadRecoveryTimer) {
+        if (state.loadRecoveryTimer === null) {
           return;
         }
         clearTimeout(state.loadRecoveryTimer);
@@ -337,7 +368,10 @@ export function createKnowledgeKanbanSurface({
         clearKnowledgeLoadRecoveryTimer(state);
         state.loadRecoveryTimer = setTimeout(() => {
           state.loadRecoveryTimer = null;
-          if (!workspaceWindowById(windowId)) {
+          if (
+            knowledgeBridgeStateMap.get(windowId) !== state ||
+            !workspaceWindowById(windowId)
+          ) {
             return;
           }
           if (
@@ -392,21 +426,24 @@ export function createKnowledgeKanbanSurface({
             return;
           }
         }
-        if (state.pendingSearchTimer) {
+        if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
-        state.detailRequestId = 0;
+        state.ownedLoadRequestIds.add(requestId);
+        while (state.ownedLoadRequestIds.size > 4) {
+          state.ownedLoadRequestIds.delete(
+            state.ownedLoadRequestIds.values().next().value,
+          );
+        }
+        state.loadSelectionGeneration = state.selectionGeneration;
+        state.loadSelectedNumber = state.selectedNumber;
         state.loading = true;
         state.refreshing = Boolean(refresh);
         state.searching = false;
-        state.searchInFlight = false;
-        state.inFlightSearchRequestId = 0;
-        state.queuedSearchQuery = "";
         state.queuedLoadRefresh = false;
-        state.searchRequestId += 1;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
         send({
@@ -421,7 +458,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function scheduleKnowledgeRelatedWorkRefresh() {
-        if (relatedWorkRefreshTimer) {
+        if (relatedWorkRefreshTimer !== null) {
           clearTimeout(relatedWorkRefreshTimer);
         }
         relatedWorkRefreshTimer = setTimeout(() => {
@@ -472,6 +509,7 @@ export function createKnowledgeKanbanSurface({
           : [];
         state.emptyMessage = state.baseEmptyMessage || "";
         if (
+          state.selectionGeneration === 0 &&
           state.selectedNumber &&
           !state.entries.some((entry) => entry.number === state.selectedNumber)
         ) {
@@ -493,16 +531,54 @@ export function createKnowledgeKanbanSurface({
       }
 
       function knowledgeDetailRequestMatches(state, event) {
-        if (!event.request_id) {
-          // FR-101: a request-ID-less legacy detail is accepted only for the
-          // currently selected number — it can never satisfy (or overwrite)
-          // a newer explicit selection of a different row.
-          return event.detail?.number === state.selectedNumber;
+        if (normalizeKnowledgeKind(state.kind) === "pr") {
+          if (!event.request_id) {
+            return event.detail?.number === state.selectedNumber;
+          }
+          return (
+            event.request_id === state.loadRequestId ||
+            event.request_id === state.detailRequestId
+          );
         }
-        return (
-          event.request_id === state.loadRequestId ||
-          event.request_id === state.detailRequestId
-        );
+        if (!event.request_id) {
+          // ID-less compatibility is restricted to generation zero. Once a
+          // user has selected anything explicitly, identity cannot be proven
+          // even if an A→B→A sequence happens to end on the same number.
+          return (
+            state.selectionGeneration === 0 &&
+            event.detail?.number === state.selectedNumber
+          );
+        }
+        if (event.request_id === state.detailRequestId) {
+          return (
+            state.detailRequestSelectionGeneration === state.selectionGeneration &&
+            state.detailRequestNumber === state.selectedNumber &&
+            event.detail?.number === state.selectedNumber
+          );
+        }
+        if (event.request_id === state.loadRequestId) {
+          if (state.loadSelectionGeneration !== state.selectionGeneration) {
+            return false;
+          }
+          if (state.selectionGeneration === 0 && state.loadSelectedNumber === null) {
+            return event.detail?.number === state.selectedNumber;
+          }
+          return (
+            state.loadSelectedNumber === state.selectedNumber &&
+            event.detail?.number === state.selectedNumber
+          );
+        }
+        return false;
+      }
+
+      function normalizeKnowledgeKind(value) {
+        return typeof value === "string" ? value.trim().toLowerCase() : "";
+      }
+
+      function isSilentSemanticKind(kind) {
+        // Both Issue and SPEC presets normalize to the backend `issue` kind.
+        // PR intentionally retains its pre-SPEC-3170 behavior.
+        return normalizeKnowledgeKind(kind) === "issue";
       }
 
       // SPEC #3170 FR-099: fixed silent retry ladder for typed transient
@@ -513,17 +589,65 @@ export function createKnowledgeKanbanSurface({
         if (!state) {
           return;
         }
-        if (state.semanticRetryTimer) {
+        if (state.semanticRetryTimer !== null) {
           clearTimeout(state.semanticRetryTimer);
           state.semanticRetryTimer = null;
         }
         state.semanticRetryIndex = 0;
         state.semanticRetryActive = false;
+        state.semanticRetryTyped = false;
         state.semanticRetryGeneration = (state.semanticRetryGeneration || 0) + 1;
       }
 
+      function invalidateKnowledgeSearchOwner(state, nextKind, nextQuery) {
+        if (state.pendingSearchTimer !== null) {
+          clearTimeout(state.pendingSearchTimer);
+          state.pendingSearchTimer = null;
+        }
+        invalidateKnowledgeSemanticRetry(state);
+        state.searchGeneration = (state.searchGeneration || 0) + 1;
+        state.searchIntentKind = normalizeKnowledgeKind(nextKind);
+        state.searchIntentQuery = String(nextQuery || "").trim();
+        state.queuedSearchIntent = state.inFlightSearchIntent && state.searchIntentQuery
+          ? {
+              generation: state.searchGeneration,
+              kind: state.searchIntentKind,
+              query: state.searchIntentQuery,
+              selectionGeneration: state.selectionGeneration,
+            }
+          : null;
+      }
+
+      function updateKnowledgeSearchIntent(state, knowledgeKind, query) {
+        const kind = normalizeKnowledgeKind(knowledgeKind || state.kind);
+        const normalizedQuery = String(query || "").trim();
+        if (
+          state.searchIntentKind !== kind ||
+          state.searchIntentQuery !== normalizedQuery
+        ) {
+          invalidateKnowledgeSearchOwner(state, kind, normalizedQuery);
+        }
+        return {
+          generation: state.searchGeneration,
+          kind,
+          query: normalizedQuery,
+          selectionGeneration: state.selectionGeneration,
+        };
+      }
+
+      function knowledgeSearchIntentIsCurrent(state, intent) {
+        return Boolean(
+          intent &&
+          intent.generation === state.searchGeneration &&
+          intent.kind === normalizeKnowledgeKind(state.kind) &&
+          intent.kind === state.searchIntentKind &&
+          intent.query === state.query.trim() &&
+          intent.query === state.searchIntentQuery,
+        );
+      }
+
       function scheduleKnowledgeSemanticRetry(windowId, knowledgeKind, state) {
-        if (state.semanticRetryTimer) {
+        if (state.semanticRetryTimer !== null) {
           clearTimeout(state.semanticRetryTimer);
           state.semanticRetryTimer = null;
         }
@@ -536,31 +660,39 @@ export function createKnowledgeKanbanSurface({
           ];
         state.semanticRetryIndex += 1;
         state.semanticRetryActive = true;
-        const generation = state.semanticRetryGeneration || 0;
+        const retryGeneration = state.semanticRetryGeneration || 0;
+        const intent = updateKnowledgeSearchIntent(
+          state,
+          knowledgeKind || state.kind,
+          state.query,
+        );
         state.semanticRetryTimer = setTimeout(() => {
           state.semanticRetryTimer = null;
-          if (generation !== (state.semanticRetryGeneration || 0)) {
+          const liveState = knowledgeBridgeStateMap.get(windowId);
+          if (liveState !== state) {
+            return;
+          }
+          if (retryGeneration !== (state.semanticRetryGeneration || 0)) {
             // Stale timer from an invalidated retry window (AS-17.2).
             return;
           }
-          if (!workspaceWindowById(windowId)) {
+          if (!workspaceWindowById(windowId) || !knowledgeSearchIntentIsCurrent(state, intent)) {
             return;
           }
-          const query = state.query.trim();
-          if (!query) {
-            return;
-          }
-          if (!isTransportOnline()) {
-            // FR-099: offline retries never enter the pending queue; the
-            // reconnect hook restarts the ladder at 5 seconds.
-            return;
-          }
-          if (state.searchInFlight) {
+          const latestIntent = {
+            ...intent,
+            selectionGeneration: state.selectionGeneration,
+          };
+          if (state.inFlightSearchIntent) {
             // One in-flight attempt, one latest queued intent.
-            state.queuedSearchQuery = query;
+            state.queuedSearchIntent = latestIntent;
+            state.queuedSearchQuery = latestIntent.query;
             return;
           }
-          sendKnowledgeSemanticSearch(windowId, knowledgeKind || state.kind, query);
+          const sentNow = sendKnowledgeSemanticSearch(windowId, latestIntent);
+          if (!sentNow && state.semanticRetryTyped === true) {
+            scheduleKnowledgeSemanticRetry(windowId, latestIntent.kind, state);
+          }
         }, delay);
       }
 
@@ -568,12 +700,36 @@ export function createKnowledgeKanbanSurface({
       // reconnect restarts a degraded still-open window/query at 5 seconds.
       function handleKnowledgeTransportChange(online) {
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (!isSilentSemanticKind(state.kind)) {
+            continue;
+          }
           if (!online) {
-            const wasActive = state.semanticRetryActive;
+            const query = state.query.trim();
+            const wasActive = Boolean(query);
+            const wasTyped = state.semanticRetryTyped === true;
+            if (state.pendingSearchTimer !== null) {
+              clearTimeout(state.pendingSearchTimer);
+              state.pendingSearchTimer = null;
+            }
             invalidateKnowledgeSemanticRetry(state);
             state.semanticRetryActive = wasActive;
+            state.semanticRetryTyped = wasTyped;
+            state.searchGeneration = (state.searchGeneration || 0) + 1;
+            state.searchIntentKind = normalizeKnowledgeKind(state.kind);
+            state.searchIntentQuery = query;
+            state.queuedSearchIntent = query
+              ? {
+                  generation: state.searchGeneration,
+                  kind: state.searchIntentKind,
+                  query,
+                  selectionGeneration: state.selectionGeneration,
+                }
+              : null;
+            state.queuedSearchQuery = query;
+            state.inFlightSearchIntent = null;
             state.searchInFlight = false;
             state.inFlightSearchRequestId = 0;
+            state.searching = false;
             continue;
           }
           if (!state.semanticRetryActive) {
@@ -590,41 +746,81 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
-      function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
-        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        const effectiveKind = knowledgeKind || state.kind;
+      function sendKnowledgeSemanticSearch(windowId, intent) {
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (
+          !state ||
+          !workspaceWindowById(windowId) ||
+          state.inFlightSearchIntent ||
+          !knowledgeSearchIntentIsCurrent(state, intent)
+        ) {
+          return false;
+        }
         const requestId = nextKnowledgeSearchRequestId++;
+        const message = {
+          kind: "search_knowledge_bridge",
+          id: windowId,
+          knowledge_kind: intent.kind,
+          query: intent.query,
+          request_id: requestId,
+          selected_number: state.selectedNumber ?? null,
+        };
         state.searchRequestId = requestId;
         state.inFlightSearchRequestId = requestId;
         state.searchInFlight = true;
         state.searching = true;
-        send({
-          kind: "search_knowledge_bridge",
-          id: windowId,
-          knowledge_kind: effectiveKind,
-          query,
-          request_id: requestId,
-          selected_number: state.selectedNumber ?? null,
-        });
+        state.inFlightSearchIntent = { ...intent, requestId };
+        const sentNow = isSilentSemanticKind(intent.kind)
+          ? sendKnowledgeSemanticSearchNow(message)
+          : (send(message), true);
+        if (!sentNow) {
+          if (state.inFlightSearchIntent?.requestId === requestId) {
+            state.searching = false;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            state.inFlightSearchIntent = null;
+          }
+          state.semanticRetryActive = true;
+          return false;
+        }
+        if (
+          state.queuedSearchIntent?.generation === intent.generation &&
+          state.queuedSearchIntent?.kind === intent.kind &&
+          state.queuedSearchIntent?.query === intent.query
+        ) {
+          state.queuedSearchIntent = null;
+          state.queuedSearchQuery = "";
+        }
+        return true;
+      }
+
+      function dispatchLatestKnowledgeSearchIntent(windowId, state) {
+        const nextIntent = state.queuedSearchIntent;
+        state.queuedSearchIntent = null;
+        state.queuedSearchQuery = "";
+        if (knowledgeSearchIntentIsCurrent(state, nextIntent)) {
+          return sendKnowledgeSemanticSearch(windowId, {
+            ...nextIntent,
+            selectionGeneration: state.selectionGeneration,
+          });
+        }
+        state.searching = false;
+        return false;
       }
 
       function scheduleKnowledgeSearch(windowId, knowledgeKind) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        if (state.pendingSearchTimer) {
+        if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
-        // AS-17.2: a query change or clear invalidates the silent semantic
-        // retry window owned by the previous generation.
-        invalidateKnowledgeSemanticRetry(state);
         const query = state.query.trim();
+        const intent = updateKnowledgeSearchIntent(state, knowledgeKind, query);
         state.error = "";
         if (!query) {
           state.searching = false;
-          state.searchInFlight = false;
-          state.inFlightSearchRequestId = 0;
           state.queuedSearchQuery = "";
-          state.searchRequestId += 1;
+          state.queuedSearchIntent = null;
           restoreKnowledgeBaseEntries(state);
           renderKnowledgeBridge(windowId);
           return;
@@ -638,7 +834,18 @@ export function createKnowledgeKanbanSurface({
           renderKnowledgeBridge(windowId);
           return;
         }
-        if (state.searchInFlight) {
+        if (
+          isSilentSemanticKind(intent.kind) &&
+          state.semanticRetryActive &&
+          state.semanticRetryTimer !== null &&
+          !state.inFlightSearchIntent
+        ) {
+          state.searching = false;
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        if (state.inFlightSearchIntent) {
+          state.queuedSearchIntent = intent;
           state.queuedSearchQuery = query;
           state.searching = true;
           renderKnowledgeBridge(windowId);
@@ -647,61 +854,91 @@ export function createKnowledgeKanbanSurface({
         state.searching = true;
         state.pendingSearchTimer = setTimeout(() => {
           state.pendingSearchTimer = null;
-          if (!workspaceWindowById(windowId)) {
+          const liveState = knowledgeBridgeStateMap.get(windowId);
+          if (liveState !== state || !workspaceWindowById(windowId)) {
             return;
           }
-          const latestQuery = state.query.trim();
-          if (!latestQuery) {
+          if (!knowledgeSearchIntentIsCurrent(state, intent)) {
+            return;
+          }
+          if (!intent.query) {
             state.searching = false;
             restoreKnowledgeBaseEntries(state);
             renderKnowledgeBridge(windowId);
             return;
           }
-          if (state.searchInFlight) {
-            state.queuedSearchQuery = latestQuery;
+          if (state.inFlightSearchIntent) {
+            state.queuedSearchIntent = {
+              ...intent,
+              selectionGeneration: state.selectionGeneration,
+            };
+            state.queuedSearchQuery = intent.query;
             renderKnowledgeBridge(windowId);
             return;
           }
-          sendKnowledgeSemanticSearch(windowId, knowledgeKind, latestQuery);
+          sendKnowledgeSemanticSearch(windowId, {
+            ...intent,
+            selectionGeneration: state.selectionGeneration,
+          });
         }, 250);
         renderKnowledgeBridge(windowId);
       }
 
-      function requestKnowledgeDetail(windowId, knowledgeKind, number) {
+      function dispatchKnowledgeDetailRequest(
+        windowId,
+        knowledgeKind,
+        number,
+        { explicit = false } = {},
+      ) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        // SPEC #3170 FR-101 (T-950): an explicit selection is a local state
-        // transition first — bump the independent selection generation and
-        // materialize the row's preview before any detail I/O is sent.
-        state.selectionGeneration = (state.selectionGeneration || 0) + 1;
-        state.selectedNumber = number;
-        const findRow = (rows) =>
-          Array.isArray(rows)
-            ? rows.find((entry) => entry && entry.number === number)
-            : null;
-        const row = findRow(state.entries) || findRow(state.baseEntries) || null;
-        const authoritative = state.detail && state.detail.number === number;
-        if (!authoritative) {
-          // The previous row's body / related work / Launch action must
-          // disappear in the same turn; without a resolvable preview the old
-          // detail is cleared rather than shown against the new number.
-          state.detail = row
-            ? {
-                number: row.number,
-                title: row.title || "",
-                subtitle: "",
-                state: row.state || "",
-                labels: Array.isArray(row.labels) ? row.labels.slice() : [],
-                sections: [],
-                launch_issue_number: row.number,
-                related_works: [],
-              }
-            : null;
+        const previousNumber = state.selectedNumber;
+        const prBaseline = normalizeKnowledgeKind(state.kind) === "pr";
+        if (explicit) {
+          state.selectedNumber = number;
+          if (!prBaseline) {
+            // Issue/SPEC selection is a local transition before any I/O.
+            state.selectionGeneration = (state.selectionGeneration || 0) + 1;
+            state.error = "";
+            const findRow = (rows) =>
+              Array.isArray(rows)
+                ? rows.find((entry) => entry && entry.number === number)
+                : null;
+            const row = findRow(state.entries) || findRow(state.baseEntries) || null;
+            const authoritative = state.detail && state.detail.number === number;
+            if (!authoritative) {
+              state.detail = row
+                ? {
+                    number: row.number,
+                    title: row.title || "",
+                    subtitle: `#${row.number}`,
+                    state: row.state || "",
+                    phase: row.phase ?? null,
+                    labels: Array.isArray(row.labels) ? row.labels.slice() : [],
+                    sections: [],
+                    launch_issue_number: row.number,
+                    related_works: [],
+                  }
+                : null;
+            }
+          }
+        } else if (number !== state.selectedNumber) {
+          return false;
         }
         state.detailLoading = true;
         const requestId = nextKnowledgeLoadRequestId++;
         state.detailRequestId = requestId;
+        if (!prBaseline) {
+          state.detailRequestSelectionGeneration = state.selectionGeneration;
+          state.detailRequestNumber = number;
+        }
         const effectiveKind = knowledgeKind || state.kind;
-        renderKnowledgeBridge(windowId);
+        if (prBaseline) {
+          renderKnowledgeBridge(windowId);
+        } else if (explicit) {
+          renderKnowledgeSelection(windowId, state, previousNumber);
+        } else {
+          renderKnowledgeDetailOnly(windowId, state);
+        }
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
@@ -709,6 +946,16 @@ export function createKnowledgeKanbanSurface({
           request_id: requestId,
           number,
         });
+        return true;
+      }
+
+      function requestKnowledgeDetail(windowId, knowledgeKind, number) {
+        return dispatchKnowledgeDetailRequest(
+          windowId,
+          knowledgeKind,
+          number,
+          { explicit: true },
+        );
       }
 
       // SPEC-2017 US-8 — push a Kanban phase change to the backend.
@@ -1213,7 +1460,11 @@ export function createKnowledgeKanbanSurface({
       }
 
       function filteredIssueEntries(state) {
-        return filteredKnowledgeEntries(state).filter((entry) =>
+        // `state.entries` is already the immediate local filter while a
+        // request is pending and becomes the authoritative semantic result
+        // set on completion. Reapplying substring filtering here would hide
+        // valid semantic matches whose wording differs from the query.
+        return (Array.isArray(state.entries) ? state.entries : []).filter((entry) =>
           issueEntryMatchesStateFilter(entry, state.issueStateFilter || "open"),
         );
       }
@@ -1382,7 +1633,6 @@ export function createKnowledgeKanbanSurface({
           // always request detail (cheap; cache-backed) so selecting the
           // same card still pulls live comment / linked-branch updates.
           requestKnowledgeDetail(windowId, state.kind, entry.number);
-          renderKnowledgeBridge(windowId);
         });
 
         // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) and closed
@@ -1499,6 +1749,85 @@ export function createKnowledgeKanbanSurface({
         detailPane.appendChild(scroll);
       }
 
+      function renderKnowledgeDetailOnly(windowId, state) {
+        const element = windowMap.get(windowId);
+        const detailPane = element?.querySelector(".knowledge-detail-pane");
+        if (!detailPane) {
+          return;
+        }
+        renderKnowledgeDetailPane(windowId, state, detailPane);
+      }
+
+      function renderKnowledgeSelection(windowId, state, previousNumber) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const updateNode = (number, selected) => {
+          if (number === null || number === undefined) {
+            return;
+          }
+          for (const node of element.querySelectorAll(
+            `[data-issue-number="${Number(number)}"]`,
+          )) {
+            node.classList.toggle(
+              "selected",
+              selected && node.classList.contains("knowledge-row"),
+            );
+            node.classList.toggle(
+              "is-selected",
+              selected && node.classList.contains("kanban-card"),
+            );
+            if (selected) {
+              node.setAttribute("aria-current", "true");
+            } else {
+              node.removeAttribute("aria-current");
+            }
+          }
+        };
+        updateNode(previousNumber, false);
+        updateNode(state.selectedNumber, true);
+        renderKnowledgeStatusOnly(windowId, state);
+        renderKnowledgeDetailOnly(windowId, state);
+      }
+
+      function renderKnowledgeStatusOnly(windowId, state) {
+        const element = windowMap.get(windowId);
+        const status = element?.querySelector(".knowledge-status");
+        if (!status) {
+          return;
+        }
+        const issueSurface = isSilentSemanticKind(state.kind);
+        status.className = "knowledge-status";
+        status.textContent = "";
+        if (state.error) {
+          status.classList.add("visible", "error");
+          status.textContent = state.error;
+        } else if (!issueSurface && state.searching) {
+          status.classList.add("visible", "info");
+          status.textContent = "Searching semantic index";
+        } else if (state.loading && state.entries.length > 0) {
+          status.classList.add("visible", "info");
+          status.textContent = state.refreshing
+            ? issueSurface
+              ? "Refreshing cached work items"
+              : "Refreshing cached knowledge"
+            : issueSurface
+              ? "Loading cache-backed work items"
+              : "Loading cache-backed data";
+        } else if (state.loading && state.entries.length === 0) {
+          status.classList.add("visible", "info");
+          status.textContent = issueSurface
+            ? "Loading cache-backed work items"
+            : "Loading cache-backed data";
+        } else if (state.entries.length === 0 && !state.searching) {
+          status.classList.add("visible", "info");
+          status.textContent = state.emptyMessage || (issueSurface
+            ? "No cached work items"
+            : "No cached items");
+        }
+      }
+
       function renderIssueRow(windowId, state, entry) {
         const row = createNode("button", "knowledge-row");
         row.type = "button";
@@ -1556,7 +1885,6 @@ export function createKnowledgeKanbanSurface({
 
         row.addEventListener("click", () => {
           requestKnowledgeDetail(windowId, state.kind, entry.number);
-          renderKnowledgeBridge(windowId);
         });
         return row;
       }
@@ -1580,23 +1908,7 @@ export function createKnowledgeKanbanSurface({
           button.setAttribute("aria-pressed", selected ? "true" : "false");
         }
 
-        status.className = "knowledge-status";
-        status.textContent = "";
-        if (state.error) {
-          status.classList.add("visible", "error");
-          status.textContent = state.error;
-        } else if (state.loading && state.entries.length > 0) {
-          status.classList.add("visible", "info");
-          status.textContent = state.refreshing
-            ? "Refreshing cached work items"
-            : "Loading cache-backed work items";
-        } else if (state.loading && state.entries.length === 0) {
-          status.classList.add("visible", "info");
-          status.textContent = "Loading cache-backed work items";
-        } else if (state.entries.length === 0 && !state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = state.emptyMessage || "No cached work items";
-        }
+        renderKnowledgeStatusOnly(windowId, state);
 
         list.innerHTML = "";
         const visibleEntries = filteredIssueEntries(state);
@@ -1646,23 +1958,7 @@ export function createKnowledgeKanbanSurface({
         }
         board.dataset.hideDone = state.hideDone === true ? "true" : "false";
 
-        status.className = "knowledge-status";
-        status.textContent = "";
-        if (state.error) {
-          status.classList.add("visible", "error");
-          status.textContent = state.error;
-        } else if (state.loading && state.entries.length > 0) {
-          status.classList.add("visible", "info");
-          status.textContent = state.refreshing
-            ? "Refreshing cached knowledge"
-            : "Loading cache-backed data";
-        } else if (state.loading && state.entries.length === 0) {
-          status.classList.add("visible", "info");
-          status.textContent = "Loading cache-backed data";
-        } else if (state.entries.length === 0 && !state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = state.emptyMessage || "No cached items";
-        }
+        renderKnowledgeStatusOnly(windowId, state);
 
         // SPEC-2017 — Kanban grouping. Each entry routes to a single
         // column: closed Issues land in "done" regardless of phase
@@ -1911,10 +2207,26 @@ export function createKnowledgeKanbanSurface({
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
           case "knowledge_entries": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (
+              !state ||
+              normalizeKnowledgeKind(event.knowledge_kind) !==
+                normalizeKnowledgeKind(state.kind)
+            ) {
+              break;
+            }
+            const prSelectionCompletion = Boolean(
+              normalizeKnowledgeKind(state.kind) === "pr" &&
+              event.request_id &&
+              event.request_id === state.detailRequestId,
             );
+            if (
+              event.request_id &&
+              !state.ownedLoadRequestIds.has(event.request_id) &&
+              !prSelectionCompletion
+            ) {
+              break;
+            }
             // Issue #3297: a response that lost the race against the 5s
             // recovery timer carries a superseded request_id, but while the
             // window still has no data it is strictly better than the empty
@@ -1922,7 +2234,8 @@ export function createKnowledgeKanbanSurface({
             if (
               event.request_id &&
               event.request_id !== state.loadRequestId &&
-              !knowledgeEntriesAreEmpty(state)
+              !knowledgeEntriesAreEmpty(state) &&
+              !prSelectionCompletion
             ) {
               break;
             }
@@ -1940,7 +2253,11 @@ export function createKnowledgeKanbanSurface({
             }
             // FR-101: an initial-load / list completion may refresh rows
             // but must never move an explicit selection.
-            if (state.selectionGeneration > 0) {
+            if (
+              state.selectionGeneration > 0 ||
+              (event.request_id === state.loadRequestId &&
+                state.loadSelectionGeneration !== state.selectionGeneration)
+            ) {
               // keep state.selectedNumber untouched
             } else {
               state.selectedNumber = keepSelectedNumber
@@ -1964,93 +2281,82 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_search_results": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
-            );
-            const isInFlightResponse =
-              event.request_id === state.inFlightSearchRequestId;
-            if (isInFlightResponse) {
-              state.searchInFlight = false;
-              state.inFlightSearchRequestId = 0;
-            }
-            if (
-              event.request_id !== state.searchRequestId ||
-              event.query !== state.query.trim()
-            ) {
-              const nextQuery = state.queuedSearchQuery || state.query.trim();
-              state.queuedSearchQuery = "";
-              if (isInFlightResponse && nextQuery) {
-                scheduleKnowledgeSearch(
-                  event.id,
-                  event.knowledge_kind,
-                );
-              }
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state) {
               break;
             }
+            const activeIntent = state.inFlightSearchIntent;
+            if (!activeIntent || event.request_id !== activeIntent.requestId) {
+              break;
+            }
+            state.inFlightSearchIntent = null;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            const responseMatchesIntent =
+              normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+              String(event.query || "").trim() === activeIntent.query &&
+              knowledgeSearchIntentIsCurrent(state, activeIntent);
+            if (!responseMatchesIntent) {
+              dispatchLatestKnowledgeSearchIntent(event.id, state);
+              break;
+            }
+            state.queuedSearchIntent = null;
+            state.queuedSearchQuery = "";
+
             state.entries = event.entries || [];
-            // FR-101: a search completion updates its own row snapshot but
-            // must never move a newer explicit selection.
-            if (!(state.selectionGeneration > 0)) {
+            const selectionIsCurrent =
+              activeIntent.selectionGeneration === state.selectionGeneration;
+            if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.selectedNumber = event.selected_number ?? null;
             }
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.error = "";
-            const nextQuery = state.queuedSearchQuery;
-            state.queuedSearchQuery = "";
-            if (nextQuery && nextQuery !== event.query) {
-              scheduleKnowledgeSearch(
-                event.id,
-                event.knowledge_kind,
-              );
-              break;
-            }
             state.searching = false;
-            // SPEC #3170 FR-099/FR-100: a typed transient directive schedules
-            // the silent ladder; success or any other outcome (including an
-            // unknown directive code) resets it without visible state.
             const directive = event.semantic_retry;
             const transientDirective =
-              directive &&
+              isSilentSemanticKind(activeIntent.kind) &&
+              typeof directive === "object" &&
+              directive !== null &&
               directive.retryable === true &&
               (directive.error_code === "INDEX_NOT_READY" ||
                 directive.error_code === "SEARCH_UNAVAILABLE");
             if (transientDirective) {
+              state.semanticRetryTyped = true;
               scheduleKnowledgeSemanticRetry(
                 event.id,
-                event.knowledge_kind,
+                activeIntent.kind,
                 state,
               );
-            } else {
-              if (state.semanticRetryTimer) {
-                clearTimeout(state.semanticRetryTimer);
-                state.semanticRetryTimer = null;
-              }
-              state.semanticRetryIndex = 0;
-              state.semanticRetryActive = false;
+            } else if (isSilentSemanticKind(activeIntent.kind)) {
+              invalidateKnowledgeSemanticRetry(state);
             }
-            if (state.selectedNumber) {
-              state.detailLoading = true;
-              requestKnowledgeDetail(
+            if (selectionIsCurrent && state.selectedNumber) {
+              dispatchKnowledgeDetailRequest(
                 event.id,
-                event.knowledge_kind,
+                activeIntent.kind,
                 state.selectedNumber,
+                { explicit: false },
               );
-            } else if (!(state.selectionGeneration > 0)) {
+            } else if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.detail = null;
             }
             renderKnowledgeBridge(event.id);
             break;
           }
           case "knowledge_detail": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
-            );
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (
+              !state ||
+              normalizeKnowledgeKind(event.knowledge_kind) !==
+                normalizeKnowledgeKind(state.kind)
+            ) {
+              break;
+            }
             if (!knowledgeDetailRequestMatches(state, event)) {
               break;
             }
+            const previousNumber = state.selectedNumber;
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
             state.detail = event.detail;
@@ -2059,7 +2365,11 @@ export function createKnowledgeKanbanSurface({
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
-            renderKnowledgeBridge(event.id);
+            if (normalizeKnowledgeKind(state.kind) === "pr") {
+              renderKnowledgeBridge(event.id);
+            } else {
+              renderKnowledgeSelection(event.id, state, previousNumber);
+            }
             // SPEC-2017 US-9 — refresh the Drawer body when the detail
             // is for the entry the Drawer is currently showing. This
             // also handles the swap-on-different-card case (T-034):
@@ -2093,10 +2403,10 @@ export function createKnowledgeKanbanSurface({
             // overwrite the optimistic card with fresh_entry and clear
             // the pending marker so the spinner stops; on Error we
             // rollback from dndSnapshot and surface a toast.
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              knowledgeKindForPreset(workspaceWindowById(event.id)?.preset),
-            );
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state) {
+              break;
+            }
             if (state.pendingPhaseUpdates) {
               state.pendingPhaseUpdates.delete(event.issue_number);
             }
@@ -2131,52 +2441,70 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_error": {
-            const state = ensureKnowledgeBridgeState(
-              event.id,
-              event.knowledge_kind,
-            );
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state) {
+              break;
+            }
             const isSearchError =
               typeof event.request_id === "number" && typeof event.query === "string";
-            if (
-              isSearchError &&
-              (event.request_id !== state.inFlightSearchRequestId ||
-                event.query !== state.query.trim())
-            ) {
-              if (event.request_id === state.inFlightSearchRequestId) {
-                state.searchInFlight = false;
-                state.inFlightSearchRequestId = 0;
-                const nextQuery = state.queuedSearchQuery || state.query.trim();
-                state.queuedSearchQuery = "";
-                if (nextQuery) {
-                  scheduleKnowledgeSearch(
-                    event.id,
-                    event.knowledge_kind,
-                  );
-                }
-              }
-              break;
-            }
             if (isSearchError) {
-              // SPEC #3170 FR-100: a search-correlated legacy Knowledge
-              // Error is semantic degradation — hide it, release in-flight
-              // ownership, keep rows and detail, and do not start the
-              // indefinite retry without a typed directive.
+              const activeIntent = state.inFlightSearchIntent;
+              if (!activeIntent || event.request_id !== activeIntent.requestId) {
+                break;
+              }
+              state.inFlightSearchIntent = null;
               state.searchInFlight = false;
               state.inFlightSearchRequestId = 0;
-              state.searching = false;
-              const nextQuery = state.queuedSearchQuery;
-              state.queuedSearchQuery = "";
-              if (nextQuery && nextQuery !== state.query.trim()) {
-                scheduleKnowledgeSearch(event.id, event.knowledge_kind);
+              const responseMatchesIntent =
+                normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+                event.query.trim() === activeIntent.query &&
+                knowledgeSearchIntentIsCurrent(state, activeIntent);
+              if (!responseMatchesIntent) {
+                dispatchLatestKnowledgeSearchIntent(event.id, state);
+                break;
               }
-              renderKnowledgeBridge(event.id);
+              state.queuedSearchIntent = null;
+              state.queuedSearchQuery = "";
+              state.searching = false;
+              if (isSilentSemanticKind(activeIntent.kind)) {
+                // Legacy/untyped semantic failures are deliberately silent
+                // and never start the typed indefinite retry ladder.
+                invalidateKnowledgeSemanticRetry(state);
+                renderKnowledgeStatusOnly(event.id, state);
+              } else {
+                state.error = event.message;
+                renderKnowledgeBridge(event.id);
+              }
               break;
             }
-            if (!knowledgeDetailRequestMatches(state, event)) {
+
+            if (
+              normalizeKnowledgeKind(event.knowledge_kind) !==
+                normalizeKnowledgeKind(state.kind)
+            ) {
               break;
             }
-            const matchesLoadRequest =
-              !event.request_id || event.request_id === state.loadRequestId;
+            const matchesLoadRequest = event.request_id === state.loadRequestId;
+            const prSelectionError =
+              normalizeKnowledgeKind(state.kind) === "pr" &&
+              event.request_id === state.detailRequestId;
+            const matchesDetailRequest =
+              event.request_id === state.detailRequestId &&
+              (prSelectionError ||
+                (state.detailRequestSelectionGeneration === state.selectionGeneration &&
+                  state.detailRequestNumber === state.selectedNumber));
+            const matchesInitialIdless =
+              !event.request_id && state.selectionGeneration === 0;
+            if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
+              break;
+            }
+            if (
+              matchesLoadRequest &&
+              state.loadSelectionGeneration !== state.selectionGeneration
+            ) {
+              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
+              break;
+            }
             const startedQueuedRefresh = matchesLoadRequest
               ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
               : false;
@@ -2186,11 +2514,13 @@ export function createKnowledgeKanbanSurface({
               state.error = event.message;
             }
             state.searching = false;
-            state.searchInFlight = false;
-            state.inFlightSearchRequestId = 0;
-            state.queuedSearchQuery = "";
             state.detailLoading = false;
-            renderKnowledgeBridge(event.id);
+            if (matchesLoadRequest || prSelectionError) {
+              renderKnowledgeBridge(event.id);
+            } else {
+              renderKnowledgeStatusOnly(event.id, state);
+              renderKnowledgeDetailOnly(event.id, state);
+            }
             break;
           }
           default:

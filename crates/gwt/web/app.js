@@ -862,6 +862,22 @@
         pendingMessages.push(message);
       }
 
+      function sendKnowledgeSemanticSearchNow(message) {
+        // Semantic search owns its retry lifecycle and must never enter the
+        // generic reconnect queue. Keep the OPEN check and direct send in one
+        // synchronous operation; a close race is reported as false.
+        const activeSocket = socket;
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+          return false;
+        }
+        try {
+          activeSocket.send(JSON.stringify(message));
+          return true;
+        } catch (_err) {
+          return false;
+        }
+      }
+
       const uiTraceWiring = createUiTraceWiring({
         profiler: uiTraceProfiler,
         send,
@@ -4264,10 +4280,7 @@
         handleKnowledgeTransportChange,
       } = createKnowledgeKanbanSurface({
         send,
-        // SPEC #3170 FR-099: offline semantic retries are skipped instead of
-        // entering the pendingMessages queue.
-        isTransportOnline: () =>
-          Boolean(socket && socket.readyState === WebSocket.OPEN),
+        sendKnowledgeSemanticSearchNow,
         createNode,
         createKnowledgeMarkdownBody,
         windowMap,
