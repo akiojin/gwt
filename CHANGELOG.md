@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.72.0] - 2026-08-03
+
+### Features
+
+- **hooks:** Workflow-policy から owner guard と intake code-edit guard を撤去 (SPEC #3245 T-101..T-103)
+- **hooks:** Intake completion Stop gate を撤去し capture 配線を単純化 (SPEC #3245 T-104)
+- **skills:** Reduced skill set と lane 別 guidance/reminder 分岐を撤去 (SPEC #3245 T-105/T-106)
+- **skills:** 登録テンプレートを autonomous 適格既定へ (SPEC #3245 Stage B T-121..T-124)
+- **lane:** Lane 機構本体を撤去し worktree 形態判定へ一本化 (SPEC #3245 Stage C T-131..T-137)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3245 delivery settlement の Work event bookkeeping
+- **work:** PR handoff 中の Work event bookkeeping
+- **work:** Record resumed work events
+
+### Testing
+
+- **hooks:** Intake シグナルが hook dispatch 挙動を変えないことを統合固定 (SPEC #3245 T-107)
+- **cli:** Action_obligation revival テストを scoped HOME + env lock で隔離
+
 ## [9.71.2] - 2026-08-03
 
 ### Bug Fixes
