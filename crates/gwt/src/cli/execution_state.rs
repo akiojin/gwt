@@ -2049,9 +2049,58 @@ pub(crate) fn session_binding_authorizes_current_lifecycle_descendant(
     ))
 }
 
-/// Recover the exact current binding from an owner-ledger Activated
+/// Reconstruct one Activated attempt's binding at activation time and require
+/// that it is still the exact current Active authority.
+///
+/// Lifecycle and takeover events are append-only suffixes to the immutable
+/// generation. Stripping all of them from a clone reconstructs the binding
+/// emitted by activation; comparing that binding with the strict current head
+/// makes every later suffix fail closed before repair can publish or bind a
+/// Session.
+fn exact_current_activated_continuation_binding(
+    ledger: &ExecutionGenerationLedger,
+    attempt: &ContinuationAttempt,
+) -> Option<gwt_agent::ExecutionBindingIdentity> {
+    if attempt.status != ContinuationAttemptStatus::Activated {
+        return None;
+    }
+    let activated = attempt.activated_generation.as_ref()?;
+    let current = ledger.current_generation()?;
+    if current.identity != *activated
+        || ledger.effective_status_for(current) != ExecutionControlStatus::Active
+    {
+        return None;
+    }
+
+    let mut activation_ledger = ledger.clone();
+    activation_ledger
+        .lifecycle_events
+        .retain(|event| event.generation_id != current.identity.generation_id);
+    activation_ledger
+        .takeovers
+        .retain(|event| event.generation_id != current.identity.generation_id);
+    let activation_binding = execution_binding_for_generation(&activation_ledger, current);
+    if execution_binding_for_generation(ledger, current) != activation_binding {
+        return None;
+    }
+
+    let projection =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .map(hydrate_recovery_envelopes)
+            .ok()?;
+    if projection.status != ExecutionControlStatus::Active
+        || !integrity_ok(&projection)
+        || projection.primary_session_id != attempt.request.initial_session_id
+    {
+        return None;
+    }
+    Some(activation_binding)
+}
+
+/// Recover the exact activation-time binding from an owner-ledger Activated
 /// continuation when the worktree pointer/projection publication was lost.
-/// Only the Session named by that exact Activated attempt is eligible.
+/// Only the Session named by that exact attempt remains eligible, and any
+/// lifecycle or takeover suffix makes the repair unavailable.
 pub(crate) fn activated_continuation_binding_for_session(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -2066,16 +2115,9 @@ pub(crate) fn activated_continuation_binding_for_session(
     }) else {
         return Ok(None);
     };
-    let Some(activated) = attempt.activated_generation.as_ref() else {
-        return Ok(None);
-    };
-    let Some(current) = ledger.current_generation() else {
-        return Ok(None);
-    };
-    if current.identity != *activated {
-        return Ok(None);
-    }
-    Ok(Some(execution_binding_for_generation(&ledger, current)))
+    Ok(exact_current_activated_continuation_binding(
+        &ledger, attempt,
+    ))
 }
 
 /// Verify an immutable binding prefix against the writer that owned that
@@ -5309,16 +5351,14 @@ pub fn activate_successor_with_session_rebind(
                     invalid_generation_data("execution generation ledger current id is missing")
                 })?;
                 let current_binding = execution_binding_for_generation(&ledger, current);
-                let activated_retry_matches_current = latest.as_ref().is_some_and(|attempt| {
-                    attempt.status == ContinuationAttemptStatus::Activated
-                        && attempt.activated_generation.as_ref() == Some(&current.identity)
-                        && current_binding == *expected_current_binding
+                let activated_retry_binding = latest.as_ref().and_then(|attempt| {
+                    exact_current_activated_continuation_binding(&ledger, attempt)
                 });
                 if latest
                     .as_ref()
                     .is_some_and(|attempt| attempt.status == ContinuationAttemptStatus::Activated)
                 {
-                    if !activated_retry_matches_current {
+                    if activated_retry_binding.as_ref() != Some(expected_current_binding) {
                         return Err(io::Error::new(
                             ErrorKind::WouldBlock,
                             "Activated successor no longer matches strict current authority",

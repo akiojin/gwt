@@ -628,7 +628,10 @@ pub fn continue_authenticated_execution(
                 execution_binding_error("execution_continuation_activation_repair_failed")
             })?
             .ok_or_else(|| {
-                execution_binding_error("execution_continuation_activation_repair_conflict")
+                AgentWorkspaceUpdateError::new(
+                    AgentWorkspaceUpdateErrorCode::IdentityConflict,
+                    "Activated continuation no longer matches current authority",
+                )
             })?;
             if binding.identity.generation_id != activated.generation_id {
                 return Err(execution_binding_error(
@@ -4226,6 +4229,112 @@ mod tests {
                     &binding.identity,
                 )
                 .unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn activated_response_loss_retry_refuses_a_legal_takeover_suffix_byte_identically() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, owner, _) = seed_foreign_active_exact_unbound(repo, session);
+            crate::cli::execution_state::set_generation_write_failure_after_ledger();
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-post-ledger-takeover-suffix".to_string(),
+            };
+
+            continue_authenticated_execution(repo, &session.id, request.clone())
+                .expect_err("inject response loss after the Activated ledger commit");
+            let attempt = crate::cli::execution_state::continuation_attempt_for_operation(
+                repo,
+                owner,
+                &request.operation_id,
+            )
+            .expect("read Activated response-loss attempt")
+            .expect("Activated response-loss attempt");
+            assert_eq!(
+                attempt.status,
+                crate::cli::execution_state::ContinuationAttemptStatus::Activated
+            );
+            crate::cli::execution_state::activate_successor(repo, owner, &attempt.request)
+                .expect("canonical Activated retry republishes only projection and pointer");
+
+            let takeover = crate::cli::execution_state::GenerationTakeoverRequest {
+                operation_id: "takeover-post-ledger-successor".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: Some("work-post-ledger-takeover".to_string()),
+                source: Some("continue-work:handoff".to_string()),
+                from_session_id: session.id.clone(),
+                to_session_id: "post-ledger-takeover-winner".to_string(),
+                reason: "legal handoff after response-loss publication".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
+                .expect("prepare legal takeover suffix");
+            let planned =
+                crate::cli::execution_state::prepared_generation_takeover_execution_binding(
+                    repo, owner, &takeover,
+                )
+                .expect("planned takeover binding");
+            let mut winner = session.clone();
+            winner.id.clone_from(&takeover.to_session_id);
+            winner.linked_issue_number = Some(owner.number);
+            winner
+                .set_execution_binding(Some(SessionExecutionBinding {
+                    schema_version: SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: winner.id.clone(),
+                    repo_hash: winner.repo_hash.clone().expect("winner repo hash"),
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity: planned.clone(),
+                    capability_generation: 1,
+                }))
+                .expect("project Prepared takeover capability into winner Session");
+            save_session_fixture(&winner);
+            let winner_identity = gwt_agent::SessionExecutionIdentity::from_session(&winner)
+                .expect("validate winner Session")
+                .expect("winner execution identity");
+            let activated =
+                crate::cli::execution_state::with_prepared_generation_takeover_exact_session_activation(
+                    repo,
+                    owner,
+                    &takeover,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &winner_identity,
+                    |activate| activate(),
+                )
+                .expect("activate legal takeover transaction")
+                .expect("winner Session retains exact Prepared identity");
+            assert_eq!(activated, planned);
+
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let winner_before = std::fs::read(
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", winner.id)),
+            )
+            .expect("read winner Session bytes");
+            let error = continue_authenticated_execution(repo, &session.id, request)
+                .expect_err("historical Activated operation must not repair across a takeover");
+
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before,
+                "historical retry must preserve old Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+            assert_eq!(
+                std::fs::read(
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", winner.id)),
+                )
+                .expect("read winner Session after historical retry"),
+                winner_before,
+                "historical retry must preserve winner Session bytes"
+            );
+            assert!(
+                matches!(
+                    error.code,
+                    AgentWorkspaceUpdateErrorCode::TransactionConflict
+                        | AgentWorkspaceUpdateErrorCode::IdentityConflict
+                ),
+                "unexpected historical retry refusal: {error:?}"
             );
         });
     }
