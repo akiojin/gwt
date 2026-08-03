@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.71.2] - 2026-08-03
+
+### Bug Fixes
+
+- **workspace:** Reconcile rolling Host authority
+- **workspace:** Validate confirm-only close ledger
+- **runtime:** Reject continuation redirects
+- **launch:** ReboundCurrent の resume 回復を Active authority として install し、monitor 再起動の無限失敗を解消する
+
+### Miscellaneous Tasks
+
+- **work:** Record work event backfill
+
 ## [9.71.1] - 2026-08-01
 
 ### Bug Fixes

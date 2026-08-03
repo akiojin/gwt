@@ -2820,7 +2820,7 @@ fn workspace_update_ensure_required_lookalikes_never_replay_locally() {
 }
 
 #[test]
-fn workspace_update_exact_rejection_without_exact_ensure_fails_closed() {
+fn workspace_update_without_exact_ensure_fails_before_host_contact() {
     let fixture = fixture();
     register_bound_agent(&fixture);
     let before = mutation_state_snapshot(&fixture);
@@ -2845,16 +2845,20 @@ fn workspace_update_exact_rejection_without_exact_ensure_fails_closed() {
 
     assert!(
         !output.status.success(),
-        "a typed rejection alone must not authorize local mutation: {}",
+        "an unensured authority must fail before Host contact: {}",
+        output_text(&output)
+    );
+    assert!(
+        output_text(&output).contains("workspace_ensure_required"),
+        "the preflight failure must preserve the machine-readable recovery action: {}",
         output_text(&output)
     );
     assert_secret_redacted(&output, FORWARD_TOKEN);
-    server.recv();
-    server.assert_no_additional_request();
+    server.assert_no_request();
     assert_eq!(
         mutation_state_snapshot(&fixture),
         before,
-        "the compatibility continuation requires an exact canonical ensured assignment"
+        "an unensured authority must not mutate local state"
     );
 }
 
