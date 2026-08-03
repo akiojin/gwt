@@ -27846,6 +27846,12 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
     );
     assert!(immediate.is_empty());
     wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    let scans_after_full_load = runtime
+        .knowledge_related_snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .full_scan_count();
+    assert_eq!(scans_after_full_load, 1, "the full load publishes once");
 
     // Mutate the projection AFTER the snapshot: a detail-only selection must
     // reuse the snapshot rather than rescanning the Work projection.
@@ -27956,9 +27962,210 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
         }
     }
     assert_eq!(detail_events, 1, "exactly one detail completion expected");
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count(),
+        scans_after_full_load,
+        "explicit selection must not scan Session/Work again",
+    );
     assert!(
         !gh_marker.exists(),
         "an explicit selection must never start a remote refresh (FR-102)"
+    );
+}
+
+#[test]
+fn select_knowledge_bridge_entry_snapshot_miss_stays_empty_without_full_scan() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Cache-only selected issue",
+            &["bug"],
+            "Detail body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id,
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(17),
+            number: 42,
+        },
+    );
+    assert!(immediate.is_empty(), "selection remains off the GUI loop");
+    wait_for_recorded_event("selection cache-miss detail", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail {
+                            request_id: Some(17),
+                            detail,
+                            ..
+                        } if detail.number == Some(42) && detail.related_works.is_empty()
+                    ))
+            )
+        })
+    });
+    let recorded = recorded_events.lock().expect("events lock");
+    assert!(recorded.iter().all(|event| {
+        !matches!(
+            event,
+            UserEvent::Dispatch(dispatched)
+                if dispatched.iter().any(|outbound| matches!(
+                    &outbound.event,
+                    BackendEvent::KnowledgeEntries { .. }
+                ))
+        )
+    }));
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count(),
+        0,
+        "snapshot miss must not fall back to a Session/Work scan",
+    );
+}
+
+#[test]
+fn select_pr_knowledge_bridge_entry_preserves_the_legacy_full_view_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "pr-1",
+        repo,
+        WindowPreset::Pr,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "pr-1");
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Pr,
+            request_id: Some(91),
+            number: 77,
+        },
+    );
+    assert!(immediate.is_empty(), "PR selection stays off the GUI loop");
+    wait_for_recorded_event("PR selection full view", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeEntries {
+                            request_id: Some(91),
+                            ..
+                        } | BackendEvent::KnowledgeError {
+                            request_id: Some(91),
+                            ..
+                        }
+                    ))
+            )
+        })
+    });
+
+    let recorded = recorded_events.lock().expect("events lock");
+    let dispatch = recorded
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(dispatched) => Some(dispatched),
+            _ => None,
+        })
+        .find(|dispatched| {
+            dispatched.iter().any(|outbound| {
+                matches!(
+                    &outbound.event,
+                    BackendEvent::KnowledgeEntries {
+                        request_id: Some(91),
+                        ..
+                    } | BackendEvent::KnowledgeError {
+                        request_id: Some(91),
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("PR selection completion");
+    assert_eq!(
+        dispatch.len(),
+        2,
+        "legacy PR selection returns the full entries + detail view"
+    );
+    assert!(matches!(
+        &dispatch[0].event,
+        BackendEvent::KnowledgeEntries {
+            knowledge_kind: gwt::KnowledgeKind::Pr,
+            request_id: Some(91),
+            entries,
+            refresh_enabled: false,
+            ..
+        } if entries.is_empty()
+    ));
+    assert!(matches!(
+        &dispatch[1].event,
+        BackendEvent::KnowledgeDetail {
+            knowledge_kind: gwt::KnowledgeKind::Pr,
+            request_id: Some(91),
+            detail,
+            ..
+        } if detail.sections.iter().any(|section| {
+            section.body.contains("cache-backed PR list support")
+        })
+    ));
+    assert!(dispatch
+        .iter()
+        .all(|outbound| !matches!(outbound.event, BackendEvent::KnowledgeError { .. })));
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count(),
+        1,
+        "PR selection retains the existing full-load augmentation pass",
     );
 }
 

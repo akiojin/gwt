@@ -205,10 +205,11 @@ pub struct KnowledgeSearchOutcome {
     pub semantic_retry: Option<KnowledgeSemanticRetry>,
 }
 
-/// Typed semantic failure surfaced by a [`SemanticSearchClient`]
-/// (SPEC #3170 FR-097/FR-100). `reason` stays backend-only in every case.
+/// Private typed semantic failure used by the production Project Index
+/// adapter (SPEC #3170 FR-097/FR-100). Public semantic clients retain their
+/// legacy `String` error contract and are adapted to non-retryable failures.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SemanticSearchFailure {
+enum SemanticSearchFailure {
     /// Typed transient outcome (`INDEX_NOT_READY` / `SEARCH_UNAVAILABLE`):
     /// the completion carries a retry directive.
     Transient {
@@ -221,16 +222,41 @@ pub enum SemanticSearchFailure {
     Fatal { reason: String },
 }
 
-impl SemanticSearchFailure {
-    pub fn reason(&self) -> &str {
-        match self {
-            SemanticSearchFailure::Transient { reason, .. }
-            | SemanticSearchFailure::Fatal { reason } => reason,
-        }
-    }
+/// Source-compatible public extension seam. A legacy/untyped error is never
+/// retryable because only the canonical Project Index boundary can vouch for
+/// the typed transient taxonomy.
+///
+/// ```
+/// use std::path::Path;
+/// use gwt::knowledge_bridge::{
+///     KnowledgeKind, SemanticSearchClient, SemanticSearchHit,
+/// };
+///
+/// struct LegacyClient;
+///
+/// impl SemanticSearchClient for LegacyClient {
+///     fn search(
+///         &self,
+///         _repo_path: &Path,
+///         _kind: KnowledgeKind,
+///         _query: &str,
+///         _limit: usize,
+///     ) -> Result<Vec<SemanticSearchHit>, String> {
+///         Ok(Vec::new())
+///     }
+/// }
+/// ```
+pub trait SemanticSearchClient {
+    fn search(
+        &self,
+        repo_path: &Path,
+        kind: KnowledgeKind,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSearchHit>, String>;
 }
 
-pub trait SemanticSearchClient {
+trait TypedSemanticSearchClient {
     fn search(
         &self,
         repo_path: &Path,
@@ -240,14 +266,11 @@ pub trait SemanticSearchClient {
     ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure>;
 }
 
-/// Production semantic client (SPEC #3170 FR-096): consumes the canonical
-/// Project Index batch-search boundary in semantic mode with blocking
-/// automatic build disabled. The legacy `search-issues` / `search-specs`
-/// runner actions remain available to other callers but are not used here.
-#[derive(Debug, Default)]
-struct CanonicalSemanticSearchClient;
+#[cfg(test)]
+struct LegacyClientAdapter<'a, C: ?Sized>(&'a C);
 
-impl SemanticSearchClient for CanonicalSemanticSearchClient {
+#[cfg(test)]
+impl<C: SemanticSearchClient + ?Sized> TypedSemanticSearchClient for LegacyClientAdapter<'_, C> {
     fn search(
         &self,
         repo_path: &Path,
@@ -255,38 +278,103 @@ impl SemanticSearchClient for CanonicalSemanticSearchClient {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
-        let scope = match kind {
-            KnowledgeKind::Issue => crate::protocol::IndexSearchScope::Issues,
-            KnowledgeKind::Spec => crate::protocol::IndexSearchScope::Specs,
-            KnowledgeKind::Pr => return Ok(Vec::new()),
-        };
-        let outcome = crate::index_search::search_project_index(
+        self.0
+            .search(repo_path, kind, query, limit)
+            .map_err(|reason| SemanticSearchFailure::Fatal { reason })
+    }
+}
+
+/// Production semantic client (SPEC #3170 FR-096): consumes the canonical
+/// Project Index batch-search boundary in semantic mode with blocking
+/// automatic build disabled. The legacy `search-issues` / `search-specs`
+/// runner actions remain available to other callers but are not used here.
+#[derive(Debug, Default)]
+struct CanonicalSemanticSearchClient;
+
+trait CanonicalProjectIndexSearchRunner {
+    fn search(
+        &self,
+        repo_path: &Path,
+        query: &str,
+        scopes: &[crate::protocol::IndexSearchScope],
+        match_mode: crate::protocol::IndexSearchMatchMode,
+        auto_build: bool,
+    ) -> Result<crate::index_search::ProjectIndexSearchOutcome, crate::index_search::IndexSearchError>;
+}
+
+#[derive(Debug, Default)]
+struct ProductionProjectIndexSearchRunner;
+
+impl CanonicalProjectIndexSearchRunner for ProductionProjectIndexSearchRunner {
+    fn search(
+        &self,
+        repo_path: &Path,
+        query: &str,
+        scopes: &[crate::protocol::IndexSearchScope],
+        match_mode: crate::protocol::IndexSearchMatchMode,
+        auto_build: bool,
+    ) -> Result<crate::index_search::ProjectIndexSearchOutcome, crate::index_search::IndexSearchError>
+    {
+        crate::index_search::search_project_index(
+            repo_path, query, scopes, None, match_mode, auto_build,
+        )
+    }
+}
+
+fn canonical_semantic_search_with_runner<R: CanonicalProjectIndexSearchRunner + ?Sized>(
+    runner: &R,
+    repo_path: &Path,
+    kind: KnowledgeKind,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
+    let scope = match kind {
+        KnowledgeKind::Issue => crate::protocol::IndexSearchScope::Issues,
+        KnowledgeKind::Spec => crate::protocol::IndexSearchScope::Specs,
+        KnowledgeKind::Pr => return Ok(Vec::new()),
+    };
+    let outcome = runner
+        .search(
             repo_path,
             query,
             &[scope],
-            None,
             crate::protocol::IndexSearchMatchMode::Semantic,
             false,
         )
         .map_err(semantic_failure_from_index_error)?;
-        // Suggestions are ignored on this surface; hits map back to cached
-        // rows by durable number, nearest-first (canonical result order).
-        let mut hits = Vec::new();
-        for result in outcome.results {
-            let number = match result.target {
-                crate::protocol::IndexSearchTarget::Issue { number } => number,
-                crate::protocol::IndexSearchTarget::Spec { spec_id } => spec_id,
-                _ => continue,
-            };
-            hits.push(SemanticSearchHit {
-                number,
-                distance: result.distance,
-            });
-            if hits.len() >= limit {
-                break;
-            }
+    let mut hits = Vec::new();
+    for result in outcome.results {
+        let number = match (kind, result.target) {
+            (KnowledgeKind::Issue, crate::protocol::IndexSearchTarget::Issue { number }) => number,
+            (KnowledgeKind::Spec, crate::protocol::IndexSearchTarget::Spec { spec_id }) => spec_id,
+            _ => continue,
+        };
+        hits.push(SemanticSearchHit {
+            number,
+            distance: result.distance,
+        });
+        if hits.len() >= limit {
+            break;
         }
-        Ok(hits)
+    }
+    Ok(hits)
+}
+
+impl TypedSemanticSearchClient for CanonicalSemanticSearchClient {
+    fn search(
+        &self,
+        repo_path: &Path,
+        kind: KnowledgeKind,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
+        canonical_semantic_search_with_runner(
+            &ProductionProjectIndexSearchRunner,
+            repo_path,
+            kind,
+            query,
+            limit,
+        )
     }
 }
 
@@ -397,19 +485,20 @@ pub fn refresh_knowledge_bridge_cache(repo_path: &Path, force: bool) -> Result<b
             ISSUE_CACHE_TTL,
         )?
     };
-    if outcome.source_changed && crate::index_worker::detect_repo_hash(repo_path).is_some() {
-        if let Err(error) = crate::index_worker::default_rebuild_runner(
+    if outcome.source_changed
+        && crate::index_worker::detect_repo_hash(repo_path).is_some()
+        && crate::index_worker::default_rebuild_runner(
             repo_path,
             crate::index_worker::IndexRebuildScope::Issues,
             None,
-        ) {
-            tracing::warn!(
-                target: "gwt::knowledge_bridge",
-                project_root = %repo_path.display(),
-                error = %error,
-                "issue cache refresh succeeded but issue index rebuild failed"
-            );
-        }
+        )
+        .is_err()
+    {
+        tracing::debug!(
+            target: "gwt::knowledge_bridge",
+            error_code = "INDEX_REPAIR_FAILED",
+            "issue cache refresh succeeded but issue index rebuild failed"
+        );
     }
     Ok(outcome.refreshed)
 }
@@ -420,13 +509,14 @@ pub fn search_knowledge_bridge(
     query: &str,
     selected_number: Option<u64>,
 ) -> Result<KnowledgeBridgeView, String> {
-    search_knowledge_bridge_with_client(
+    search_knowledge_bridge_outcome_with_typed_client(
         repo_path,
         kind,
         query,
         selected_number,
         &CanonicalSemanticSearchClient,
     )
+    .map(|outcome| outcome.view)
 }
 
 /// Search completion carrying cache/local rows plus the optional typed
@@ -438,7 +528,7 @@ pub fn search_knowledge_bridge_outcome(
     query: &str,
     selected_number: Option<u64>,
 ) -> Result<KnowledgeSearchOutcome, String> {
-    search_knowledge_bridge_outcome_with_client(
+    search_knowledge_bridge_outcome_with_typed_client(
         repo_path,
         kind,
         query,
@@ -551,6 +641,7 @@ where
     Ok(work_item_list_item(&refreshed, &linked_branches, None))
 }
 
+#[cfg(test)]
 pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Sized>(
     repo_path: &Path,
     kind: KnowledgeKind,
@@ -558,11 +649,34 @@ pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Siz
     selected_number: Option<u64>,
     client: &C,
 ) -> Result<KnowledgeBridgeView, String> {
-    search_knowledge_bridge_outcome_with_client(repo_path, kind, query, selected_number, client)
-        .map(|outcome| outcome.view)
+    search_knowledge_bridge_outcome_with_typed_client(
+        repo_path,
+        kind,
+        query,
+        selected_number,
+        &LegacyClientAdapter(client),
+    )
+    .map(|outcome| outcome.view)
 }
 
+#[cfg(test)]
 pub(crate) fn search_knowledge_bridge_outcome_with_client<C: SemanticSearchClient + ?Sized>(
+    repo_path: &Path,
+    kind: KnowledgeKind,
+    query: &str,
+    selected_number: Option<u64>,
+    client: &C,
+) -> Result<KnowledgeSearchOutcome, String> {
+    search_knowledge_bridge_outcome_with_typed_client(
+        repo_path,
+        kind,
+        query,
+        selected_number,
+        &LegacyClientAdapter(client),
+    )
+}
+
+fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClient + ?Sized>(
     repo_path: &Path,
     kind: KnowledgeKind,
     query: &str,
@@ -611,12 +725,6 @@ pub(crate) fn search_knowledge_bridge_outcome_with_client<C: SemanticSearchClien
         match client.search(repo_path, kind, query, KNOWLEDGE_SEARCH_RESULT_LIMIT) {
             Ok(hits) => (hits, None),
             Err(failure) => {
-                tracing::warn!(
-                    target: "gwt::knowledge_bridge",
-                    project_root = %repo_path.display(),
-                    reason = %failure.reason(),
-                    "semantic search degraded; serving cache-backed results"
-                );
                 let directive = match &failure {
                     SemanticSearchFailure::Transient {
                         error_code,
@@ -629,6 +737,15 @@ pub(crate) fn search_knowledge_bridge_outcome_with_client<C: SemanticSearchClien
                     }),
                     SemanticSearchFailure::Fatal { .. } => None,
                 };
+                let error_code = directive
+                    .as_ref()
+                    .map(|directive| directive.error_code.as_str())
+                    .unwrap_or("SEARCH_FAILED");
+                tracing::debug!(
+                    target: "gwt::knowledge_bridge",
+                    error_code,
+                    "semantic search degraded; serving cache-backed results"
+                );
                 (Vec::new(), directive)
             }
         };
@@ -1167,10 +1284,7 @@ fn load_linked_branches(repo_path: &Path) -> HashMap<u64, Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs};
-
-    #[cfg(unix)]
-    use std::path::PathBuf;
+    use std::{cell::RefCell, collections::HashMap, fs, path::PathBuf};
 
     use gwt_github::{
         client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
@@ -1520,6 +1634,58 @@ Extra context.
     }
 
     #[test]
+    fn detail_loader_reads_exactly_the_requested_cache_entry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                41,
+                "First cache entry",
+                "Wrong body",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write first entry");
+        cache
+            .write_snapshot(&issue_snapshot(
+                43,
+                "Requested cache entry",
+                "Requested body",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write requested entry");
+
+        let detail = load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 43)
+            .expect("load requested detail");
+
+        assert_eq!(detail.number, Some(43));
+        assert_eq!(detail.title, "Requested cache entry");
+        assert!(detail
+            .sections
+            .iter()
+            .any(|section| section.body == "Requested body"));
+        let source = include_str!("knowledge_bridge.rs");
+        let detail_loader = source
+            .split("pub fn load_knowledge_bridge_detail")
+            .nth(1)
+            .and_then(|tail| tail.split("pub fn refresh_knowledge_bridge_cache").next())
+            .expect("detail loader source");
+        assert!(detail_loader.contains(".load_entry("));
+        assert!(!detail_loader.contains(".list_entries("));
+        assert!(!detail_loader.contains("load_local_cache_entries_for_repo"));
+    }
+
+    #[test]
     fn closed_spec_uses_done_as_effective_lifecycle_even_with_stale_phase_label() {
         let cache_dir = tempfile::tempdir().expect("temp cache");
         let cache = Cache::new(cache_dir.path().to_path_buf());
@@ -1616,7 +1782,7 @@ Extra context.
             _kind: KnowledgeKind,
             _query: &str,
             _limit: usize,
-        ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
+        ) -> Result<Vec<SemanticSearchHit>, String> {
             Ok(self.hits.clone())
         }
     }
@@ -1628,7 +1794,7 @@ Extra context.
         failure: SemanticSearchFailure,
     }
 
-    impl SemanticSearchClient for FailingSemanticSearchClient {
+    impl TypedSemanticSearchClient for FailingSemanticSearchClient {
         fn search(
             &self,
             _repo_path: &Path,
@@ -1637,6 +1803,243 @@ Extra context.
             _limit: usize,
         ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
             Err(self.failure.clone())
+        }
+    }
+
+    struct LegacyFailingSemanticSearchClient {
+        reason: String,
+    }
+
+    impl SemanticSearchClient for LegacyFailingSemanticSearchClient {
+        fn search(
+            &self,
+            _repo_path: &Path,
+            _kind: KnowledgeKind,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<SemanticSearchHit>, String> {
+            Err(self.reason.clone())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct CanonicalSearchCall {
+        repo_path: PathBuf,
+        query: String,
+        scopes: Vec<crate::protocol::IndexSearchScope>,
+        match_mode: crate::protocol::IndexSearchMatchMode,
+        auto_build: bool,
+    }
+
+    struct FakeCanonicalProjectIndexRunner {
+        outcome: RefCell<
+            Option<
+                Result<
+                    crate::index_search::ProjectIndexSearchOutcome,
+                    crate::index_search::IndexSearchError,
+                >,
+            >,
+        >,
+        calls: RefCell<Vec<CanonicalSearchCall>>,
+    }
+
+    impl FakeCanonicalProjectIndexRunner {
+        fn new(
+            outcome: Result<
+                crate::index_search::ProjectIndexSearchOutcome,
+                crate::index_search::IndexSearchError,
+            >,
+        ) -> Self {
+            Self {
+                outcome: RefCell::new(Some(outcome)),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CanonicalProjectIndexSearchRunner for FakeCanonicalProjectIndexRunner {
+        fn search(
+            &self,
+            repo_path: &Path,
+            query: &str,
+            scopes: &[crate::protocol::IndexSearchScope],
+            match_mode: crate::protocol::IndexSearchMatchMode,
+            auto_build: bool,
+        ) -> Result<
+            crate::index_search::ProjectIndexSearchOutcome,
+            crate::index_search::IndexSearchError,
+        > {
+            self.calls.borrow_mut().push(CanonicalSearchCall {
+                repo_path: repo_path.to_path_buf(),
+                query: query.to_string(),
+                scopes: scopes.to_vec(),
+                match_mode,
+                auto_build,
+            });
+            self.outcome
+                .borrow_mut()
+                .take()
+                .expect("one canonical runner invocation")
+        }
+    }
+
+    fn project_index_result(
+        scope: crate::protocol::IndexSearchScope,
+        target: crate::protocol::IndexSearchTarget,
+        distance: f64,
+    ) -> crate::protocol::IndexSearchResult {
+        crate::protocol::IndexSearchResult {
+            scope,
+            title: "result".to_string(),
+            subtitle: String::new(),
+            preview: String::new(),
+            distance: Some(distance),
+            match_mode: Some(crate::protocol::IndexSearchMatchMode::Semantic),
+            matched_terms: Vec::new(),
+            missing_terms: Vec::new(),
+            target,
+        }
+    }
+
+    #[test]
+    fn canonical_runner_contract_is_cross_platform_and_rejects_cross_kind_targets() {
+        let repo = Path::new("canonical-repo");
+        let issue_runner = FakeCanonicalProjectIndexRunner::new(Ok(
+            crate::index_search::ProjectIndexSearchOutcome {
+                results: vec![
+                    project_index_result(
+                        crate::protocol::IndexSearchScope::Issues,
+                        crate::protocol::IndexSearchTarget::Spec { spec_id: 99 },
+                        0.01,
+                    ),
+                    project_index_result(
+                        crate::protocol::IndexSearchScope::Issues,
+                        crate::protocol::IndexSearchTarget::Issue { number: 42 },
+                        0.02,
+                    ),
+                ],
+                ..Default::default()
+            },
+        ));
+        let issue_hits = canonical_semantic_search_with_runner(
+            &issue_runner,
+            repo,
+            KnowledgeKind::Issue,
+            "issue query",
+            10,
+        )
+        .expect("issue search");
+        assert_eq!(
+            issue_hits,
+            vec![SemanticSearchHit {
+                number: 42,
+                distance: Some(0.02)
+            }]
+        );
+        assert_eq!(
+            issue_runner.calls.borrow().as_slice(),
+            &[CanonicalSearchCall {
+                repo_path: repo.to_path_buf(),
+                query: "issue query".to_string(),
+                scopes: vec![crate::protocol::IndexSearchScope::Issues],
+                match_mode: crate::protocol::IndexSearchMatchMode::Semantic,
+                auto_build: false,
+            }]
+        );
+
+        let spec_runner = FakeCanonicalProjectIndexRunner::new(Ok(
+            crate::index_search::ProjectIndexSearchOutcome {
+                results: vec![
+                    project_index_result(
+                        crate::protocol::IndexSearchScope::Specs,
+                        crate::protocol::IndexSearchTarget::Issue { number: 7 },
+                        0.01,
+                    ),
+                    project_index_result(
+                        crate::protocol::IndexSearchScope::Specs,
+                        crate::protocol::IndexSearchTarget::Spec { spec_id: 1939 },
+                        0.03,
+                    ),
+                ],
+                ..Default::default()
+            },
+        ));
+        let spec_hits = canonical_semantic_search_with_runner(
+            &spec_runner,
+            repo,
+            KnowledgeKind::Spec,
+            "spec query",
+            10,
+        )
+        .expect("spec search");
+        assert_eq!(
+            spec_hits,
+            vec![SemanticSearchHit {
+                number: 1939,
+                distance: Some(0.03)
+            }]
+        );
+        assert_eq!(
+            spec_runner.calls.borrow()[0].scopes,
+            vec![crate::protocol::IndexSearchScope::Specs]
+        );
+        assert!(!spec_runner.calls.borrow()[0].auto_build);
+    }
+
+    #[test]
+    fn canonical_runner_failure_matrix_preserves_only_typed_transient_codes() {
+        let repo = Path::new("canonical-repo");
+        let cases = [
+            (
+                crate::index_search::IndexSearchError::NotReady(
+                    crate::index_search::IndexSearchNotReady {
+                        reason: "missing".to_string(),
+                        affected_scopes: vec!["issues".to_string()],
+                        waited_ms: 0,
+                        retry_after_ms: 5_000,
+                    },
+                ),
+                Some("INDEX_NOT_READY"),
+            ),
+            (
+                crate::index_search::IndexSearchError::Unavailable(
+                    crate::index_search::IndexSearchUnavailable {
+                        reason: "spawn".to_string(),
+                        retry_after_ms: 5_000,
+                    },
+                ),
+                Some("SEARCH_UNAVAILABLE"),
+            ),
+            (
+                crate::index_search::IndexSearchError::SearchFailed(
+                    crate::index_search::IndexSearchFailed {
+                        reason: "query".to_string(),
+                        affected_scopes: vec!["issues".to_string()],
+                    },
+                ),
+                None,
+            ),
+            (
+                crate::index_search::IndexSearchError::Other("malformed".to_string()),
+                None,
+            ),
+        ];
+
+        for (error, expected_code) in cases {
+            let runner = FakeCanonicalProjectIndexRunner::new(Err(error));
+            let failure = canonical_semantic_search_with_runner(
+                &runner,
+                repo,
+                KnowledgeKind::Issue,
+                "probe",
+                10,
+            )
+            .expect_err("runner failure");
+            let actual_code = match failure {
+                SemanticSearchFailure::Transient { error_code, .. } => Some(error_code),
+                SemanticSearchFailure::Fatal { .. } => None,
+            };
+            assert_eq!(actual_code.as_deref(), expected_code);
         }
     }
 
@@ -1856,6 +2259,120 @@ exit 1\n",
         repo
     }
 
+    fn serialized_backend_search_event(outcome: KnowledgeSearchOutcome) -> String {
+        let view = outcome.view;
+        serde_json::to_string(&crate::protocol::BackendEvent::KnowledgeSearchResults {
+            id: "issue-window".to_string(),
+            knowledge_kind: KnowledgeKind::Issue,
+            query: "probe".to_string(),
+            request_id: 7,
+            entries: view.entries,
+            selected_number: view.selected_number,
+            empty_message: view.empty_message,
+            refresh_enabled: view.refresh_enabled,
+            semantic_retry: outcome.semantic_retry,
+        })
+        .expect("serialize final backend event")
+    }
+
+    #[test]
+    fn legacy_public_client_signature_degrades_without_retry_or_raw_protocol_diagnostic() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = cache_with_issue_42(home.path());
+        let sentinel = "legacy-secret-diagnostic C:\\private\\index";
+
+        let outcome = search_knowledge_bridge_outcome_with_client(
+            &repo,
+            KnowledgeKind::Issue,
+            "#42",
+            None,
+            &LegacyFailingSemanticSearchClient {
+                reason: sentinel.to_string(),
+            },
+        )
+        .expect("legacy error silently degrades");
+        assert!(outcome.semantic_retry.is_none());
+        let serialized = serialized_backend_search_event(outcome);
+        assert!(!serialized.contains(sentinel), "{serialized}");
+    }
+
+    #[test]
+    fn typed_failure_matrix_emits_only_allowlisted_retry_metadata() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = cache_with_issue_42(home.path());
+        let cases = [
+            (
+                SemanticSearchFailure::Transient {
+                    error_code: "INDEX_NOT_READY".to_string(),
+                    retry_after_ms: 5_000,
+                    reason: "not-ready-secret".to_string(),
+                },
+                Some("INDEX_NOT_READY"),
+                "not-ready-secret",
+            ),
+            (
+                SemanticSearchFailure::Transient {
+                    error_code: "SEARCH_UNAVAILABLE".to_string(),
+                    retry_after_ms: 5_000,
+                    reason: "unavailable-secret".to_string(),
+                },
+                Some("SEARCH_UNAVAILABLE"),
+                "unavailable-secret",
+            ),
+            (
+                SemanticSearchFailure::Fatal {
+                    reason: "search-failed-secret".to_string(),
+                },
+                None,
+                "search-failed-secret",
+            ),
+            (
+                SemanticSearchFailure::Fatal {
+                    reason: "malformed-secret".to_string(),
+                },
+                None,
+                "malformed-secret",
+            ),
+        ];
+
+        for (failure, expected_code, sentinel) in cases {
+            let outcome = search_knowledge_bridge_outcome_with_typed_client(
+                &repo,
+                KnowledgeKind::Issue,
+                "#42",
+                None,
+                &FailingSemanticSearchClient { failure },
+            )
+            .expect("typed failure silently degrades");
+            assert_eq!(
+                outcome
+                    .semantic_retry
+                    .as_ref()
+                    .map(|directive| directive.error_code.as_str()),
+                expected_code,
+            );
+            let serialized = serialized_backend_search_event(outcome);
+            assert!(!serialized.contains(sentinel), "{serialized}");
+            assert!(!serialized.contains("reason"), "{serialized}");
+        }
+    }
+
     #[test]
     fn transient_semantic_failure_returns_cache_rows_with_retry_directive() {
         // SPEC #3170 AS-17.1 / FR-098: a typed transient semantic failure is
@@ -1872,7 +2389,7 @@ exit 1\n",
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let repo = cache_with_issue_42(home.path());
 
-        let outcome = search_knowledge_bridge_outcome_with_client(
+        let outcome = search_knowledge_bridge_outcome_with_typed_client(
             &repo,
             KnowledgeKind::Issue,
             "#42",
@@ -1917,7 +2434,7 @@ exit 1\n",
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let repo = cache_with_issue_42(home.path());
 
-        let outcome = search_knowledge_bridge_outcome_with_client(
+        let outcome = search_knowledge_bridge_outcome_with_typed_client(
             &repo,
             KnowledgeKind::Issue,
             "silent recovery issue",
@@ -1960,7 +2477,7 @@ exit 1\n",
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let repo = cache_with_issue_42(home.path());
 
-        let outcome = search_knowledge_bridge_outcome_with_client(
+        let outcome = search_knowledge_bridge_outcome_with_typed_client(
             &repo,
             KnowledgeKind::Issue,
             "#42",

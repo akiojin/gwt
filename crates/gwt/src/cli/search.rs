@@ -144,6 +144,10 @@ pub fn run<E: CliEnv>(
             render_search_failed(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
+        Err(error @ crate::index_search::IndexSearchError::Unavailable(_)) => {
+            render_search_unavailable(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
         Err(error) => {
             return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
         }
@@ -173,6 +177,29 @@ pub fn run<E: CliEnv>(
         }
     }
     Ok(0)
+}
+
+fn render_search_unavailable(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchError,
+) {
+    let crate::index_search::IndexSearchError::Unavailable(unavailable) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "SEARCH_UNAVAILABLE",
+            "retryable": true,
+            "reason": unavailable.reason,
+            "retry_after_ms": unavailable.retry_after_ms,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("search unavailable: {error}\n"));
+    }
 }
 
 fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::IndexSearchError) {
@@ -509,6 +536,25 @@ mod tests {
     }
 
     #[test]
+    fn render_search_unavailable_json_reports_retryable_error_contract() {
+        use crate::index_search::{IndexSearchError, IndexSearchUnavailable};
+        let mut out = String::new();
+        let error = IndexSearchError::Unavailable(IndexSearchUnavailable {
+            reason: "project index runner unavailable".to_string(),
+            retry_after_ms: 5_000,
+        });
+
+        render_search_unavailable(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
+        assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
     fn render_text_lists_results_and_suggestions() {
         let mut out = String::new();
         render_text(
@@ -668,5 +714,9 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        assert!(
+            crate::index_search::wait_for_index_search_repairs(std::time::Duration::from_secs(20)),
+            "search-triggered repair did not settle before scoped HOME cleanup"
+        );
     }
 }

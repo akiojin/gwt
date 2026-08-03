@@ -204,26 +204,21 @@ async fn spawn_logged_inner(
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
 
-    tracing::info!(
-        target: SUMMARY_TARGET,
-        kind = kind.as_str(),
-        spawn_id = spawn_id,
-        label = %options.label,
-        program = %program.to_string_lossy(),
-        phase = "start",
-        "process start",
-    );
+    trace_process_start(kind, spawn_id, &options, &program);
 
     // SPEC-2809 (revised) — push the command line as a banner so the
     // Console window shows e.g. `$ gh pr list ...` instead of an opaque
     // `spawn_id` marker. The synthetic line uses the kind's hub so a
     // gh / docker / runner spawn lands under the right tab.
-    crate::process::push_command_banner_to_hub(
-        kind,
-        spawn_id,
-        &options.label,
-        options.current_dir.as_deref(),
-    );
+    if options.forward_output {
+        push_command_banner_to_hub(
+            hub,
+            kind,
+            spawn_id,
+            &options.label,
+            options.current_dir.as_deref(),
+        );
+    }
 
     let mut request = crate::process::ProcessPlanRequest::new(&program)
         .args(args.iter().map(|arg| arg.as_ref()))
@@ -241,7 +236,15 @@ async fn spawn_logged_inner(
         Ok(command) => command,
         Err(error) => {
             let error = process_resolution_io_error(error);
-            finish_failed_launch(hub, kind, spawn_id, &options.label, started_at, &error);
+            finish_failed_launch(
+                hub,
+                kind,
+                spawn_id,
+                &options.label,
+                started_at,
+                &error,
+                options.forward_output,
+            );
             return Err(error);
         }
     };
@@ -257,18 +260,52 @@ async fn spawn_logged_inner(
         Stdio::null()
     });
 
-    if deadline.is_some() {
-        configure_deadline_command(&mut command);
-    }
+    let mut process_tree = match ChildProcessTree::prepare(&mut command, deadline.is_some()) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            finish_failed_launch(
+                hub,
+                kind,
+                spawn_id,
+                &options.label,
+                started_at,
+                &error,
+                options.forward_output,
+            );
+            return Err(error);
+        }
+    };
 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            finish_failed_launch(hub, kind, spawn_id, &options.label, started_at, &error);
+            finish_failed_launch(
+                hub,
+                kind,
+                spawn_id,
+                &options.label,
+                started_at,
+                &error,
+                options.forward_output,
+            );
             return Err(error);
         }
     };
-    let mut process_tree = ChildProcessTree::new(deadline.and_then(|_| child.id()));
+    if let Some(pid) = deadline.and_then(|_| child.id()) {
+        if let Err(error) = process_tree.after_spawn(pid) {
+            let _ = cleanup_child_process_with_grace(&mut process_tree, &mut child).await;
+            finish_failed_launch(
+                hub,
+                kind,
+                spawn_id,
+                &options.label,
+                started_at,
+                &error,
+                options.forward_output,
+            );
+            return Err(error);
+        }
+    }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
@@ -319,28 +356,22 @@ async fn spawn_logged_inner(
 
     let Some(collected) = collected else {
         if !cleanup_child_process_with_grace(&mut process_tree, &mut child).await {
-            tracing::warn!(
-                target: SUMMARY_TARGET,
-                spawn_id,
-                cleanup_grace_ms = PROCESS_CLEANUP_GRACE.as_millis() as u64,
-                "process cleanup exceeded its grace period"
-            );
+            trace_cleanup_grace_exceeded(spawn_id, options.forward_output);
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
-        crate::process::push_command_summary_to_hub(kind, spawn_id, None, duration_ms);
-        tracing::info!(
-            target: SUMMARY_TARGET,
-            kind = kind.as_str(),
-            spawn_id = spawn_id,
-            label = %options.label,
-            phase = "end",
-            exit_code = Option::<i64>::None,
-            duration_ms = duration_ms,
-            stdout_lines = 0_u64,
-            stderr_lines = 0_u64,
-            success = false,
-            timed_out = true,
-            "process end",
+        if options.forward_output {
+            push_command_summary_to_hub(hub, kind, spawn_id, None, duration_ms);
+        }
+        trace_process_end(
+            kind,
+            spawn_id,
+            &options,
+            None,
+            duration_ms,
+            0,
+            0,
+            false,
+            true,
         );
         return Err(deadline_error());
     };
@@ -348,36 +379,49 @@ async fn spawn_logged_inner(
         Ok(collected) => collected,
         Err(error) => {
             if !cleanup_child_process_with_grace(&mut process_tree, &mut child).await {
-                tracing::warn!(
-                    target: SUMMARY_TARGET,
-                    spawn_id,
-                    cleanup_grace_ms = PROCESS_CLEANUP_GRACE.as_millis() as u64,
-                    "process cleanup exceeded its grace period"
-                );
+                trace_cleanup_grace_exceeded(spawn_id, options.forward_output);
             }
-            finish_failed_launch(hub, kind, spawn_id, &options.label, started_at, &error);
+            finish_failed_launch(
+                hub,
+                kind,
+                spawn_id,
+                &options.label,
+                started_at,
+                &error,
+                options.forward_output,
+            );
             return Err(error);
         }
     };
-    process_tree.disarm();
+    if let Err(error) = process_tree.release_without_termination() {
+        finish_failed_launch(
+            hub,
+            kind,
+            spawn_id,
+            &options.label,
+            started_at,
+            &error,
+            options.forward_output,
+        );
+        return Err(error);
+    }
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let exit_code = status.code();
 
-    crate::process::push_command_summary_to_hub(kind, spawn_id, exit_code, duration_ms);
-
-    tracing::info!(
-        target: SUMMARY_TARGET,
-        kind = kind.as_str(),
-        spawn_id = spawn_id,
-        label = %options.label,
-        phase = "end",
-        exit_code = exit_code.map(|c| c as i64),
-        duration_ms = duration_ms,
-        stdout_lines = stdout_lines,
-        stderr_lines = stderr_lines,
-        success = status.success(),
-        "process end",
+    if options.forward_output {
+        push_command_summary_to_hub(hub, kind, spawn_id, exit_code, duration_ms);
+    }
+    trace_process_end(
+        kind,
+        spawn_id,
+        &options,
+        exit_code,
+        duration_ms,
+        stdout_lines,
+        stderr_lines,
+        status.success(),
+        false,
     );
 
     Ok(SpawnOutput {
@@ -389,6 +433,129 @@ async fn spawn_logged_inner(
     })
 }
 
+fn trace_process_start(
+    kind: ProcessKind,
+    spawn_id: u64,
+    options: &SpawnOptions,
+    program: &std::ffi::OsStr,
+) {
+    if options.forward_output {
+        tracing::info!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id,
+            label = %options.label,
+            program = %program.to_string_lossy(),
+            phase = "start",
+            "process start",
+        );
+    } else {
+        // Silent process execution is intentionally invisible to every UI
+        // surface. Keep only non-sensitive correlation metadata at Debug.
+        tracing::debug!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id,
+            phase = "start",
+            "silent process start",
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_process_end(
+    kind: ProcessKind,
+    spawn_id: u64,
+    options: &SpawnOptions,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+    stdout_lines: u64,
+    stderr_lines: u64,
+    success: bool,
+    timed_out: bool,
+) {
+    if options.forward_output {
+        tracing::info!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id,
+            label = %options.label,
+            phase = "end",
+            exit_code = exit_code.map(i64::from),
+            duration_ms,
+            stdout_lines,
+            stderr_lines,
+            success,
+            timed_out,
+            "process end",
+        );
+    } else {
+        tracing::debug!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id,
+            phase = "end",
+            exit_code = exit_code.map(i64::from),
+            duration_ms,
+            success,
+            timed_out,
+            "silent process end",
+        );
+    }
+}
+
+fn trace_cleanup_grace_exceeded(spawn_id: u64, forward_output: bool) {
+    if forward_output {
+        tracing::warn!(
+            target: SUMMARY_TARGET,
+            spawn_id,
+            cleanup_grace_ms = PROCESS_CLEANUP_GRACE.as_millis() as u64,
+            "process cleanup exceeded its grace period",
+        );
+    } else {
+        tracing::debug!(
+            target: SUMMARY_TARGET,
+            spawn_id,
+            "silent process cleanup exceeded its grace period",
+        );
+    }
+}
+
+fn push_command_banner_to_hub(
+    hub: &ProcessConsoleHub,
+    kind: ProcessKind,
+    spawn_id: u64,
+    label: &str,
+    current_dir: Option<&std::path::Path>,
+) {
+    let banner = match current_dir {
+        Some(dir) => format!("$ {label} (cwd={})", dir.display()),
+        None => format!("$ {label}"),
+    };
+    hub.push(ProcessLine::new(
+        kind,
+        spawn_id,
+        ProcessStream::Stdout,
+        banner,
+    ));
+}
+
+fn push_command_summary_to_hub(
+    hub: &ProcessConsoleHub,
+    kind: ProcessKind,
+    spawn_id: u64,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+) {
+    let exit = exit_code.map_or_else(|| "?".to_string(), |code| code.to_string());
+    hub.push(ProcessLine::new(
+        kind,
+        spawn_id,
+        ProcessStream::Stdout,
+        format!("→ exit={exit} ({duration_ms}ms)"),
+    ));
+}
+
 fn finish_failed_launch(
     hub: &ProcessConsoleHub,
     kind: ProcessKind,
@@ -396,34 +563,42 @@ fn finish_failed_launch(
     label: &str,
     started_at: Instant,
     error: &std::io::Error,
+    forward_output: bool,
 ) {
     let duration_ms = started_at.elapsed().as_millis() as u64;
-    hub.push(ProcessLine::new(
-        kind,
-        spawn_id,
-        ProcessStream::Stderr,
-        redact::redact_line(&format!("process launch failed: {error}")),
-    ));
-    hub.push(ProcessLine::new(
-        kind,
-        spawn_id,
-        ProcessStream::Stdout,
-        format!("→ exit=? ({duration_ms}ms)"),
-    ));
-    tracing::info!(
-        target: SUMMARY_TARGET,
-        kind = kind.as_str(),
-        spawn_id = spawn_id,
-        label = %label,
-        phase = "end",
-        exit_code = Option::<i64>::None,
-        duration_ms = duration_ms,
-        stdout_lines = 0_u64,
-        stderr_lines = 1_u64,
-        success = false,
-        error = %error,
-        "process end",
-    );
+    if forward_output {
+        hub.push(ProcessLine::new(
+            kind,
+            spawn_id,
+            ProcessStream::Stderr,
+            redact::redact_line(&format!("process launch failed: {error}")),
+        ));
+        push_command_summary_to_hub(hub, kind, spawn_id, None, duration_ms);
+        tracing::info!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id = spawn_id,
+            label = %label,
+            phase = "end",
+            exit_code = Option::<i64>::None,
+            duration_ms = duration_ms,
+            stdout_lines = 0_u64,
+            stderr_lines = 1_u64,
+            success = false,
+            error = %error,
+            "process end",
+        );
+    } else {
+        tracing::debug!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id,
+            phase = "end",
+            duration_ms,
+            success = false,
+            "silent process launch failed",
+        );
+    }
 }
 
 fn process_resolution_io_error(error: crate::process::ProcessResolveFailure) -> std::io::Error {
@@ -475,43 +650,115 @@ where
     tokio::time::timeout(grace, cleanup).await.is_ok()
 }
 
-fn configure_deadline_command(command: &mut TokioCommand) {
-    command.kill_on_drop(true);
-    configure_process_group(command);
-}
-
-#[cfg(unix)]
-fn configure_process_group(command: &mut TokioCommand) {
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut TokioCommand) {}
-
 struct ChildProcessTree {
+    #[cfg(unix)]
+    pid: Option<u32>,
+    #[cfg(windows)]
+    job: Option<crate::process_tree::WindowsJobObject>,
+    #[cfg(not(any(unix, windows)))]
     pid: Option<u32>,
 }
 
 impl ChildProcessTree {
-    fn new(pid: Option<u32>) -> Self {
-        Self { pid }
+    fn prepare(command: &mut TokioCommand, deadline_enabled: bool) -> std::io::Result<Self> {
+        if deadline_enabled {
+            command.kill_on_drop(true);
+        }
+        #[cfg(unix)]
+        {
+            if deadline_enabled {
+                command.process_group(0);
+            }
+            Ok(Self { pid: None })
+        }
+        #[cfg(windows)]
+        {
+            let job = if deadline_enabled {
+                let job =
+                    crate::process_tree::WindowsJobObject::new().map_err(windows_job_io_error)?;
+                crate::process_tree::WindowsJobObject::configure_suspended(command.as_std_mut());
+                Some(job)
+            } else {
+                None
+            };
+            Ok(Self { job })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Self { pid: None })
+        }
+    }
+
+    fn after_spawn(&mut self, pid: u32) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.pid = Some(pid);
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            self.job
+                .as_mut()
+                .expect("deadline process owns a Windows Job")
+                .assign_and_resume(pid)
+                .map_err(windows_job_io_error)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.pid = Some(pid);
+            Ok(())
+        }
     }
 
     async fn terminate(&mut self) {
-        if let Some(pid) = self.pid {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.take() {
             terminate_process_tree(pid).await;
-            self.pid = None;
+        }
+        #[cfg(windows)]
+        if let Some(mut job) = self.job.take() {
+            let _ = job.terminate();
+        }
+        #[cfg(not(any(unix, windows)))]
+        if let Some(pid) = self.pid.take() {
+            terminate_process_tree(pid).await;
         }
     }
 
     fn terminate_on_drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.take() {
+            terminate_process_tree_on_drop(pid);
+        }
+        #[cfg(windows)]
+        if let Some(mut job) = self.job.take() {
+            let _ = job.terminate();
+        }
+        #[cfg(not(any(unix, windows)))]
         if let Some(pid) = self.pid.take() {
             terminate_process_tree_on_drop(pid);
         }
     }
 
-    fn disarm(&mut self) {
-        self.pid = None;
+    fn release_without_termination(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.pid = None;
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            if let Some(job) = self.job.take() {
+                job.release_without_termination()
+                    .map_err(windows_job_io_error)?;
+            }
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.pid = None;
+            Ok(())
+        }
     }
 }
 
@@ -536,34 +783,16 @@ fn terminate_process_tree_on_drop(pid: u32) {
     }
 }
 
-#[cfg(windows)]
-async fn terminate_process_tree(pid: u32) {
-    let pid = pid.to_string();
-    #[allow(clippy::disallowed_methods)]
-    let mut command = TokioCommand::new("taskkill");
-    crate::process::configure_hidden_tokio_command(&mut command);
-    command
-        .args(["/PID", pid.as_str(), "/T", "/F"])
-        .kill_on_drop(true)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let _ = command.status().await;
-}
-
-#[cfg(windows)]
-fn terminate_process_tree_on_drop(pid: u32) {
-    let _ = crate::process::hidden_command("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-}
-
 #[cfg(not(any(unix, windows)))]
 async fn terminate_process_tree(_pid: u32) {}
 
 #[cfg(not(any(unix, windows)))]
 fn terminate_process_tree_on_drop(_pid: u32) {}
+
+#[cfg(windows)]
+fn windows_job_io_error(error: crate::process_tree::WindowsJobError) -> std::io::Error {
+    std::io::Error::other(error)
+}
 
 async fn forward_stream<R>(
     mut reader: R,
@@ -612,9 +841,48 @@ where
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedTrace(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedTrace {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        }
+    }
+
+    impl Write for CapturedTrace {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTrace {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     #[tokio::test]
     async fn cleanup_future_is_abandoned_after_grace() {
@@ -730,9 +998,11 @@ mod tests {
         assert!(out.stdout.contains("hello world"));
         assert_eq!(out.stdout_lines, 1);
         let lines = hub.snapshot_kind(ProcessKind::Git);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].stream, ProcessStream::Stdout);
-        assert!(lines[0].message.contains("hello world"));
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].message.starts_with("$ test echo"));
+        assert_eq!(lines[1].stream, ProcessStream::Stdout);
+        assert!(lines[1].message.contains("hello world"));
+        assert!(lines[2].message.starts_with("→ exit=0"));
     }
 
     #[tokio::test]
@@ -751,8 +1021,8 @@ mod tests {
         assert!(out.success());
         assert_eq!(out.stderr_lines, 1);
         let lines = hub.snapshot_kind(ProcessKind::Docker);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].stream, ProcessStream::Stderr);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].stream, ProcessStream::Stderr);
     }
 
     #[tokio::test]
@@ -787,11 +1057,16 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         let lines = hub.snapshot_kind(ProcessKind::AgentBootstrap);
-        assert_eq!(lines.len(), 2, "diagnostic plus footer must be emitted");
-        assert_eq!(lines[0].stream, ProcessStream::Stderr);
-        assert!(lines[0].message.contains("process launch failed"));
-        assert_eq!(lines[1].stream, ProcessStream::Stdout);
-        assert!(lines[1].message.starts_with("→ exit=?"));
+        assert_eq!(
+            lines.len(),
+            3,
+            "banner, diagnostic, and footer must be emitted"
+        );
+        assert!(lines[0].message.starts_with("$ missing executable"));
+        assert_eq!(lines[1].stream, ProcessStream::Stderr);
+        assert!(lines[1].message.contains("process launch failed"));
+        assert_eq!(lines[2].stream, ProcessStream::Stdout);
+        assert!(lines[2].message.starts_with("→ exit=?"));
     }
 
     #[tokio::test]
@@ -828,12 +1103,15 @@ mod tests {
         );
         // Hub line is redacted (SPEC-1924 FR-041).
         let lines = hub.snapshot_kind(ProcessKind::Gh);
+        let output_line = lines
+            .iter()
+            .find(|line| line.message.contains("***redacted***"))
+            .expect("redacted child output line");
         assert!(
-            !lines[0].message.contains(token),
+            !output_line.message.contains(token),
             "hub line: {:?}",
-            lines[0].message
+            output_line.message
         );
-        assert!(lines[0].message.contains("***redacted***"));
     }
 
     #[tokio::test]
@@ -848,7 +1126,9 @@ mod tests {
         assert!(out.stdout.is_empty());
         assert_eq!(out.stdout_lines, 0);
         let lines = hub.snapshot_kind(ProcessKind::Git);
-        assert!(lines.is_empty());
+        assert_eq!(lines.len(), 2, "capture off keeps lifecycle only");
+        assert!(lines[0].message.starts_with("$ test null"));
+        assert!(lines[1].message.starts_with("→ exit=0"));
     }
 
     #[test]
@@ -939,6 +1219,112 @@ mod tests {
         assert!(out.stdout.contains(sensitive));
         assert_eq!(out.stdout_lines, 0);
         assert!(hub.snapshot_kind(ProcessKind::Git).is_empty());
+    }
+
+    #[test]
+    fn silent_success_timeout_and_spawn_failure_emit_no_hub_or_ui_events() {
+        use tracing_subscriber::prelude::*;
+
+        let supplied_hub = ProcessConsoleHub::new();
+        let candidate_global = ProcessConsoleHub::new();
+        let installed_global = super::super::hub::set_global(candidate_global.clone());
+        let global_before = candidate_global
+            .snapshot_kind(ProcessKind::IndexRunner)
+            .len();
+        let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let trace = CapturedTrace::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(crate::logging::ui_forwarder::UiForwarderLayer::new(ui_tx))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(trace.clone()),
+            );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let (success_program, success_args) = echo_command();
+                spawn_logged(
+                    &supplied_hub,
+                    ProcessKind::IndexRunner,
+                    success_program,
+                    &success_args,
+                    SpawnOptions::new("secret label ghp_abcdef0123456789").forward_output(false),
+                )
+                .await
+                .expect("silent success");
+
+                let (timeout_program, timeout_args) = if cfg!(windows) {
+                    (
+                        "cmd".to_string(),
+                        vec!["/C".to_string(), "ping -n 4 127.0.0.1 >NUL".to_string()],
+                    )
+                } else {
+                    (
+                        "sh".to_string(),
+                        vec!["-c".to_string(), "sleep 3".to_string()],
+                    )
+                };
+                let timeout = spawn_logged_with_deadline(
+                    &supplied_hub,
+                    ProcessKind::IndexRunner,
+                    timeout_program,
+                    &timeout_args,
+                    SpawnOptions::new("private timeout path C:\\secret").forward_output(false),
+                    Instant::now() + Duration::from_millis(150),
+                )
+                .await
+                .expect_err("silent timeout");
+                assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+
+                spawn_logged(
+                    &supplied_hub,
+                    ProcessKind::IndexRunner,
+                    "this-binary-does-not-exist-silent-process-test",
+                    &[] as &[&str],
+                    SpawnOptions::new("private missing executable").forward_output(false),
+                )
+                .await
+                .expect_err("silent spawn failure");
+            });
+        });
+
+        assert!(
+            supplied_hub
+                .snapshot_kind(ProcessKind::IndexRunner)
+                .is_empty(),
+            "silent lifecycle must not reach the supplied hub"
+        );
+        if installed_global {
+            assert_eq!(
+                candidate_global
+                    .snapshot_kind(ProcessKind::IndexRunner)
+                    .len(),
+                global_before,
+                "silent lifecycle must not reach the global hub"
+            );
+        }
+        assert!(
+            ui_rx.try_recv().is_err(),
+            "Debug-only silent lifecycle must not reach UiForwarder"
+        );
+        let trace = trace.contents();
+        assert!(trace.contains("silent process"));
+        for sensitive in [
+            "ghp_abcdef0123456789",
+            r"C:\secret",
+            "this-binary-does-not-exist-silent-process-test",
+        ] {
+            assert!(
+                !trace.contains(sensitive),
+                "silent Debug lifecycle leaked sensitive context: {trace}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1088,7 +1474,7 @@ mod tests {
     async fn deadline_terminates_and_reaps_child_process_tree_windows() {
         // T-IDX-418 (SPEC #1939 Phase 70d): Windows counterpart of the POSIX
         // deadline tree test — the descendant a child backgrounds must not
-        // survive the deadline-driven `taskkill /T` cleanup.
+        // survive the deadline-driven Job Object close.
         let directory = tempfile::tempdir().expect("tempdir");
         let descendant_file = directory.path().join("descendant.pid");
         let script = format!(
@@ -1114,6 +1500,83 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
 
         let descendant = wait_for_pid_file_windows(&descendant_file);
+        wait_for_process_exit_windows(descendant);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deadline_reaps_windows_descendant_after_root_exits_first_with_pipe_open() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let descendant_file = directory.path().join("descendant-pipe.pid");
+        let script = format!(
+            "$child = Start-Process powershell -ArgumentList '-NoProfile','-Command',\
+             'Start-Sleep -Seconds 60' -PassThru -NoNewWindow; \
+             Set-Content -Path '{}' -Value $child.Id -Encoding ascii; exit 0",
+            descendant_file.display()
+        );
+        let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
+        let started = Instant::now();
+        let error = spawn_logged_with_deadline(
+            &ProcessConsoleHub::new(),
+            ProcessKind::IndexRunner,
+            "powershell",
+            &args,
+            SpawnOptions::new("windows root exits before pipe descendant").forward_output(false),
+            started + Duration::from_secs(2),
+        )
+        .await
+        .expect_err("descendant-held pipe must keep collection pending until deadline");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let descendant = wait_for_pid_file_windows(&descendant_file);
+        wait_for_process_exit_windows(descendant);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn successful_deadline_spawn_releases_job_without_killing_detached_descendant() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let descendant_file = directory.path().join("detached.pid");
+        let stdout_file = directory.path().join("detached.stdout");
+        let stderr_file = directory.path().join("detached.stderr");
+        let script = format!(
+            "$child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
+             -PassThru -WindowStyle Hidden -RedirectStandardOutput '{}' \
+             -RedirectStandardError '{}'; \
+             Set-Content -Path '{}' -Value $child.Id -Encoding ascii; exit 0",
+            stdout_file.display(),
+            stderr_file.display(),
+            descendant_file.display(),
+        );
+        let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
+
+        let output = spawn_logged_with_deadline(
+            &ProcessConsoleHub::new(),
+            ProcessKind::IndexRunner,
+            "powershell",
+            &args,
+            SpawnOptions::new("windows detached success")
+                .capture(false, false)
+                .forward_output(false),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("root process succeeds before deadline");
+        assert!(output.success());
+
+        let descendant = wait_for_pid_file_windows(&descendant_file);
+        assert!(
+            process_is_alive_windows(descendant),
+            "successful Job release must preserve detached descendants"
+        );
+        let _ = crate::process::hidden_command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("Stop-Process -Id {descendant} -Force -ErrorAction SilentlyContinue"),
+            ])
+            .status();
         wait_for_process_exit_windows(descendant);
     }
 
@@ -1148,6 +1611,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         panic!("process {pid} remained alive after deadline cleanup");
+    }
+
+    #[cfg(windows)]
+    fn process_is_alive_windows(pid: u32) -> bool {
+        let filter = format!("PID eq {pid}");
+        let output = crate::process::hidden_command("tasklist")
+            .args(["/FI", filter.as_str(), "/NH"])
+            .output()
+            .expect("probe process via tasklist");
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
     }
 
     #[cfg(unix)]

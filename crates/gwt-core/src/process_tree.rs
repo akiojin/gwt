@@ -23,8 +23,8 @@ mod windows_job {
                 },
                 JobObjects::{
                     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    QueryInformationJobObject, SetInformationJobObject,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
                     OpenProcess, OpenThread, ResumeThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
@@ -164,6 +164,66 @@ mod windows_job {
             })
         }
 
+        /// Relinquish this process' Job handle without terminating processes
+        /// that remain in the Job.
+        ///
+        /// The existing extended-limit structure is queried and written back
+        /// verbatim except for `KILL_ON_JOB_CLOSE`. This is deliberately a
+        /// consuming operation: until the updated limits and handle close both
+        /// succeed, `self` retains ownership so its armed `Drop` remains the
+        /// failure-path safety net.
+        pub fn release_without_termination(mut self) -> Result<(), WindowsJobError> {
+            let job = self.handle.expect("live Windows Job handle");
+            let mut original = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+            // SAFETY: `original` is the exact buffer required by the selected
+            // information class and is writable for the duration of the call.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(job),
+                    JobObjectExtendedLimitInformation,
+                    &mut original as *mut _ as _,
+                    info_size,
+                    None,
+                )
+            }
+            .map_err(|source| operation_error("QueryInformationJobObject", source))?;
+
+            let mut released = original;
+            released.BasicLimitInformation.LimitFlags &= !JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `released` is the exact structure required by the
+            // selected information class and remains live for this call.
+            unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &released as *const _ as _,
+                    info_size,
+                )
+            }
+            .map_err(|source| operation_error("SetInformationJobObject", source))?;
+
+            // Remove ownership only after CloseHandle succeeds. If closing
+            // unexpectedly fails, restore the armed limits before Drop makes
+            // one final close attempt.
+            if let Err(source) = unsafe { CloseHandle(job) } {
+                // SAFETY: best-effort restoration uses the previously queried
+                // exact structure; failure still leaves the owned handle for
+                // Drop to close.
+                let _ = unsafe {
+                    SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        &original as *const _ as _,
+                        info_size,
+                    )
+                };
+                return Err(operation_error("CloseHandle", source));
+            }
+            self.handle = None;
+            Ok(())
+        }
+
         fn assign_process(&mut self, process_id: u32) -> Result<(), WindowsJobError> {
             let job = self.handle.expect("live Windows Job handle");
             // SAFETY: OpenProcess returns a new owned handle for the exact PID.
@@ -272,5 +332,23 @@ mod tests {
 
         assert!(assign < resume, "Job assignment must precede thread resume");
         assert!(!source.contains(concat!("task", "kill")));
+    }
+
+    #[test]
+    fn windows_job_release_preserves_existing_extended_limits() {
+        let source = include_str!("process_tree.rs");
+        let release = source
+            .split("pub fn release_without_termination")
+            .nth(1)
+            .and_then(|tail| tail.split("fn assign_process").next())
+            .expect("release_without_termination body");
+
+        assert!(release.contains("QueryInformationJobObject"));
+        assert!(release.contains("let mut released = original"));
+        assert!(release.contains("&= !JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"));
+        assert!(release.contains("SetInformationJobObject"));
+        assert!(
+            release.find("CloseHandle(job)").unwrap() < release.find("self.handle = None").unwrap()
+        );
     }
 }
