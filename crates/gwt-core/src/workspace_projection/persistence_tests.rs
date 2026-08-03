@@ -5065,6 +5065,291 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
 }
 
 #[test]
+fn exact_terminal_compatibility_preserves_split_root_legacy_terminal_bytes() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let target = SessionBoundWorkspaceTerminalTarget {
+        project_state_root: fixture.target.project_state_root.clone(),
+        work_event_root: fixture.target.work_event_root.clone(),
+        session_id: fixture.target.session_id.clone(),
+        branch_identity: fixture.target.branch_identity.clone(),
+        worktree_identity: fixture.target.worktree_identity.clone(),
+        owner: fixture.target.owner.clone(),
+        agent_id: fixture.target.agent_id.clone(),
+    };
+
+    let legacy_work_items_path =
+        gwt_workspace_work_items_path_for_repo_path(&target.work_event_root);
+    let legacy_close_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&target.work_event_root);
+    let mut legacy = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load canonical WorkItems")
+        .expect("canonical WorkItems");
+    let mut legacy_discard = WorkEvent::new(
+        WorkEventKind::Discard,
+        T812_TARGET_WORK_ID,
+        Utc.with_ymd_and_hms(2026, 7, 22, 1, 1, 0).unwrap(),
+    );
+    legacy_discard.agent_session_id = Some(T812_SESSION_ID.to_string());
+    assert_eq!(
+        legacy.apply_event(legacy_discard.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+    save_workspace_work_items_projection_to_path(&legacy_work_items_path, &legacy)
+        .expect("seed stale legacy WorkItems");
+    fs::create_dir_all(legacy_close_path.parent().expect("legacy close parent"))
+        .expect("create legacy close parent");
+    fs::write(
+        &legacy_close_path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&legacy_discard).expect("serialize legacy close")
+        ),
+    )
+    .expect("seed stale legacy close ledger");
+    let legacy_before = [
+        fs::read(&legacy_work_items_path).expect("read legacy WorkItems before"),
+        fs::read(&legacy_close_path).expect("read legacy close before"),
+    ];
+
+    assert_eq!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+            Utc::now(),
+            |_, _| Ok(()),
+        )
+        .expect("close the exact canonical Work"),
+        WorkspaceTerminalEventOutcome::Emitted
+    );
+    assert_eq!(
+        [
+            fs::read(&legacy_work_items_path).expect("read legacy WorkItems after"),
+            fs::read(&legacy_close_path).expect("read legacy close after"),
+        ],
+        legacy_before,
+        "exact compatibility must preserve the stale linked-worktree authority bytes"
+    );
+    let canonical = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load canonical WorkItems after close")
+        .expect("canonical WorkItems after close");
+    let canonical_work = canonical
+        .work_items
+        .iter()
+        .find(|work| work.id == T812_TARGET_WORK_ID)
+        .expect("canonical exact Work");
+    assert_eq!(
+        canonical_work.status_category,
+        WorkspaceStatusCategory::Done
+    );
+    assert!(!canonical_work.discarded);
+}
+
+#[test]
+fn exact_terminal_confirmation_rejects_unprojected_or_unsupported_close_ledger() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for label in [
+        "unprojected",
+        "same-id-wrong-terminal",
+        "unknown-kind",
+        "additive-field",
+        "partial-tail",
+    ] {
+        let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+        let target = SessionBoundWorkspaceTerminalTarget {
+            project_state_root: fixture.target.project_state_root.clone(),
+            work_event_root: fixture.target.work_event_root.clone(),
+            session_id: fixture.target.session_id.clone(),
+            branch_identity: fixture.target.branch_identity.clone(),
+            worktree_identity: fixture.target.worktree_identity.clone(),
+            owner: fixture.target.owner.clone(),
+            agent_id: fixture.target.agent_id.clone(),
+        };
+        assert_eq!(
+            emit_workspace_terminal_event_for_exact_resolved_work_target(
+                &target,
+                T812_TARGET_WORK_ID,
+                WorkCloseKind::Done,
+                ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+                Utc.with_ymd_and_hms(2026, 7, 22, 2, 0, 0).unwrap(),
+                |_, _| Ok(()),
+            )
+            .expect("seed canonical terminal"),
+            WorkspaceTerminalEventOutcome::Emitted
+        );
+
+        let close_path =
+            gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root);
+        let extra = match label {
+            "unprojected" => {
+                let mut event = WorkEvent::new(
+                    WorkEventKind::Update,
+                    T812_TARGET_WORK_ID,
+                    Utc.with_ymd_and_hms(2026, 7, 22, 2, 1, 0).unwrap(),
+                );
+                event.id = "event-unprojected-close-ledger".to_string();
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&event).expect("serialize unprojected event")
+                )
+            }
+            "same-id-wrong-terminal" => {
+                let mut event: WorkEvent = serde_json::from_str(
+                    fs::read_to_string(&close_path)
+                        .expect("read canonical close ledger")
+                        .lines()
+                        .next()
+                        .expect("canonical close event"),
+                )
+                .expect("decode canonical close event");
+                event.kind = WorkEventKind::Discard;
+                event.status_category = None;
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&event).expect("serialize divergent close event")
+                )
+            }
+            "unknown-kind" => concat!(
+                r#"{"id":"event-future-close","work_item_id":"work-session-bound-target","kind":"correction","updated_at":"2026-07-22T02:01:00Z"}"#,
+                "\n"
+            )
+            .to_string(),
+            "additive-field" => concat!(
+                r#"{"id":"event-additive-close","work_item_id":"work-session-bound-target","kind":"done","future_event_field":true,"updated_at":"2026-07-22T02:01:00Z"}"#,
+                "\n"
+            )
+            .to_string(),
+            "partial-tail" => r#"{"id":"event-partial-close""#.to_string(),
+            _ => unreachable!(),
+        };
+        let mut close_bytes = fs::read(&close_path).expect("read canonical close ledger");
+        close_bytes.extend_from_slice(extra.as_bytes());
+        fs::write(&close_path, close_bytes).expect("seed close ledger drift");
+        let state_before = fixture.state_bytes();
+        let close_before = fs::read(&close_path).expect("snapshot close ledger drift");
+
+        let error = emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc.with_ymd_and_hms(2026, 7, 22, 3, 0, 0).unwrap(),
+            |_, _| Ok(()),
+        )
+        .expect_err("close ledger drift must fail closed");
+
+        assert!(
+            error.to_string().contains(match label {
+                "unprojected" => "unprojected machine-local close event",
+                "same-id-wrong-terminal" => "divergent machine-local close event",
+                _ => "machine-local close event json",
+            }),
+            "unexpected {label} diagnostic: {error}"
+        );
+        assert_eq!(
+            fixture.state_bytes(),
+            state_before,
+            "{label} confirm-only readback changed canonical Work state"
+        );
+        assert_eq!(
+            fs::read(&close_path).expect("read preserved close ledger"),
+            close_before,
+            "{label} confirm-only readback changed the close ledger"
+        );
+    }
+}
+
+#[test]
+fn exact_terminal_confirmation_accepts_repaired_identity_and_unrelated_legacy_close() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let target = SessionBoundWorkspaceTerminalTarget {
+        project_state_root: fixture.target.project_state_root.clone(),
+        work_event_root: fixture.target.work_event_root.clone(),
+        session_id: fixture.target.session_id.clone(),
+        branch_identity: fixture.target.branch_identity.clone(),
+        worktree_identity: fixture.target.worktree_identity.clone(),
+        owner: fixture.target.owner.clone(),
+        agent_id: fixture.target.agent_id.clone(),
+    };
+    assert_eq!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::EmitIfNeeded,
+            Utc.with_ymd_and_hms(2026, 7, 22, 2, 0, 0).unwrap(),
+            |_, _| Ok(()),
+        )
+        .expect("seed canonical terminal"),
+        WorkspaceTerminalEventOutcome::Emitted
+    );
+
+    let close_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root);
+    let mut durable_event: WorkEvent = serde_json::from_str(
+        fs::read_to_string(&close_path)
+            .expect("read close ledger")
+            .lines()
+            .next()
+            .expect("close event"),
+    )
+    .expect("decode close event");
+    durable_event.work_item_id = "legacy-mega-item".to_string();
+    durable_event.title = Some("legacy shared title".to_string());
+    durable_event.owner = Some("SPEC-legacy-owner".to_string());
+    let mut unrelated_legacy_close = WorkEvent::new(
+        WorkEventKind::Done,
+        "legacy-mega-item",
+        Utc.with_ymd_and_hms(2026, 7, 22, 1, 30, 0).unwrap(),
+    );
+    unrelated_legacy_close.id = "event-dropped-legacy-close".to_string();
+    unrelated_legacy_close.status_category = Some(WorkspaceStatusCategory::Done);
+    fs::write(
+        &close_path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&durable_event).expect("serialize legacy close event"),
+            serde_json::to_string(&unrelated_legacy_close)
+                .expect("serialize dropped legacy close event")
+        ),
+    )
+    .expect("seed pre-repair close payload");
+    let state_before = fixture.state_bytes();
+    let close_before = fs::read(&close_path).expect("snapshot pre-repair close payload");
+
+    assert_eq!(
+        emit_workspace_terminal_event_for_exact_resolved_work_target(
+            &target,
+            T812_TARGET_WORK_ID,
+            WorkCloseKind::Done,
+            ExactWorkspaceTerminalPolicy::ConfirmOnly,
+            Utc.with_ymd_and_hms(2026, 7, 22, 3, 0, 0).unwrap(),
+            |_, _| Ok(()),
+        )
+        .expect("confirm repaired canonical terminal"),
+        WorkspaceTerminalEventOutcome::AlreadyMatching
+    );
+    assert_eq!(fixture.state_bytes(), state_before);
+    assert_eq!(
+        fs::read(&close_path).expect("read preserved pre-repair close payload"),
+        close_before
+    );
+}
+
+#[test]
 fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");

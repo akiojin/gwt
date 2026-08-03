@@ -2540,6 +2540,67 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
     updated_at: DateTime<Utc>,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::LatestAssigned,
+        revalidate,
+    )
+}
+
+/// Whether an exact-Work compatibility continuation may create the requested
+/// terminal event or may only confirm an already-terminal canonical Work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactWorkspaceTerminalPolicy {
+    EmitIfNeeded,
+    ConfirmOnly,
+}
+
+/// Terminalize one pre-snapshotted Work while retaining the normal Host path's
+/// lock-time assignment resolution. This is reserved for rolling Host
+/// compatibility after a schema-valid no-write bridge outcome.
+pub fn emit_workspace_terminal_event_for_exact_resolved_work_target(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    expected_work_id: &str,
+    close_kind: WorkCloseKind,
+    policy: ExactWorkspaceTerminalPolicy,
+    updated_at: DateTime<Utc>,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    if expected_work_id.trim().is_empty() {
+        return Err(GwtError::Other(
+            "exact Work terminalization received an empty Work id".to_string(),
+        ));
+    }
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::Exact {
+            work_id: expected_work_id,
+            policy,
+        },
+        revalidate,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WorkspaceTerminalTargetSelection<'a> {
+    LatestAssigned,
+    Exact {
+        work_id: &'a str,
+        policy: ExactWorkspaceTerminalPolicy,
+    },
+}
+
+fn emit_workspace_terminal_event_for_resolved_work_target_inner(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    close_kind: WorkCloseKind,
+    updated_at: DateTime<Utc>,
+    selection: WorkspaceTerminalTargetSelection<'_>,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
     validate_session_bound_target_identity_shape(target)?;
     if target.owner.trim().is_empty() || target.agent_id.trim().is_empty() {
         return Err(GwtError::Other(
@@ -2585,15 +2646,69 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
         let locked =
             resolve_session_bound_terminal_target_locked(&projection, &work_items, target)?;
         revalidate(&projection, &work_items)?;
-        let work_id = match locked {
-            LockedSessionBoundTerminalTarget::NoTarget => {
-                return Ok(WorkspaceTerminalEventOutcome::NoTarget)
+        let (work_id, exact_policy) = match (locked, selection) {
+            (
+                LockedSessionBoundTerminalTarget::Existing(work_id),
+                WorkspaceTerminalTargetSelection::Exact {
+                    work_id: expected,
+                    policy,
+                },
+            ) if work_id == expected => (work_id, Some(policy)),
+            (
+                LockedSessionBoundTerminalTarget::Existing(_),
+                WorkspaceTerminalTargetSelection::Exact { .. },
+            ) => {
+                return Err(GwtError::Other(
+                    "exact Work terminalization assignment changed before commit".to_string(),
+                ))
             }
-            LockedSessionBoundTerminalTarget::AssignedWorkMissing(work_id) => {
-                return Ok(WorkspaceTerminalEventOutcome::AssignedWorkMissing(work_id))
+            (
+                LockedSessionBoundTerminalTarget::AssignedWorkMissing(_)
+                | LockedSessionBoundTerminalTarget::NoTarget,
+                WorkspaceTerminalTargetSelection::Exact { .. },
+            ) => {
+                return Err(GwtError::Other(
+                    "exact Work terminalization target disappeared before commit".to_string(),
+                ))
             }
-            LockedSessionBoundTerminalTarget::Existing(work_id) => work_id,
+            (
+                LockedSessionBoundTerminalTarget::Existing(work_id),
+                WorkspaceTerminalTargetSelection::LatestAssigned,
+            ) => (work_id, None),
+            (
+                LockedSessionBoundTerminalTarget::NoTarget,
+                WorkspaceTerminalTargetSelection::LatestAssigned,
+            ) => return Ok(WorkspaceTerminalEventOutcome::NoTarget),
+            (
+                LockedSessionBoundTerminalTarget::AssignedWorkMissing(work_id),
+                WorkspaceTerminalTargetSelection::LatestAssigned,
+            ) => return Ok(WorkspaceTerminalEventOutcome::AssignedWorkMissing(work_id)),
         };
+        if exact_policy == Some(ExactWorkspaceTerminalPolicy::ConfirmOnly) {
+            let item = work_items
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .ok_or_else(|| {
+                    GwtError::Other(
+                        "exact Work terminal confirmation lost its canonical Work".to_string(),
+                    )
+                })?;
+            validate_exact_work_machine_local_close_events_read_only(item, &events_path)?;
+            let requested_kind = match close_kind {
+                WorkCloseKind::Done => WorkEventKind::Done,
+                WorkCloseKind::Discarded => WorkEventKind::Discard,
+            };
+            return terminal_outcome_for_item(item, &requested_kind).map_or_else(
+                || {
+                    Err(GwtError::Other(
+                        "exact Work terminal confirmation would require a new terminal event"
+                            .to_string(),
+                    ))
+                },
+                Ok,
+            );
+        }
 
         let mut event = match close_kind {
             WorkCloseKind::Done => {
@@ -5250,26 +5365,7 @@ fn emit_workspace_terminal_event_outcome_locked(
             WorkspaceTerminalEventOutcome::NoTarget
         });
     }
-    let outcome = item.and_then(|item| {
-        if item.status_category == WorkspaceStatusCategory::Done && item.discarded {
-            Some(WorkspaceTerminalEventOutcome::AmbiguousTerminal)
-        } else {
-            let matches_requested_terminal = match event.kind {
-                WorkEventKind::Done => {
-                    item.status_category == WorkspaceStatusCategory::Done && !item.discarded
-                }
-                WorkEventKind::Discard => item.discarded,
-                _ => false,
-            };
-            if matches_requested_terminal {
-                Some(WorkspaceTerminalEventOutcome::AlreadyMatching)
-            } else if item.is_terminal() {
-                Some(WorkspaceTerminalEventOutcome::WrongTerminal)
-            } else {
-                None
-            }
-        }
-    });
+    let outcome = item.and_then(|item| terminal_outcome_for_item(item, &event.kind));
     if let Some(outcome) = outcome {
         if recovered {
             save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
@@ -5283,6 +5379,29 @@ fn emit_workspace_terminal_event_outcome_locked(
         vec![event],
     )?;
     Ok(WorkspaceTerminalEventOutcome::Emitted)
+}
+
+fn terminal_outcome_for_item(
+    item: &WorkItem,
+    requested_kind: &WorkEventKind,
+) -> Option<WorkspaceTerminalEventOutcome> {
+    if item.status_category == WorkspaceStatusCategory::Done && item.discarded {
+        return Some(WorkspaceTerminalEventOutcome::AmbiguousTerminal);
+    }
+    let matches_requested_terminal = match requested_kind {
+        WorkEventKind::Done => {
+            item.status_category == WorkspaceStatusCategory::Done && !item.discarded
+        }
+        WorkEventKind::Discard => item.discarded,
+        _ => false,
+    };
+    if matches_requested_terminal {
+        Some(WorkspaceTerminalEventOutcome::AlreadyMatching)
+    } else if item.is_terminal() {
+        Some(WorkspaceTerminalEventOutcome::WrongTerminal)
+    } else {
+        None
+    }
 }
 
 fn recover_unprojected_workspace_work_events_locked(
@@ -5942,6 +6061,14 @@ fn read_workspace_work_event_records_from_path(path: &Path) -> Result<Vec<WorkEv
 // this writer-owned log and never runs for shared/tracked rebuild input.
 fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec<WorkEvent>> {
     repair_jsonl_tail(path)?;
+    read_machine_local_workspace_work_events_from_path_read_only(path)
+}
+
+// Confirm-only authority readback must validate the writer-owned ledger
+// without repairing its tail or otherwise changing durable bytes.
+fn read_machine_local_workspace_work_events_from_path_read_only(
+    path: &Path,
+) -> Result<Vec<WorkEvent>> {
     let content = match fs::read(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -5956,6 +6083,59 @@ fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec
             })
         })
         .collect()
+}
+
+fn machine_local_close_event_matches_projected_lifecycle(
+    durable: &WorkEvent,
+    projected: &WorkEvent,
+) -> bool {
+    // Resume-owner repair may sanitize the descriptive identity fields, and
+    // legacy mega-item decomposition may re-key work_item_id. Neither repair
+    // may change the lifecycle identity or terminal semantics below.
+    durable.kind == projected.kind
+        && durable.progress_summary == projected.progress_summary
+        && durable.status_category == projected.status_category
+        && durable.agent_session_id == projected.agent_session_id
+        && durable.agent_id == projected.agent_id
+        && durable.display_name == projected.display_name
+        && durable.board_entry_id == projected.board_entry_id
+        && durable.execution_container == projected.execution_container
+        && durable.related_work_item_id == projected.related_work_item_id
+        && durable.updated_at == projected.updated_at
+}
+
+fn validate_exact_work_machine_local_close_events_read_only(
+    item: &WorkItem,
+    path: &Path,
+) -> Result<()> {
+    let mut projected_events = HashMap::new();
+    for event in &item.events {
+        if projected_events.insert(event.id.as_str(), event).is_some() {
+            return Err(GwtError::Other(format!(
+                "exact Work terminal confirmation found duplicate projected event {}",
+                event.id
+            )));
+        }
+    }
+    for durable_event in read_machine_local_workspace_work_events_from_path_read_only(path)? {
+        let projected_event = projected_events.get(durable_event.id.as_str());
+        if projected_event.is_none() && durable_event.work_item_id != item.id {
+            continue;
+        }
+        let projected_event = projected_event.ok_or_else(|| {
+            GwtError::Other(format!(
+                "exact Work terminal confirmation found unprojected machine-local close event {}",
+                durable_event.id
+            ))
+        })?;
+        if !machine_local_close_event_matches_projected_lifecycle(&durable_event, projected_event) {
+            return Err(GwtError::Other(format!(
+                "exact Work terminal confirmation found divergent machine-local close event {}",
+                durable_event.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn append_workspace_work_events_to_path(path: &Path, events: &[WorkEvent]) -> Result<()> {
