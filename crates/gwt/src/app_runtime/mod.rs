@@ -3835,13 +3835,28 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-            } => self.select_knowledge_bridge_entry_events(
-                &client_id,
-                &id,
-                knowledge_kind,
-                request_id,
-                number,
-            ),
+            } => match knowledge_kind {
+                KnowledgeKind::Issue | KnowledgeKind::Spec => self
+                    .select_knowledge_bridge_entry_events(
+                        &client_id,
+                        &id,
+                        knowledge_kind,
+                        request_id,
+                        number,
+                    ),
+                // FR-102 intentionally covers only Issue/SPEC. Keep the PR
+                // surface on its pre-existing full-load selection path.
+                KnowledgeKind::Pr => self.load_knowledge_bridge_events(
+                    &client_id,
+                    KnowledgeLoadRequest {
+                        id: &id,
+                        kind: knowledge_kind,
+                        request_id,
+                        selected_number: Some(number),
+                        refresh: false,
+                    },
+                ),
+            },
             FrontendEvent::UpdateKnowledgeBridgePhase {
                 id,
                 request_id,
