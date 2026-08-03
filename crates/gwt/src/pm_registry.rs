@@ -260,6 +260,25 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
     })
 }
 
+/// SPEC-3431 FR-009: is `session_id` the project's registered PM?
+///
+/// This is the whole privileged-subject rule. It is deliberately an exact
+/// match against the durable registration — no trimming, no normalization —
+/// so a near-miss id can never inherit PM authority. Liveness needs no
+/// separate probe here: the caller *is* the session, so if the registration
+/// names it, that PM is running. A missing or unreadable registration is not
+/// privileged (fail-closed).
+pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    load_pm_prefs(prefs_path).is_ok_and(|prefs| {
+        prefs
+            .registration
+            .is_some_and(|registration| registration.session_id == session_id)
+    })
+}
+
 /// FR-003 crash-loop damper: uptime beyond this resets the consecutive-crash
 /// count (the PM ran healthily, so the next crash starts a fresh series).
 pub const PM_HEALTHY_UPTIME_SECS: i64 = 600;
@@ -345,6 +364,12 @@ pub struct PmStatusReport {
     pub implementation_slots_consumed: u32,
     /// FR-014 visibility: resident PM bucket (1 while a PM is registered).
     pub pm_bucket: u32,
+    /// FR-009 diagnostic visibility: whether the session asking for this
+    /// report is the registered PM, i.e. whether the asymmetric Issue Monitor
+    /// boundary is lifted for it. `None` when the caller has no ambient
+    /// session identity to judge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_is_registered_pm: Option<bool>,
 }
 
 /// Build the `pm.status` report from loaded prefs. The durable-session probe
@@ -353,6 +378,15 @@ pub struct PmStatusReport {
 pub fn pm_status_report(
     prefs: &PmPrefs,
     session_record_present: impl Fn(&str) -> bool,
+) -> PmStatusReport {
+    pm_status_report_for_caller(prefs, session_record_present, None)
+}
+
+/// [`pm_status_report`] plus the FR-009 privilege verdict for `caller_session`.
+pub fn pm_status_report_for_caller(
+    prefs: &PmPrefs,
+    session_record_present: impl Fn(&str) -> bool,
+    caller_session: Option<&str>,
 ) -> PmStatusReport {
     let registration = prefs.registration.clone();
     let record_present = registration
@@ -364,6 +398,11 @@ pub fn pm_status_report(
         auto_start: prefs.settings.auto_start,
         pm_bucket: u32::from(registration.is_some()),
         implementation_slots_consumed: 0,
+        caller_is_registered_pm: caller_session.map(|caller| {
+            registration
+                .as_ref()
+                .is_some_and(|current| current.session_id == caller)
+        }),
         registration,
         session_record_present: record_present,
         stale_hint: record_present.map(|present| !present),
@@ -648,6 +687,33 @@ mod tests {
         assert!(respawn);
         assert_eq!(reg.consecutive_crashes, 1);
         assert_eq!(reg.next_not_before, None);
+    }
+
+    #[test]
+    fn registered_pm_session_is_recognized_and_others_are_not() {
+        // SPEC-3431 FR-009: the privileged subject is exactly the session the
+        // durable registration names. Anything else — a different agent
+        // session, an empty ambient id, or no PM at all — is not privileged.
+        let (_dir, path) = temp_prefs_path();
+        assert!(
+            !session_is_registered_pm(&path, "session-a"),
+            "no registration means no privilege"
+        );
+
+        try_register_pm(&path, registration("session-a"), |_| false).expect("register");
+        assert!(session_is_registered_pm(&path, "session-a"));
+        assert!(!session_is_registered_pm(&path, "session-b"));
+        assert!(!session_is_registered_pm(&path, ""));
+        assert!(
+            !session_is_registered_pm(&path, " session-a "),
+            "untrimmed ids must not match"
+        );
+
+        deregister_pm(&path, "session-a").expect("deregister");
+        assert!(
+            !session_is_registered_pm(&path, "session-a"),
+            "a closed PM loses its privilege immediately"
+        );
     }
 
     #[test]

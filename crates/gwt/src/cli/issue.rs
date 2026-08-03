@@ -345,8 +345,9 @@ fn apply_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    pm_privileged: bool,
 ) -> io::Result<()> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     if let Some(enabled) = enabled {
@@ -370,6 +371,7 @@ fn validate_monitor_config_set(
     enabled: Option<bool>,
     autonomous_mode: Option<bool>,
     max_active: Option<usize>,
+    pm_privileged: bool,
 ) -> io::Result<()> {
     if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
         return Err(io::Error::new(
@@ -377,10 +379,12 @@ fn validate_monitor_config_set(
             "at least one Issue Monitor config field is required",
         ));
     }
-    if enabled == Some(true) || autonomous_mode == Some(true) {
+    // SPEC-3431 FR-008/FR-009: same rule as the parse layer — the registered
+    // PM may raise the switches; every other session must use the GUI.
+    if !pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "enabling Issue Monitor or autonomous mode requires an explicit GUI action",
+            "enabling Issue Monitor or autonomous mode requires an explicit GUI action              (only the project's registered PM agent may raise it from the CLI;              run `pm.status` to see the current PM)",
         ));
     }
     if max_active == Some(0) {
@@ -392,6 +396,23 @@ fn validate_monitor_config_set(
     Ok(())
 }
 
+/// SPEC-3431 FR-008/FR-009: the asymmetric boundary from Issue #3357 stays in
+/// force for every agent session — only the project's registered PM may raise
+/// `enabled` / `autonomous_mode`. The privileged subject is resolved from the
+/// ambient `GWT_SESSION_ID` (the caller cannot claim someone else's id through
+/// params) matched against the durable PM registration. Raising the switch
+/// changes nothing about merges: SPEC #3200's fail-closed merge gate still
+/// decides every merge on its own.
+fn caller_is_registered_pm(project_root: &std::path::Path) -> bool {
+    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
+        return false;
+    };
+    crate::pm_registry::session_is_registered_pm(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(project_root),
+        session_id.trim(),
+    )
+}
+
 fn run_monitor_config_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -400,8 +421,42 @@ fn run_monitor_config_set<E: CliEnv>(
     max_active: Option<usize>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
     let project_root = issue_monitor_project_root(env, project_root)?;
+    let pm_privileged = caller_is_registered_pm(&project_root);
+    validate_monitor_config_set(enabled, autonomous_mode, max_active, pm_privileged)
+        .map_err(io_as_api_error)?;
+
+    // SPEC-3431 FR-008: a PM raising a switch writes the prefs SOT directly
+    // and asks for an immediate rescan. The daemon control lane refuses ON in
+    // its own decoder (it cannot see who sent a frame), and prefs is the
+    // source the scan driver re-reads every pass — so this is the honest path
+    // rather than a second authority channel.
+    if pm_privileged && (enabled == Some(true) || autonomous_mode == Some(true)) {
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, true)
+        })
+        .map_err(io_as_api_error)?;
+        let scan_now = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "scan_now": {} }),
+            std::process::id(),
+        );
+        let _ = publish_monitor_config_set(&project_root, scan_now);
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+        out.push_str(
+            &serde_json::json!({
+                "enabled": prefs.enabled,
+                "autonomous_mode": prefs.autonomous_mode,
+                "max_active": prefs.max_active_agents.max(1),
+                "applied_by": "pm",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(0);
+    }
+
     let payload = crate::runtime_daemon_events::issue_monitor_payload(
         "control",
         serde_json::json!({
@@ -420,7 +475,7 @@ fn run_monitor_config_set<E: CliEnv>(
         }
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
         crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
-            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active, pm_privileged)
         })
         .map_err(io_as_api_error)?;
     }

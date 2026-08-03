@@ -203,15 +203,23 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "enabled|autonomous_mode|max_active",
                 ));
             }
-            if enabled == Some(true) {
-                return Err(CliParseError::InvalidJson(
-                    "enabled=true requires an explicit GUI action".to_string(),
-                ));
-            }
-            if autonomous_mode == Some(true) {
-                return Err(CliParseError::InvalidJson(
-                    "autonomous_mode=true requires an explicit GUI action".to_string(),
-                ));
+            // SPEC-3431 FR-008/FR-009: Issue #3357's asymmetric boundary keeps
+            // applying to every agent session — raising a switch stays a GUI
+            // action — except for the project's registered PM, which the SPEC
+            // grants full authority. Merges are unaffected either way: SPEC
+            // #3200's fail-closed merge gate still decides every merge.
+            let pm_privileged = params_caller_is_registered_pm(params);
+            if !pm_privileged {
+                if enabled == Some(true) {
+                    return Err(CliParseError::InvalidJson(
+                        "enabled=true requires an explicit GUI action".to_string(),
+                    ));
+                }
+                if autonomous_mode == Some(true) {
+                    return Err(CliParseError::InvalidJson(
+                        "autonomous_mode=true requires an explicit GUI action".to_string(),
+                    ));
+                }
             }
             if max_active == Some(0) {
                 return Err(CliParseError::InvalidJson(
@@ -1148,6 +1156,34 @@ fn required_u64_vec(
     optional_u64_vec(params, key)
 }
 
+/// SPEC-3431 FR-009: is this caller the project's registered PM?
+///
+/// The identity comes from the ambient `GWT_SESSION_ID` only — params may
+/// name the project, never the subject — so no caller can claim PM authority
+/// it does not hold. The project is the explicit `project_root` when given,
+/// otherwise the current directory, matching how the handler resolves it.
+/// Anything unresolvable is not privileged (fail-closed).
+fn params_caller_is_registered_pm(params: &Map<String, Value>) -> bool {
+    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
+        return false;
+    };
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return false;
+    }
+    let project_root = match params.get("project_root").and_then(Value::as_str) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(_) => return false,
+        },
+    };
+    crate::pm_registry::session_is_registered_pm(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(&project_root),
+        &session_id,
+    )
+}
+
 fn issue_monitor_priority_position(
     params: &Map<String, Value>,
 ) -> Result<super::IssueMonitorPriorityPosition, CliParseError> {
@@ -1710,6 +1746,83 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.review_verdict", json!({"issue_number": 42})),
             CliParseError::MissingFlag(_)
+        ));
+    }
+
+    // SPEC-3431 T-030 (FR-008/FR-009): the #3357 asymmetric boundary keeps
+    // applying to every agent session; only the project's registered PM may
+    // raise the switches. The privileged subject comes from the ambient
+    // session id, never from params, so a caller cannot claim it.
+    #[test]
+    fn issue_monitor_config_set_on_direction_is_pm_only() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        crate::pm_registry::try_register_pm(
+            &prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: project_root.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+
+        let params = json!({
+            "project_root": project_root.to_string_lossy(),
+            "autonomous_mode": true,
+        });
+
+        // positive: a non-PM session is still refused, with the GUI guidance.
+        let _other = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "other-session",
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", params.clone()),
+            CliParseError::InvalidJson(message) if message.contains("requires an explicit GUI action")
+        ));
+        drop(_other);
+
+        // ...and so is a session with no ambient identity at all.
+        let _unset = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert!(matches!(
+            err("issue.monitor.config.set", params.clone()),
+            CliParseError::InvalidJson(_)
+        ));
+        drop(_unset);
+
+        // false-positive negative: the registered PM is allowed through.
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        assert_eq!(
+            ok("issue.monitor.config.set", params),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: Some(project_root.clone()),
+                enabled: None,
+                autonomous_mode: Some(true),
+                max_active: None,
+            })
+        );
+
+        // OFF direction stays open to everyone, PM or not.
+        assert!(matches!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"project_root": project_root.to_string_lossy(), "autonomous_mode": false})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet { .. })
         ));
     }
 

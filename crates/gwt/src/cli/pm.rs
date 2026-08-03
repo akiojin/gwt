@@ -40,11 +40,22 @@ pub(super) fn run<E: CliEnv>(
                     prefs_path.display()
                 )))
             })?;
-            let report = pm_registry::pm_status_report(&prefs, |session_id| {
-                gwt_sessions_dir()
-                    .join(format!("{session_id}.toml"))
-                    .exists()
-            });
+            // SPEC-3431 FR-009 diagnostic visibility: report whether THIS
+            // caller holds PM privilege, so a refused Issue Monitor ON has a
+            // one-command explanation.
+            let caller_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let report = pm_registry::pm_status_report_for_caller(
+                &prefs,
+                |session_id| {
+                    gwt_sessions_dir()
+                        .join(format!("{session_id}.toml"))
+                        .exists()
+                },
+                caller_session.as_deref(),
+            );
             let rendered = serde_json::to_string_pretty(&report).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to serialize pm.status report: {error}"
