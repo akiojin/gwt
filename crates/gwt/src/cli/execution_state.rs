@@ -1231,7 +1231,7 @@ fn validate_generation_ledger(
                 .any(|attempt| attempt.request.operation_id == audit.operation_id)
             || !ledger.generations.iter().any(|generation| {
                 generation.identity.generation_id == audit.generation_id
-                    && execution_binding_authorizes_lifecycle_descendant(
+                    && execution_binding_matches_historical_prefix(
                         ledger,
                         generation,
                         &audit.session_id,
@@ -1972,6 +1972,58 @@ fn execution_binding_authorizes_lifecycle_descendant(
                 .iter()
                 .all(|(_, session_id)| *session_id == Some(expected_session_id));
         }
+    }
+    false
+}
+
+/// Verify an immutable binding prefix against the writer that owned that
+/// exact prefix. Later legal lifecycle or takeover events are historical
+/// suffixes and cannot invalidate the earlier proof.
+fn execution_binding_matches_historical_prefix(
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+    expected_session_id: &str,
+    expected: &gwt_agent::ExecutionBindingIdentity,
+) -> bool {
+    if expected.generation_id != generation.identity.generation_id
+        || expected.binding_id != generation.identity.session_binding_id
+    {
+        return false;
+    }
+    let mut sequences = ledger
+        .lifecycle_events_for(&generation.identity.generation_id)
+        .map(|event| event.sequence)
+        .chain(
+            ledger
+                .takeovers
+                .iter()
+                .filter(|event| event.generation_id == generation.identity.generation_id)
+                .map(|event| event.sequence),
+        )
+        .collect::<Vec<_>>();
+    sequences.sort_unstable();
+
+    for prefix_len in 0..=sequences.len() {
+        let cutoff = prefix_len.checked_sub(1).map(|index| sequences[index]);
+        let mut prefix = ledger.clone();
+        prefix.lifecycle_events.retain(|event| {
+            event.generation_id != generation.identity.generation_id
+                || cutoff.is_some_and(|sequence| event.sequence <= sequence)
+        });
+        prefix.takeovers.retain(|event| {
+            event.generation_id != generation.identity.generation_id
+                || cutoff.is_some_and(|sequence| event.sequence <= sequence)
+        });
+        if execution_binding_for_generation(&prefix, generation) != *expected {
+            continue;
+        }
+        let writer = serde_json::from_str::<ExecutionControlRecord>(
+            prefix.effective_projection_for(generation),
+        )
+        .map(hydrate_recovery_envelopes)
+        .ok()
+        .map(|record| record.primary_session_id);
+        return writer.as_deref() == Some(expected_session_id);
     }
     false
 }
@@ -5075,8 +5127,10 @@ pub fn activate_successor_with_session_rebind(
     )>,
 > {
     validate_successor_request(request)?;
+    let expected_exact_unbound = expected_session.linked_issue_number.is_none()
+        && expected_session.execution_binding.is_none();
     if request.initial_session_id != expected_session.id
-        || expected_session.linked_issue_number != Some(owner.number)
+        || (expected_session.linked_issue_number != Some(owner.number) && !expected_exact_unbound)
         || expected_session
             .repo_hash
             .as_deref()
@@ -5106,6 +5160,7 @@ pub fn activate_successor_with_session_rebind(
         })?;
         let planned_identity = execution_binding_for_generation(&planned, planned_generation);
         let expected_binding = expected_session.execution_binding.clone();
+        let expected_linked_issue_number = expected_session.linked_issue_number;
         let expected_repo_hash = expected_session
             .repo_hash
             .clone()
@@ -5115,34 +5170,32 @@ pub fn activate_successor_with_session_rebind(
             return Ok(None);
         }
         let updated = gwt_agent::update_session(sessions_dir, &expected_session.id, |session| {
+            let already_planned = session.linked_issue_number == Some(owner.number)
+                && session
+                    .execution_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.identity == planned_identity);
             if session.id != expected_session.id
                 || session.repo_hash.as_deref() != Some(expected_repo_hash.as_str())
-                || session.linked_issue_number != Some(owner.number)
                 || dunce::canonicalize(&session.worktree_path).ok().as_ref()
                     != Some(&context.worktree)
-                || (session.execution_binding != expected_binding
-                    && session
-                        .execution_binding
-                        .as_ref()
-                        .map(|binding| &binding.identity)
-                        != Some(&planned_identity))
+                || (!already_planned
+                    && (session.linked_issue_number != expected_linked_issue_number
+                        || session.execution_binding != expected_binding))
             {
                 return Err(io::Error::new(
                     ErrorKind::WouldBlock,
                     "durable Session changed before successor activation",
                 ));
             }
-            if session
-                .execution_binding
-                .as_ref()
-                .is_some_and(|binding| binding.identity == planned_identity)
-            {
+            if already_planned {
                 return Ok(());
             }
             let capability_generation = session
                 .execution_binding
                 .as_ref()
                 .map_or(1, |binding| binding.capability_generation.saturating_add(1));
+            session.linked_issue_number = Some(owner.number);
             session
                 .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
                     schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
@@ -6582,6 +6635,8 @@ pub struct ExecutionDiagnosisSnapshot {
     pub settlement_severity: String,
     pub settlement_obligation_open: bool,
     pub open_obligations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_probes: Vec<crate::cli::governance::RecoveryProbe>,
     pub available_recoveries: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -6644,6 +6699,7 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
         settlement_severity: "unknown".to_string(),
         settlement_obligation_open: false,
         open_obligations: Vec::new(),
+        recovery_probes: Vec::new(),
         available_recoveries: vec!["gwt-execute".to_string()],
         warnings: Vec::new(),
     };
@@ -7091,8 +7147,103 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
     }
     execution_recoveries.sort();
     execution_recoveries.dedup();
+    let mut probes = vec![probe_execution_repair(worktree, session_id)];
+    if let Some(session_id) = session_id {
+        probes.push(
+            crate::agent_project_state::probe_authenticated_execution_continuation(
+                worktree, session_id,
+            ),
+        );
+        probes.push(
+            crate::agent_project_state::probe_session_work_mutation_target(worktree, session_id),
+        );
+        probes.push(crate::cli::workspace::probe_workspace_ensure(
+            worktree, session_id,
+        ));
+    }
+    for probe in &probes {
+        if matches!(
+            probe.operation.as_str(),
+            "execution.continue" | "execution.repair" | "workspace.update" | "workspace.ensure"
+        ) {
+            execution_recoveries.retain(|operation| operation != &probe.operation);
+            if probe.advertise() {
+                execution_recoveries.push(probe.operation.clone());
+            }
+        }
+    }
+    execution_recoveries.sort();
+    execution_recoveries.dedup();
+    snapshot.recovery_probes = probes;
     snapshot.available_recoveries = execution_recoveries;
     snapshot
+}
+
+fn probe_execution_repair(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let metadata = |cause| GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        cause,
+        retryable: Some(false),
+        target_state: Some("active".to_string()),
+        ..GovernanceMetadata::default()
+    };
+    let Some(session_id) = session_id else {
+        return RecoveryProbe::unavailable(
+            "execution.repair",
+            metadata(Some(GovernanceCause::ManagedIdentity)),
+            "session_id_unavailable",
+        );
+    };
+    let corrupt = match load(worktree) {
+        Err(_) => true,
+        Ok(Some(record)) if !integrity_ok(&record) => true,
+        Ok(Some(record)) => {
+            let owner = ExecutionOwnerKey {
+                kind: record.owner_kind,
+                number: record.owner_number,
+            };
+            load_generation_ledger(worktree, owner).is_err()
+        }
+        Ok(None) => false,
+    };
+    if !corrupt {
+        return RecoveryProbe::unavailable(
+            "execution.repair",
+            metadata(Some(GovernanceCause::DomainInvalid)),
+            "execution_repair_not_corrupt",
+        );
+    }
+    let Some(trusted_dir) = crate::cli::trusted_store::trusted_dir_for_worktree(worktree) else {
+        return RecoveryProbe::unavailable(
+            "execution.repair",
+            metadata(Some(GovernanceCause::Authority)),
+            "execution_repair_unmanaged",
+        );
+    };
+    match discover_repair_owner(worktree, session_id, &trusted_dir) {
+        Ok(owner) => RecoveryProbe::available(
+            "execution.repair",
+            GovernanceMetadata {
+                effect: Some(GovernanceEffect::Protected),
+                cause: Some(GovernanceCause::Integrity),
+                fingerprint: Some(format!("execution.repair:{}:{}", owner.number, session_id)),
+                retryable: Some(true),
+                target_state: Some("active".to_string()),
+                ..GovernanceMetadata::default()
+            },
+        ),
+        Err(error) => RecoveryProbe::unavailable(
+            "execution.repair",
+            metadata(Some(GovernanceCause::Authority)),
+            error.to_string(),
+        ),
+    }
 }
 
 fn repair_audit_hash(audit: &ExecutionRepairAudit) -> String {
@@ -7601,6 +7752,17 @@ fn run_repair(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let probe = probe_execution_repair(worktree, Some(session_id));
+    if !probe.executable() {
+        out.push_str(&format!(
+            "execution: repair refused — {}\n",
+            probe
+                .reason
+                .as_deref()
+                .unwrap_or("execution_repair_unavailable")
+        ));
+        return Ok(2);
+    }
     match repair_corrupt_execution(worktree, session_id, reason) {
         Ok(outcome) => {
             out.push_str(&serde_json::to_string_pretty(&outcome).map_err(|error| {
@@ -8484,6 +8646,76 @@ mod tests {
             load(dir.path()).unwrap().unwrap().primary_session_id,
             "session-original",
             "prepare must not publish the successor before activation"
+        );
+    }
+
+    #[test]
+    fn historical_continuation_audit_survives_legal_takeover() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let original_identity = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-original".to_string(),
+            repo_hash: crate::index_worker::detect_repo_hash(dir.path())
+                .unwrap()
+                .to_string(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: original_identity.clone(),
+            capability_generation: 1,
+        };
+        record_rebound_continuation_validation(
+            dir.path(),
+            owner,
+            "historical-continuation-audit",
+            "session-original",
+            &binding,
+        )
+        .expect("record rebound validation");
+
+        let mut out = String::new();
+        assert_eq!(
+            run_adopt(
+                dir.path(),
+                "session-successor",
+                "legal handoff after rebound validation",
+                &mut out,
+            )
+            .expect("legal takeover must preserve historical audit validity"),
+            0,
+            "{out}"
+        );
+
+        let ledger = load_generation_ledger(dir.path(), owner)
+            .expect("load valid post-takeover ledger")
+            .expect("post-takeover ledger");
+        assert!(generation_ledger_integrity_ok(&ledger));
+        assert_eq!(ledger.continuation_validations.len(), 1);
+        assert_eq!(
+            ledger.continuation_validations[0].execution_binding,
+            original_identity
+        );
+        assert_ne!(
+            current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .unwrap(),
+            original_identity,
+            "the historical audit must not grant current mutation authority"
         );
     }
 

@@ -1371,6 +1371,13 @@ pub(super) fn ensure_workspace_for_agent(
     repo_path: &std::path::Path,
     input: WorkspaceEnsureInput,
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
+    let probe = probe_workspace_ensure(repo_path, &input.agent_session);
+    if !probe.executable() {
+        return Err(core_error(GwtError::Other(format!(
+            "workspace.ensure prerequisite probe refused: {}",
+            probe.reason.as_deref().unwrap_or("unavailable")
+        ))));
+    }
     let recovery = crate::agent_project_state::validated_workspace_recovery_session(
         repo_path,
         &input.agent_session,
@@ -1511,6 +1518,134 @@ pub(super) fn ensure_workspace_for_agent(
     };
     publish_workspace_change(&publish_root);
     Ok(result)
+}
+
+/// Side-effect-free prerequisite evaluator shared by `execution.status` and
+/// the `workspace.ensure` mutation preflight.
+pub(crate) fn probe_workspace_ensure(
+    repo_path: &Path,
+    session_id: &str,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let protected = |cause| GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        cause,
+        retryable: Some(false),
+        ..GovernanceMetadata::default()
+    };
+    let recovery = match crate::agent_project_state::validated_workspace_recovery_session(
+        repo_path, session_id,
+    ) {
+        Ok(Some(recovery)) => recovery,
+        Ok(None) => {
+            return RecoveryProbe::unavailable(
+                "workspace.ensure",
+                protected(Some(GovernanceCause::ManagedIdentity)),
+                format!("Session ledger is missing for Session {session_id}"),
+            )
+        }
+        Err(error) => {
+            return RecoveryProbe::unavailable(
+                "workspace.ensure",
+                protected(Some(GovernanceCause::Authority)),
+                error.to_string(),
+            )
+        }
+    };
+    let (recovery, policy) = match &recovery {
+        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) => {
+            (recovery, WorkspaceEnsurePolicy::HostMayBootstrap)
+        }
+        crate::agent_project_state::ValidatedWorkspaceEnsureSession::Docker(recovery) => {
+            (recovery, WorkspaceEnsurePolicy::DockerExistingOnly)
+        }
+    };
+    let owner = match resolve_workspace_ensure_owner(Some(&recovery.session), None, None) {
+        Ok(owner) => owner,
+        Err(error) => {
+            return RecoveryProbe::unavailable(
+                "workspace.ensure",
+                protected(Some(GovernanceCause::ManagedIdentity)),
+                error.to_string(),
+            )
+        }
+    };
+    let projection_path = gwt_workspace_projection_path_for_repo_path(&recovery.project_state_root);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&recovery.project_state_root);
+    let projection = match load_workspace_projection_from_path(&projection_path) {
+        Ok(Some(projection)) => projection,
+        Ok(None) => WorkspaceProjection::default_for_project(&recovery.project_state_root),
+        Err(error) => {
+            return RecoveryProbe::unavailable(
+                "workspace.ensure",
+                protected(Some(GovernanceCause::StructuralGovernance)),
+                error.to_string(),
+            )
+        }
+    };
+    let work_items = match load_workspace_work_items_from_path(&work_items_path) {
+        Ok(Some(work_items)) => work_items,
+        Ok(None) => WorkItemsProjection::empty(Utc::now()),
+        Err(error) => {
+            return RecoveryProbe::unavailable(
+                "workspace.ensure",
+                protected(Some(GovernanceCause::StructuralGovernance)),
+                error.to_string(),
+            )
+        }
+    };
+    let input = WorkspaceEnsureInput {
+        agent_session: session_id.to_string(),
+        title_summary: String::new(),
+        current_focus: None,
+        spec: None,
+        issue: None,
+        topic: None,
+        boundary: None,
+    };
+    let generation = recovery
+        .session
+        .execution_binding
+        .as_ref()
+        .map(|binding| binding.identity.generation_id.clone());
+    let governance = GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        fingerprint: Some(format!(
+            "workspace.ensure:{}:{}",
+            session_id,
+            generation.as_deref().unwrap_or("unbound")
+        )),
+        retryable: Some(true),
+        repository_target: recovery.session.repo_hash.clone(),
+        target_state: Some("workspace_assignment".to_string()),
+        execution_generation: generation,
+        ..GovernanceMetadata::default()
+    };
+    match validate_workspace_ensure_recovery_state(
+        recovery,
+        &input,
+        owner.as_deref(),
+        policy,
+        &projection,
+        &work_items,
+    ) {
+        Ok(WorkspaceEnsureAuthorityState::Missing { .. }) => {
+            RecoveryProbe::available("workspace.ensure", governance)
+        }
+        Ok(WorkspaceEnsureAuthorityState::ExactExisting { .. }) => {
+            RecoveryProbe::satisfied("workspace.ensure", governance)
+        }
+        Err(error) => RecoveryProbe::unavailable(
+            "workspace.ensure",
+            GovernanceMetadata {
+                cause: Some(GovernanceCause::DomainInvalid),
+                ..governance
+            },
+            error.to_string(),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
