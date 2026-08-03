@@ -914,12 +914,24 @@ case "$*" in
   *"--action probe"*)
     exit 0
     ;;
+  *"--action search-multi"*"--scopes issues"*)
+    printf '%s\n' '{"ok":true,"scope_results":{"issues":{"issueResults":[{"number":42,"distance":0.25}]}}}'
+    exit 0
+    ;;
+  *"--action search-multi"*)
+    printf '%s\n' '{"ok":true,"scope_results":{"specs":{"specResults":[{"spec_id":1930,"distance":0.4}]}}}'
+    exit 0
+    ;;
   *"--action search-issues"*)
     printf '%s\n' '{"ok":true,"issueResults":[{"number":42,"distance":0.25}]}'
     exit 0
     ;;
   *"--action search-specs"*)
     printf '%s\n' '{"ok":true,"specResults":[{"spec_id":1930,"distance":0.4}]}'
+    exit 0
+    ;;
+  *"--action index-"*)
+    printf '%s\n' '{"ok":true}'
     exit 0
     ;;
 esac
@@ -3087,6 +3099,7 @@ fn sample_runtime_with_events(
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
         issue_link_cache_dir: gwt_cache_dir(),
+        knowledge_related_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
         pty_writers,
@@ -27567,6 +27580,386 @@ fn app_runtime_knowledge_search_replies_through_async_dispatch() {
             )
         })
     });
+}
+
+/// Fake index python for the transient-semantic-failure runtime contract
+/// (SPEC #3170 T-944): canonical `search-multi` classifies the issues scope
+/// as missing, the legacy per-kind semantic actions fail hard, and repair
+/// (`index-*`) succeeds instantly.
+#[cfg(unix)]
+fn write_fake_project_index_runtime_with_missing_issues_scope(home: &Path) {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-c" ]; then
+    exit 0
+  fi
+done
+case "$*" in
+  *"-m pip"*)
+    exit 0
+    ;;
+  *"--action probe"*)
+    exit 0
+    ;;
+  *"--action search-multi"*)
+    printf '%s\n' '{"ok":true,"scopes":{"issues":{"state":"missing"}}}'
+    exit 0
+    ;;
+  *"--action search-issues"*|*"--action search-specs"*)
+    printf '%s\n' '{"ok":false,"error":"legacy semantic action used"}'
+    exit 1
+    ;;
+  *"--action index-"*)
+    printf '%s\n' '{"ok":true}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{"ok":false,"error":"unexpected fake python invocation"}'
+exit 1
+"#;
+    let legacy_python = home
+        .join(".gwt")
+        .join("runtime")
+        .join("chroma-venv")
+        .join("bin")
+        .join("python3");
+    for python in [
+        legacy_python,
+        gwt_core::runtime::project_index_python_path(),
+    ] {
+        fs::create_dir_all(python.parent().expect("fake python parent"))
+            .expect("create fake python dir");
+        fs::write(&python, script).expect("write fake python");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod fake python");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_directive() {
+    // SPEC #3170 AS-17.1 / FR-098: a typed transient semantic failure must
+    // complete as KnowledgeSearchResults — cache-backed rows plus the typed
+    // retry directive — and must NOT surface a correlated KnowledgeError.
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    write_fake_project_index_runtime_with_missing_issues_scope(temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Silent recovery issue",
+            &["bug"],
+            "Cache-backed body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SearchKnowledgeBridge {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            query: "#42".to_string(),
+            request_id: 9,
+            selected_number: None,
+        },
+    );
+    assert!(immediate_events.is_empty());
+
+    // Wait for whichever completion the backend dispatches for request 9,
+    // then require it to be the silent typed completion.
+    wait_for_recorded_event("knowledge search completion", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeSearchResults { request_id, .. }
+                                if *request_id == 9
+                        ) || matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeError { request_id, .. }
+                                if *request_id == Some(9)
+                        )
+                    })
+            )
+        })
+    });
+    let recorded = events.lock().expect("events lock");
+    let mut saw_results = false;
+    for event in recorded.iter() {
+        let UserEvent::Dispatch(dispatched) = event else {
+            continue;
+        };
+        for outbound in dispatched {
+            match &outbound.event {
+                BackendEvent::KnowledgeError {
+                    request_id,
+                    message,
+                    ..
+                } if *request_id == Some(9) => {
+                    panic!(
+                        "transient semantic failure must stay silent, got \
+                         KnowledgeError: {message}"
+                    );
+                }
+                BackendEvent::KnowledgeSearchResults {
+                    request_id,
+                    entries,
+                    semantic_retry,
+                    ..
+                } if *request_id == 9 => {
+                    saw_results = true;
+                    assert_eq!(entries.len(), 1, "cache-backed rows stay usable");
+                    assert_eq!(entries[0].number, 42);
+                    let directive = semantic_retry
+                        .as_ref()
+                        .expect("typed transient failure carries the retry directive");
+                    assert_eq!(directive.error_code, "INDEX_NOT_READY");
+                    assert!(directive.retryable);
+                    assert!(directive.retry_after_ms > 0);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_results, "KnowledgeSearchResults for request 9 expected");
+}
+
+#[test]
+fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
+    // SPEC #3170 AS-17.4 / FR-102 (T-946): an explicit selection carrying a
+    // real request ID must be a background cache-backed DETAIL-ONLY path —
+    // no remote refresh, no full list rebuild, and the latest related-work
+    // snapshot is reused instead of a per-click full Session/Work scan.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let gh_marker = temp.path().join("gh-selection-marker.txt");
+    let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
+
+    let repo = temp.path().join("repo");
+    let issue_worktree = temp.path().join("repo-work-issue-42");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&issue_worktree).expect("create issue worktree");
+    init_repo(&repo);
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Selected issue",
+            &["bug"],
+            "Detail body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            43,
+            "Other issue",
+            &["bug"],
+            "Other body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    write_issue_link_store(&repo, HashMap::from([("work/issue-42".to_string(), 42)]));
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let seeded_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-42"),
+        Some(&issue_worktree),
+    )
+    .expect("work id");
+    let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        seeded_at,
+    );
+    work_event.title = Some("Issue #42 first related work".to_string());
+    work_event.owner = Some("Issue #42".to_string());
+    work_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-42".to_string()),
+            worktree_path: Some(issue_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, work_event)
+        .expect("record work event");
+
+    // Initial load captures the latest related-work snapshot for issue 42.
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(42),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+
+    // Mutate the projection AFTER the snapshot: a detail-only selection must
+    // reuse the snapshot rather than rescanning the Work projection.
+    let second_worktree = temp.path().join("repo-work-issue-42-second");
+    fs::create_dir_all(&second_worktree).expect("create second worktree");
+    let second_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-42-second"),
+        Some(&second_worktree),
+    )
+    .expect("second work id");
+    let mut second_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        second_id,
+        Utc.with_ymd_and_hms(2026, 6, 20, 9, 30, 0).unwrap(),
+    );
+    second_event.title = Some("Issue #42 second related work".to_string());
+    second_event.owner = Some("Issue #42".to_string());
+    second_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-42-second".to_string()),
+            worktree_path: Some(second_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, second_event)
+        .expect("record second work event");
+    write_issue_link_store(
+        &repo,
+        HashMap::from([
+            ("work/issue-42".to_string(), 42),
+            ("work/issue-42-second".to_string(), 42),
+        ]),
+    );
+    let events_before_selection = recorded_events.lock().expect("events lock").len();
+    fs::write(&gh_marker, b"").ok();
+    let _ = fs::remove_file(&gh_marker);
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(5),
+            number: 42,
+        },
+    );
+    assert!(
+        immediate.is_empty(),
+        "selection must reply off the GUI event loop"
+    );
+    wait_for_recorded_event("selection detail dispatch", &recorded_events, |events| {
+        events[events_before_selection..].iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail { request_id: Some(5), .. }
+                            | BackendEvent::KnowledgeError { request_id: Some(5), .. }
+                    ))
+            )
+        })
+    });
+    // Give any (incorrect) trailing refresh work a moment to surface.
+    std::thread::sleep(Duration::from_millis(400));
+
+    let recorded = recorded_events.lock().expect("events lock");
+    let mut detail_events = 0usize;
+    for event in recorded[events_before_selection..].iter() {
+        let UserEvent::Dispatch(dispatched) = event else {
+            continue;
+        };
+        for outbound in dispatched {
+            match &outbound.event {
+                BackendEvent::KnowledgeEntries { .. } => {
+                    panic!(
+                        "a detail-only selection must not rebuild the full \
+                         list (FR-102)"
+                    );
+                }
+                BackendEvent::KnowledgeError { message, .. } => {
+                    panic!("selection must resolve from cache, got error: {message}");
+                }
+                BackendEvent::KnowledgeDetail {
+                    request_id, detail, ..
+                } => {
+                    assert_eq!(*request_id, Some(5));
+                    detail_events += 1;
+                    assert_eq!(detail.number, Some(42));
+                    assert_eq!(detail.launch_issue_number, Some(42));
+                    assert_eq!(
+                        detail.related_works.len(),
+                        1,
+                        "selection must reuse the latest related-work \
+                         snapshot instead of rescanning: {:?}",
+                        detail.related_works
+                    );
+                    assert_eq!(
+                        detail.related_works[0].title,
+                        "Issue #42 first related work"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(detail_events, 1, "exactly one detail completion expected");
+    assert!(
+        !gh_marker.exists(),
+        "an explicit selection must never start a remote refresh (FR-102)"
+    );
 }
 
 #[test]

@@ -2663,6 +2663,7 @@ mod tests {
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
+            knowledge_related_snapshot: Default::default(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -4424,6 +4425,7 @@ mod tests {
                 )
             })
         });
+        let events_before_selection = events.lock().expect("event log").len();
         assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
@@ -4435,21 +4437,20 @@ mod tests {
                 },
             )
             .is_empty());
+        // SPEC #3170 FR-102 (T-947): selection is a cache-backed detail-only
+        // path — it never rebuilds the list. With no resolvable cache entry
+        // the completion is the correlated selection error.
         wait_for_recorded_event("knowledge bridge selection dispatch", &events, |events| {
-            events
-                .iter()
-                .filter(|event| {
-                    matches!(
-                        event,
-                        UserEvent::Dispatch(dispatched)
-                            if dispatched.iter().any(|outbound| matches!(
-                                outbound.event,
-                                BackendEvent::KnowledgeEntries { .. }
-                            ))
-                    )
-                })
-                .count()
-                >= 2
+            events[events_before_selection..].iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeError { .. }
+                        ))
+                )
+            })
         });
 
         let cleanup_events = runtime.handle_frontend_event(

@@ -728,6 +728,10 @@ pub struct AppRuntime {
     /// unguessable process-local ticket, never by wire correlation data.
     pub(crate) pending_agent_self_closes: HashMap<String, PendingAgentSelfClose>,
     pub(crate) issue_link_cache_dir: PathBuf,
+    /// SPEC #3170 FR-102: latest related-work snapshot per project root,
+    /// captured by full load/search/refresh augmentation and reused verbatim
+    /// by the detail-only selection path.
+    pub(crate) knowledge_related_snapshot: knowledge::KnowledgeRelatedSnapshot,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
@@ -1290,6 +1294,7 @@ impl AppRuntime {
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
+            knowledge_related_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
             pty_writers,
@@ -3830,15 +3835,12 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-            } => self.load_knowledge_bridge_events(
+            } => self.select_knowledge_bridge_entry_events(
                 &client_id,
-                KnowledgeLoadRequest {
-                    id: &id,
-                    kind: knowledge_kind,
-                    request_id,
-                    selected_number: Some(number),
-                    refresh: false,
-                },
+                &id,
+                knowledge_kind,
+                request_id,
+                number,
             ),
             FrontendEvent::UpdateKnowledgeBridgePhase {
                 id,

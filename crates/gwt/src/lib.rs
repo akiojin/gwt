@@ -127,10 +127,11 @@ pub use issue_monitor::{
     PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
-    load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
-    update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
-    KnowledgeKind, KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
-    KnowledgeRelatedWorkView,
+    load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
+    search_knowledge_bridge, search_knowledge_bridge_outcome, update_knowledge_phase,
+    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
+    KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
+    KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,

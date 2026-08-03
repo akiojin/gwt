@@ -21,9 +21,17 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use gwt::KnowledgeKind;
+
+/// SPEC #3170 FR-102: latest bounded related-work snapshot per project
+/// root. Full load/search/refresh augmentation replaces the project's map
+/// wholesale (latest wins); the detail-only selection path reuses it
+/// verbatim instead of rescanning Sessions/Work per click.
+pub(crate) type KnowledgeRelatedSnapshot =
+    Arc<Mutex<HashMap<PathBuf, HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>>>>>;
 
 use super::{
     knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
@@ -169,6 +177,7 @@ fn augment_knowledge_bridge_related_works_from_paths(
     sessions_dir: &Path,
     issue_link_cache_dir: &Path,
     view: &mut gwt::KnowledgeBridgeView,
+    related_snapshot: &KnowledgeRelatedSnapshot,
 ) {
     let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(sessions_dir);
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(project_root)
@@ -177,13 +186,18 @@ fn augment_knowledge_bridge_related_works_from_paths(
         .map(|projection| projection.work_items)
         .unwrap_or_default();
     let issue_by_branch = load_issue_branch_links(project_root, issue_link_cache_dir);
-    augment_knowledge_bridge_related_works(
+    let related_by_number = augment_knowledge_bridge_related_works(
         project_root,
         view,
         &work_items,
         &sessions,
         &issue_by_branch,
     );
+    // FR-102: publish the freshly computed map as the project's latest
+    // snapshot so detail-only selection can reuse it without a rescan.
+    if let Ok(mut snapshots) = related_snapshot.lock() {
+        snapshots.insert(project_root.to_path_buf(), related_by_number);
+    }
 }
 
 fn augment_knowledge_bridge_related_works(
@@ -192,9 +206,9 @@ fn augment_knowledge_bridge_related_works(
     work_items: &[gwt_core::workspace_projection::WorkItem],
     sessions: &[gwt_agent::Session],
     issue_by_branch: &HashMap<String, u64>,
-) {
+) -> HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> {
     if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-        return;
+        return HashMap::new();
     }
     let relevant_numbers = view
         .entries
@@ -203,7 +217,7 @@ fn augment_knowledge_bridge_related_works(
         .chain(view.detail.number)
         .collect::<HashSet<_>>();
     if relevant_numbers.is_empty() {
-        return;
+        return HashMap::new();
     }
 
     let session_index = work_session_index(sessions);
@@ -273,6 +287,7 @@ fn augment_knowledge_bridge_related_works(
             view.detail.related_works = works.clone();
         }
     }
+    related_by_number
 }
 
 fn issue_number_for_work_item(
@@ -736,6 +751,7 @@ impl AppRuntime {
         let selected_number = request.selected_number;
         let sessions_dir = self.sessions_dir.clone();
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        let related_snapshot = self.knowledge_related_snapshot.clone();
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
@@ -745,6 +761,7 @@ impl AppRuntime {
                         &sessions_dir,
                         &issue_link_cache_dir,
                         &mut view,
+                        &related_snapshot,
                     );
                     view
                 }
@@ -781,6 +798,7 @@ impl AppRuntime {
                     &sessions_dir,
                     &issue_link_cache_dir,
                     &mut view,
+                    &related_snapshot,
                 );
                 proxy.send(UserEvent::Dispatch(knowledge_view_events(
                     client_id, id, kind, request_id, view,
@@ -802,6 +820,7 @@ impl AppRuntime {
             sessions_dir,
             issue_link_cache_dir,
         } = task;
+        let related_snapshot = self.knowledge_related_snapshot.clone();
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let refreshed = match gwt::refresh_knowledge_bridge_cache(&project_root, force) {
@@ -827,6 +846,7 @@ impl AppRuntime {
                             &sessions_dir,
                             &issue_link_cache_dir,
                             &mut view,
+                            &related_snapshot,
                         );
                         knowledge_view_events(client_id, id, kind, request_id, view)
                     }
@@ -837,6 +857,79 @@ impl AppRuntime {
                 };
             proxy.send(UserEvent::Dispatch(event));
         });
+    }
+
+    /// SPEC #3170 FR-102 (T-947): explicit selection is a background
+    /// cache-backed detail-only path — it loads exactly the selected entry,
+    /// starts no remote refresh, rebuilds no list, and reuses the latest
+    /// related-work snapshot when one exists.
+    pub(crate) fn select_knowledge_bridge_entry_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        kind: KnowledgeKind,
+        request_id: Option<u64>,
+        number: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(id, kind, "Window not found", request_id, None),
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(id, kind, "Project tab not found", request_id, None),
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(id, kind, "Window not found", request_id, None),
+            )];
+        };
+        if knowledge_kind_for_preset(window.preset) != Some(kind) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window is not a knowledge bridge",
+                    request_id,
+                    None,
+                ),
+            )];
+        }
+
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let project_root = tab.project_root.clone();
+        let related_snapshot = self.knowledge_related_snapshot.clone();
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event =
+                match gwt::load_knowledge_bridge_detail(&project_root, kind, number) {
+                    Ok(mut detail) => {
+                        if let Some(related) = related_snapshot.lock().ok().and_then(|snapshots| {
+                            snapshots.get(&project_root)?.get(&number).cloned()
+                        }) {
+                            detail.related_works = related;
+                        }
+                        BackendEvent::KnowledgeDetail {
+                            id,
+                            knowledge_kind: kind,
+                            request_id,
+                            detail,
+                        }
+                    }
+                    Err(error) => knowledge_error_event(id, kind, error, request_id, None),
+                };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
     }
 
     pub(crate) fn search_knowledge_bridge_events(
@@ -921,32 +1014,42 @@ impl AppRuntime {
             sessions_dir,
             issue_link_cache_dir,
         } = task;
+        let related_snapshot = self.knowledge_related_snapshot.clone();
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
-            let event =
-                match gwt::search_knowledge_bridge(&project_root, kind, &query, selected_number) {
-                    Ok(mut view) => {
-                        augment_knowledge_bridge_related_works_from_paths(
-                            &project_root,
-                            &sessions_dir,
-                            &issue_link_cache_dir,
-                            &mut view,
-                        );
-                        BackendEvent::KnowledgeSearchResults {
-                            id: id.clone(),
-                            knowledge_kind: kind,
-                            query: query.clone(),
-                            request_id,
-                            entries: view.entries,
-                            selected_number: view.selected_number,
-                            empty_message: view.empty_message,
-                            refresh_enabled: view.refresh_enabled,
-                        }
+            // SPEC #3170 FR-098: semantic degradation is a normal completion
+            // (cache rows + optional typed retry directive). Only
+            // non-semantic failures (cache read, window lookup) still use the
+            // visible KnowledgeError channel.
+            let event = match gwt::search_knowledge_bridge_outcome(
+                &project_root,
+                kind,
+                &query,
+                selected_number,
+            ) {
+                Ok(outcome) => {
+                    let mut view = outcome.view;
+                    augment_knowledge_bridge_related_works_from_paths(
+                        &project_root,
+                        &sessions_dir,
+                        &issue_link_cache_dir,
+                        &mut view,
+                        &related_snapshot,
+                    );
+                    BackendEvent::KnowledgeSearchResults {
+                        id: id.clone(),
+                        knowledge_kind: kind,
+                        query: query.clone(),
+                        request_id,
+                        entries: view.entries,
+                        selected_number: view.selected_number,
+                        empty_message: view.empty_message,
+                        refresh_enabled: view.refresh_enabled,
+                        semantic_retry: outcome.semantic_retry,
                     }
-                    Err(error) => {
-                        knowledge_error_event(id, kind, error, Some(request_id), Some(query))
-                    }
-                };
+                }
+                Err(error) => knowledge_error_event(id, kind, error, Some(request_id), Some(query)),
+            };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                 client_id, event,
             )]));
