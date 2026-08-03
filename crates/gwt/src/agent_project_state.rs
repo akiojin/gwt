@@ -546,7 +546,7 @@ pub fn continue_authenticated_execution(
         record,
         owner,
         exact_unbound,
-        current_binding: _,
+        current_binding,
     } = authority;
 
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
@@ -620,6 +620,7 @@ pub fn continue_authenticated_execution(
                 owner,
                 &existing.request,
                 existing.predecessor_status,
+                &current_binding,
                 &gwt_core::paths::gwt_sessions_dir(),
                 &session,
             )
@@ -733,10 +734,7 @@ pub fn continue_authenticated_execution(
         },
         |attempt| attempt.request,
     );
-    let predecessor_binding =
-        crate::cli::execution_state::current_execution_binding(&worktree, owner)
-            .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
-            .ok_or_else(|| execution_binding_error("execution_continuation_binding_missing"))?;
+    let predecessor_binding = current_binding;
     let predecessor_status = match record.status {
         crate::cli::execution_state::ExecutionControlStatus::Active => {
             crate::cli::execution_state::SuccessorPredecessorStatus::Active
@@ -752,6 +750,7 @@ pub fn continue_authenticated_execution(
         owner,
         &successor_request,
         predecessor_status,
+        &predecessor_binding,
         &sessions_dir,
         &session,
     )
@@ -3952,6 +3951,15 @@ mod tests {
             assert_continuation_refused_byte_identically(repo, &bound, "owner-only", |session| {
                 session.execution_binding = None;
             });
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "legacy-owner-only",
+                |session| {
+                    session.schema_version = Session::CURRENT_SCHEMA_VERSION - 1;
+                    session.execution_binding = None;
+                },
+            );
             assert_continuation_refused_byte_identically(repo, &bound, "binding-only", |session| {
                 session.linked_issue_number = None;
             });
@@ -3960,6 +3968,15 @@ mod tests {
                 &bound,
                 "foreign-binding",
                 |session| {
+                    session.execution_binding.as_mut().unwrap().owner_number += 1;
+                },
+            );
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "legacy-foreign-binding",
+                |session| {
+                    session.schema_version = Session::CURRENT_SCHEMA_VERSION - 1;
                     session.execution_binding.as_mut().unwrap().owner_number += 1;
                 },
             );
@@ -4216,7 +4233,8 @@ mod tests {
     #[test]
     fn stale_exact_unbound_loser_preserves_winner_authority_bytes() {
         with_strict_target_fixture(|repo, session| {
-            let (stale_unbound, owner, _) = seed_foreign_active_exact_unbound(repo, session);
+            let (stale_unbound, owner, predecessor) =
+                seed_foreign_active_exact_unbound(repo, session);
             continue_authenticated_execution(
                 repo,
                 &stale_unbound.id,
@@ -4238,15 +4256,20 @@ mod tests {
                 requested_at: Utc::now(),
             };
 
-            crate::cli::execution_state::activate_successor_with_session_rebind(
-                repo,
-                owner,
-                &loser,
-                crate::cli::execution_state::SuccessorPredecessorStatus::Active,
-                &gwt_core::paths::gwt_sessions_dir(),
-                &stale_unbound,
-            )
-            .expect_err("stale loser must lose the Session CAS before ledger publication");
+            assert!(
+                crate::cli::execution_state::activate_successor_with_session_rebind(
+                    repo,
+                    owner,
+                    &loser,
+                    crate::cli::execution_state::SuccessorPredecessorStatus::Active,
+                    &predecessor,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &stale_unbound,
+                )
+                .expect("stale predecessor is a transaction miss")
+                .is_none(),
+                "stale loser must lose the Session CAS before ledger publication"
+            );
 
             assert_eq!(
                 ExecutionBindingAuthoritySnapshot::capture(
@@ -4256,6 +4279,140 @@ mod tests {
                 ),
                 winner,
                 "loser must preserve winner Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn distinct_stale_exact_unbound_session_loses_predecessor_cas_byte_identically() {
+        with_strict_target_fixture(|repo, session| {
+            let (session_a, owner, predecessor) = seed_foreign_active_exact_unbound(repo, session);
+            let mut session_b = session_a.clone();
+            session_b.id = "exact-unbound-session-b".to_string();
+            save_session_fixture(&session_b);
+
+            let observed_a = evaluate_authenticated_execution_continuation(repo, &session_a.id)
+                .expect("Session A observes predecessor P");
+            let observed_b = evaluate_authenticated_execution_continuation(repo, &session_b.id)
+                .expect("Session B observes predecessor P");
+            assert_eq!(observed_a.current_binding, predecessor);
+            assert_eq!(observed_b.current_binding, predecessor);
+
+            let winner_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "continue-distinct-session-winner".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "execution-continue-distinct-session-winner".to_string(),
+                initial_session_id: session_b.id.clone(),
+                entrypoint: "execution.continue".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::activate_successor_with_session_rebind(
+                repo,
+                owner,
+                &winner_request,
+                crate::cli::execution_state::SuccessorPredecessorStatus::Active,
+                &observed_b.current_binding,
+                &gwt_core::paths::gwt_sessions_dir(),
+                &observed_b.session,
+            )
+            .expect("winner activation transaction")
+            .expect("Session B must commit its observed predecessor");
+            let winner_a = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session_a.id);
+            let winner_b = std::fs::read(
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session_b.id)),
+            )
+            .expect("read winner Session B bytes");
+
+            let loser_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "continue-distinct-session-loser".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "execution-continue-distinct-session-loser".to_string(),
+                initial_session_id: session_a.id.clone(),
+                entrypoint: "execution.continue".to_string(),
+                requested_at: Utc::now(),
+            };
+            let loser = crate::cli::execution_state::activate_successor_with_session_rebind(
+                repo,
+                owner,
+                &loser_request,
+                crate::cli::execution_state::SuccessorPredecessorStatus::Active,
+                &observed_a.current_binding,
+                &gwt_core::paths::gwt_sessions_dir(),
+                &observed_a.session,
+            )
+            .expect("stale predecessor is a transaction miss");
+            assert!(
+                loser.is_none(),
+                "Session A must not activate from a predecessor superseded by Session B"
+            );
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session_a.id),
+                winner_a,
+                "stale Session A must preserve its Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+            assert_eq!(
+                std::fs::read(
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session_b.id)),
+                )
+                .expect("read Session B after stale loss"),
+                winner_b,
+                "stale Session A must preserve winner Session B bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_exact_unbound_session_migrates_and_binds_in_one_continuation() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut legacy, owner, predecessor) = seed_foreign_active_exact_unbound(repo, session);
+            legacy.schema_version = Session::CURRENT_SCHEMA_VERSION - 1;
+            save_session_fixture(&legacy);
+
+            let (receipt, binding) = continue_authenticated_execution(
+                repo,
+                &legacy.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-legacy-exact-unbound".to_string(),
+                },
+            )
+            .expect("legacy exact-unbound Session must migrate and activate atomically");
+
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::SuccessorCreated
+            );
+            assert_eq!(
+                receipt.predecessor_generation_id.as_deref(),
+                Some(predecessor.generation_id.as_str())
+            );
+            let durable = Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", legacy.id)),
+            )
+            .expect("read migrated successor Session");
+            assert_eq!(durable.schema_version, Session::CURRENT_SCHEMA_VERSION);
+            assert_eq!(durable.linked_issue_number, Some(owner.number));
+            assert_eq!(durable.execution_binding.as_ref(), Some(&binding));
+            assert_eq!(binding.capability_generation, 1);
+            assert_eq!(receipt.execution_binding, binding.identity);
+            assert_eq!(
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read current successor binding")
+                    .as_ref(),
+                Some(&binding.identity)
+            );
+            assert!(
+                crate::cli::execution_state::current_active_execution_binding_matches(
+                    repo,
+                    owner,
+                    &legacy.id,
+                    &binding.identity,
+                )
+                .expect("validate migrated active binding readback")
             );
         });
     }

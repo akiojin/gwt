@@ -5239,6 +5239,7 @@ pub fn activate_successor_with_session_rebind(
     owner: ExecutionOwnerKey,
     request: &SuccessorRequest,
     predecessor_status: SuccessorPredecessorStatus,
+    expected_current_binding: &gwt_agent::ExecutionBindingIdentity,
     sessions_dir: &Path,
     expected_session: &gwt_agent::Session,
 ) -> io::Result<
@@ -5248,6 +5249,8 @@ pub fn activate_successor_with_session_rebind(
     )>,
 > {
     validate_successor_request(request)?;
+    let mut expected_session = expected_session.clone();
+    expected_session.migrate_legacy_launch_args();
     let expected_exact_unbound = expected_session.linked_issue_number.is_none()
         && expected_session.execution_binding.is_none();
     if request.initial_session_id != expected_session.id
@@ -5259,7 +5262,7 @@ pub fn activate_successor_with_session_rebind(
     {
         return Ok(None);
     }
-    let expected_session_toml = toml::to_string(expected_session)
+    let expected_session_toml = toml::to_string(&expected_session)
         .map_err(|error| invalid_generation_data(format!("serialize expected Session: {error}")))?;
     with_generation_activation_leases(worktree, owner, |context| {
         let expected_repo_hash = expected_session
@@ -5271,8 +5274,10 @@ pub fn activate_successor_with_session_rebind(
             return Ok(None);
         }
         let mut activated_identity = None;
-        let updated =
-            gwt_agent::update_session_if_changed(sessions_dir, &expected_session.id, |session| {
+        let updated = match gwt_agent::update_session_if_changed(
+            sessions_dir,
+            &expected_session.id,
+            |session| {
                 let durable_session_toml = toml::to_string(session).map_err(|error| {
                     invalid_generation_data(format!("serialize durable Session: {error}"))
                 })?;
@@ -5300,6 +5305,31 @@ pub fn activate_successor_with_session_rebind(
                 let latest =
                     latest_operation_attempt(&ledger, request, &context.worktree_binding_hash)?
                         .cloned();
+                let current = ledger.current_generation().ok_or_else(|| {
+                    invalid_generation_data("execution generation ledger current id is missing")
+                })?;
+                let current_binding = execution_binding_for_generation(&ledger, current);
+                let activated_retry_matches_current = latest.as_ref().is_some_and(|attempt| {
+                    attempt.status == ContinuationAttemptStatus::Activated
+                        && attempt.activated_generation.as_ref() == Some(&current.identity)
+                        && current_binding == *expected_current_binding
+                });
+                if latest
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.status == ContinuationAttemptStatus::Activated)
+                {
+                    if !activated_retry_matches_current {
+                        return Err(io::Error::new(
+                            ErrorKind::WouldBlock,
+                            "Activated successor no longer matches strict current authority",
+                        ));
+                    }
+                } else if current_binding != *expected_current_binding {
+                    return Err(io::Error::new(
+                        ErrorKind::WouldBlock,
+                        "successor predecessor changed before activation",
+                    ));
+                }
                 if latest
                     .as_ref()
                     .is_none_or(|attempt| attempt.status != ContinuationAttemptStatus::Activated)
@@ -5348,7 +5378,12 @@ pub fn activate_successor_with_session_rebind(
                     .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
                 activated_identity = Some(activated);
                 Ok(())
-            })?;
+            },
+        ) {
+            Ok(updated) => updated,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let binding = updated.execution_binding.ok_or_else(|| {
             invalid_generation_data("successor Session rebind lost execution authority")
         })?;
