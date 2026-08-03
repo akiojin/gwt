@@ -158,6 +158,10 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             issue_numbers,
         } => run_monitor_priority_set(env, project_root.as_deref(), &issue_numbers, out)?,
+        IssueCommand::MonitorLaunchNow {
+            project_root,
+            number,
+        } => run_monitor_launch_now(env, project_root.as_deref(), number, out)?,
         IssueCommand::MonitorConfigSet {
             project_root,
             enabled,
@@ -291,6 +295,47 @@ fn run_monitor_priority_set<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
     out.push_str(&serde_json::json!({"priority_order": prefs.priority_order}).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC-3431 FR-006: the PM's launch instruction. It does exactly two things —
+/// move the issue to the head of `priority_order` (prefs is the SOT the scan
+/// driver re-reads) and ask the daemon for one immediate scan. The launch
+/// itself stays on the Monitor's claim/slot path, so this cannot produce a
+/// duplicate agent. Without a reachable daemon the reorder still lands and the
+/// next scheduled scan picks it up; the response says which happened.
+fn run_monitor_launch_now<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.priority_order.retain(|existing| *existing != number);
+        prefs.priority_order.insert(0, number);
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "scan_now": {} }),
+        std::process::id(),
+    );
+    let scan_requested = publish_monitor_config_set(&project_root, payload).is_ok();
+
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "priority_order": prefs.priority_order,
+            "scan_requested": scan_requested,
+            "scan_delivery": if scan_requested { "immediate" } else { "next-scheduled-scan" },
+        })
+        .to_string(),
+    );
     out.push('\n');
     Ok(0)
 }

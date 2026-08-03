@@ -128,6 +128,12 @@ pub enum IssueCommand {
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
     },
+    /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
+    /// priority head and ask for one immediate scan. Never launches directly.
+    MonitorLaunchNow {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+    },
 }
 
 /// SPEC-1942 command model for `pr.*` JSON operations.

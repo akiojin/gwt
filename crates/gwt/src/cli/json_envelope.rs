@@ -182,6 +182,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 position: issue_monitor_priority_position(params)?,
             })
         }
+        "issue.monitor.launch_now" | "issue.monitor.launch-now" => {
+            CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -1704,6 +1710,34 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.review_verdict", json!({"issue_number": 42})),
             CliParseError::MissingFlag(_)
+        ));
+    }
+
+    // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
+    // priority head-move plus an immediate scan. It never spawns anything
+    // itself; the Monitor's claim/slot path stays the only launcher.
+    #[test]
+    fn issue_monitor_launch_now_parses() {
+        assert_eq!(
+            ok("issue.monitor.launch_now", json!({"number": 42})),
+            CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.launch-now",
+                json!({"project_root": "/tmp/project", "number": 7})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 7,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.launch_now", json!({})),
+            CliParseError::MissingFlag("number")
         ));
     }
 

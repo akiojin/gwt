@@ -4731,6 +4731,61 @@ mod tests {
         }
     }
 
+    // SPEC-3431 T-023 (AS2 / FR-006): the PM's launch_now writes the target to
+    // the head of priority_order and asks for a scan. This pins the two
+    // properties that make it safe: the reordered issue is the one the very
+    // next scan claims, and re-scanning (which an immediate ScanNow racing the
+    // interval tick can cause) never yields a second launch for it.
+    #[test]
+    fn launch_now_priority_head_claims_the_target_once_across_rescans() {
+        let prefs = IssueMonitorPrefs {
+            // exactly what run_monitor_launch_now writes for issue 7
+            priority_order: vec![7],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(7), issue(9)],
+            "2026-08-04T00:00:00Z",
+        );
+
+        assert_eq!(
+            monitor.queued_issue_numbers().first().copied(),
+            Some(7),
+            "launch_now's priority head must be first in the scan queue"
+        );
+
+        let request = monitor
+            .next_launch_request("2026-08-04T00:00:00Z")
+            .expect("the head issue is claimed");
+        assert_eq!(request.issue_number, 7);
+
+        // A second scan (immediate ScanNow landing next to the interval tick)
+        // must not re-queue the in-flight issue, and no further launch for it
+        // may be claimed.
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(7), issue(9)],
+            "2026-08-04T00:00:05Z",
+        );
+        assert!(
+            !monitor.queued_issue_numbers().contains(&7),
+            "an in-flight launch must not be re-queued by a rescan"
+        );
+
+        let mut claimed = vec![request.issue_number];
+        while let Some(next) = monitor.next_launch_request("2026-08-04T00:00:05Z") {
+            claimed.push(next.issue_number);
+        }
+        assert_eq!(
+            claimed.iter().filter(|number| **number == 7).count(),
+            1,
+            "issue 7 must be claimed exactly once: {claimed:?}"
+        );
+    }
+
     #[test]
     fn launching_claims_survive_prefs_roundtrip_and_are_not_reclaimed() {
         // Issue #3222: a claimed-but-not-yet-acked launch (Launching, no window

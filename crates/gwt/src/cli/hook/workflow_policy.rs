@@ -1162,6 +1162,9 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            // SPEC-3431 FR-006: launch_now mutates priority order, so it is
+            // not read-only — but it must stay ownerless-safe like its siblings.
+            "issue.monitor.launch_now",
         ] {
             assert!(!is_read_only_json_envelope_operation(operation));
         }
@@ -1173,6 +1176,7 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            "issue.monitor.launch_now",
         ] {
             let command = format!(
                 "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
