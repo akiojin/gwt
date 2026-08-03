@@ -488,6 +488,157 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.match(text, /board-claim-1/);
 });
 
+test("Workspace detail renders backend execution diagnosis without replacing the Work purpose", () => {
+  const projection = sampleProjection();
+  projection.works[0].works = [
+    {
+      id: "work-diagnosis",
+      title: "Release Notes cleanup",
+      status_category: "blocked",
+      status_text: "Waiting for recovery",
+      lifecycle_state: "active",
+      agents: [],
+      execution_diagnosis: {
+        schema_version: 1,
+        ecr_status: "blocked",
+        owner_kind: "spec",
+        owner_number: 3393,
+        blocked_reason: "Verification evidence is stale",
+        missing_verification: "User confirmation",
+        generation_id: "generation-2",
+        binding_state: "stale",
+        binding_cause: "current_session_not_authorized",
+        verification_state: "stale_fingerprint",
+        trivial_reason: "docs_only",
+        generated_outputs: ["artifacts/report.json"],
+        capability_generation: 4,
+        continuation: {
+          status: "activated",
+          outcome: "successor_created",
+          predecessor_generation_id: "generation-1",
+          generation_id: "generation-2",
+          validated: true,
+        },
+        workspace_update_applicable: false,
+        workspace_update_applicability_reason: "workspace_update_authority_mismatch",
+        obligation_revival: {
+          outcome: "persist_failed",
+          error: "trusted state write failed",
+        },
+        binding_repair: {
+          status: "failed",
+          failure_cause: "probe_receipt_mismatch",
+          generation_id: "generation-2",
+          matches_current_generation: true,
+          validated: true,
+        },
+        repair: {
+          outcome: "activated",
+          repair_id: "repair-1",
+          new_generation_id: "generation-2",
+          repaired_at: "2026-07-29T00:00:00Z",
+          source_kinds: ["execution_control", "generation_ledger"],
+        },
+        work_event_receipt_generation_id: "generation-1",
+        work_event_receipt_matches_current_generation: false,
+        settlement: { blocked: "missing_upstream" },
+        settlement_severity: "warning",
+        settlement_obligation_open: true,
+        open_obligations: ["user_verification"],
+        available_recoveries: ["verify.run", "execution.reopen"],
+        warnings: ["Host status is temporarily unavailable"],
+      },
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(
+    fixture.body.querySelector(".workspace-detail-title").textContent.trim(),
+    "Release Notes cleanup",
+    "SPEC-3075 purpose remains the detail heading",
+  );
+  const diagnosis = fixture.body.querySelector(
+    '[data-section="execution-diagnosis"][data-severity="warning"]',
+  );
+  assert.ok(diagnosis, "backend diagnosis renders in the existing detail surface");
+  const text = diagnosis.textContent.replace(/\s+/g, " ").trim();
+  assert.match(text, /Blocked/);
+  assert.match(text, /Stale/);
+  assert.match(text, /Verification evidence is stale/);
+  assert.match(text, /User confirmation/);
+  assert.match(text, /Stale fingerprint/);
+  assert.match(text, /Docs only/);
+  assert.match(text, /Capability generation\s*4/);
+  assert.match(text, /Successor created/);
+  assert.match(text, /Workspace update\s*Not applicable/);
+  assert.match(text, /Workspace update authority mismatch/);
+  assert.match(text, /Persist failed/);
+  assert.match(text, /Binding repair outcome\s*Failed/);
+  assert.match(text, /Binding repair cause\s*Probe receipt mismatch/);
+  assert.match(text, /Binding repair generation\s*generation-2/);
+  assert.match(text, /repair-1/);
+  assert.match(text, /Repair outcome\s*Activated/);
+  assert.match(text, /execution_control/);
+  assert.match(text, /generation_ledger/);
+  assert.match(text, /Work receipt generation\s*generation-1/);
+  assert.match(text, /Work receipt binding\s*Stale/);
+  assert.match(text, /Warning/);
+  assert.match(text, /Host status is temporarily unavailable/);
+  assert.match(text, /verify\.run/);
+  assert.match(text, /execution\.reopen/);
+  assert.match(text, /artifacts\/report\.json/);
+});
+
+test("Workspace detail surfaces an active bound execution as clear without recovery inference", () => {
+  const projection = sampleProjection();
+  projection.works[0].execution_containers = [
+    {
+      branch: "work/20260521-0234",
+      worktree_path: "/repo/work/20260521-0234",
+      diagnosis: {
+        ecr_status: "active",
+        owner_kind: "spec",
+        owner_number: 3393,
+        blocked_reason: null,
+        missing_verification: null,
+        generation_id: "generation-3",
+        binding_state: "bound",
+        binding_cause: "current_generation",
+        verification_state: "fresh",
+        settlement: { settled: { event_commit: "abc123", upstream_ref: "origin/work" } },
+        settlement_severity: "clear",
+        settlement_obligation_open: false,
+        open_obligations: [],
+        available_recoveries: [],
+        warnings: [],
+      },
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const diagnosis = fixture.body.querySelector(
+    '[data-section="execution-diagnosis"][data-severity="clear"]',
+  );
+  assert.ok(diagnosis);
+  assert.match(diagnosis.textContent, /Active/);
+  assert.match(diagnosis.textContent, /Bound/);
+  assert.match(diagnosis.textContent, /Fresh/);
+  assert.match(diagnosis.textContent, /Clear/);
+  assert.equal(diagnosis.querySelector(".workspace-execution-recovery-list"), null);
+});
+
 test("Workspace detail Board refs can focus the matching Board entry", () => {
   const fixture = createFixture();
   const focused = [];
@@ -792,7 +943,7 @@ test("Work without Session history keeps one Continue work action and renders on
   assert.equal(group.querySelectorAll(".workspace-detail-session-guidance").length, 1);
   assert.equal(
     group.querySelector(".workspace-detail-session-guidance").textContent,
-    "No previous session to inspect. Continue work can start a new one.",
+    "No previous session to open. Continue work can start a new one.",
   );
 });
 
@@ -875,7 +1026,7 @@ test("Task-first Work layout separates purpose, producing intent, and lifecycle 
   );
   assert.equal(
     group.querySelector('[data-action="resume-session"]').textContent,
-    "Inspect session",
+    "Open session",
     "Session history does not compete with the producing Continue work intent",
   );
   assert.deepEqual(
@@ -986,7 +1137,7 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
   );
 });
 
-test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-581)", () => {
+test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", () => {
   const projection = continuationProjection({ sessions: [{
     agent_session_id: "inspect-conversation",
     started_at: "2026-07-26T03:00:00Z",
@@ -1018,7 +1169,7 @@ test("Inspect session pending timeout keeps the inspection label (SPEC-2359 FR-5
   assert.equal(begins.length, 1);
   assert.equal(
     begins[0].label,
-    "Inspect session",
+    "Open session",
     "timeout notices must not regress to the old Resume wording",
   );
 });
@@ -1083,7 +1234,7 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
-test("Non-resumable Sessions stay Inspection-only while Continue work owns fallback (SPEC-2359)", () => {
+test("Non-resumable Sessions show no Resume control while Continue work owns fallback (SPEC-2359)", () => {
   const projection = continuationProjection({ sessions: [
     { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
     { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },

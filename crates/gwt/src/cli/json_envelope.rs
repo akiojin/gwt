@@ -271,21 +271,37 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
-            if commands.is_empty() {
-                return Err(CliParseError::MissingFlag("commands"));
-            }
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
         }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
+            let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             if commands.is_empty() && !derive {
                 return Err(CliParseError::MissingFlag("commands"));
             }
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
-                commands,
-                derive,
-            })
+            if generated_outputs.is_empty() {
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands,
+                    derive,
+                })
+            } else {
+                CliCommand::Verify(
+                    crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                        commands,
+                        derive,
+                        generated_outputs,
+                    },
+                )
+            }
+        }
+        "execution.status" => {
+            if !params.is_empty() {
+                return Err(CliParseError::InvalidJson(
+                    "execution.status accepts no params".to_string(),
+                ));
+            }
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -299,6 +315,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "execution.adopt" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Adopt {
                 reason: required_string(params, "reason")?,
+            })
+        }
+        "execution.repair" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair {
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "execution.continue" => {
+            let operation_id = required_string(params, "operation_id")?;
+            if params.len() != 1 || !params.contains_key("operation_id") {
+                return Err(CliParseError::InvalidJson(
+                    "execution.continue only accepts params.operation_id".to_string(),
+                ));
+            }
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Continue {
+                operation_id,
             })
         }
         "execution.reopen" => {
@@ -1724,6 +1756,15 @@ mod tests {
     #[test]
     fn execution_settlement_variants() {
         assert!(matches!(
+            ok("execution.status", json!({})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"unexpected": true})),
+            CliParseError::InvalidJson(message)
+                if message.contains("accepts no params")
+        ));
+        assert!(matches!(
             ok("execution.complete", json!({})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
         ));
@@ -1739,12 +1780,63 @@ mod tests {
             CliParseError::MissingFlag("reason")
         ));
         assert!(matches!(
+            ok(
+                "execution.repair",
+                json!({"reason": "trusted authority is corrupt"})
+            ),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair { .. })
+        ));
+        assert!(matches!(
+            err("execution.repair", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
             ok("execution.reopen", json!({"reason": "blocker resolved"})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen { .. })
         ));
         assert!(matches!(
             err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            ok(
+                "execution.continue",
+                json!({"operation_id": "continue-operation-1"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Continue { operation_id }
+            ) if operation_id == "continue-operation-1"
+        ));
+        assert!(matches!(
+            err("execution.continue", json!({})),
+            CliParseError::MissingFlag("operation_id")
+        ));
+        assert!(matches!(
+            err(
+                "execution.continue",
+                json!({"operation_id": "continue-operation-1", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("only accepts params.operation_id")
+        ));
+    }
+
+    #[test]
+    fn verification_plan_generated_output_allowlist_is_typed() {
+        assert!(matches!(
+            ok(
+                "verify.plan",
+                json!({
+                    "commands": ["cargo test -p gwt --lib"],
+                    "generated_outputs": ["artifacts/report.json"]
+                })
+            ),
+            CliCommand::Verify(
+                crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                    generated_outputs,
+                    ..
+                }
+            ) if generated_outputs == vec!["artifacts/report.json"]
         ));
     }
 

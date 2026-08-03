@@ -27,6 +27,7 @@ thiserror.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 dunce.workspace = true
+libc.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

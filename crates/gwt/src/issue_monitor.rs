@@ -1489,7 +1489,7 @@ pub fn establish_issue_monitor_authority_fence(
             .truncate(false)
             .open(issue_monitor_authority_lock_path(prefs_path))?;
         if let Err(error) = FileExt::try_lock_exclusive(&authority_lock) {
-            if error.kind() == io::ErrorKind::WouldBlock {
+            if gwt_core::operation_deadline::is_lock_contended(&error) {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "Issue Monitor authority lifetime lease is already held by another daemon",

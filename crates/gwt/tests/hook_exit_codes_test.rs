@@ -239,6 +239,8 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
+    gwt_skills::write_lane_file(tmp.path(), gwt_skills::LaneRegistry::default_profile())
+        .expect("pin execution lane");
     let sessions_dir = tmp.path().join(".gwt").join("sessions");
     let mut session = Session::new(tmp.path(), "feature/demo", AgentId::Codex);
     session.agent_session_id = Some("agent-123".to_string());

@@ -382,20 +382,25 @@ fn format_execution_help() -> String {
         "",
         "Usage:",
         "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}",
+        "  {\"schema_version\":1,\"operation\":\"execution.continue\",\"params\":{\"operation_id\":\"<stable-operation-id>\"}}",
+        "  JSON",
+        "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"<blocker>\",\"missing_verification\":\"<what could not run>\"}}",
         "  {\"schema_version\":1,\"operation\":\"execution.reopen\",\"params\":{\"reason\":\"<resolved blocker>\"}}",
         "  JSON",
         "",
         "Operations:",
-        "  execution.complete | execution.blocked | execution.adopt | execution.reopen",
+        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
         "  settles the record for gwt-build-spec flows. Blocked is not done.",
         "  execution.adopt takes over another session's active record with an",
         "  audited params.reason (crash recovery / handoff) only when integrity",
-        "  is valid. An integrity-failed record cannot be repaired in the same",
-        "  execution lifetime; use a fresh linked-owner launch to preserve audit.",
+        "  is valid. For an integrity-failed ECR or generation ledger, use",
+        "  execution.repair with a non-empty params.reason; it quarantines the",
+        "  corrupt bytes and creates fresh authority with an independent audit.",
         "  Do not use execution.blocked for temporary questions or decisions.",
         "  If the same owning session resolves a terminal block, register a",
         "  derived plan with verify.plan params.derive:true, run the full",
@@ -807,12 +812,14 @@ mod tests {
     fn format_execution_help_documents_same_session_recovery() {
         let help = format_execution_help();
         for expected in [
+            "execution.continue",
             "execution.reopen",
             "params.derive:true",
             "temporary questions",
             "post-block",
-            "cannot be repaired in the same",
-            "fresh linked-owner launch",
+            "execution.repair",
+            "quarantines",
+            "creates fresh authority",
         ] {
             assert!(
                 help.contains(expected),
@@ -820,6 +827,8 @@ mod tests {
             );
         }
         assert!(!help.contains("integrity repair"), "{help}");
+        assert!(!help.contains("cannot be repaired in the same"), "{help}");
+        assert!(!help.contains("fresh linked-owner launch"), "{help}");
     }
 
     #[test]

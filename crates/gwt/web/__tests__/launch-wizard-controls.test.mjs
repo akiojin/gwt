@@ -475,10 +475,10 @@ const wizardSource = readFileSync(
   "utf8",
 );
 
-test("legacy conversation methods are Inspection while saved settings remain a new Launch", () => {
+test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
   assert.match(
     wizardSource,
-    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "inspection"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
+    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
     "wizard start methods must classify history, focus, and new-launch intents independently",
   );
   assert.match(
@@ -486,10 +486,10 @@ test("legacy conversation methods are Inspection while saved settings remain a n
     /button\.dataset\.executionIntent\s*=\s*startMethodIntent/,
     "start method rows must expose their execution intent to the rendered contract",
   );
-  assert.match(
+  assert.doesNotMatch(
     wizardSource,
-    /History only[\s\S]*?Continue work/,
-    "Inspection methods must direct producing continuation to Continue work",
+    /History only/,
+    "legacy conversation methods carry no observation-only notice",
   );
 });
 

@@ -1184,6 +1184,66 @@ pub struct WorkspaceHistoryAgentView {
 
 pub type WorkAgentView = WorkspaceHistoryAgentView;
 
+/// Read-only execution diagnosis shared by the CLI status operation and the
+/// Workspace detail surface. String fields preserve the stable snake_case wire
+/// values produced by the execution state machine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExecutionDiagnosisView {
+    #[serde(default = "default_execution_diagnosis_schema_version")]
+    pub schema_version: u32,
+    pub ecr_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_verification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    pub binding_state: String,
+    pub binding_cause: String,
+    pub verification_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trivial_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_update_applicable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_update_applicability_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_revival: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_repair: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_event_receipt_generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_event_receipt_matches_current_generation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<serde_json::Value>,
+    pub settlement_severity: String,
+    #[serde(default)]
+    pub settlement_obligation_open: bool,
+    #[serde(default)]
+    pub open_obligations: Vec<String>,
+    #[serde(default)]
+    pub available_recoveries: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn default_execution_diagnosis_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExecutionContainerView {
     pub branch: Option<String>,
@@ -1191,6 +1251,8 @@ pub struct WorkspaceExecutionContainerView {
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnosis: Option<WorkspaceExecutionDiagnosisView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1314,6 +1376,8 @@ pub struct ActiveWorkspaceWorkView {
     pub close_blocked_reason: Option<String>,
     #[serde(default)]
     pub agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_diagnosis: Option<WorkspaceExecutionDiagnosisView>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -2256,6 +2320,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "terminal_output",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "process_line",
         BackendEventDeliveryClass::Streamed,
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
@@ -3317,6 +3386,13 @@ mod tests {
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
+        let process_line = backend_event_policy("process_line").expect("process_line policy");
+        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
+        assert_eq!(
+            process_line.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
         let workspace_state =
             backend_event_policy("workspace_state").expect("workspace_state policy");
         assert_eq!(
@@ -3411,6 +3487,64 @@ mod tests {
             data_base64: "ZWNobw==".to_string(),
         };
         assert_eq!(event.delivery_policy().kind, "terminal_output");
+    }
+
+    #[test]
+    fn workspace_execution_diagnosis_serializes_and_legacy_container_remains_compatible() {
+        let legacy: super::WorkspaceExecutionContainerView =
+            serde_json::from_value(serde_json::json!({
+                "branch": "work/3393",
+                "worktree_path": "/repo/work/3393",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": null
+            }))
+            .expect("deserialize legacy execution container");
+        assert_eq!(legacy.diagnosis, None);
+
+        let diagnosed: super::WorkspaceExecutionContainerView =
+            serde_json::from_value(serde_json::json!({
+                "branch": "work/3393",
+                "worktree_path": "/repo/work/3393",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": null,
+                "diagnosis": {
+                    "ecr_status": "blocked",
+                    "owner_kind": "spec",
+                    "owner_number": 3393,
+                    "blocked_reason": "verification evidence is stale",
+                    "missing_verification": "user confirmation",
+                    "generation_id": "generation-2",
+                    "binding_state": "stale",
+                    "binding_cause": "current_session_not_authorized",
+                    "verification_state": "stale_fingerprint",
+                    "settlement": {"blocked": "missing_upstream"},
+                    "settlement_severity": "warning",
+                    "settlement_obligation_open": true,
+                    "open_obligations": ["user_verification"],
+                    "available_recoveries": ["verify.run", "execution.reopen"],
+                    "warnings": ["Host status is temporarily unavailable"]
+                }
+            }))
+            .expect("deserialize diagnosed execution container");
+
+        let diagnosis = diagnosed.diagnosis.expect("diagnosis");
+        assert_eq!(diagnosis.ecr_status, "blocked");
+        assert_eq!(diagnosis.binding_state, "stale");
+        assert_eq!(diagnosis.settlement_severity, "warning");
+        assert_eq!(
+            diagnosis.available_recoveries,
+            vec!["verify.run", "execution.reopen"]
+        );
+
+        let serialized = serde_json::to_value(diagnosis).expect("serialize diagnosis");
+        assert_eq!(
+            serialized["blocked_reason"],
+            "verification evidence is stale"
+        );
+        assert_eq!(serialized["verification_state"], "stale_fingerprint");
+        assert_eq!(serialized["settlement_severity"], "warning");
     }
 
     #[test]

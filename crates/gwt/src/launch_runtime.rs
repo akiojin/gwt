@@ -245,42 +245,73 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
 /// the dirty ones (uncommitted work is never destroyed). Bounded by
 /// `max_removals` so a pathological pile-up cannot stall startup. Returns the
 /// number removed. Never errors — best-effort recovery.
+#[cfg(test)]
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
-    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
+    let Some(plan) = plan_orphan_intake_worktree_prune(repo_path) else {
         return 0;
+    };
+    execute_orphan_intake_worktree_prune(plan, max_removals)
+}
+
+/// Fixed startup snapshot of detached `.intake-*` worktrees that existed
+/// before the GUI became interactive. Keeping discovery separate from safety
+/// inspection lets startup dispatch the expensive per-worktree checks to a
+/// worker without ever considering an intake created after startup.
+#[derive(Debug)]
+pub struct OrphanIntakePrunePlan {
+    main_repo_path: PathBuf,
+    worktree_paths: Vec<PathBuf>,
+}
+
+impl OrphanIntakePrunePlan {
+    pub(crate) fn detached_worktree_paths(&self) -> &[PathBuf] {
+        &self.worktree_paths
+    }
+}
+
+pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntakePrunePlan> {
+    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
+        return None;
     };
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
     let Ok(worktrees) = manager.list() else {
-        return 0;
+        return None;
     };
+    let worktree_paths = worktrees
+        .into_iter()
+        .filter(|worktree| {
+            is_ephemeral_intake_worktree(&worktree.path) && worktree.branch.is_none()
+        })
+        .map(|worktree| worktree.path)
+        .collect();
+    Some(OrphanIntakePrunePlan {
+        main_repo_path,
+        worktree_paths,
+    })
+}
 
+pub fn execute_orphan_intake_worktree_prune(
+    plan: OrphanIntakePrunePlan,
+    max_removals: usize,
+) -> usize {
+    let manager = gwt_git::WorktreeManager::new(&plan.main_repo_path);
     let mut removed = 0;
-    for worktree in worktrees {
+    for worktree_path in plan.worktree_paths {
         if removed >= max_removals {
             break;
         }
-        if !is_ephemeral_intake_worktree(&worktree.path) {
-            continue;
-        }
-        // codex #3236 P2: only reap the branchless intake worktrees this feature
-        // creates — a real branch worktree a user happens to name `.intake-*`
-        // has a branch and must be left alone (mirrors is_ephemeral_intake_session).
-        if worktree.branch.is_some() {
-            continue;
-        }
-        let worktree_path = worktree.path.clone();
-        match manager.ephemeral_worktree_has_local_work_with(&worktree.path, |entry| {
+        match manager.ephemeral_worktree_has_local_work_with(&worktree_path, |entry| {
             intake_hook_config_is_disposable(&worktree_path, entry)
         }) {
             Ok(false) => {
-                if manager.remove_force(&worktree.path).is_ok() {
+                if manager.remove_force(&worktree_path).is_ok() {
                     removed += 1;
                 }
             }
             // Has local work or unknown → keep it (fail closed).
             _ => {
                 tracing::warn!(
-                    worktree_path = %worktree.path.display(),
+                    worktree_path = %worktree_path.display(),
                     "keeping orphaned intake worktree with local work (changes, ignored files, or commits)"
                 );
             }
@@ -928,6 +959,8 @@ mod tests {
         }
     }
 
+    // Only the `#[cfg(not(windows))]` fallback tests build failing probes.
+    #[cfg_attr(windows, allow(dead_code))]
     fn probe_failure(detail: &str) -> gwt_agent::HostRunnerProbeOutcome {
         gwt_agent::HostRunnerProbeOutcome {
             success: false,

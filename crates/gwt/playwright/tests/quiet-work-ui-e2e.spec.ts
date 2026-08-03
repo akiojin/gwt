@@ -84,8 +84,9 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
       "Workspace",
     );
-    // Producing continuation lives on the Work. A Session-level Resume remains
-    // a history/Inspection action and carries no execution authority.
+    // Producing continuation lives on the Work. A Session-level Resume
+    // reopens the conversation with input enabled; producing authority is
+    // recovered by the backend continuation coordinator when applicable.
     await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
     await expect(page.locator("[data-action='resume-work']")).toHaveCount(0);
     const continueWork = page.locator("[data-action='continue-work']");
@@ -98,7 +99,37 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
       "data-agent-session-id",
       "conv-bbbb2222",
     );
-    await expect(sessionResume).toHaveText("Inspect session");
+    await expect(sessionResume).toHaveText("Open session");
+  });
+
+  test("Workspace detail exposes blocked execution recovery without replacing purpose", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-detail-title")).toHaveText(
+      "Quiet Work UI redesign",
+    );
+    const diagnosis = page.locator(
+      '[data-section="execution-diagnosis"][data-severity="warning"]',
+    );
+    await expect(diagnosis).toBeVisible();
+    await expect(diagnosis).toHaveAttribute("aria-label", "Execution diagnosis");
+    await expect(diagnosis).toContainText("Blocked");
+    await expect(diagnosis).toContainText("Stale");
+    await expect(diagnosis).toContainText("Verification evidence is stale");
+    await expect(diagnosis).toContainText("Host status is temporarily unavailable");
+    await expect(diagnosis.locator(".workspace-execution-severity")).toHaveText(
+      "Warning",
+    );
+    await expect(diagnosis.locator(".workspace-execution-recovery-list")).toContainText(
+      "verify.run",
+    );
+    await expect(diagnosis.locator(".workspace-execution-recovery-list")).toContainText(
+      "execution.reopen",
+    );
   });
 
   test("Work without Session history keeps Continue work and shows one Work-level guidance", async ({
@@ -119,7 +150,7 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     const guidance = group.locator(".workspace-detail-session-guidance");
     await expect(guidance).toHaveCount(1);
     await expect(guidance).toHaveText(
-      "No previous session to inspect. Continue work can start a new one.",
+      "No previous session to open. Continue work can start a new one.",
     );
   });
 
@@ -435,6 +466,23 @@ async function installBackend(
                 agents: workAgents,
                 manual_close_allowed: true,
                 close_blocked_reason: "",
+                execution_diagnosis: {
+                  ecr_status: "blocked",
+                  owner_kind: "spec",
+                  owner_number: 3393,
+                  blocked_reason: "Verification evidence is stale",
+                  missing_verification: "User confirmation",
+                  generation_id: "generation-2",
+                  binding_state: "stale",
+                  binding_cause: "current_session_not_authorized",
+                  verification_state: "stale_fingerprint",
+                  settlement: { blocked: "missing_upstream" },
+                  settlement_severity: "warning",
+                  settlement_obligation_open: true,
+                  open_obligations: ["user_verification"],
+                  available_recoveries: ["verify.run", "execution.reopen"],
+                  warnings: ["Host status is temporarily unavailable"],
+                },
               },
             ],
             events: [

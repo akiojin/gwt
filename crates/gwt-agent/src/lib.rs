@@ -39,8 +39,9 @@ pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::LaunchEnvironment;
 pub use launch::{
-    canonical_launch_args, normalize_launch_args, resolve_host_npx_fallback_executable,
-    resolve_runner, AgentLaunchBuilder, ExecutionLaunchIntent, LaunchConfig, ResolvedRunner,
+    apply_host_bunx_cache_fast_path, canonical_launch_args, normalize_launch_args,
+    resolve_host_npx_fallback_executable, resolve_runner, AgentLaunchBuilder,
+    ExecutionLaunchIntent, LaunchConfig, ResolvedRunner,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{

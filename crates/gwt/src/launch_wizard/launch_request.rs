@@ -332,14 +332,14 @@ mod tests {
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
         assert!(
             !config.skip_permissions,
-            "inspection Resume must never inherit a permission bypass"
+            "a Resume launch must never inherit a permission bypass"
         );
         assert!(
             !config
                 .args
                 .iter()
                 .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
-            "inspection Resume must not carry Codex's dangerous bypass flag"
+            "a Resume launch must not carry Codex's dangerous bypass flag"
         );
         assert!(config.codex_fast_mode);
     }
@@ -963,7 +963,7 @@ mod tests {
         assert!(!config.skip_permissions);
         assert!(
             !config.args.contains(&"--unsafe".to_string()),
-            "inspection Resume must not carry the custom agent permission bypass"
+            "a Resume launch must not carry the custom agent permission bypass"
         );
         assert_eq!(
             config.env_vars.get("API_KEY").map(String::as_str),

@@ -256,9 +256,74 @@ export function createWorkspaceKanbanSurface({
     return [];
   }
 
+  function normalizeExecutionDiagnosis(diagnosis) {
+    if (!diagnosis || typeof diagnosis !== "object") return null;
+    const stringList = (values) =>
+      (Array.isArray(values) ? values : [])
+        .map((value) => compactText(value))
+        .filter(Boolean);
+    return {
+      schema_version: Number.isFinite(Number(diagnosis.schema_version))
+        ? Number(diagnosis.schema_version)
+        : 1,
+      ecr_status: compactText(diagnosis.ecr_status),
+      owner_kind: compactText(diagnosis.owner_kind),
+      owner_number: diagnosis.owner_number ?? null,
+      blocked_reason: compactText(diagnosis.blocked_reason),
+      missing_verification: compactText(diagnosis.missing_verification),
+      generation_id: compactText(diagnosis.generation_id),
+      binding_state: compactText(diagnosis.binding_state),
+      binding_cause: compactText(diagnosis.binding_cause),
+      verification_state: compactText(diagnosis.verification_state),
+      trivial_reason: compactText(diagnosis.trivial_reason),
+      generated_outputs: stringList(diagnosis.generated_outputs),
+      capability_generation: diagnosis.capability_generation ?? null,
+      continuation:
+        diagnosis.continuation && typeof diagnosis.continuation === "object"
+          ? diagnosis.continuation
+          : null,
+      workspace_update_applicable:
+        typeof diagnosis.workspace_update_applicable === "boolean"
+          ? diagnosis.workspace_update_applicable
+          : null,
+      workspace_update_applicability_reason: compactText(
+        diagnosis.workspace_update_applicability_reason,
+      ),
+      obligation_revival:
+        diagnosis.obligation_revival && typeof diagnosis.obligation_revival === "object"
+          ? diagnosis.obligation_revival
+          : null,
+      binding_repair:
+        diagnosis.binding_repair && typeof diagnosis.binding_repair === "object"
+          ? diagnosis.binding_repair
+          : null,
+      repair:
+        diagnosis.repair && typeof diagnosis.repair === "object"
+          ? diagnosis.repair
+          : null,
+      repair_source_kinds: stringList(diagnosis.repair?.source_kinds),
+      work_event_receipt_generation_id: compactText(
+        diagnosis.work_event_receipt_generation_id,
+      ),
+      work_event_receipt_matches_current_generation:
+        typeof diagnosis.work_event_receipt_matches_current_generation === "boolean"
+          ? diagnosis.work_event_receipt_matches_current_generation
+          : null,
+      settlement: diagnosis.settlement || null,
+      settlement_severity: compactText(diagnosis.settlement_severity) || "unknown",
+      settlement_obligation_open: Boolean(diagnosis.settlement_obligation_open),
+      open_obligations: stringList(diagnosis.open_obligations),
+      available_recoveries: stringList(diagnosis.available_recoveries),
+      warnings: stringList(diagnosis.warnings),
+    };
+  }
+
   function normalizeWorkspaceItem(item, fallback = {}) {
     const containers = containersFor(item);
     const primaryContainer = containers[0] || {};
+    const childDiagnosis = (Array.isArray(item?.works) ? item.works : [])
+      .map((work) => work?.execution_diagnosis)
+      .find(Boolean);
     const id =
       item?.id ||
       item?.workspace_id ||
@@ -293,6 +358,12 @@ export function createWorkspaceKanbanSurface({
       pr_number: item?.pr_number || primaryContainer.pr_number || fallback.pr_number || null,
       pr_url: item?.pr_url || primaryContainer.pr_url || fallback.pr_url || "",
       pr_state: item?.pr_state || primaryContainer.pr_state || fallback.pr_state || "",
+      execution_diagnosis: normalizeExecutionDiagnosis(
+        item?.execution_diagnosis
+          || primaryContainer.diagnosis
+          || childDiagnosis
+          || fallback.execution_diagnosis,
+      ),
       board_refs: Array.isArray(item?.board_refs)
         ? item.board_refs
         : Array.isArray(fallback.board_refs)
@@ -787,6 +858,138 @@ export function createWorkspaceKanbanSurface({
     }
   }
 
+  function executionDiagnosisLabel(value) {
+    const text = compactText(value).replaceAll("_", " ");
+    return text ? `${text[0].toUpperCase()}${text.slice(1)}` : "";
+  }
+
+  function appendExecutionList(container, className, label, values) {
+    if (!Array.isArray(values) || values.length === 0) return;
+    const group = createNode("div", "workspace-execution-list-group");
+    group.appendChild(createNode("div", "workspace-execution-list-label", label));
+    const list = createNode("ul", className);
+    for (const value of values) {
+      const item = createNode("li");
+      item.appendChild(createNode("code", "", value));
+      list.appendChild(item);
+    }
+    group.appendChild(list);
+    container.appendChild(group);
+  }
+
+  function renderExecutionDiagnosisSection(diagnosis) {
+    if (!diagnosis) return null;
+    const supportedSeverities = new Set(["clear", "warning", "blocked", "unknown"]);
+    const severity = supportedSeverities.has(diagnosis.settlement_severity)
+      ? diagnosis.settlement_severity
+      : "unknown";
+    const section = detailSection("Execution", (body) => {
+      const severityBadge = createNode(
+        "span",
+        "workspace-execution-severity",
+        executionDiagnosisLabel(severity),
+      );
+      severityBadge.setAttribute("aria-label", `Settlement severity: ${severity}`);
+      body.appendChild(severityBadge);
+      const continuationOutcome =
+        diagnosis.continuation?.outcome || diagnosis.continuation?.status;
+      const obligationRevivalOutcome = diagnosis.obligation_revival?.outcome;
+      const workspaceUpdateApplicability =
+        diagnosis.workspace_update_applicable === null
+          ? ""
+          : diagnosis.workspace_update_applicable
+            ? "Applicable"
+            : "Not applicable";
+      const workEventReceiptMatch =
+        diagnosis.work_event_receipt_matches_current_generation === null
+          ? ""
+          : diagnosis.work_event_receipt_matches_current_generation
+            ? "Current"
+            : "Stale";
+      appendDefinitionList(body, [
+        ["ECR", executionDiagnosisLabel(diagnosis.ecr_status)],
+        ["Binding", executionDiagnosisLabel(diagnosis.binding_state)],
+        ["Binding cause", executionDiagnosisLabel(diagnosis.binding_cause)],
+        ["Verification", executionDiagnosisLabel(diagnosis.verification_state)],
+        ["Trivial reason", executionDiagnosisLabel(diagnosis.trivial_reason)],
+        ["Settlement", executionDiagnosisLabel(severity)],
+        ["Generation", diagnosis.generation_id],
+        ["Capability generation", diagnosis.capability_generation],
+        ["Continuation", executionDiagnosisLabel(continuationOutcome)],
+        ["Workspace update", workspaceUpdateApplicability],
+        [
+          "Applicability reason",
+          executionDiagnosisLabel(diagnosis.workspace_update_applicability_reason),
+        ],
+        ["Obligation revival", executionDiagnosisLabel(obligationRevivalOutcome)],
+        [
+          "Binding repair outcome",
+          executionDiagnosisLabel(diagnosis.binding_repair?.status),
+        ],
+        [
+          "Binding repair cause",
+          executionDiagnosisLabel(diagnosis.binding_repair?.failure_cause),
+        ],
+        [
+          "Binding repair generation",
+          diagnosis.binding_repair?.generation_id,
+        ],
+        ["Repair outcome", executionDiagnosisLabel(diagnosis.repair?.outcome)],
+        ["Repair", diagnosis.repair?.repair_id],
+        ["Work receipt generation", diagnosis.work_event_receipt_generation_id],
+        ["Work receipt binding", workEventReceiptMatch],
+      ]);
+      appendTextBlock(
+        body,
+        diagnosis.blocked_reason,
+        "workspace-detail-text workspace-execution-alert is-blocked",
+      );
+      if (diagnosis.missing_verification) {
+        appendTextBlock(
+          body,
+          `Missing verification: ${diagnosis.missing_verification}`,
+          "workspace-detail-text workspace-execution-alert is-warning",
+        );
+      }
+      for (const warning of diagnosis.warnings) {
+        appendTextBlock(
+          body,
+          warning,
+          "workspace-detail-text workspace-execution-alert is-warning",
+        );
+      }
+      appendExecutionList(
+        body,
+        "workspace-execution-obligation-list",
+        "Open obligations",
+        diagnosis.open_obligations,
+      );
+      appendExecutionList(
+        body,
+        "workspace-execution-recovery-list",
+        "Recovery actions",
+        diagnosis.available_recoveries,
+      );
+      appendExecutionList(
+        body,
+        "workspace-execution-generated-output-list",
+        "Generated outputs",
+        diagnosis.generated_outputs,
+      );
+      appendExecutionList(
+        body,
+        "workspace-execution-repair-source-list",
+        "Repaired authority",
+        diagnosis.repair_source_kinds,
+      );
+    });
+    section.classList.add("workspace-execution-diagnosis", `is-${severity}`);
+    section.dataset.section = "execution-diagnosis";
+    section.dataset.severity = severity;
+    section.setAttribute("aria-label", "Execution diagnosis");
+    return section;
+  }
+
   function appendBoardRefs(container, refs) {
     const list = Array.isArray(refs) ? refs.filter(Boolean) : [];
     if (list.length === 0) return false;
@@ -1010,7 +1213,7 @@ export function createWorkspaceKanbanSurface({
           createNode(
             "div",
             "workspace-overview-empty workspace-detail-session-guidance",
-            "No previous session to inspect. Continue work can start a new one.",
+            "No previous session to open. Continue work can start a new one.",
           ),
         );
       }
@@ -1221,16 +1424,16 @@ export function createWorkspaceKanbanSurface({
     if (session && session.resumable === false) {
       return null;
     }
-    const button = createNode("button", "wizard-button is-compact", "Inspect session");
+    const button = createNode("button", "wizard-button is-compact", "Open session");
     button.type = "button";
     button.dataset.action = "resume-session";
     button.dataset.sessionId = work.session_id;
     const agentSessionId = session && session.agent_session_id;
     if (agentSessionId) {
       button.dataset.agentSessionId = agentSessionId;
-      button.setAttribute("aria-label", `Inspect conversation ${agentSessionId}`);
+      button.setAttribute("aria-label", `Open conversation ${agentSessionId}`);
     } else {
-      button.setAttribute("aria-label", "Inspect this conversation");
+      button.setAttribute("aria-label", "Open this conversation");
     }
     if (isWorkResumePending(work.session_id)) {
       markResumeButtonPending(button);
@@ -1254,7 +1457,7 @@ export function createWorkspaceKanbanSurface({
     // agent_session_id (this Session row).
     if (
       launchPending
-      && !launchPending.begin(workPendingKey(sessionId), "Inspect session", operationId)
+      && !launchPending.begin(workPendingKey(sessionId), "Open session", operationId)
     ) {
       return;
     }
@@ -1367,7 +1570,7 @@ export function createWorkspaceKanbanSurface({
 
     // E4: expose the row's identity / state / resumability to assistive tech.
     const stateLabel = active ? "Current" : "Past";
-    const resumableLabel = resume ? "resumable" : "history only";
+    const resumableLabel = resume ? "resumable" : "not resumable";
     const ariaParts = [`Session ${fullId}`.trim(), stateLabel, resumableLabel];
     if (relative) {
       ariaParts.push(`started ${relative}`);
@@ -1516,6 +1719,10 @@ export function createWorkspaceKanbanSurface({
         }
       }),
     );
+    const executionDiagnosis = renderExecutionDiagnosisSection(workspace.execution_diagnosis);
+    if (executionDiagnosis) {
+      container.appendChild(executionDiagnosis);
+    }
     container.appendChild(
       (() => {
         const section = detailSection("Branch", (body) => {

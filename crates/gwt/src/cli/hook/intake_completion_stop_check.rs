@@ -13,11 +13,12 @@
 //!   dirty marker (T-074/T-080). Board posts and prose answers never write
 //!   outcome state, so they can never satisfy the gate (FR-017, T-081).
 //!
-//! On a missing/stale-outcome block the gate auto-captures one
-//! `issue-spec-workflow` self-improvement candidate with a stable dedupe key
-//! (T-084, FR-019); a capture failure is surfaced inside the StopBlock reason
-//! with a manual `improvement.capture` fallback instead of silently passing
-//! (T-085).
+//! On a missing/stale-outcome block the production dispatcher injects the
+//! registered managed-hook producer. The gate emits deterministic typed
+//! `issue-spec-workflow` evidence with a stable session/event key, so the
+//! shared Improvement Fingerprint and strict bounded Owner Resolution paths
+//! handle replay, eligibility, and ownership without transcript inspection.
+//! A capture failure remains visible inside the StopBlock reason.
 //!
 //! Existing Stop contracts are preserved: `stop_hook_active` short-circuits
 //! (one forced continuation per cycle, FR-014o), parse/IO errors fail open
@@ -29,7 +30,12 @@ use std::path::Path;
 use chrono::Utc;
 
 use super::{context::HookContext, envelope::stop_hook_active_from, HookOutput};
-use crate::cli::{improvement, intake_outcome};
+use crate::cli::{improvement_contract, intake_outcome};
+
+pub(crate) type ManagedHookCapture<'a> = dyn FnMut(
+        improvement_contract::ManagedHookFailureEvent,
+    ) -> Result<improvement_contract::ManagedHookCaptureResult, gwt_github::SpecOpsError>
+    + 'a;
 
 /// UserPromptSubmit handler: persist the FR-016 dirty marker. Fail-open state
 /// writer — it never contributes to the hook output.
@@ -63,6 +69,27 @@ pub fn handle_with_input(
     worktree: &Path,
     input: &str,
     current_session: Option<&str>,
+) -> HookOutput {
+    handle_with_optional_capture(worktree, input, current_session, None)
+}
+
+/// Production managed-hook entry point. The dispatcher supplies the sealed
+/// registered producer capability from its [`crate::cli::CliEnv`], keeping
+/// candidate persistence and Owner Resolution out of this gate module.
+pub(crate) fn handle_with_managed_capture(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+    capture: &mut ManagedHookCapture<'_>,
+) -> HookOutput {
+    handle_with_optional_capture(worktree, input, current_session, Some(capture))
+}
+
+fn handle_with_optional_capture(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+    managed_hook_capture: Option<&mut ManagedHookCapture<'_>>,
 ) -> HookOutput {
     if stop_hook_active_from(input) {
         return HookOutput::Silent;
@@ -99,27 +126,23 @@ pub fn handle_with_input(
 
     let situation = describe_gate_violation(&state);
     let capture_note = if lane.policy_flags.self_improvement_capture {
-        match improvement::capture_intake_gate_violation(
-            &resolved,
-            "Intake session attempted to stop without a fresh Issue/SPEC outcome (intake artifact gate)",
-            &format!(
-                "session {session}: {situation}",
-                session = state.session_id
-            ),
-        ) {
+        managed_hook_capture.map_or_else(String::new, |capture| {
+            match managed_hook_failure_event(&state).and_then(capture) {
             Ok(summary) => format!(
-                "Self-improvement candidate {id} {verb} (occurrences: {count}).",
-                id = summary.id,
-                verb = if summary.updated { "updated" } else { "captured" },
+                "Self-improvement candidate {id} captured or replayed (occurrences: {count}, fingerprint: {fingerprint}, eligibility: {eligibility:?}).",
+                id = summary.candidate_id,
                 count = summary.occurrences,
+                fingerprint = summary.fingerprint,
+                eligibility = summary.eligibility,
             ),
             // T-085: a capture failure must not silently pass (or silently
-            // drop the bookkeeping) — surface it with a manual fallback.
+            // drop the bookkeeping). A public manual capture remains
+            // interpretive and is not presented as a deterministic substitute.
             Err(error) => format!(
-                "Self-improvement auto-capture failed ({error}). Record it manually: run JSON operation `improvement.capture` with `params.source:\"hook-runtime\"`, `params.target_artifact:\"issue-spec-workflow\"`, `params.classification:\"gwt-caused\"`, `params.confidence:\"medium\"`, `params.summary:\"intake artifact gate violation\"`, and `params.dedupe_key:\"{key}\"`.",
-                key = improvement::INTAKE_GATE_DEDUPE_KEY,
+                "Typed self-improvement auto-capture failed ({error}). Retry this Stop after correcting the capture failure. JSON operation `improvement.capture` remains available for interpretive evidence, but does not replace this deterministic event."
             ),
-        }
+            }
+        })
     } else {
         String::new()
     };
@@ -135,6 +158,38 @@ pub fn handle_with_input(
         reason.push_str(&capture_note);
     }
     HookOutput::stop_block(reason)
+}
+
+fn managed_hook_failure_event(
+    state: &intake_outcome::IntakeOutcomeState,
+) -> Result<improvement_contract::ManagedHookFailureEvent, gwt_github::SpecOpsError> {
+    let observed_outcome = match &state.outcome {
+        None => "DURABLE_INTAKE_OUTCOME_MISSING",
+        Some(outcome) if !outcome.is_valid() => "DURABLE_INTAKE_OUTCOME_INVALID",
+        Some(_) => "DURABLE_INTAKE_OUTCOME_STALE",
+    };
+    let required_since = state
+        .required_since
+        .expect("managed hook event requires an armed intake gate");
+    let mut event = improvement_contract::ManagedHookFailureEvent {
+        producer: improvement_contract::MANAGED_HOOK_PRODUCER_ID.to_string(),
+        gate_id: improvement_contract::MANAGED_HOOK_GATE_ID.to_string(),
+        failure_code: improvement_contract::MANAGED_HOOK_FAILURE_CODE.to_string(),
+        target_artifact: improvement_contract::MANAGED_HOOK_TARGET_ARTIFACT.to_string(),
+        contract_revision: improvement_contract::MANAGED_HOOK_CONTRACT_REVISION,
+        session_key: state.session_id.clone(),
+        event_key: format!(
+            "intake-artifact:{}:{}",
+            state.session_id,
+            required_since.timestamp_micros()
+        ),
+        expected_outcome: improvement_contract::MANAGED_HOOK_EXPECTED_OUTCOME.to_string(),
+        observed_outcome: observed_outcome.to_string(),
+        evidence_kind: improvement_contract::ManagedHookEvidenceKind::Deterministic,
+        fingerprint: String::new(),
+    };
+    event.fingerprint = improvement_contract::managed_hook_failure_fingerprint(&event)?;
+    Ok(event)
 }
 
 /// Human-readable violation summary for the StopBlock reason.
@@ -221,6 +276,7 @@ fn is_pure_status_question(prompt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{improvement, improvement_contract, TestEnv};
     use chrono::{Duration, Utc};
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
@@ -421,36 +477,91 @@ mod tests {
         );
     }
 
-    // T-084 / AS-13 / AS-14: blocking auto-captures one legacy-compatible
-    // issue-spec-workflow candidate with the stable dedupe key. Repeats update
-    // only the aggregate legacy count and never invent typed occurrences.
+    // SPEC-3393 FR-016 / SPEC-3164 FR-025, FR-035, FR-039: the production
+    // intake gate emits one registered deterministic occurrence for a Stop
+    // event and immediately enters the strict bounded Owner Resolution path.
+    // Replaying the same Stop event must reuse both the fingerprint and the
+    // occurrence instead of incrementing corroboration.
     #[test]
-    fn block_auto_captures_single_candidate_with_stable_dedupe() {
+    fn managed_stop_uses_registered_typed_capture_and_deduplicates_replay() {
         let dir = mk_worktree(Some(&INTAKE_PROFILE));
-        intake_outcome::mark_required_since(dir.path(), "sess-1", Utc::now()).unwrap();
+        let mut session =
+            gwt_agent::Session::new(dir.path(), "intake/typed", gwt_agent::AgentId::Codex);
+        session.repo_hash = Some(gwt_core::paths::project_scope_hash(dir.path()).to_string());
+        let session_id = session.id.clone();
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save verified session");
+        intake_outcome::mark_required_since(dir.path(), &session_id, Utc::now()).unwrap();
 
-        for expected_occurrences in [1u64, 2u64] {
-            let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
-            assert!(matches!(output, HookOutput::StopBlock { .. }));
-            let candidates = candidate_values(dir.path());
-            assert_eq!(candidates.len(), 1, "exactly one candidate expected");
-            let candidate = &candidates[0];
-            assert_eq!(
-                candidate.get("target_artifact").and_then(|v| v.as_str()),
-                Some("issue-spec-workflow")
+        let mut env = TestEnv::new(dir.path().join("cache"));
+        env.repo_path = dir.path().to_path_buf();
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(dir.path())
+                .expect("source scope nonce");
+        let mut emitted = Vec::new();
+        for _ in 0..2 {
+            let output = handle_with_managed_capture(
+                dir.path(),
+                r#"{"transcript_path":"/tmp/must-not-be-read.jsonl"}"#,
+                Some(&session_id),
+                &mut |event| {
+                    emitted.push(event.clone());
+                    improvement_contract::capture_managed_hook_failure(&mut env, event)
+                },
             );
-            assert_eq!(
-                candidate.get("occurrences").and_then(|v| v.as_u64()),
-                Some(0),
-                "untyped intake captures must not count as distinct evidence"
-            );
-            assert_eq!(
-                candidate
-                    .get("legacy_occurrence_count")
-                    .and_then(|v| v.as_u64()),
-                Some(expected_occurrences)
-            );
+            let HookOutput::StopBlock { reason } = output else {
+                panic!("expected typed intake StopBlock");
+            };
+            assert!(reason.contains("fingerprint: v2:"), "{reason}");
         }
+
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(
+            emitted[0].producer,
+            improvement_contract::MANAGED_HOOK_PRODUCER_ID
+        );
+        assert_eq!(
+            emitted[0].gate_id,
+            improvement_contract::MANAGED_HOOK_GATE_ID
+        );
+        assert_eq!(
+            emitted[0].failure_code,
+            improvement_contract::MANAGED_HOOK_FAILURE_CODE
+        );
+        assert_eq!(
+            emitted[0].target_artifact,
+            improvement_contract::MANAGED_HOOK_TARGET_ARTIFACT
+        );
+        assert_eq!(
+            emitted[0].contract_revision,
+            improvement_contract::MANAGED_HOOK_CONTRACT_REVISION
+        );
+        assert_eq!(emitted[0].session_key, session_id);
+        assert_eq!(emitted[0].event_key, emitted[1].event_key);
+        assert_eq!(emitted[0].fingerprint, emitted[1].fingerprint);
+        assert_eq!(
+            emitted[0].evidence_kind,
+            improvement_contract::ManagedHookEvidenceKind::Deterministic
+        );
+
+        let candidates = candidate_values(dir.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["target_artifact"], "issue-spec-workflow");
+        assert_eq!(candidates[0]["eligibility"], "deterministic");
+        assert_eq!(candidates[0]["occurrences"], 1);
+        assert!(
+            candidates[0]["fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("v2:")),
+            "{candidates:?}"
+        );
+        let (connect_timeout, total_remaining) =
+            env.last_owner_client_budget().unwrap_or_else(|| {
+                panic!("registered capture must invoke Owner Resolution: {candidates:?}")
+            });
+        assert!(connect_timeout <= std::time::Duration::from_secs(3));
+        assert!(total_remaining <= std::time::Duration::from_secs(15));
     }
 
     // T-085: a capture failure surfaces in the StopBlock with a manual
@@ -464,16 +575,17 @@ mod tests {
         let store_path = crate::cli::improvement_store::candidate_store_path(dir.path());
         std::fs::create_dir_all(&store_path).unwrap();
 
-        let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
+        let mut env = TestEnv::new(dir.path().join("cache"));
+        env.repo_path = dir.path().to_path_buf();
+        let output = handle_with_managed_capture(dir.path(), "{}", Some("sess-1"), &mut |event| {
+            improvement_contract::capture_managed_hook_failure(&mut env, event)
+        });
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected StopBlock despite capture failure, got {output:?}");
         };
         assert!(reason.contains("auto-capture failed"), "{reason}");
         assert!(reason.contains("improvement.capture"), "{reason}");
-        assert!(
-            reason.contains(improvement::INTAKE_GATE_DEDUPE_KEY),
-            "{reason}"
-        );
+        assert!(reason.contains("does not replace"), "{reason}");
     }
 
     // T-079 + FR-168: producing prompts mark the requirement dirty; pure

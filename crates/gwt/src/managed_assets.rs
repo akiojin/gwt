@@ -78,21 +78,16 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
 }
 
 /// Determine the [`SessionKind`] for a non-launch (re-)materialization
-/// (SPEC-3247 FR-002 / FR-004). The refreshers that use this run either
-/// (a) inside an agent process — hook-time re-materialization, where the agent
-/// inherited `GWT_SESSION_KIND` from its launch env — or (b) from the GUI /
-/// startup / tests, where no such signal exists. Reading the ambient signal
-/// therefore keeps an intake agent's guidance intake on re-materialization,
-/// while every other caller decodes to Execution and preserves the current
-/// producing-work behavior. (The launch path does NOT use this: it passes the
-/// kind from `config.is_ephemeral` directly, because the launching GUI process
-/// has no intake env of its own — the signal is written into the *child*.)
-///
-/// `worktree` is currently unused because the deterministic intake-worktree
-/// probe lives in a binary-only module; the ambient signal is the lib-visible
-/// source of truth and is authoritative for the hook-time case this guards.
-fn session_kind_for_worktree(_worktree: &Path) -> SessionKind {
-    SessionKind::from_env()
+/// (SPEC-3247 FR-002 / FR-004). The worktree lane file is the source of truth
+/// (#3377): resolving from the ambient `GWT_SESSION_KIND` alone let an intake
+/// session's gwtd invocation against another worktree (e.g. develop) apply the
+/// reduced intake asset policy there and delete tracked skill files. Worktrees
+/// materialized before hooks v2 (no lane file) keep the env fast-path, which
+/// preserves hook-time re-materialization for old intake worktrees. (The
+/// launch path does NOT use this: it passes the kind from
+/// `config.is_ephemeral` directly.)
+fn session_kind_for_worktree(worktree: &Path) -> SessionKind {
+    gwt_skills::resolve_session_kind_for_worktree(worktree)
 }
 
 fn materialize_managed_gwt_assets_for_targets(
@@ -444,6 +439,31 @@ mod tests {
         assert!(
             msg.contains("issue-3206"),
             "error must name the failing worktree path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn session_kind_for_worktree_prefers_lane_file_over_env() {
+        // #3377: an intake session invoking gwtd against an execution worktree
+        // (e.g. develop) must materialize with that worktree's lane, not the
+        // caller's ambient env — the env-only read applied the reduced intake
+        // skill set there and deleted tracked skill files.
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvVarGuard::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
+        let worktree = tempfile::tempdir().expect("worktree");
+        gwt_skills::write_lane_file(worktree.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("write lane file");
+        assert_eq!(
+            super::session_kind_for_worktree(worktree.path()),
+            gwt_skills::SessionKind::Execution
+        );
+        // A pre-hooks-v2 worktree (no lane file) keeps the env fast-path.
+        let bare = tempfile::tempdir().expect("bare worktree");
+        assert_eq!(
+            super::session_kind_for_worktree(bare.path()),
+            gwt_skills::SessionKind::Intake
         );
     }
 

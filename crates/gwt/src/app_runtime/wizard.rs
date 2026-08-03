@@ -788,6 +788,71 @@ impl AppRuntime {
             );
         }
 
+        // Linked Resume is an authority-producing continuation. Route it
+        // through the same coordinator as the Workspace Continue action so
+        // the resumed pane is either rebound to the current generation or
+        // launched with one Prepared successor. Legacy unlinked Sessions keep
+        // the observation-only resume path below.
+        let linked_session = gwt_agent::Session::load_and_migrate(
+            &self.sessions_dir.join(format!("{session_id}.toml")),
+        )
+        .ok()
+        .filter(|session| session.linked_issue_number.is_some());
+        if let Some(linked_session) = linked_session {
+            if agent_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some_and(|requested| {
+                    linked_session
+                        .resume_session_id_for(Some(requested))
+                        .as_deref()
+                        != Some(requested)
+                })
+            {
+                return reply_error(
+                    "The requested Session id is not resumable; use the Work Resume picker or start a new Work.".to_string(),
+                );
+            }
+            let work_id =
+                gwt_core::workspace_projection::load_workspace_work_items(&tab.project_root)
+                    .ok()
+                    .flatten()
+                    .and_then(|projection| {
+                        projection
+                            .work_items
+                            .into_iter()
+                            .find(|work| {
+                                work.agents
+                                    .iter()
+                                    .any(|agent| agent.session_id == linked_session.id)
+                            })
+                            .map(|work| work.id)
+                    })
+                    .unwrap_or_else(|| format!("work-session-{}", linked_session.id));
+            let branch =
+                (!linked_session.branch.trim().is_empty()).then(|| linked_session.branch.clone());
+            let mut events =
+                self.continue_work_events(client_id, operation_id.clone(), work_id, bounds);
+            let failure = events.iter().find_map(|outbound| match &outbound.event {
+                BackendEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                    message,
+                    ..
+                } => Some(
+                    message
+                        .clone()
+                        .unwrap_or_else(|| "Resume continuation failed".to_string()),
+                ),
+                _ => None,
+            });
+            if let Some(message) = failure {
+                return reply_error(message);
+            }
+            events.push(started_ack(&session_id, branch));
+            return events;
+        }
+
         if let Some((window_id, live_gwt_session)) = self
             .active_agent_sessions
             .iter()
@@ -943,15 +1008,10 @@ impl AppRuntime {
         // instead of falling back to the agent's default display name.
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
-        let resume_context_root = if session_worktree_exists {
-            session.worktree_path.as_path()
-        } else {
-            project_root.as_path()
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            &project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -1109,15 +1169,10 @@ impl AppRuntime {
         }
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
-        let resume_context_root = if session.worktree_path.as_path().exists() {
-            session.worktree_path.as_path()
-        } else {
-            project_root.as_path()
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            &project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -2302,15 +2357,10 @@ impl AppRuntime {
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok(None);
         }
-        let resume_context_root = if session.worktree_path.as_path().exists() {
-            session.worktree_path.as_path()
-        } else {
-            project_root
-        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            resume_context_root,
+            project_root,
             Some(session.branch.as_str()),
-            resume_context_root,
+            &session.worktree_path,
         ));
         let launch_index = self
             .tab(tab_id)
