@@ -1088,6 +1088,11 @@
 
       function setConnectionState(connected) {
         connectionOverlay.setConnected(connected);
+        // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
+        // retry owner; reconnect restarts degraded open windows at 5s.
+        if (typeof handleKnowledgeTransportChange === "function") {
+          handleKnowledgeTransportChange(connected);
+        }
         // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
         // screen overlay above) is the home for connection state — the
         // permanent canvas hint bar is retired. The class is set on the strip
@@ -4256,8 +4261,13 @@
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        handleKnowledgeTransportChange,
       } = createKnowledgeKanbanSurface({
         send,
+        // SPEC #3170 FR-099: offline semantic retries are skipped instead of
+        // entering the pendingMessages queue.
+        isTransportOnline: () =>
+          Boolean(socket && socket.readyState === WebSocket.OPEN),
         createNode,
         createKnowledgeMarkdownBody,
         windowMap,

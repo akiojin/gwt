@@ -41,6 +41,9 @@ export function createKnowledgeKanbanSurface({
   openIssueLaunchWizard,
   visibleBounds,
   launchPending,
+  // SPEC #3170 FR-099: transport probe so offline semantic retries are
+  // skipped instead of entering the generic pending WebSocket queue.
+  isTransportOnline = () => true,
 }) {
       const knowledgeBridgeStateMap = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
@@ -185,6 +188,14 @@ export function createKnowledgeKanbanSurface({
             // SPEC #3170 FR-101: independent monotonically increasing
             // explicit-selection generation; 0 means no explicit selection.
             selectionGeneration: 0,
+            // SPEC #3170 FR-099: silent semantic retry window (frontend
+            // owned). generation invalidates stale timers; index walks the
+            // fixed 5/10/20/30/30… ladder; active marks a degraded query so
+            // reconnect can restart the sequence at 5 seconds.
+            semanticRetryTimer: null,
+            semanticRetryIndex: 0,
+            semanticRetryGeneration: 0,
+            semanticRetryActive: false,
             detail: null,
             query: "",
             loading: false,
@@ -287,6 +298,8 @@ export function createKnowledgeKanbanSurface({
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        // AS-17.2: window destroy invalidates the silent retry owner.
+        invalidateKnowledgeSemanticRetry(state);
         if (state) {
           state.queuedSearchQuery = "";
           state.searchInFlight = false;
@@ -427,6 +440,32 @@ export function createKnowledgeKanbanSurface({
         }, 150);
       }
 
+      // AS-17.7 (T-953): immediate local fallback rows for a query — match
+      // by number, title, metadata line, or label, case-insensitively.
+      function applyLocalKnowledgeFilter(state, query) {
+        const queryLower = query.toLowerCase();
+        const numberQuery = queryLower.replace(/^#/, "");
+        const matches = (entry) => {
+          if (!entry) {
+            return false;
+          }
+          if (numberQuery && String(entry.number ?? "").includes(numberQuery)) {
+            return true;
+          }
+          if ((entry.title || "").toLowerCase().includes(queryLower)) {
+            return true;
+          }
+          if ((entry.meta || "").toLowerCase().includes(queryLower)) {
+            return true;
+          }
+          const labels = Array.isArray(entry.labels) ? entry.labels : [];
+          return labels.some((label) =>
+            String(label).toLowerCase().includes(queryLower),
+          );
+        };
+        state.entries = (state.baseEntries || []).filter(matches);
+      }
+
       function restoreKnowledgeBaseEntries(state) {
         state.entries = Array.isArray(state.baseEntries)
           ? state.baseEntries.slice()
@@ -466,6 +505,91 @@ export function createKnowledgeKanbanSurface({
         );
       }
 
+      // SPEC #3170 FR-099: fixed silent retry ladder for typed transient
+      // semantic failures — 5s, 10s, 20s, 30s, then 30s indefinitely.
+      const KNOWLEDGE_SEMANTIC_RETRY_DELAYS = [5000, 10000, 20000, 30000];
+
+      function invalidateKnowledgeSemanticRetry(state) {
+        if (!state) {
+          return;
+        }
+        if (state.semanticRetryTimer) {
+          clearTimeout(state.semanticRetryTimer);
+          state.semanticRetryTimer = null;
+        }
+        state.semanticRetryIndex = 0;
+        state.semanticRetryActive = false;
+        state.semanticRetryGeneration = (state.semanticRetryGeneration || 0) + 1;
+      }
+
+      function scheduleKnowledgeSemanticRetry(windowId, knowledgeKind, state) {
+        if (state.semanticRetryTimer) {
+          clearTimeout(state.semanticRetryTimer);
+          state.semanticRetryTimer = null;
+        }
+        const delay =
+          KNOWLEDGE_SEMANTIC_RETRY_DELAYS[
+            Math.min(
+              state.semanticRetryIndex,
+              KNOWLEDGE_SEMANTIC_RETRY_DELAYS.length - 1,
+            )
+          ];
+        state.semanticRetryIndex += 1;
+        state.semanticRetryActive = true;
+        const generation = state.semanticRetryGeneration || 0;
+        state.semanticRetryTimer = setTimeout(() => {
+          state.semanticRetryTimer = null;
+          if (generation !== (state.semanticRetryGeneration || 0)) {
+            // Stale timer from an invalidated retry window (AS-17.2).
+            return;
+          }
+          if (!workspaceWindowById(windowId)) {
+            return;
+          }
+          const query = state.query.trim();
+          if (!query) {
+            return;
+          }
+          if (!isTransportOnline()) {
+            // FR-099: offline retries never enter the pending queue; the
+            // reconnect hook restarts the ladder at 5 seconds.
+            return;
+          }
+          if (state.searchInFlight) {
+            // One in-flight attempt, one latest queued intent.
+            state.queuedSearchQuery = query;
+            return;
+          }
+          sendKnowledgeSemanticSearch(windowId, knowledgeKind || state.kind, query);
+        }, delay);
+      }
+
+      // SPEC #3170 AS-17.2: disconnect invalidates every retry owner;
+      // reconnect restarts a degraded still-open window/query at 5 seconds.
+      function handleKnowledgeTransportChange(online) {
+        for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (!online) {
+            const wasActive = state.semanticRetryActive;
+            invalidateKnowledgeSemanticRetry(state);
+            state.semanticRetryActive = wasActive;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            continue;
+          }
+          if (!state.semanticRetryActive) {
+            continue;
+          }
+          if (!workspaceWindowById(windowId)) {
+            continue;
+          }
+          if (!state.query.trim()) {
+            continue;
+          }
+          state.semanticRetryIndex = 0;
+          scheduleKnowledgeSemanticRetry(windowId, state.kind, state);
+        }
+      }
+
       function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const effectiveKind = knowledgeKind || state.kind;
@@ -490,6 +614,9 @@ export function createKnowledgeKanbanSurface({
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        // AS-17.2: a query change or clear invalidates the silent semantic
+        // retry window owned by the previous generation.
+        invalidateKnowledgeSemanticRetry(state);
         const query = state.query.trim();
         state.error = "";
         if (!query) {
@@ -502,6 +629,10 @@ export function createKnowledgeKanbanSurface({
           renderKnowledgeBridge(windowId);
           return;
         }
+        // AS-17.7: local number/title/metadata/label filtering from
+        // baseEntries is visible immediately; the semantic completion later
+        // replaces it with authoritative rows.
+        applyLocalKnowledgeFilter(state, query);
         if (state.loading && state.baseEntries.length === 0) {
           state.searching = true;
           renderKnowledgeBridge(windowId);
@@ -1882,6 +2013,29 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             state.searching = false;
+            // SPEC #3170 FR-099/FR-100: a typed transient directive schedules
+            // the silent ladder; success or any other outcome (including an
+            // unknown directive code) resets it without visible state.
+            const directive = event.semantic_retry;
+            const transientDirective =
+              directive &&
+              directive.retryable === true &&
+              (directive.error_code === "INDEX_NOT_READY" ||
+                directive.error_code === "SEARCH_UNAVAILABLE");
+            if (transientDirective) {
+              scheduleKnowledgeSemanticRetry(
+                event.id,
+                event.knowledge_kind,
+                state,
+              );
+            } else {
+              if (state.semanticRetryTimer) {
+                clearTimeout(state.semanticRetryTimer);
+                state.semanticRetryTimer = null;
+              }
+              state.semanticRetryIndex = 0;
+              state.semanticRetryActive = false;
+            }
             if (state.selectedNumber) {
               state.detailLoading = true;
               requestKnowledgeDetail(
@@ -1889,7 +2043,7 @@ export function createKnowledgeKanbanSurface({
                 event.knowledge_kind,
                 state.selectedNumber,
               );
-            } else {
+            } else if (!(state.selectionGeneration > 0)) {
               state.detail = null;
             }
             renderKnowledgeBridge(event.id);
@@ -2008,10 +2162,23 @@ export function createKnowledgeKanbanSurface({
               }
               break;
             }
-            if (
-              !isSearchError &&
-              !knowledgeDetailRequestMatches(state, event)
-            ) {
+            if (isSearchError) {
+              // SPEC #3170 FR-100: a search-correlated legacy Knowledge
+              // Error is semantic degradation — hide it, release in-flight
+              // ownership, keep rows and detail, and do not start the
+              // indefinite retry without a typed directive.
+              state.searchInFlight = false;
+              state.inFlightSearchRequestId = 0;
+              state.searching = false;
+              const nextQuery = state.queuedSearchQuery;
+              state.queuedSearchQuery = "";
+              if (nextQuery && nextQuery !== state.query.trim()) {
+                scheduleKnowledgeSearch(event.id, event.knowledge_kind);
+              }
+              renderKnowledgeBridge(event.id);
+              break;
+            }
+            if (!knowledgeDetailRequestMatches(state, event)) {
               break;
             }
             const matchesLoadRequest =
@@ -2053,5 +2220,6 @@ export function createKnowledgeKanbanSurface({
         renderKanbanDrawerBody,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        handleKnowledgeTransportChange,
       };
 }

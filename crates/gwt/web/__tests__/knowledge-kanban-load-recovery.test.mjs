@@ -303,6 +303,394 @@ test("a request-ID-less legacy detail is fenced while a newer selection is pendi
   assert.equal(state.detail?.number, ROW_B.number);
 });
 
+// ---------------------------------------------------------------------------
+// SPEC #3170 T-951/T-952 — silent indefinite semantic retry + lifecycle +
+// local fallback. The retry window is owned by the frontend: fixed delays
+// 5s, 10s, 20s, 30s, then 30s indefinitely (FR-099); every degradation is
+// invisible (FR-100); offline retries never enter the generic pending queue.
+// ---------------------------------------------------------------------------
+
+function searchResultsEvent(requestId, overrides = {}) {
+  return {
+    kind: "knowledge_search_results",
+    id: "win-1",
+    knowledge_kind: "issue",
+    query: "alpha",
+    request_id: requestId,
+    entries: [ROW_A],
+    selected_number: null,
+    empty_message: "",
+    refresh_enabled: true,
+    ...overrides,
+  };
+}
+
+const TRANSIENT_RETRY = {
+  error_code: "INDEX_NOT_READY",
+  retryable: true,
+  retry_after_ms: 5000,
+};
+
+function startSearch(surface, sent, { fire }) {
+  const state = surface.knowledgeBridgeStateMap.get("win-1");
+  state.query = "alpha";
+  surface.scheduleKnowledgeSearch("win-1", "issue");
+  fire((timer) => timer.delay === 250);
+  const message = sent.at(-1);
+  assert.equal(message.kind, "search_knowledge_bridge");
+  return message.request_id;
+}
+
+test("typed transient failure schedules the silent 5/10/20/30/30 retry ladder (T-951)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    let requestId = startSearch(surface, sent, { fire });
+
+    const expectedDelays = [5000, 10000, 20000, 30000, 30000, 30000];
+    for (const delay of expectedDelays) {
+      surface.applyKnowledgeReceiveEvent(
+        searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+      );
+      assert.equal(
+        state.error,
+        "",
+        "typed transient semantic failure must stay invisible (FR-100)",
+      );
+      assert.equal(
+        state.entries.length,
+        1,
+        "cache-backed rows from the completion stay usable",
+      );
+      const pending = timers.filter(
+        (timer) => !timer.cleared && !timer.fired && timer.delay === delay,
+      );
+      assert.equal(
+        pending.length,
+        1,
+        `exactly one silent retry must be scheduled at ${delay}ms (FR-099)`,
+      );
+      const sentBefore = sent.length;
+      fire((timer) => timer.delay === delay);
+      assert.equal(
+        sent.length,
+        sentBefore + 1,
+        "a retry fires exactly one new attempt (one in-flight attempt)",
+      );
+      const retryMessage = sent.at(-1);
+      assert.equal(retryMessage.kind, "search_knowledge_bridge");
+      assert.equal(retryMessage.query, "alpha");
+      requestId = retryMessage.request_id;
+    }
+  });
+});
+
+test("a retry success resets the ladder back to 5 seconds (T-951)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    let requestId = startSearch(surface, sent, { fire });
+
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+    fire((timer) => timer.delay === 5000);
+    requestId = sent.at(-1).request_id;
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+    fire((timer) => timer.delay === 10000);
+    requestId = sent.at(-1).request_id;
+
+    // Success: no directive. The ladder resets and no retry stays pending.
+    surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
+    assert.equal(
+      timers.filter(
+        (timer) =>
+          !timer.cleared &&
+          !timer.fired &&
+          [5000, 10000, 20000, 30000].includes(timer.delay),
+      ).length,
+      0,
+      "success must cancel the retry window (FR-099)",
+    );
+
+    // The next transient failure starts again at 5 seconds.
+    const nextSearchId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(nextSearchId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+    assert.equal(
+      timers.filter(
+        (timer) => !timer.cleared && !timer.fired && timer.delay === 5000,
+      ).length,
+      1,
+      "after a success the ladder must restart at 5 seconds",
+    );
+  });
+});
+
+test("a search-correlated legacy error is silent degradation without retry (T-951, AS-17.3)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    const detailBefore = state.detail;
+
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_error",
+      id: "win-1",
+      knowledge_kind: "issue",
+      request_id: requestId,
+      query: "alpha",
+      message: "semantic search runner exited with 1: raw diagnostic",
+    });
+
+    assert.equal(
+      state.error,
+      "",
+      "a search-correlated legacy error is semantic degradation and must be hidden (FR-100)",
+    );
+    assert.equal(state.searchInFlight, false, "in-flight ownership released");
+    assert.deepEqual(
+      state.baseEntries.map((entry) => entry.number),
+      [ROW_A.number, ROW_B.number],
+      "cache rows survive silent degradation",
+    );
+    assert.equal(state.detail, detailBefore, "current detail is preserved");
+    assert.equal(
+      timers.filter(
+        (timer) =>
+          !timer.cleared &&
+          !timer.fired &&
+          [5000, 10000, 20000, 30000].includes(timer.delay),
+      ).length,
+      0,
+      "an untyped legacy failure must not start the indefinite retry (FR-100)",
+    );
+  });
+});
+
+test("non-semantic knowledge errors remain visible (T-951 guard)", async () => {
+  const mod = await importSurfaceModule();
+  const sent = [];
+  const surface = createSurface(mod, sent);
+  const state = seedListAndAuthoritativeA(surface, "issue");
+
+  surface.requestKnowledgeBridge("win-1", "issue", false);
+  const loadRequestId = sent.at(-1).request_id;
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_error",
+    id: "win-1",
+    knowledge_kind: "issue",
+    request_id: loadRequestId,
+    message: "failed to read issue cache",
+  });
+
+  assert.equal(
+    state.error,
+    "failed to read issue cache",
+    "cache/load failures keep their existing visible error channel",
+  );
+});
+
+test("row selection does not cancel or reset the retry window (T-951, AS-17.2)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+
+    assert.equal(
+      timers.filter(
+        (timer) => !timer.cleared && !timer.fired && timer.delay === 5000,
+      ).length,
+      1,
+      "selecting a row must leave the semantic retry window untouched",
+    );
+  });
+});
+
+test("query change and clear invalidate the pending retry (T-952, AS-17.2)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+
+    state.query = "beta";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+    const staleRetry = timers.find(
+      (timer) => timer.delay === 5000 && !timer.fired,
+    );
+    assert.ok(
+      staleRetry.cleared,
+      "changing the query must cancel the previous retry timer",
+    );
+
+    fire((timer) => timer.delay === 250);
+    const secondRequestId = sent.at(-1).request_id;
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(secondRequestId, {
+        query: "beta",
+        semantic_retry: TRANSIENT_RETRY,
+      }),
+    );
+    state.query = "";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+    assert.equal(
+      timers.filter(
+        (timer) =>
+          !timer.cleared &&
+          !timer.fired &&
+          [5000, 10000, 20000, 30000].includes(timer.delay),
+      ).length,
+      0,
+      "clearing the query must cancel the retry window",
+    );
+  });
+});
+
+test("window destroy invalidates the retry window (T-952, AS-17.2)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+
+    surface.clearKnowledgeBridgeState("win-1");
+
+    assert.equal(
+      timers.filter(
+        (timer) => !timer.cleared && !timer.fired && timer.delay === 5000,
+      ).length,
+      0,
+      "destroying the window must cancel its retry timer",
+    );
+  });
+});
+
+test("offline retries never enter the generic pending queue; reconnect restarts at 5s (T-952)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const online = { value: true };
+    const windowData = { id: "win-1", preset: "issue" };
+    const surface = mod.createKnowledgeKanbanSurface({
+      send: (message) => sent.push(message),
+      createNode: () => ({ appendChild() {}, classList: { add() {} } }),
+      createKnowledgeMarkdownBody: () => ({ appendChild() {} }),
+      windowMap: new Map(),
+      workspaceWindowById: (id) => (id === "win-1" ? windowData : null),
+      getWorkspaceWindows: () => [windowData],
+      pendingIndexOpenTargetsByPreset: new Map(),
+      knowledgeKindForPreset: (preset) => (preset === "issue" ? "issue" : null),
+      focusWindowLocally() {},
+      sendWindowFocus() {},
+      focusOrSpawnPreset() {},
+      openIssueLaunchWizard() {},
+      visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
+      launchPending: {},
+      isTransportOnline: () => online.value,
+    });
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, { semantic_retry: TRANSIENT_RETRY }),
+    );
+
+    // Transport drops before the retry fires: the attempt must be skipped
+    // entirely instead of accumulating in the offline pending queue.
+    online.value = false;
+    assert.equal(
+      typeof surface.handleKnowledgeTransportChange,
+      "function",
+      "the surface must expose a transport-change hook (FR-099)",
+    );
+    surface.handleKnowledgeTransportChange(false);
+    const sentWhileOffline = sent.length;
+    const retryTimer = timers.find(
+      (timer) => timer.delay === 5000 && !timer.fired,
+    );
+    if (retryTimer && !retryTimer.cleared) {
+      retryTimer.fired = true;
+      retryTimer.callback();
+    }
+    assert.equal(
+      sent.length,
+      sentWhileOffline,
+      "an offline retry must not send (zero pending-message accumulation)",
+    );
+
+    // Reconnect with the same open window/query: fresh ladder from 5s.
+    online.value = true;
+    surface.handleKnowledgeTransportChange(true);
+    assert.equal(
+      timers.filter(
+        (timer) => !timer.cleared && !timer.fired && timer.delay === 5000,
+      ).length,
+      1,
+      "reconnect must restart the retry sequence at 5 seconds (AS-17.2)",
+    );
+    assert.equal(state.error, "", "reconnect handling stays silent");
+  });
+});
+
+test("a new query filters baseEntries locally before semantic results arrive (T-952, AS-17.7)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+
+    state.query = "beta";
+    surface.scheduleKnowledgeSearch("win-1", "issue");
+
+    // Before the debounce fires and before any semantic response, the
+    // visible rows must already be the local filter of baseEntries.
+    assert.deepEqual(
+      state.entries.map((entry) => entry.number),
+      [ROW_B.number],
+      "local number/title/label filtering must be immediate (AS-17.7)",
+    );
+
+    // Semantic completion then provides the authoritative rows.
+    fire((timer) => timer.delay === 250);
+    const requestId = sent.at(-1).request_id;
+    surface.applyKnowledgeReceiveEvent(
+      searchResultsEvent(requestId, {
+        query: "beta",
+        entries: [ROW_B, ROW_A],
+      }),
+    );
+    assert.deepEqual(
+      state.entries.map((entry) => entry.number),
+      [ROW_B.number, ROW_A.number],
+      "authoritative semantic rows must not be substring-filtered again",
+    );
+  });
+});
+
 function withPatchedTimersAsync(run) {
   const timers = [];
   const originalSetTimeout = globalThis.setTimeout;
