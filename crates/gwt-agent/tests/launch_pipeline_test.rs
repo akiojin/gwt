@@ -219,6 +219,7 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         reasoning_level: None,
         session_mode: SessionMode::Normal,
         resume_session_id: None,
+        predecessor_session_id: None,
         skip_permissions: false,
         fast_mode: false,
         codex_fast_mode: false,
@@ -228,6 +229,7 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         linked_issue_number: None,
         windows_shell: None,
         suppress_execution_control: false,
+        execution_intent: gwt_agent::ExecutionLaunchIntent::Automatic,
     };
 
     let mut refreshed_paths = Vec::new();

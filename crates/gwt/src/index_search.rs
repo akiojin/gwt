@@ -34,11 +34,20 @@ pub struct IndexSearchNotReady {
     pub retry_after_ms: u64,
 }
 
+/// Non-retryable query failure against a scope whose canonical health check
+/// still reports a usable store (Phase 70a FR-400).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexSearchFailed {
+    pub reason: String,
+    pub affected_scopes: Vec<String>,
+}
+
 /// Search error surface (Phase 70 FR-388). `NotReady` is retryable and maps
 /// to exit code 75 / `error_code=INDEX_NOT_READY` on the CLI surface.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexSearchError {
     NotReady(IndexSearchNotReady),
+    SearchFailed(IndexSearchFailed),
     Other(String),
 }
 
@@ -46,13 +55,14 @@ impl IndexSearchError {
     pub fn exit_code(&self) -> i32 {
         match self {
             IndexSearchError::NotReady(_) => INDEX_NOT_READY_EXIT_CODE,
-            IndexSearchError::Other(_) => 1,
+            IndexSearchError::SearchFailed(_) | IndexSearchError::Other(_) => 1,
         }
     }
 
     pub fn error_code(&self) -> Option<&'static str> {
         match self {
             IndexSearchError::NotReady(_) => Some("INDEX_NOT_READY"),
+            IndexSearchError::SearchFailed(_) => Some("SEARCH_FAILED"),
             IndexSearchError::Other(_) => None,
         }
     }
@@ -73,6 +83,7 @@ impl std::fmt::Display for IndexSearchError {
                 not_ready.reason,
                 not_ready.retry_after_ms,
             ),
+            IndexSearchError::SearchFailed(failed) => f.write_str(&failed.reason),
             IndexSearchError::Other(message) => f.write_str(message),
         }
     }
@@ -129,7 +140,7 @@ pub fn search_project_index(
     // runner tree, one model load, one query encode.
     let per_scope_limit = per_scope_limit(effective_scopes.len());
     let worktree_hash_arg = file_worktree.as_ref().map(|worktree| worktree.hash.clone());
-    let run_batch = || -> Result<Value, String> {
+    let run_batch = || -> Result<Value, IndexSearchError> {
         run_batch_scope_search(
             &repo_search_root,
             repo_hash.as_str(),
@@ -540,7 +551,7 @@ fn run_batch_scope_search(
     query: &str,
     limit: usize,
     match_mode: IndexSearchMatchMode,
-) -> Result<Value, String> {
+) -> Result<Value, IndexSearchError> {
     let output =
         gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
             .args(batch_scope_search_command_args(
@@ -554,13 +565,15 @@ fn run_batch_scope_search(
             ))
             .current_dir(project_root)
             .output()
-            .map_err(|error| format!("run project index search: {error}"))?;
+            .map_err(|error| {
+                IndexSearchError::Other(format!("run project index search: {error}"))
+            })?;
     if !output.status.success() {
-        return Err(format_runner_failure(&output));
+        return Err(IndexSearchError::Other(format_runner_failure(&output)));
     }
-    let payload = parse_runner_payload(&output.stdout)?;
+    let payload = parse_runner_payload(&output.stdout).map_err(IndexSearchError::Other)?;
     if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(payload_error(&payload));
+        return Err(runner_payload_error(&payload));
     }
     Ok(payload)
 }
@@ -905,6 +918,23 @@ fn payload_error(payload: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("project index search failed")
         .to_string()
+}
+
+fn runner_payload_error(payload: &Value) -> IndexSearchError {
+    if payload.get("error_code").and_then(Value::as_str) == Some("SEARCH_FAILED") {
+        return IndexSearchError::SearchFailed(IndexSearchFailed {
+            reason: payload_error(payload),
+            affected_scopes: payload
+                .get("affected_scopes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+        });
+    }
+    IndexSearchError::Other(payload_error(payload))
 }
 
 fn format_runner_failure(output: &std::process::Output) -> String {
@@ -1496,7 +1526,7 @@ mod tests {
                 assert!(not_ready.retry_after_ms > 0);
                 assert!(not_ready.reason.contains("files"));
             }
-            IndexSearchError::Other(_) => panic!("expected NotReady"),
+            other => panic!("expected NotReady, got {other:?}"),
         }
     }
 }

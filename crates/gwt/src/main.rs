@@ -4,10 +4,9 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::repo_browser::{
@@ -67,43 +66,43 @@ pub(crate) use app_runtime::{
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
-    BlockingTaskSpawner, DispatchTarget, FrontendHydrationCompletion, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, RepoActivitySnapshot,
-    WindowAddress,
+    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
+    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
     docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_runtime, package_runner_version_spec,
-    resolve_docker_launch_plan, resolve_docker_shell_command, strip_package_runner_args,
+    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
+    resolve_docker_shell_command,
 };
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
-    mount_source_matches_project_root, normalize_docker_launch_action,
-    resolved_test_docker_runtime, DockerLaunchServiceAction, PackageRunnerProgram,
+    mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
+    resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
-    AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
+    AgentCapabilityGrant, AgentCapabilityIssuer, AgentDurableAuthority, AgentFrontendRequest,
     AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
     AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
-pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
-    build_shell_process_launch, ensure_docker_launch_runtime_ready_for_runtime,
-    install_launch_gwt_bin_env, prune_orphan_intake_worktrees,
-};
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_ephemeral_launch_worktree, resolve_launch_worktree, resolve_launch_worktree_request,
-    resolve_shell_launch_worktree,
+    prune_orphan_intake_worktrees, resolve_ephemeral_launch_worktree,
+    resolve_launch_worktree_request,
+};
+pub(crate) use launch_runtime::{
+    apply_windows_host_shell_wrapper, build_shell_process_launch,
+    ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
+    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune, resolve_launch_worktree,
+    resolve_shell_launch_worktree, OrphanIntakePrunePlan,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -216,21 +215,6 @@ fn load_tray_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
 
 fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
-}
-
-fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) {
-    clients.dispatch(vec![OutboundEvent::broadcast(
-        BackendEvent::LogEntryAppended { entry },
-    )]);
-}
-
-/// SPEC-2809 Phase F1 — fan out one external-process line to every
-/// connected client. The Console window renders it under the matching
-/// kind tab; the Logs window renders it inside the Process kind facet.
-fn broadcast_process_line(clients: &ClientHub, line: gwt_core::process_console::ProcessLine) {
-    clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::ProcessLine {
-        line,
-    })]);
 }
 
 fn spawn_project_index_status_check(
@@ -894,13 +878,16 @@ fn daemon_broadcast_user_event(
             Some(UserEvent::DaemonRuntimeHook(event))
         }
         gwt::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
-            issue_monitor_daemon_user_event(event)
+            issue_monitor_daemon_user_event(event, project_root)
         }
     }
 }
 
 #[cfg(unix)]
-fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent> {
+fn issue_monitor_daemon_user_event(
+    event: serde_json::Value,
+    project_root: &Path,
+) -> Option<UserEvent> {
     let event_name = event.get("event")?.as_str()?;
     let payload = event
         .get("payload")
@@ -944,16 +931,25 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok())
                 .unwrap_or(gwt::LinkedIssueKind::Issue);
+            let delivery_id = payload
+                .get("delivery_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             Some(UserEvent::IssueMonitorLaunchRequest {
+                project_root: project_root.to_path_buf(),
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             })
         }
         "review_dispatch" => {
             // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
             // review agent for a PR-ready autonomous issue.
             let dispatch: gwt::AutonomousReviewDispatch = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::IssueMonitorReviewDispatch { dispatch })
+            Some(UserEvent::IssueMonitorReviewDispatch {
+                project_root: project_root.to_path_buf(),
+                dispatch,
+            })
         }
         _ => None,
     }
@@ -988,33 +984,6 @@ enum ImprovementActionOutcome {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum KnowledgeProjectionRetry {
-    Load {
-        client_id: ClientId,
-        id: String,
-        kind: KnowledgeKind,
-        request_id: Option<u64>,
-        selected_number: Option<u64>,
-    },
-    Search {
-        client_id: ClientId,
-        id: String,
-        kind: KnowledgeKind,
-        query: String,
-        request_id: u64,
-        selected_number: Option<u64>,
-    },
-}
-
-impl KnowledgeProjectionRetry {
-    fn client_id(&self) -> &str {
-        match self {
-            Self::Load { client_id, .. } | Self::Search { client_id, .. } => client_id,
-        }
-    }
-}
-
 #[cfg_attr(
     windows,
     allow(
@@ -1028,20 +997,6 @@ enum UserEvent {
         client_id: ClientId,
         event: FrontendEvent,
     },
-    /// SPEC-3170 FR-045: process/PTY-backed second phase of FrontendReady.
-    /// The event loop validates all captured generations before dispatch.
-    FrontendHydrationReady {
-        client_id: ClientId,
-        hydration: FrontendHydrationCompletion,
-    },
-    /// Browser socket teardown cancels any pane hydration owned by that
-    /// client. Agent-pane sockets never create browser hydration state.
-    FrontendClientDisconnected {
-        client_id: ClientId,
-    },
-    /// SPEC-3170 FR-039: ordered navigation replies are dispatched before
-    /// persistence and whole-workspace reconciliation in a later loop turn.
-    NavigationFollowup,
     /// Internal request from the capability-authenticated pane bridge. The
     /// server-side principal is the only project/Session routing authority.
     AgentFrontend {
@@ -1054,6 +1009,12 @@ enum UserEvent {
     /// acknowledgement.
     CommitAgentSelfClose {
         ticket: AgentSelfCloseCapabilityTicket,
+    },
+    /// Candidate Continue work launches must return an authenticated
+    /// SessionStart receipt before this correlated deadline.
+    ContinueWorkReadyTimeout {
+        window_id: String,
+        operation_id: String,
     },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
@@ -1097,26 +1058,22 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
-    /// SPEC-3170 FR-066: a projection observed a missing or expired repository
-    /// activity snapshot. The event loop starts the existing background scan;
-    /// the projection itself remains process-free and fail-closed.
-    RepoActivityRefreshRequested {
+    /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
+    /// The runtime caches the set and rebroadcasts the Workspace projection
+    /// so rows can show the "safe to delete" badge.
+    WorkMergeStatus {
         project_root: PathBuf,
+        merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+        cleanup_ready_branches: std::collections::HashMap<String, String>,
+        dirty_branches: std::collections::HashSet<String>,
+        live_process_branches: std::collections::HashSet<String>,
     },
-    /// SPEC-3170 FR-066: delayed continuation for an incomplete repository
-    /// activity scan. Generation validation prevents stale retries from
-    /// replacing newer or complete state.
-    RepoActivityRetryRequested {
+    /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
+    /// caches the `branch -> subject` map and rebroadcasts the Workspace
+    /// projection so historical rows show "what work was running".
+    WorkTipSubjects {
         project_root: PathBuf,
-        generation: u64,
-    },
-    /// SPEC-3170 FR-044: one complete, generation-tagged repository activity
-    /// scan. All process-backed inputs are collected off the event loop and
-    /// atomically replace the projection cache.
-    RepoActivityReady {
-        project_root: PathBuf,
-        generation: u64,
-        snapshot: RepoActivitySnapshot,
+        tip_subjects: std::collections::HashMap<String, String>,
     },
     /// SPEC-3075: result of the background `gh pr list` scan. The runtime caches
     /// the `branch -> PR title` map and rebroadcasts the Workspace projection so
@@ -1144,22 +1101,18 @@ enum UserEvent {
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
-    /// A cleanup changed branch/worktree topology off-thread. Projection
-    /// persistence may be absent or fail independently; the event-loop
-    /// continuation still invalidates repository-derived caches and rebuilds
-    /// the projection from one fresh background snapshot.
-    WorkspaceCleanupCompleted {
-        project_root: PathBuf,
-    },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     IssueMonitorLaunchRequest {
+        project_root: PathBuf,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
     },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
+        project_root: PathBuf,
         dispatch: gwt::AutonomousReviewDispatch,
     },
     LaunchProgress {
@@ -1209,21 +1162,14 @@ enum UserEvent {
         window_id: String,
         result: Result<ProcessLaunch, String>,
     },
-    /// A launch resolver materialized a new worktree and changed repository
-    /// topology before any later profile, process, or window handoff work.
-    RepoTopologyMaterialized {
-        project_root: PathBuf,
-    },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
-    /// Repository-derived Knowledge projection tagged with the identity epoch
-    /// captured by its background worker.
-    RepoGenerationDispatch {
-        project_root: PathBuf,
-        generation: u64,
-        events: Vec<OutboundEvent>,
-        retry: Option<KnowledgeProjectionRetry>,
-    },
     Dispatch(Vec<OutboundEvent>),
+    AgentBackendConnectionProbeComplete {
+        client_id: ClientId,
+        agent: gwt_agent::BuiltinAgentId,
+        generation: u64,
+        event: BackendEvent,
+    },
     ImprovementActionComplete {
         project_root: PathBuf,
         client_id: ClientId,
@@ -1348,9 +1294,9 @@ mod tests {
     use super::{
         app_state_view_from_parts, apply_agent_frontend_dispatch_outcome,
         apply_host_package_runner_fallback_with_probe, apply_windows_host_shell_wrapper,
-        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
-        build_shell_process_launch, close_window_from_workspace, combined_window_id,
-        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
+        close_window_from_workspace, combined_window_id, current_git_branch,
+        docker_bundle_mounts_for_home, docker_bundle_override_content,
         gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
@@ -1383,10 +1329,30 @@ mod tests {
         assert!(
             matches!(
                 queue.try_next(),
-                Some(crate::embedded_server::DrainStep::Closed)
+                Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                    if frame.code == 1008
+                        && frame.reason == "execution binding is no longer current"
             ),
-            "a capability rotated while queued must close the agent socket"
+            "a capability rotated while queued must close the agent socket with a stable policy frame"
         );
+    }
+
+    #[test]
+    fn unavailable_agent_frontend_authority_closes_pane_client_without_raw_error() {
+        let clients = ClientHub::default();
+        let queue = clients.register("unknown-pane-client".to_string());
+
+        apply_agent_frontend_dispatch_outcome(
+            &clients,
+            "unknown-pane-client",
+            AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable,
+        );
+
+        assert!(matches!(
+            queue.try_next(),
+            Some(crate::embedded_server::DrainStep::Closed(Some(frame)))
+                if frame.code == 1011 && frame.reason == "execution authority is unavailable"
+        ));
     }
 
     #[cfg(unix)]
@@ -1423,6 +1389,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some(project_root.display().to_string()),
             branch: Some("work/runtime".to_string()),
@@ -1536,7 +1503,11 @@ mod tests {
 
         let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "launch_request",
-            serde_json::json!({"issue_number": 42, "linked_issue_kind": "spec"}),
+            serde_json::json!({
+                "issue_number": 42,
+                "linked_issue_kind": "spec",
+                "delivery_id": "launch:effect-42",
+            }),
             42,
         );
         match super::daemon_broadcast_user_event(
@@ -1546,13 +1517,46 @@ mod tests {
             99,
         ) {
             Some(UserEvent::IssueMonitorLaunchRequest {
+                project_root: actual_project_root,
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             }) => {
+                assert_eq!(actual_project_root, project_root);
                 assert_eq!(issue_number, 42);
                 assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
+                assert_eq!(delivery_id.as_deref(), Some("launch:effect-42"));
             }
             other => panic!("unexpected issue monitor launch event: {other:?}"),
+        }
+
+        let dispatch = gwt::AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 84,
+            reviewed_sha: "abc123".to_string(),
+            required_criteria: vec!["tests pass".to_string()],
+            diff: "diff --git a/a b/a".to_string(),
+            linked_issue_kind: gwt::LinkedIssueKind::Issue,
+        };
+        let review_payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "review_dispatch",
+            serde_json::to_value(&dispatch).expect("dispatch serializes"),
+            42,
+        );
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            review_payload,
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::IssueMonitorReviewDispatch {
+                project_root: actual_project_root,
+                dispatch: actual_dispatch,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(actual_dispatch, dispatch);
+            }
+            other => panic!("unexpected issue monitor review event: {other:?}"),
         }
     }
 
@@ -1953,6 +1957,7 @@ mod tests {
                 kind: RuntimeHookEventKind::RuntimeState,
                 source_event: Some("PreToolUse".to_string()),
                 gwt_session_id: Some("session-1".to_string()),
+                continuation_readiness_nonce: None,
                 agent_session_id: Some("agent-1".to_string()),
                 project_root: Some("E:/gwt/test-repo".to_string()),
                 branch: Some("feature/runtime".to_string()),
@@ -1970,16 +1975,21 @@ mod tests {
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
     }
 
+    // Issue #3366 — delivery gating lives in `AppRuntime::log_entry_events`
+    // (see app_runtime tests); this guards the hub fan-out and payload
+    // shape once an entry passes the gate.
     #[test]
     fn log_entry_broadcast_reaches_all_registered_clients() {
         let clients = ClientHub::default();
         let native = clients.register("native".to_string());
         let browser = clients.register("browser".to_string());
 
-        broadcast_log_entry(
-            &clients,
-            LogEvent::new(LogLevel::Warn, "pty", "reader stalled").with_detail("retrying"),
-        );
+        clients.dispatch(vec![OutboundEvent::broadcast(
+            BackendEvent::LogEntryAppended {
+                entry: LogEvent::new(LogLevel::Warn, "pty", "reader stalled")
+                    .with_detail("retrying"),
+            },
+        )]);
 
         let native_payload = native.try_recv().expect("native payload");
         let browser_payload = browser.try_recv().expect("browser payload");
@@ -2267,7 +2277,6 @@ mod tests {
 
         let events = build_frontend_sync_events(
             "browser-1",
-            0,
             workspace,
             vec![(
                 "tab-1::shell-1".to_string(),
@@ -2322,7 +2331,7 @@ mod tests {
         )];
         let workspace = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
         let mut events =
-            build_frontend_sync_events("primary", 0, workspace, Vec::new(), Vec::new(), None, None);
+            build_frontend_sync_events("primary", workspace, Vec::new(), Vec::new(), None, None);
         events.push(OutboundEvent::broadcast(
             gwt::BackendEvent::ProjectOpenError {
                 message: "shared".to_string(),
@@ -2620,36 +2629,31 @@ mod tests {
             launch_wizard_cache,
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
+            issue_monitor_launch_deliveries: HashMap::new(),
+            issue_monitor_materializer_id: "main-test-materializer".to_string(),
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_continue_work: HashMap::new(),
+            pending_fresh_execution_launches: HashMap::new(),
+            continue_work_outcomes: HashMap::new(),
+            continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_dirty_branches: HashMap::new(),
+            work_live_process_branches: HashMap::new(),
             work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
-            repo_activity_snapshots: HashMap::new(),
-            repo_activity_scans_inflight: std::collections::HashSet::new(),
-            repo_activity_scan_generations: HashMap::new(),
-            repo_activity_force_pending: std::collections::HashSet::new(),
-            repo_activity_projection_generations: HashMap::new(),
-            pending_knowledge_projection_retries: HashMap::new(),
-            repo_activity_retry_attempts: HashMap::new(),
-            frontend_hydration_generations: HashMap::new(),
-            frontend_hydration_tasks: Default::default(),
-            frontend_hydration_context_generation: 0,
-            navigation_revision: 0,
-            pending_navigation_followup: crate::app_runtime::PendingNavigationFollowup::default(),
-            navigation_followup_scheduled: false,
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
-            knowledge_related_snapshots: Default::default(),
+            active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -2671,6 +2675,8 @@ mod tests {
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
             improvement_refresh_epoch: 0,
             improvement_latest_refresh_epochs: HashMap::new(),
+            agent_backend_probe_generation: 0,
+            agent_backend_latest_probe_generations: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -3353,7 +3359,6 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Work,
             WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
@@ -3378,6 +3383,37 @@ mod tests {
             assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
+
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_raw_id = runtime
+            .window_lookup
+            .get(&branches_id)
+            .expect("Branches lookup")
+            .raw_id
+            .clone();
+        let before_z = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("Branches window")
+            .z_index;
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Work, bounds.clone())
+                .len(),
+            1,
+            "Work must focus the existing legacy Branches singleton",
+        );
+        let reused_work = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&branches_raw_id)
+            .expect("reused Work surface");
+        assert_eq!(reused_work.geometry.width, 720.0);
+        assert_eq!(reused_work.geometry.height, 420.0);
+        assert!(reused_work.z_index > before_z);
     }
 
     #[test]
@@ -3645,7 +3681,6 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                refresh_if_stale: true,
             },
         );
         assert_eq!(knowledge_missing.len(), 1);
@@ -3662,7 +3697,6 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                refresh_if_stale: true,
             },
         );
         assert_eq!(knowledge_wrong.len(), 1);
@@ -3852,6 +3886,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: None,
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/test".to_string()),
@@ -3953,6 +3988,8 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
                 repo.display().to_string(),
             )),
         );
@@ -4209,16 +4246,14 @@ mod tests {
                 },
             )
             .is_empty());
-        assert!(runtime
+        assert!(!runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::SelectProjectTab {
                     tab_id: "tab-1".to_string(),
-                    interaction_id: None,
                 },
             )
             .is_empty());
-        assert!(!runtime.handle_navigation_followup().is_empty());
         assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
@@ -4242,17 +4277,18 @@ mod tests {
         );
         let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
 
-        assert!(runtime
-            .handle_frontend_event(
-                "client-1".to_string(),
-                gwt::FrontendEvent::FocusWindow {
-                    id: branches_id.clone(),
-                    bounds: Some(bounds.clone()),
-                    interaction_id: None,
-                },
-            )
-            .is_empty());
-        assert!(!runtime.handle_navigation_followup().is_empty());
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::FocusWindow {
+                        id: branches_id.clone(),
+                        bounds: Some(bounds.clone()),
+                    },
+                )
+                .len(),
+            1
+        );
         assert_eq!(
             runtime
                 .handle_frontend_event(
@@ -4381,9 +4417,6 @@ mod tests {
                 matches!(
                     event,
                     UserEvent::Dispatch(dispatched)
-                    | UserEvent::RepoGenerationDispatch {
-                        events: dispatched, ..
-                    }
                         if dispatched.iter().any(|outbound| matches!(
                             outbound.event,
                             BackendEvent::KnowledgeEntries { .. }
@@ -4409,9 +4442,6 @@ mod tests {
                     matches!(
                         event,
                         UserEvent::Dispatch(dispatched)
-                        | UserEvent::RepoGenerationDispatch {
-                            events: dispatched, ..
-                        }
                             if dispatched.iter().any(|outbound| matches!(
                                 outbound.event,
                                 BackendEvent::KnowledgeEntries { .. }
@@ -4531,6 +4561,143 @@ mod tests {
                 )
             })
         });
+    }
+
+    #[test]
+    fn test_agent_backend_connection_replies_through_async_dispatch() {
+        let temp = tempdir().expect("tempdir");
+        let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::TestAgentBackendConnection {
+                agent: gwt_agent::BuiltinAgentId::Codex,
+                base_url: "ws://not-http".to_string(),
+                api_key: "secret".to_string(),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "blocking agent backend probe must not reply on the frontend event loop"
+        );
+        wait_for_recorded_event("agent backend connection completion", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::AgentBackendConnectionProbeComplete {
+                        client_id,
+                        agent: gwt_agent::BuiltinAgentId::Codex,
+                        ..
+                    } if client_id == "client-1"
+                )
+            })
+        });
+        let (client_id, agent, generation, event) = events
+            .lock()
+            .expect("event log")
+            .iter()
+            .find_map(|recorded| match recorded {
+                UserEvent::AgentBackendConnectionProbeComplete {
+                    client_id,
+                    agent,
+                    generation,
+                    event,
+                } => Some((client_id.clone(), *agent, *generation, event.clone())),
+                _ => None,
+            })
+            .expect("agent backend completion");
+        let dispatched = runtime
+            .handle_agent_backend_connection_probe_complete(client_id, agent, generation, event);
+        assert!(dispatched.iter().any(|outbound| {
+            matches!(
+                &outbound.target,
+                DispatchTarget::Client(client_id) if client_id == "client-1"
+            ) && matches!(
+                &outbound.event,
+                BackendEvent::AgentBackendError {
+                    agent: gwt_agent::BuiltinAgentId::Codex,
+                    code: gwt::CustomAgentErrorCode::Probe,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_backend_connection_probe_drops_older_reverse_completion_per_client_and_agent() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let codex = gwt_agent::BuiltinAgentId::Codex;
+        let claude = gwt_agent::BuiltinAgentId::ClaudeCode;
+
+        let older_generation = runtime.register_agent_backend_connection_probe("client-1", codex);
+        let newer_generation = runtime.register_agent_backend_connection_probe("client-1", codex);
+        let other_agent_generation =
+            runtime.register_agent_backend_connection_probe("client-1", claude);
+        let other_client_generation =
+            runtime.register_agent_backend_connection_probe("client-2", codex);
+
+        let newer = runtime.handle_agent_backend_connection_probe_complete(
+            "client-1".to_string(),
+            codex,
+            newer_generation,
+            BackendEvent::BackendConnectionResult {
+                models: vec!["newer".to_string()],
+            },
+        );
+        assert_eq!(newer.len(), 1, "the newest completion is dispatched");
+        assert!(matches!(
+            &newer[0].target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            &newer[0].event,
+            BackendEvent::BackendConnectionResult { models }
+                if models.as_slice() == ["newer"]
+        ));
+
+        let older = runtime.handle_agent_backend_connection_probe_complete(
+            "client-1".to_string(),
+            codex,
+            older_generation,
+            BackendEvent::BackendConnectionResult {
+                models: vec!["older".to_string()],
+            },
+        );
+        assert!(
+            older.is_empty(),
+            "an older completion arriving after the newest result must not be dispatched"
+        );
+
+        assert_eq!(
+            runtime
+                .handle_agent_backend_connection_probe_complete(
+                    "client-1".to_string(),
+                    claude,
+                    other_agent_generation,
+                    BackendEvent::BackendConnectionResult {
+                        models: vec!["other-agent".to_string()],
+                    },
+                )
+                .len(),
+            1,
+            "a different agent has an independent generation"
+        );
+        assert_eq!(
+            runtime
+                .handle_agent_backend_connection_probe_complete(
+                    "client-2".to_string(),
+                    codex,
+                    other_client_generation,
+                    BackendEvent::BackendConnectionResult {
+                        models: vec!["other-client".to_string()],
+                    },
+                )
+                .len(),
+            1,
+            "a different client has an independent generation"
+        );
     }
 
     #[test]
@@ -4921,6 +5088,8 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
                 repo.display().to_string(),
             )),
         );
@@ -4961,6 +5130,8 @@ mod tests {
                 None,
                 None,
                 gwt_agent::LaunchRuntimeTarget::Host,
+                gwt_agent::SessionMode::Normal,
+                false,
                 repo.display().to_string(),
             )),
         );
@@ -5201,26 +5372,25 @@ mod tests {
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
         config.remove_env = vec!["SECRET".to_string()];
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
         assert!(changed, "expected bunx failure to switch to npx");
+        assert_eq!(probes.len(), 2, "bunx and npx must both be checked");
+        assert_eq!(
+            probes[0],
+            ("bunx".to_string(), vec!["--version".to_string()])
+        );
         assert_eq!(config.command, "npx");
         assert_eq!(
             config.args,
@@ -5250,52 +5420,54 @@ mod tests {
     }
 
     #[test]
-    fn host_package_runner_fallback_switches_custom_bunx_to_npx_when_probe_fails() {
+    fn host_package_runner_fallback_does_not_probe_or_mutate_custom_bunx() {
         let mut config = sample_custom_bunx_launch_config();
+        let original = format!("{config:?}");
+        let mut probes = Vec::new();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
             |command, args, _env, _remove_env, cwd| {
-                assert_eq!(command, "bunx");
-                assert_eq!(
-                    args,
-                    vec![
-                        "@anthropic-ai/claude-code@latest".to_string(),
-                        "--version".to_string(),
-                    ]
-                );
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
-                false
+                probes.push((command.to_string(), args));
+                command == "npx"
             },
         );
 
-        assert!(changed, "expected custom bunx failure to switch to npx");
-        assert_eq!(config.command, "npx");
+        assert!(!changed, "Custom Bunx must bypass built-in fallback policy");
+        assert!(probes.is_empty(), "Custom Bunx must not be probed");
         assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ]
+            format!("{config:?}"),
+            original,
+            "Custom Bunx launch must remain unchanged"
         );
     }
 
     #[test]
-    fn host_package_runner_fallback_ignores_direct_installed_command() {
+    fn host_runner_health_compatibility_preserves_healthy_direct_command() {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
             .version("installed")
             .build();
+        #[cfg(not(windows))]
+        {
+            config.command = "/opt/gwt-test/claude".to_string();
+        }
+        #[cfg(windows)]
+        {
+            config.command = "C:/gwt-test/claude.exe".to_string();
+        }
         let original_command = config.command.clone();
         let original_args = config.args.clone();
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |_command, _args, _env, _remove_env, _cwd| {
-                panic!("installed command should not probe bunx");
+            |command, args, _env, _remove_env, _cwd| {
+                assert_eq!(command, original_command);
+                assert_eq!(args, vec!["--version".to_string()]);
+                true
             },
         );
 
@@ -6119,6 +6291,33 @@ mod tests {
     }
 
     #[test]
+    fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        let startup_orphan = temp.path().join(".intake-startup-orphan");
+        manager
+            .create_detached("HEAD", &startup_orphan)
+            .expect("startup orphan");
+
+        let plan = super::plan_orphan_intake_worktree_prune(&repo).expect("startup prune plan");
+
+        let launched_after_snapshot = temp.path().join(".intake-live-after-snapshot");
+        manager
+            .create_detached("HEAD", &launched_after_snapshot)
+            .expect("later intake");
+        let removed = super::execute_orphan_intake_worktree_prune(plan, 10);
+
+        assert_eq!(removed, 1);
+        assert!(!startup_orphan.exists(), "snapshotted orphan is reaped");
+        assert!(
+            launched_after_snapshot.exists(),
+            "an intake materialized after startup snapshot is never treated as orphaned"
+        );
+    }
+
+    #[test]
     fn resolve_ephemeral_launch_worktree_creates_detached_intake_worktree() {
         // SPEC-3214 T-003: an ephemeral intake launch materializes a detached
         // `.intake-*` worktree (no branch) and sets working_dir; the existing
@@ -6174,6 +6373,96 @@ mod tests {
         assert_ne!(
             second_dir, intake_dir,
             "collision avoided for concurrent intake"
+        );
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_fetches_origin_for_remote_base_ref() {
+        // #3374: an intake worktree must be based on the FRESH origin state,
+        // not the remote-tracking ref as of the last fetch. Advance origin
+        // develop after the clone; the resolved intake worktree must contain
+        // the new commit.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let origin = init_git_clone_with_origin(&repo);
+
+        // Advance origin: new commit in the seed repo, pushed to the bare
+        // origin. The clone's remote-tracking origin/develop stays stale.
+        let seed = temp.path().join("seed");
+        fs::write(seed.join("fresh.txt"), "fresh\n").expect("write fresh file");
+        for args in [
+            vec!["add", "fresh.txt"],
+            vec!["commit", "-qm", "advance develop"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&seed)
+                .status()
+                .expect("git seed advance");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+        let status = gwt_core::process::hidden_command("git")
+            .arg("push")
+            .arg("-q")
+            .arg(&origin)
+            .arg("develop:develop")
+            .current_dir(&seed)
+            .status()
+            .expect("git push origin");
+        assert!(status.success(), "git push to origin failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("origin/develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("ephemeral intake worktree resolves");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(
+            intake_dir.join("fresh.txt").exists(),
+            "intake worktree is based on the fetched origin tip, not the stale remote-tracking ref"
+        );
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_falls_back_to_head_without_origin_remote() {
+        // #3374: a repo with no origin remote cannot fetch; an `origin/*` base
+        // must fall back to HEAD instead of failing the intake launch.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        for args in [
+            vec!["init", "-q", "-b", "develop"],
+            vec!["config", "user.name", "Codex Test"],
+            vec!["config", "user.email", "codex@example.com"],
+            vec!["commit", "-qm", "init", "--allow-empty"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&repo)
+                .status()
+                .expect("git local repo setup");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("origin/develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("intake in a remote-less repo falls back to HEAD");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(
+            intake_dir.exists(),
+            "intake worktree materialized from HEAD"
         );
     }
 
@@ -6357,7 +6646,7 @@ mod tests {
         let mut created_dir = None;
         let mut created_env = HashMap::new();
         let mut base_branch = Some("develop".to_string());
-        let did_materialize = super::resolve_launch_worktree_request(
+        super::resolve_launch_worktree_request(
             &repo,
             Some("feature/created"),
             &mut base_branch,
@@ -6365,10 +6654,6 @@ mod tests {
             &mut created_env,
         )
         .expect("remote-backed worktree");
-        assert!(
-            did_materialize,
-            "creating a new branch worktree must report a topology mutation"
-        );
         let created_dir = created_dir.expect("created worktree dir");
         assert!(created_dir.exists());
         assert!(created_env
@@ -6433,12 +6718,7 @@ mod tests {
             .build();
         launch_config.working_dir = None;
         launch_config.env_vars = HashMap::new();
-        let did_materialize = super::resolve_launch_worktree(&repo, &mut launch_config)
-            .expect("agent launch wrapper");
-        assert!(
-            !did_materialize,
-            "reusing an existing Agent worktree must not report materialization"
-        );
+        super::resolve_launch_worktree(&repo, &mut launch_config).expect("agent launch wrapper");
         assert!(launch_config
             .working_dir
             .as_deref()
@@ -6458,40 +6738,12 @@ mod tests {
             command_override: None,
             command_args_override: None,
         };
-        let did_materialize = super::resolve_shell_launch_worktree(&repo, &mut shell_config)
+        super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");
-        assert!(
-            !did_materialize,
-            "reusing an existing Shell worktree must not report materialization"
-        );
         assert!(shell_config
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
-
-        let mut new_agent_config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .branch("feature/new-agent-wrapper")
-            .base_branch("develop")
-            .build();
-        let did_materialize = super::resolve_launch_worktree(&repo, &mut new_agent_config)
-            .expect("new Agent launch wrapper");
-        assert!(
-            did_materialize,
-            "a newly created Agent worktree must report materialization"
-        );
-
-        let mut new_shell_config = ShellLaunchConfig {
-            branch: Some("feature/new-shell-wrapper".to_string()),
-            ..shell_config.clone()
-        };
-        new_shell_config.working_dir = None;
-        new_shell_config.env_vars.clear();
-        let did_materialize = super::resolve_shell_launch_worktree(&repo, &mut new_shell_config)
-            .expect("new Shell launch wrapper");
-        assert!(
-            did_materialize,
-            "a newly created Shell worktree must report materialization"
-        );
     }
 
     #[test]
@@ -7305,7 +7557,15 @@ fn apply_agent_frontend_dispatch_outcome(
 ) {
     match outcome {
         AgentFrontendDispatchOutcome::Dispatched(events) => clients.dispatch(events),
-        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister(client_id),
+        AgentFrontendDispatchOutcome::StaleCapability => clients.unregister_with_close_frame(
+            client_id,
+            Some(crate::embedded_server::AGENT_STALE_BINDING_CLOSE),
+        ),
+        AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => clients
+            .unregister_with_close_frame(
+                client_id,
+                Some(crate::embedded_server::AGENT_AUTHORITY_UNAVAILABLE_CLOSE),
+            ),
     }
 }
 
@@ -7802,19 +8062,6 @@ fn main() -> std::io::Result<()> {
                     );
                 }
             }
-            Event::UserEvent(UserEvent::FrontendHydrationReady {
-                client_id,
-                hydration,
-            }) => {
-                let events = app.handle_frontend_hydration_ready(&client_id, hydration);
-                clients.dispatch(events);
-            }
-            Event::UserEvent(UserEvent::FrontendClientDisconnected { client_id }) => {
-                app.handle_frontend_client_disconnected(&client_id);
-            }
-            Event::UserEvent(UserEvent::NavigationFollowup) => {
-                clients.dispatch(app.handle_navigation_followup());
-            }
             Event::UserEvent(UserEvent::AgentFrontend {
                 client_id,
                 grant,
@@ -7832,6 +8079,17 @@ fn main() -> std::io::Result<()> {
                     let _ = proxy.send_event(UserEvent::QuitApp);
                 }
             }
+            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout {
+                window_id,
+                operation_id,
+            }) => {
+                clients.dispatch(
+                    app.handle_continue_work_ready_timeout(
+                        &window_id,
+                        &operation_id,
+                    ),
+                );
+            }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the
                 // only producer of this variant. The browser UI now
@@ -7839,10 +8097,14 @@ fn main() -> std::io::Result<()> {
                 // stragglers from older clients are dropped silently.
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
-                broadcast_log_entry(&clients, entry);
+                // Issue #3366 — gated on an open Logs window; see
+                // `AppRuntime::log_entry_events`.
+                clients.dispatch(app.log_entry_events(entry));
             }
             Event::UserEvent(UserEvent::ProcessLine { line }) => {
-                broadcast_process_line(&clients, line);
+                // Issue #3366 — gated on an open Console window; see
+                // `AppRuntime::process_line_events`.
+                clients.dispatch(app.process_line_events(line));
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);
@@ -7864,15 +8126,6 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_board_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RepoActivityRefreshRequested { project_root }) => {
-                app.spawn_repo_activity_snapshot_scan(project_root, false);
-            }
-            Event::UserEvent(UserEvent::RepoActivityRetryRequested {
-                project_root,
-                generation,
-            }) => {
-                app.handle_repo_activity_retry(project_root, generation);
-            }
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
@@ -7880,12 +8133,27 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_work_events_ingested(project_root, changed);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RepoActivityReady {
+            Event::UserEvent(UserEvent::WorkMergeStatus {
                 project_root,
-                generation,
-                snapshot,
+                merged_branches,
+                cleanup_ready_branches,
+                dirty_branches,
+                live_process_branches,
             }) => {
-                let events = app.apply_repo_activity_snapshot(&project_root, generation, snapshot);
+                let events = app.apply_work_merge_status(
+                    &project_root,
+                    merged_branches,
+                    cleanup_ready_branches,
+                    dirty_branches,
+                    live_process_branches,
+                );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkTipSubjects {
+                project_root,
+                tip_subjects,
+            }) => {
+                let events = app.apply_work_tip_subjects(&project_root, tip_subjects);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkPrTitles {
@@ -7906,10 +8174,6 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_workspace_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::WorkspaceCleanupCompleted { project_root }) => {
-                let events = app.handle_workspace_cleanup_completed(project_root);
-                clients.dispatch(events);
-            }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let events = app.handle_runtime_hook_event(event);
                 clients.dispatch(events);
@@ -7919,15 +8183,28 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
+                project_root,
                 issue_number,
                 linked_issue_kind,
+                delivery_id,
             }) => {
-                let events =
-                    app.auto_launch_issue_monitor_request_events(issue_number, linked_issue_kind);
+                let events = app.auto_launch_issue_monitor_delivery_events_for_project(
+                    &project_root,
+                    issue_number,
+                    linked_issue_kind,
+                    delivery_id,
+                );
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch { dispatch }) => {
-                let events = app.auto_dispatch_issue_monitor_review_events(dispatch);
+            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {
+                project_root,
+                dispatch,
+            }) => {
+                let events =
+                    app.auto_dispatch_issue_monitor_review_events_for_project(
+                        &project_root,
+                        dispatch,
+                    );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
@@ -8005,28 +8282,22 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_shell_launch_complete(window_id, result);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RepoTopologyMaterialized { project_root }) => {
-                app.handle_repo_topology_materialized(project_root);
-            }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
                 let events = app.handle_issue_launch_wizard_prepared(prepared);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RepoGenerationDispatch {
-                project_root,
-                generation,
-                events,
-                retry,
-            }) => {
-                clients.dispatch(app.handle_repo_generation_dispatch(
-                    &project_root,
-                    generation,
-                    events,
-                    retry,
-                ));
-            }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::AgentBackendConnectionProbeComplete {
+                client_id,
+                agent,
+                generation,
+                event,
+            }) => {
+                clients.dispatch(app.handle_agent_backend_connection_probe_complete(
+                    client_id, agent, generation, event,
+                ));
             }
             Event::UserEvent(UserEvent::ImprovementActionComplete {
                 project_root,

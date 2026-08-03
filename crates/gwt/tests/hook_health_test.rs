@@ -12,6 +12,34 @@ use gwt::cli::hook::{
 use gwt_agent::PendingDiscussionResume;
 use serde_json::json;
 
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[test]
 fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
     let worktree = tempfile::tempdir().expect("worktree");
@@ -31,6 +59,25 @@ fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
     assert!(health.pending_goal.is_none());
     assert!(health.slow_handlers.is_empty());
     assert!(health.issues.is_empty(), "{:?}", health.issues);
+}
+
+#[test]
+fn managed_hook_health_defaults_to_the_session_runtime_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
+    gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
+    let runtime_path = worktree.path().join("runtime-state.json");
+    runtime_state::write_for_event(&runtime_path, "PreToolUse").expect("runtime state");
+    let _runtime_path = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+    let health = read_managed_hook_health(&ManagedHookHealthInput::new(worktree.path()));
+
+    assert_eq!(health.status, ManagedHookHealthStatus::Ready);
+    assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
+    assert!(health.last_event_at.is_some());
 }
 
 #[test]

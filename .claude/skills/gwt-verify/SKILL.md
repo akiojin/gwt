@@ -40,6 +40,17 @@ Playwright recipe. Instead it executes the following four-part contract:
    launch → navigate → observe) and ask the user to confirm or reject. See
    `references/user-verification-guide.md`.
 
+For every new or changed blocking gate, the verification evidence must also
+cover the complete gate acceptance contract:
+
+- an **agent-reachable recovery operation**
+- **diagnostic visibility** for both the requirement and current state
+- a **positive test** proving the invalid state is rejected
+- a **false-positive negative test** proving legitimate work is not rejected
+
+A gate missing any of these four elements fails verification. Warning-only
+diagnostics are not classified as blocking gates.
+
 Project-local rules always win. If the project root has an AGENTS.md / README
 section describing its own testing approach (e.g., "run `make verify`",
 "use Unity Editor batch mode test runner"), the agent follows that instead of
@@ -155,20 +166,34 @@ Skipped (no matching surface or not applicable):
 Status: required | recommended | skipped(<reason>)
 Surfaces requiring user check: <list>
 
+#### Verification Target Card
+Owner Issue/SPEC: <Issue #N, SPEC #N, or approved standalone task label>
+Work purpose: <short concrete objective that distinguishes this work from other active agents>
+Success Goal: <user-visible behavior achieved and the observation that proves it>
+Requesting agent/session: <agent provider/name plus GWT_SESSION_ID or equivalent stable session ID>
+Branch: <exact branch>
+Absolute worktree: <absolute path of the target checkout>
+Commit: <full or unambiguous short HEAD SHA>
+Prepared instance ID: <runtime-specific PID, window/pane ID, port, or invocation label tied to this checkout>
+URL or launch target: <verified URL, GUI/editor target, or exact CLI/TUI invocation>
+
 #### 導線 (How to access the changed behavior)
 1. build:     <project-specific build command>
 2. launch:    <how to start the app / open the editor / run the binary>
 3. navigate:  <how to reach the changed feature inside the running app>
-4. observe:   <what the user should look at / interact with>
+4. observe:   <action to perform and the exact result that proves the Success Goal>
 
 #### Check Items
-- [ ] <expected behavior — the representative happy path>
-- [ ] <edge case / failure handling — at least one>
-- [ ] <adjacent feature regression sanity — at least one>
+- [ ] Expected — Action: <concrete click/input/command> → Expected: <decidable result>
+- [ ] Edge — Action: <reachable boundary action> → Expected: <decidable handling>
+- [ ] Regression — Action: <adjacent feature action> → Expected: <unchanged result>
+
+#### Automated-only Evidence
+- <unreachable manual boundary>: Executed item `<exact command>` — PASS (<named test/scenario>)
 
 Expected: <one-line summary of the intended behavior>
 Observed: <user response slot>
-User Verification Result: pending | confirmed | rejected(<reason>) | n/a
+User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a
 
 Headed verification: <yes|no>
 Tooling installed during run: <list, or "none">
@@ -181,6 +206,10 @@ Rules:
 - `Overall: PASS` requires **both** every entry in `Executed` reporting `PASS`
   **and** `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
   `pending` must never resolve to `PASS`.
+- Every acceptance boundary in scope must map to either a reachable manual
+  checkbox or an Automated-only Evidence item that names the exact command and
+  test. An Automated-only Evidence item must match a `PASS` entry under
+  `Executed`; missing, failed, or unlinked coverage makes `Overall: FAIL`.
 - If any executed command fails, `Overall: FAIL` and the failing command's
   detail block is captured verbatim.
 - If the user rejects, `Overall: FAIL` and the reason is preserved.
@@ -214,23 +243,64 @@ supplied:
    - `Status: skipped(<reason>)` for `--mode quick`, `Changed surfaces:
      (none)`, docs-only changes, `--skip-user-check`, or any explicit
      skip rule above. The reason must be human-readable and specific.
-2. Generate the 4-step 導線 ("How to access the changed behavior") using the
+2. Resolve and print the **Verification Target Card** before any instructions:
+   - `Owner Issue/SPEC:` identifies the work item whose behavior is being
+     checked.
+   - `Work purpose:` distinguishes the concrete objective from other active
+     agents that may share the same Issue, branch, or commit.
+   - `Success Goal:` states what behavior was achieved and what observation
+     proves success without relying on prior conversation.
+   - `Requesting agent/session:` names the provider/agent and a stable session
+     identifier such as `GWT_SESSION_ID`.
+   - `Branch:`, `Absolute worktree:`, and `Commit:` identify the exact code.
+   - `Prepared instance ID:` names the exact runtime using its PID, window or
+     pane ID, port, or invocation label and ties it to the identified checkout.
+   - `URL or launch target:` names the reachable URL or exact non-URL target.
+   The full card, not any single field, is the identity. A bare URL, process
+   name, PID, or generic "this change" is insufficient when multiple agents or
+   instances may be running.
+3. Generate the 4-step 導線 ("How to access the changed behavior") using the
    project's build / launch conventions. The structure is fixed across all
    project types — **always exactly four labelled steps in this order**:
    1. **build** — the project's build command for the smallest target that
-      exercises the change.
+      exercises the change. When the target is already prepared, state the
+      exact command the agent already completed and its result.
    2. **launch** — how to start the running artifact (binary / server /
-      editor / interpreter / web page).
+      editor / interpreter / web page). For a prepared runtime, tell the user
+      how to focus that exact Prepared instance ID; never instruct them to
+      start another process or discover a different dynamic URL.
    3. **navigate** — how to reach the changed feature from the entry point.
    4. **observe** — what the user should look at, click, or interact with to
       confirm the change.
    See `references/user-verification-guide.md` for project-type-specific
    launch patterns (Rust CLI / WebView / Unity Editor / .NET WPF / Python
    service / generic TUI / long-running service).
-3. Produce a **Check Items** list with **three categories minimum**:
-   (1) expected happy-path behavior, (2) at least one edge case or failure
-   path, (3) at least one adjacent-feature regression sanity check.
-4. Ask the user via the platform's selection question tool
+4. Apply the **Manual Feasibility Gate** before producing **Check Items**:
+   - Every manual checkbox must be reachable in the prepared instance and use
+     the exact `Action → Expected` shape.
+   - Include all three categories: Expected, Edge, and Regression.
+   - Do not ask the user to manufacture remote failures, mutate unrelated
+     external state, switch to an unidentified instance, or infer which agent
+     owns the request.
+   - Move every unreachable boundary to **Automated-only Evidence** and name
+     the exact command and named test that covers it. The item must match a
+     `PASS` entry under `Executed`.
+   - When a real failure path is not reachable, use the nearest safe reachable
+     boundary for the Edge checkbox and report the destructive or external
+     failure path only under Automated-only Evidence.
+   - Before handoff, map every scoped acceptance boundary to either one
+     reachable checkbox or one valid Automated-only Evidence item. Stop with
+     `Overall: FAIL` if any boundary has neither form of evidence.
+
+   Use this exact minimum shape:
+
+   ```markdown
+   - [ ] Expected — Action: <concrete action> → Expected: <decidable result>
+   - [ ] Edge — Action: <reachable action> → Expected: <decidable result>
+   - [ ] Regression — Action: <adjacent action> → Expected: <unchanged result>
+   ```
+
+5. Ask the user via the platform's selection question tool
    (`AskUserQuestionTool` for Claude Code, `request_user_input` for Codex,
    the closest equivalent for other runtimes) to choose one of:
    - `Confirmed` — observed behavior matches expectations; record

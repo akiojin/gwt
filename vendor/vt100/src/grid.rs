@@ -251,6 +251,243 @@ impl Grid {
         prev_attrs
     }
 
+    pub(crate) fn write_snapshot_formatted(
+        &self,
+        contents: &mut Vec<u8>,
+        max_scrollback: usize,
+    ) -> crate::attrs::Attrs {
+        crate::term::ClearAttrs.write_buf(contents);
+        crate::term::ClearScreen.write_buf(contents);
+
+        let reflowed_scrollback = self.reflowed_scrollback();
+        let history_start = reflowed_scrollback.len().saturating_sub(max_scrollback);
+        let history_len = reflowed_scrollback.len() - history_start;
+        let total_rows = history_len + self.rows.len();
+        let last_screen_row = self.size.rows - 1;
+        let mut prev_attrs = crate::attrs::Attrs::default();
+        let mut prev_pos = Pos::default();
+        let mut wrapping = false;
+
+        for (index, row) in reflowed_scrollback
+            .iter()
+            .skip(history_start)
+            .chain(self.rows.iter())
+            .enumerate()
+        {
+            let row_index: u16 = index
+                .min(usize::from(last_screen_row))
+                .try_into()
+                .unwrap();
+            let writer_prev_pos = if wrapping && row_index == last_screen_row {
+                Pos {
+                    row: last_screen_row.saturating_sub(1),
+                    col: prev_pos.col,
+                }
+            } else {
+                prev_pos
+            };
+            let (new_pos, new_attrs) = row.write_contents_formatted(
+                contents,
+                0,
+                self.size.cols,
+                row_index,
+                wrapping,
+                Some(writer_prev_pos),
+                Some(prev_attrs),
+            );
+            prev_pos = new_pos;
+            prev_attrs = new_attrs;
+
+            if index + 1 < total_rows && !row.wrapped() {
+                crate::term::Crlf.write_buf(contents);
+                prev_pos = Pos {
+                    row: (row_index + 1).min(last_screen_row),
+                    col: 0,
+                };
+            }
+            wrapping = row.wrapped();
+        }
+
+        self.write_cursor_position_formatted(
+            contents,
+            Some(prev_pos),
+            Some(prev_attrs),
+        );
+
+        prev_attrs
+    }
+
+    fn reflowed_scrollback(&self) -> Vec<crate::row::Row> {
+        let mut reflowed = Vec::new();
+        let mut logical_line = Vec::new();
+
+        for row in &self.scrollback {
+            logical_line.extend_from_slice(row.snapshot_cells());
+            if !row.wrapped() {
+                Self::push_reflowed_snapshot_line(
+                    &mut reflowed,
+                    &logical_line,
+                    self.size.cols,
+                    false,
+                );
+                logical_line.clear();
+            }
+        }
+
+        if !logical_line.is_empty() {
+            Self::push_reflowed_snapshot_line(
+                &mut reflowed,
+                &logical_line,
+                self.size.cols,
+                true,
+            );
+        }
+
+        reflowed
+    }
+
+    fn push_reflowed_snapshot_line(
+        reflowed: &mut Vec<crate::row::Row>,
+        logical_line: &[crate::Cell],
+        cols: u16,
+        continues_into_drawing_rows: bool,
+    ) {
+        if logical_line.is_empty() {
+            reflowed.push(crate::row::Row::new(cols));
+            return;
+        }
+
+        let width = usize::from(cols);
+        if width == 1 {
+            let mut start = 0;
+            while start < logical_line.len() {
+                let mut cell = logical_line[start].clone();
+                let cell_width = if cell.is_wide()
+                    && logical_line
+                        .get(start + 1)
+                        .is_some_and(crate::Cell::is_wide_continuation)
+                {
+                    2
+                } else {
+                    1
+                };
+                cell.set_effective_width(1);
+                let end = (start + cell_width).min(logical_line.len());
+                let wrapped =
+                    end < logical_line.len() || continues_into_drawing_rows;
+                reflowed.push(crate::row::Row::from_snapshot_cells(
+                    std::slice::from_ref(&cell),
+                    cols,
+                    wrapped,
+                ));
+                start = end;
+            }
+            return;
+        }
+
+        let mut start = 0;
+        while start < logical_line.len() {
+            let mut end = (start + width).min(logical_line.len());
+            if end < logical_line.len() && logical_line[end].is_wide_continuation() {
+                end -= 1;
+            }
+            if end == start {
+                end = (start + width).min(logical_line.len());
+            }
+
+            let wrapped = end < logical_line.len() || continues_into_drawing_rows;
+            reflowed.push(crate::row::Row::from_snapshot_cells(
+                &logical_line[start..end],
+                cols,
+                wrapped,
+            ));
+            start = end;
+        }
+    }
+
+    pub(crate) fn write_snapshot_continuation_formatted(
+        &self,
+        contents: &mut Vec<u8>,
+        current_attrs: crate::attrs::Attrs,
+        saved_attrs: crate::attrs::Attrs,
+        prev_attrs: crate::attrs::Attrs,
+    ) -> crate::attrs::Attrs {
+        write_scroll_region_formatted(contents, 0, self.size.rows - 1);
+        write_origin_mode_formatted(contents, self.saved_origin_mode);
+        saved_attrs.write_escape_code_diff(contents, &prev_attrs);
+        self.write_cursor_position_for_origin_formatted(
+            contents,
+            self.saved_pos,
+            self.saved_origin_mode,
+            0,
+            saved_attrs,
+        );
+        crate::term::SaveCursor.write_buf(contents);
+
+        write_scroll_region_formatted(
+            contents,
+            self.scroll_top,
+            self.scroll_bottom,
+        );
+        write_origin_mode_formatted(contents, self.origin_mode);
+        current_attrs.write_escape_code_diff(contents, &saved_attrs);
+        self.write_cursor_position_for_origin_formatted(
+            contents,
+            self.pos,
+            self.origin_mode,
+            self.scroll_top,
+            current_attrs,
+        );
+
+        current_attrs
+    }
+
+    fn write_cursor_position_for_origin_formatted(
+        &self,
+        contents: &mut Vec<u8>,
+        pos: Pos,
+        origin_mode: bool,
+        scroll_top: u16,
+        active_attrs: crate::attrs::Attrs,
+    ) {
+        if pos.col < self.size.cols {
+            write_cup_formatted(contents, pos, origin_mode, scroll_top);
+            return;
+        }
+
+        let mut drawing_pos = Pos {
+            row: pos.row,
+            col: self.size.cols - 1,
+        };
+        if self
+            .drawing_cell(drawing_pos)
+            .expect("snapshot cursor row and column must be valid")
+            .is_wide_continuation()
+        {
+            drawing_pos.col = drawing_pos.col.saturating_sub(1);
+        }
+        let cell = self
+            .drawing_cell(drawing_pos)
+            .expect("snapshot cursor cell must be valid");
+        write_cup_formatted(contents, drawing_pos, origin_mode, scroll_top);
+
+        if cell.has_contents() {
+            cell.attrs()
+                .write_escape_code_diff(contents, &active_attrs);
+            contents.extend_from_slice(cell.contents().as_bytes());
+            active_attrs.write_escape_code_diff(contents, cell.attrs());
+        } else {
+            contents.push(b' ');
+            cell.attrs()
+                .write_escape_code_diff(contents, &active_attrs);
+            crate::term::SaveCursor.write_buf(contents);
+            crate::term::Backspace.write_buf(contents);
+            crate::term::EraseChar::new(1).write_buf(contents);
+            crate::term::RestoreCursor.write_buf(contents);
+            active_attrs.write_escape_code_diff(contents, cell.attrs());
+        }
+    }
+
     pub fn write_contents_diff(
         &self,
         contents: &mut Vec<u8>,
@@ -727,6 +964,38 @@ impl Grid {
             self.pos.col = self.size.cols - 1;
         }
     }
+}
+
+fn write_scroll_region_formatted(contents: &mut Vec<u8>, top: u16, bottom: u16) {
+    let mut top_buffer = itoa::Buffer::new();
+    let mut bottom_buffer = itoa::Buffer::new();
+    contents.extend_from_slice(b"\x1b[");
+    contents.extend_from_slice(top_buffer.format(top + 1).as_bytes());
+    contents.push(b';');
+    contents.extend_from_slice(bottom_buffer.format(bottom + 1).as_bytes());
+    contents.push(b'r');
+}
+
+fn write_origin_mode_formatted(contents: &mut Vec<u8>, origin_mode: bool) {
+    contents.extend_from_slice(if origin_mode {
+        b"\x1b[?6h"
+    } else {
+        b"\x1b[?6l"
+    });
+}
+
+fn write_cup_formatted(
+    contents: &mut Vec<u8>,
+    pos: Pos,
+    origin_mode: bool,
+    scroll_top: u16,
+) {
+    let row = if origin_mode {
+        pos.row.saturating_sub(scroll_top)
+    } else {
+        pos.row
+    };
+    crate::term::MoveTo::new(Pos { row, col: pos.col }).write_buf(contents);
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]

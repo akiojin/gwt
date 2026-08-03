@@ -14,12 +14,13 @@
 //! tear down the runtime.
 
 use std::{
+    collections::VecDeque,
     path::PathBuf,
-    sync::{Arc, Condvar, Mutex, PoisonError},
+    sync::{mpsc, Arc, Condvar, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
-use gwt::{save_session_state, save_workspace_state};
+use gwt::{save_session_state, save_workspace_state, save_workspace_state_durable};
 
 use super::BlockingTaskSpawner;
 
@@ -34,6 +35,12 @@ pub(crate) struct PersistSnapshot {
 #[derive(Default)]
 struct DispatcherState {
     latest: Option<PersistSnapshot>,
+    /// Generation of `latest`; durable requests use the same sequence so the
+    /// worker can preserve enqueue order without giving up snapshot coalescing.
+    latest_generation: Option<u64>,
+    /// Non-coalescible workspace barriers. Each caller waits on its completion
+    /// channel, so these requests must remain FIFO and must never be replaced.
+    durable_workspaces: VecDeque<DurableWorkspaceRequest>,
     /// `Some(timestamp)` when an unwritten `latest` snapshot exists. Used by
     /// the worker to enforce the 50ms coalesce window: new enqueues that
     /// arrive within the window push the deadline forward so a quick burst
@@ -46,9 +53,26 @@ struct DispatcherState {
     last_error: Option<String>,
 }
 
+struct DurableWorkspaceRequest {
+    generation: u64,
+    path: PathBuf,
+    workspace: gwt::PersistedWindowCanvasState,
+    completion: mpsc::SyncSender<Result<(), String>>,
+}
+
+enum PersistWork {
+    Snapshot {
+        generation: u64,
+        snapshot: PersistSnapshot,
+    },
+    DurableWorkspace(DurableWorkspaceRequest),
+}
+
 struct DispatcherInner {
     state: Mutex<DispatcherState>,
     cond: Condvar,
+    #[cfg(test)]
+    before_workspace_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Owner handle: enqueue snapshots and (in tests) wait until the worker drains.
@@ -69,6 +93,8 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// write per window. On shutdown the worker drains immediately and skips the
 /// wait.
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
+
+const DURABLE_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Drop for PersistDispatcher {
     fn drop(&mut self) {
@@ -131,6 +157,8 @@ impl PersistDispatcher {
         let inner = Arc::new(DispatcherInner {
             state: Mutex::new(DispatcherState::default()),
             cond: Condvar::new(),
+            #[cfg(test)]
+            before_workspace_write: Mutex::new(None),
         });
         let worker_inner = inner.clone();
         spawner.spawn(move || worker_loop(worker_inner));
@@ -152,10 +180,56 @@ impl PersistDispatcher {
             return;
         }
         state.enqueued = state.enqueued.saturating_add(1);
+        state.latest_generation = Some(state.enqueued);
         state.latest = Some(snapshot);
         state.latest_updated_at = Some(Instant::now());
         drop(state);
         self.inner.cond.notify_one();
+    }
+
+    /// Serialize an exact workspace state after every older dispatcher
+    /// generation and wait until its crash-durable atomic write succeeds.
+    pub(crate) fn flush_workspace_durable(
+        &self,
+        path: PathBuf,
+        workspace: gwt::PersistedWindowCanvasState,
+    ) -> std::io::Result<()> {
+        let (completion, completed) = mpsc::sync_channel(1);
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.shutdown {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "persist dispatcher is shutting down",
+                ));
+            }
+            state.enqueued = state.enqueued.saturating_add(1);
+            let generation = state.enqueued;
+            state.durable_workspaces.push_back(DurableWorkspaceRequest {
+                generation,
+                path,
+                workspace,
+                completion,
+            });
+        }
+        self.inner.cond.notify_one();
+
+        match completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(std::io::Error::other(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for durable workspace persistence",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "persist dispatcher stopped before durable workspace persistence completed",
+            )),
+        }
     }
 
     #[cfg(test)]
@@ -214,13 +288,30 @@ impl PersistDispatcher {
             .unwrap_or_else(PoisonError::into_inner)
             .completed
     }
+
+    #[cfg(test)]
+    fn set_before_workspace_write_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .inner
+            .before_workspace_write
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
 }
 
 fn worker_loop(inner: Arc<DispatcherInner>) {
     loop {
-        let (snapshot, covered) = {
+        let work = {
             let mut state = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
             loop {
+                let durable_is_next = state.durable_workspaces.front().is_some_and(|durable| {
+                    state
+                        .latest_generation
+                        .is_none_or(|latest| durable.generation <= latest)
+                });
+                if durable_is_next {
+                    break;
+                }
                 if state.shutdown {
                     break;
                 }
@@ -251,45 +342,91 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
                     }
                 }
             }
-            if state.latest.is_none() && state.shutdown {
+            if state.latest.is_none() && state.durable_workspaces.is_empty() && state.shutdown {
                 return;
             }
-            state.latest_updated_at = None;
-            (state.latest.take(), state.enqueued)
+            let durable_is_next = state.durable_workspaces.front().is_some_and(|durable| {
+                state
+                    .latest_generation
+                    .is_none_or(|latest| durable.generation <= latest)
+            });
+            if durable_is_next {
+                PersistWork::DurableWorkspace(
+                    state
+                        .durable_workspaces
+                        .pop_front()
+                        .expect("durable workspace request should exist"),
+                )
+            } else {
+                state.latest_updated_at = None;
+                PersistWork::Snapshot {
+                    generation: state
+                        .latest_generation
+                        .take()
+                        .expect("latest snapshot generation should exist"),
+                    snapshot: state.latest.take().expect("latest snapshot should exist"),
+                }
+            }
         };
 
-        let (outcome, successful_snapshot) = match snapshot {
-            Some(snap) => {
-                let outcome = write_snapshot(&snap);
-                let successful_snapshot = if outcome.is_ok() { Some(snap) } else { None };
-                (outcome, successful_snapshot)
+        let (generation, outcome, successful_snapshot, durable_completion) = match work {
+            PersistWork::Snapshot {
+                generation,
+                snapshot,
+            } => {
+                let outcome = write_snapshot(&snapshot, &inner).map_err(|error| error.to_string());
+                let successful_snapshot = outcome.is_ok().then_some(snapshot);
+                (generation, outcome, successful_snapshot, None)
             }
-            None => (Ok(()), None),
+            PersistWork::DurableWorkspace(request) => {
+                let outcome = save_workspace_state_durable(&request.path, &request.workspace)
+                    .map_err(|error| error.to_string());
+                (request.generation, outcome, None, Some(request.completion))
+            }
         };
 
         let mut state = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if covered > state.completed {
-            state.completed = covered;
+        if generation > state.completed {
+            state.completed = generation;
         }
         if let Some(snap) = successful_snapshot {
             state.last_successful_snapshot = Some(snap);
             state.last_error = None;
-        } else if let Err(error) = outcome {
+        } else if durable_completion.is_some() && outcome.is_ok() {
+            state.last_successful_snapshot = None;
+            state.last_error = None;
+        } else if let Err(error) = &outcome {
+            if durable_completion.is_some() {
+                state.last_successful_snapshot = None;
+            }
             tracing::warn!(error = %error, "persist dispatcher failed to write snapshot");
-            state.last_error = Some(error.to_string());
+            state.last_error = Some(error.clone());
         }
-        let should_exit = state.shutdown && state.latest.is_none();
+        let should_exit =
+            state.shutdown && state.latest.is_none() && state.durable_workspaces.is_empty();
         drop(state);
         inner.cond.notify_all();
+        if let Some(completion) = durable_completion {
+            let _ = completion.send(outcome);
+        }
         if should_exit {
             return;
         }
     }
 }
 
-fn write_snapshot(snap: &PersistSnapshot) -> std::io::Result<()> {
+fn write_snapshot(snap: &PersistSnapshot, _inner: &DispatcherInner) -> std::io::Result<()> {
     save_session_state(&snap.session_path, &snap.session)?;
     for (path, ws) in &snap.workspaces {
+        #[cfg(test)]
+        if let Some(hook) = _inner
+            .before_workspace_write
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
         save_workspace_state(path, ws)?;
     }
     Ok(())
@@ -303,7 +440,10 @@ mod tests {
 
     use super::*;
     use crate::app_runtime::BlockingTaskSpawner;
-    use gwt::{empty_workspace_state, load_session_state};
+    use gwt::{
+        default_workspace_state, empty_workspace_state, load_session_state, load_workspace_state,
+        WindowPreset,
+    };
 
     fn sample_empty_session() -> gwt::PersistedSessionState {
         gwt::PersistedSessionState {
@@ -334,6 +474,7 @@ mod tests {
             inner: Arc::new(DispatcherInner {
                 state: Mutex::new(DispatcherState::default()),
                 cond: Condvar::new(),
+                before_workspace_write: Mutex::new(None),
             }),
         }
     }
@@ -650,5 +791,79 @@ mod tests {
 
         assert!(session_path.exists(), "session file should be written");
         assert!(workspace_path.exists(), "workspace file should be written");
+    }
+
+    #[test]
+    fn durable_workspace_barrier_orders_exact_window_after_inflight_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let session_path = temp.path().join("session-state.json");
+        let workspace_path = temp.path().join("workspace.json");
+        let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
+
+        let (old_write_ready_tx, old_write_ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_old_write_tx, release_old_write_rx) = std::sync::mpsc::sync_channel(1);
+        let release_old_write_rx = Arc::new(Mutex::new(release_old_write_rx));
+        dispatcher.set_before_workspace_write_hook(Arc::new(move || {
+            old_write_ready_tx
+                .send(())
+                .expect("report old workspace write ready");
+            release_old_write_rx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv()
+                .expect("release old workspace write");
+        }));
+
+        dispatcher.enqueue(PersistSnapshot {
+            session_path,
+            session: sample_empty_session(),
+            workspaces: vec![(workspace_path.clone(), empty_workspace_state())],
+        });
+        old_write_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("old generation should pause before workspace write");
+
+        let mut exact_workspace = default_workspace_state();
+        exact_workspace.windows[0].id = "agent-delivery-exact".to_string();
+        exact_workspace.windows[0].preset = WindowPreset::Agent;
+        let barrier_dispatcher = dispatcher.clone();
+        let barrier_workspace_path = workspace_path.clone();
+        let barrier_workspace = exact_workspace.clone();
+        let (barrier_done_tx, barrier_done_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let result = barrier_dispatcher
+                .flush_workspace_durable(barrier_workspace_path, barrier_workspace);
+            barrier_done_tx
+                .send(result)
+                .expect("report durable barrier result");
+        });
+
+        let early_result = barrier_done_rx.recv_timeout(Duration::from_millis(100));
+        let returned_before_old_write = early_result.is_ok();
+        release_old_write_tx
+            .send(())
+            .expect("allow old workspace write");
+        let barrier_result = match early_result {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => barrier_done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("durable barrier should finish after old generation"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("durable barrier worker disconnected")
+            }
+        };
+        barrier_result.expect("durable barrier");
+        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+
+        let on_disk = load_workspace_state(&workspace_path).expect("load durable workspace");
+        let exact_window_is_recoverable = on_disk
+            .windows
+            .iter()
+            .any(|window| window.id == "agent-delivery-exact");
+        assert!(
+            !returned_before_old_write && exact_window_is_recoverable,
+            "barrier returned before the old generation was ordered ({returned_before_old_write}); \
+             exact launch window remained recoverable ({exact_window_is_recoverable})",
+        );
     }
 }

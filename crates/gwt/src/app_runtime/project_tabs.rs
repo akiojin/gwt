@@ -481,7 +481,6 @@ impl AppRuntime {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         if !self.tabs.iter().any(|tab| tab.id == tab_id) {
             return Vec::new();
@@ -508,72 +507,12 @@ impl AppRuntime {
         events
     }
 
-    pub(crate) fn navigate_project_tab_events(
-        &mut self,
-        client_id: &str,
-        tab_id: &str,
-        interaction_id: Option<String>,
-    ) -> Vec<OutboundEvent> {
-        let canonical = |runtime: &AppRuntime| gwt::protocol::NavigationCanonicalDelta {
-            active_tab_id: runtime.active_tab_id.clone(),
-            target_id: Some(tab_id.to_string()),
-            window_updates: Vec::new(),
-        };
-        let Some(project_root) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.project_root.clone())
-        else {
-            return self.navigation_result(
-                client_id,
-                interaction_id,
-                gwt::protocol::NavigationScope::ProjectTab,
-                gwt::protocol::NavigationOutcome::NotFound,
-                canonical(self),
-            );
-        };
-
-        let already_current = self.active_tab_id.as_deref() == Some(tab_id);
-        if already_current && interaction_id.is_some() {
-            return self.navigation_result(
-                client_id,
-                interaction_id,
-                gwt::protocol::NavigationScope::ProjectTab,
-                gwt::protocol::NavigationOutcome::AlreadyCurrent,
-                canonical(self),
-            );
-        }
-        if !already_current && !self.advance_navigation_revision() {
-            return self.navigation_result(
-                client_id,
-                interaction_id,
-                gwt::protocol::NavigationScope::ProjectTab,
-                gwt::protocol::NavigationOutcome::Rejected,
-                canonical(self),
-            );
-        }
-
-        let change = self.apply_active_tab(tab_id.to_string());
-        self.queue_navigation_followup(change, Some(project_root), true);
-        self.navigation_result(
-            client_id,
-            interaction_id,
-            gwt::protocol::NavigationScope::ProjectTab,
-            if already_current {
-                gwt::protocol::NavigationOutcome::AlreadyCurrent
-            } else {
-                gwt::protocol::NavigationOutcome::Accepted
-            },
-            canonical(self),
-        )
-    }
-
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
+        let closing_project_root = self.tabs[index].project_root.clone();
 
         let window_ids = self
             .tabs
@@ -596,9 +535,10 @@ impl AppRuntime {
         }
 
         // Return any Issue Monitor launched windows to pending before the tab is
-        // removed, while the closing project is still the active root. Closing a
-        // project pauses (does not complete) its in-flight work.
-        let issue_monitor_events = self.issue_monitor_windows_closed_events(&window_ids);
+        // removed. The closing tab owns this lifecycle even when another tab is
+        // active. Closing a project pauses (does not complete) its in-flight work.
+        let issue_monitor_events =
+            self.issue_monitor_windows_closed_events(&closing_project_root, &window_ids);
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {

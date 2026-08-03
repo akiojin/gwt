@@ -242,6 +242,15 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
+    // The title requirement is meaningful only for the same Session/container
+    // that workspace.update itself can mutate. A stale ambient Session must
+    // not brick an unrelated cwd, repository, or branch before the user can
+    // inspect and recover it.
+    if crate::agent_project_state::resolve_session_work_mutation_target(worktree_root, &session.id)
+        .is_err()
+    {
+        return Ok(false);
+    }
     let projection_root = if session.worktree_path.exists() {
         session.worktree_path.as_path()
     } else {
@@ -409,9 +418,14 @@ Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
 /// path-based blocking and remain covered by the integrity hashes.)
 const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
     "execution-control.json",
+    "execution-generation-pointer.json",
+    "generation-ledger.json",
+    "execution-repair-audit.json",
     "verification-run.json",
     "verification-plan.json",
     "intake-outcome.json",
+    "action-obligations.json",
+    "action-obligation-revival.json",
 ];
 
 fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, HookError> {
@@ -441,7 +455,7 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
         "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.reopen` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.repair` / `execution.reopen` for execution authority, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
@@ -467,15 +481,29 @@ fn is_intake_editable_path(path: &str, worktree_root: &Path) -> bool {
 
 fn requires_owner_for_mutating_work(event: &HookEvent, worktree_root: &Path) -> bool {
     match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit") => {
-            !event_targets_documentation_or_guidance(event, worktree_root)
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => {
+            !event_targets_ownerless_editable_paths(event, worktree_root)
         }
-        Some("apply_patch") => !event_targets_documentation_or_guidance(event, worktree_root),
         Some("Bash") => event
             .command()
             .is_some_and(|command| !command_segments_are_ownerless_safe(command, worktree_root)),
         _ => false,
     }
+}
+
+/// Documentation/guidance, worktree bookkeeping (`.gwt/`, `tasks/`), and the
+/// session scratchpad under `<temp>/claude/` are ownerless-editable
+/// (issue #3356): none of them is production source, and the intake Stop
+/// gate's own settlement flows stage payloads there. Everything else —
+/// including source files staged elsewhere under the OS temp dir — still
+/// needs an owner.
+fn event_targets_ownerless_editable_paths(event: &HookEvent, worktree_root: &Path) -> bool {
+    let paths = event_target_paths(event);
+    !paths.is_empty()
+        && paths.iter().all(|path| {
+            is_intake_editable_path(path, worktree_root)
+                || Path::new(path).starts_with(std::env::temp_dir().join("claude"))
+        })
 }
 
 fn event_targets_documentation_or_guidance(event: &HookEvent, worktree_root: &Path) -> bool {
@@ -595,7 +623,8 @@ fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> b
 }
 
 fn is_ownerless_safe_segment(segment: &str, worktree_root: &Path) -> bool {
-    is_read_only_segment(segment)
+    is_loop_scaffolding_segment(segment)
+        || is_read_only_segment(segment)
         || is_transport_segment(segment)
         || is_verification_segment(segment)
         || is_goal_bookkeeping_segment(segment)
@@ -606,6 +635,24 @@ fn is_ownerless_safe_segment(segment: &str, worktree_root: &Path) -> bool {
         // `jq ... | gwtd` pipeline — is transport, exactly like the sanctioned
         // standalone heredoc envelope (issue #3265).
         || is_gwtd_only_segment(segment)
+}
+
+/// Pure loop/conditional scaffolding (`for x in a b c`, bare `done` / `fi`)
+/// is neutral: the loop body segments are classified on their own, so the
+/// scaffold itself must not force an owner (issue #3356). Command
+/// substitution disqualifies — it hides an inner command inside the word
+/// list.
+fn is_loop_scaffolding_segment(segment: &str) -> bool {
+    let trimmed = segment.trim();
+    if trimmed.contains("$(") || trimmed.contains('`') {
+        return false;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["done" | "fi" | "esac" | "else" | "then" | "do"] => true,
+        ["for", _var, "in", rest @ ..] => !rest.is_empty(),
+        _ => false,
+    }
 }
 
 /// A redirect target counts as bookkeeping only inside the worktree-local
@@ -749,7 +796,7 @@ fn is_verification_segment(segment: &str) -> bool {
     )
 }
 
-fn is_mutating_work_event(event: &HookEvent) -> bool {
+pub(crate) fn is_mutating_work_event(event: &HookEvent) -> bool {
     match event.tool_name.as_deref() {
         Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
         Some("Bash") => {
@@ -956,6 +1003,8 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "index.status"
             | "diagnostics.cpu"
             | "daemon.status"
+            | "execution.status"
+            | "execution.continue"
             | "hook.health"
             | "pane.list"
             | "pane.read"
@@ -1106,6 +1155,20 @@ fn normalize_command_name(token: &str) -> String {
 }
 
 fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
+    let mut subcommand_index = 0;
+    loop {
+        match tokens.get(subcommand_index).copied() {
+            Some("-C" | "-c") if tokens.get(subcommand_index + 1).is_some() => {
+                subcommand_index += 2;
+            }
+            Some("--no-pager" | "-P") => {
+                subcommand_index += 1;
+            }
+            Some("-C" | "-c") => return false,
+            _ => break,
+        }
+    }
+    let tokens = &tokens[subcommand_index..];
     match tokens {
         ["cat-file" | "diff" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "rev-list"
         | "rev-parse" | "show" | "status", ..] => true,
@@ -1451,11 +1514,23 @@ Coverage requirements.
     // that could still expand elsewhere fails closed.
     #[test]
     fn gwt_bookkeeping_target_accepts_only_literal_worktree_paths() {
-        let root = Path::new("/worktree");
-        for target in [
-            ".gwt/work/register-spec/envelope.json",
-            "/worktree/.gwt/work/out.json",
-        ] {
+        // `Path::is_absolute` needs a drive prefix on Windows, so the roots
+        // (and the absolute fixtures derived from them) are platform-shaped.
+        // Forward slashes are kept because the allowance rejects backslashes.
+        let (root, inside, outside) = if cfg!(windows) {
+            (
+                Path::new("C:/worktree"),
+                "C:/worktree/.gwt/work/out.json",
+                "C:/elsewhere/.gwt/out.json",
+            )
+        } else {
+            (
+                Path::new("/worktree"),
+                "/worktree/.gwt/work/out.json",
+                "/elsewhere/.gwt/out.json",
+            )
+        };
+        for target in [".gwt/work/register-spec/envelope.json", inside] {
             assert!(
                 is_worktree_gwt_bookkeeping_target(target, root),
                 "{target} is worktree-local bookkeeping"
@@ -1472,7 +1547,7 @@ Coverage requirements.
             ".gwt/*.json",
             "~/.gwt/out.json",
             "src/generated.rs",
-            "/elsewhere/.gwt/out.json",
+            outside,
             ".gwt/skill-state/execution-control.json",
             super::super::segments::UNRESOLVED_REDIRECT_TARGET,
         ] {
@@ -1593,9 +1668,12 @@ Coverage requirements.
     fn trusted_state_write_guard_blocks_direct_edits_in_all_lanes() {
         for state_file in [
             ".gwt/skill-state/execution-control.json",
+            ".gwt/skill-state/execution-generation-pointer.json",
             ".gwt/skill-state/verification-run.json",
             ".gwt/skill-state/verification-plan.json",
             ".gwt/skill-state/intake-outcome.json",
+            ".gwt/skill-state/action-obligations.json",
+            ".gwt/skill-state/action-obligation-revival.json",
         ] {
             let event = HookEvent {
                 tool_name: Some("Edit".to_string()),
@@ -1726,6 +1804,145 @@ Coverage requirements.
                 HookOutput::PreToolUsePermission { .. }
             ),
             "intake must still block production code edits"
+        );
+    }
+
+    // #3356 invariant: every operation a Stop gate names as its settlement
+    // path MUST pass the full PreToolUse chain in an ownerless session —
+    // changing either side alone recreates the registration deadlock.
+    #[test]
+    fn stop_gate_settlement_operations_pass_ownerless() {
+        let bash_event = |command: &str| HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        // Intake artifact gate settlement paths (FR-017).
+        let intake = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(intake.path(), &gwt_skills::INTAKE_PROFILE).expect("lane");
+        for operation in [
+            "issue.create",
+            "issue.comment",
+            "issue.spec.create",
+            "issue.spec.edit",
+            "intake.outcome.record",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert_eq!(
+                evaluate_with_context(
+                    &bash_event(&command),
+                    intake.path(),
+                    &WorkflowContext::unknown(),
+                )
+                .expect("guard"),
+                HookOutput::Silent,
+                "intake settlement op {operation} must pass PreToolUse ownerless"
+            );
+        }
+
+        // Execution-side gates (execution control, obligations, evidence,
+        // PR handoff) advertise these operations in their block messages.
+        let execution = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(execution.path(), &gwt_skills::EXECUTION_PROFILE)
+            .expect("lane");
+        for operation in [
+            "verify.plan",
+            "verify.run",
+            "execution.complete",
+            "execution.blocked",
+            "execution.adopt",
+            "pr.create",
+            "pr.edit",
+            "pr.ready",
+            "build.complete",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert_eq!(
+                evaluate_with_context(
+                    &bash_event(&command),
+                    execution.path(),
+                    &WorkflowContext::unknown(),
+                )
+                .expect("guard"),
+                HookOutput::Silent,
+                "execution settlement op {operation} must pass PreToolUse ownerless"
+            );
+        }
+    }
+
+    // #3356: read-only loops and sanctioned bookkeeping writes must not
+    // require an owner; production source stays owner-gated.
+    #[test]
+    fn ownerless_read_only_loops_and_bookkeeping_writes_pass() {
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::EXECUTION_PROFILE).expect("lane");
+        let context = WorkflowContext::unknown();
+
+        for command in [
+            "for d in crates docs scripts; do ls \"$d\"; done",
+            "for f in a.json b.json; do head -c 200 \"$f\"; done",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(&event, repo.path(), &context).expect("guard"),
+                HookOutput::Silent,
+                "read-only loop must pass ownerless: {command}"
+            );
+        }
+
+        let write_event = |path: String| HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": path })),
+            transcript_path: None,
+            cwd: None,
+        };
+        // Worktree bookkeeping (any extension) and the OS temp scratchpad
+        // are sanctioned ownerless surfaces.
+        for path in [
+            repo.path()
+                .join(".gwt/work/scratch/data.json")
+                .to_string_lossy()
+                .to_string(),
+            repo.path()
+                .join("tasks/state.json")
+                .to_string_lossy()
+                .to_string(),
+            std::env::temp_dir()
+                .join("claude/session-x/scratchpad/probe.json")
+                .to_string_lossy()
+                .to_string(),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&write_event(path.clone()), repo.path(), &context)
+                    .expect("guard"),
+                HookOutput::Silent,
+                "bookkeeping write must pass ownerless: {path}"
+            );
+        }
+        // Production source stays owner-gated.
+        let blocked = write_event(
+            repo.path()
+                .join("crates/gwt/src/main.rs")
+                .to_string_lossy()
+                .to_string(),
+        );
+        assert!(
+            matches!(
+                evaluate_with_context(&blocked, repo.path(), &context).expect("guard"),
+                HookOutput::PreToolUsePermission { .. }
+            ),
+            "production source writes still need an owner"
         );
     }
 
@@ -1868,6 +2085,23 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_execution_status_before_identity_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
     fn title_summary_guard_allows_read_only_git_config_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
@@ -1899,6 +2133,30 @@ Coverage requirements.
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_read_only_git_after_global_options() {
+        for command in [
+            "git -C /tmp/repository log -1",
+            "git -c color.ui=false status --short",
+            "git --no-pager log -1",
+            "git -P show --stat HEAD",
+            "git -C /tmp/repository -c color.ui=false --no-pager log -1",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -2079,6 +2337,10 @@ Coverage requirements.
             }
         }
 
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2090,7 +2352,7 @@ Coverage requirements.
 
         let output = evaluate_with_context(
             &event,
-            std::path::Path::new("."),
+            repo.path(),
             &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
@@ -2119,7 +2381,7 @@ Coverage requirements.
         assert_eq!(
             evaluate_with_context(
                 &allowed,
-                std::path::Path::new("."),
+                repo.path(),
                 &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
@@ -2140,7 +2402,7 @@ Coverage requirements.
             assert_eq!(
                 evaluate_with_context(
                     &allowed,
-                    std::path::Path::new("."),
+                    repo.path(),
                     &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
@@ -2172,6 +2434,8 @@ Coverage requirements.
     #[test]
     fn owner_guard_blocks_mutating_tools_without_owner() {
         let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -2199,6 +2463,8 @@ Coverage requirements.
     #[test]
     fn owner_guard_requires_plan_and_tasks_for_spec_owner() {
         let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), gwt_skills::LaneRegistry::default_profile())
+            .expect("pin execution lane");
         let event = HookEvent {
             tool_name: Some("Write".to_string()),
             tool_input: Some(serde_json::json!({

@@ -113,15 +113,20 @@ root_js_modules! {
     "index-settings-panel.js" => "renderIndexSettingsPanel",
     // SPEC-2008 Phase 24 — terminal viewport reflow primitives.
     "terminal-viewport-reflow.js" => "attachHostResizeReflow",
-    // SPEC-2008 Phase 25 — revision-aware window geometry sync primitives.
-    "window-geometry-sync.js" => "shouldApplyWorkspaceGeometry",
+    // SPEC-2008 Phase 25 — window geometry sync primitives (Issue #3364:
+    // the revision-arithmetic guard became the content-matched
+    // resolveIncomingGeometry).
+    "window-geometry-sync.js" => "resolveIncomingGeometry",
     // Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
     // dispatcher.
     "socket-receive-dispatcher.js" => "createSocketReceiveDispatcher",
-    // SPEC-3170 FR-040: local-first navigation overlays remain visible until
-    // an ordered backend result or revisioned workspace snapshot reconciles
-    // them.
-    "navigation-pending-controller.js" => "createNavigationPendingController",
+    // Issue #3365 — render-key lifecycle with per-window exception isolation
+    // (a failed sync retries on the next workspace_state instead of freezing
+    // the minimap / window list / telemetry behind a committed key).
+    "workspace-render-sync.js" => "createWorkspaceRenderSync",
+    // Issue #3365 — user-visible degradation notice for swallowed
+    // render/receive failures.
+    "render-degradation-banner.js" => "createRenderDegradationBanner",
     // SPEC-1939 Phase 24 — per-window terminal output batching before xterm
     // write.
     "terminal-output-buffer.js" => "createTerminalOutputBatcher",

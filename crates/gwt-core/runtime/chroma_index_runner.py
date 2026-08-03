@@ -1478,33 +1478,47 @@ class E5EmbeddingFunction:
             return [input_value]
         return list(input_value)
 
+    @staticmethod
+    def _native_finite_query_vectors(output: Any) -> List[List[float]]:
+        """Normalize model output at the Chroma API boundary.
+
+        SentenceTransformer returns NumPy float32 scalars. Chroma's public
+        embedding contract accepts native Python floats and rejects the NumPy
+        scalars before querying an otherwise healthy collection.
+        """
+        vectors: List[List[float]] = []
+        for vector_index, vector in enumerate(output):
+            normalized: List[float] = []
+            for value_index, value in enumerate(vector):
+                try:
+                    native_value = float(value)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError(
+                        "embedding value must be numeric "
+                        f"(vector={vector_index}, value={value_index})"
+                    ) from error
+                if not math.isfinite(native_value):
+                    raise ValueError(
+                        "embedding value must be finite "
+                        f"(vector={vector_index}, value={value_index})"
+                    )
+                normalized.append(native_value)
+            vectors.append(normalized)
+        return vectors
+
     def embed_documents(self, input: Any = None, **kwargs: Any) -> List[List[float]]:  # noqa: A002
         if input is None:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "passage")
         out = self._model_or_default().encode(prepared)
-        return [list(v) for v in out]
+        return [list(vector) for vector in out]
 
     def embed_query(self, input: Any = None, **kwargs: Any) -> List[List[float]]:  # noqa: A002
         if input is None:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "query")
         out = self._model_or_default().encode(prepared)
-        normalized: List[List[float]] = []
-        for vector in out:
-            native_vector: List[float] = []
-            for value in vector:
-                try:
-                    native_value = float(value)
-                except (TypeError, ValueError, OverflowError) as error:
-                    raise ValueError(
-                        "query embedding values must be finite numbers"
-                    ) from error
-                if not math.isfinite(native_value):
-                    raise ValueError("query embedding values must be finite numbers")
-                native_vector.append(native_value)
-            normalized.append(native_vector)
-        return normalized
+        return self._native_finite_query_vectors(out)
 
     # Chroma EmbeddingFunction protocol: callable on a sequence of strings.
     # Default to passage mode (used during indexing).
@@ -5031,16 +5045,20 @@ def action_search_multi_v2(
                 query_embedding,
             )
         except Exception as error:
+            # Phase 70a FR-400: query-contract failures (for example an
+            # unsupported embedding scalar type) do not prove the verified
+            # store is corrupt. Re-check the same canonical health source used
+            # by status; only an actually missing/corrupt store enters repair.
             try:
-                failure_state, failure_health = _classify_scope_for_search(
+                current_state, current_health = _classify_scope_for_search(
                     repo_hash, scope_worktree, scope, db_root=db_root
                 )
             except Exception:
-                failure_state, failure_health = state, health
-            if failure_state in ("missing", "corrupt"):
+                current_state, current_health = state, health
+            if current_state in ("missing", "corrupt"):
                 scope_states[scope] = {
-                    "state": failure_state,
-                    "reason": failure_health.get("reason", failure_state),
+                    "state": current_state,
+                    "reason": current_health.get("reason", current_state),
                 }
                 continue
             return _search_failed_payload([scope], "query", error)

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::OsStr,
     fmt,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -16,6 +17,21 @@ use gwt_core::{
     worktree_hash::compute_worktree_hash,
 };
 use serde::Serialize;
+
+const DISABLE_BACKGROUND_INDEX_ENV: &str = "GWT_DISABLE_BACKGROUND_INDEX";
+
+/// SPEC-3170 FR-073/FR-074: emergency opt-out shared by every automatic
+/// project-index bootstrap entry. Explicit search, status refresh, and manual
+/// rebuild paths do not consult this policy.
+pub fn automatic_background_index_disabled() -> bool {
+    automatic_background_index_disabled_value(
+        std::env::var_os(DISABLE_BACKGROUND_INDEX_ENV).as_deref(),
+    )
+}
+
+fn automatic_background_index_disabled_value(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
 
 /// Determine `RepoHash` for the given repository root by shelling out to
 /// `git remote get-url origin`. Returns `None` if no origin is configured.
@@ -1786,6 +1802,20 @@ mod tests {
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    fn automatic_background_index_opt_out_is_exact() {
+        assert!(automatic_background_index_disabled_value(Some(
+            std::ffi::OsStr::new("1")
+        )));
+        assert!(!automatic_background_index_disabled_value(None));
+        assert!(!automatic_background_index_disabled_value(Some(
+            std::ffi::OsStr::new("true")
+        )));
+        assert!(!automatic_background_index_disabled_value(Some(
+            std::ffi::OsStr::new("0")
+        )));
+    }
+
     struct FixtureEnvGuard {
         previous: Option<String>,
     }
@@ -2896,6 +2926,9 @@ detached
     #[test]
     fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         let started = tmp.path().join("owner-started");
         let started_for_thread = started.clone();

@@ -26,7 +26,6 @@ export const UI_TRACE_EVENT = Object.freeze({
   resizePointermoveFrame: "resize_pointermove_frame",
   resizePointermoveFrameScheduled: "resize_pointermove_frame_scheduled",
   terminalActivation: "terminal_activation",
-  terminalInputEnqueue: "terminal_input_enqueue",
   terminalVisibilityReveal: "terminal_visibility_reveal",
   writeOutput: "write_output",
 });
@@ -63,8 +62,6 @@ export function createUiTraceWiring({
     throw new TypeError("createUiTraceWiring requires a send callback");
   }
 
-  let activeEpoch = null;
-
   function traceUi(kind, fields = {}) {
     profiler.record(kind, fields);
   }
@@ -84,23 +81,14 @@ export function createUiTraceWiring({
     return Boolean(profiler.isActive());
   }
 
-  function currentEpoch() {
-    if (!isTracing()) {
-      return null;
-    }
-    return activeEpoch;
-  }
-
   function start() {
     const trace = profiler.start();
-    activeEpoch = Symbol("ui-trace-epoch");
     log(`[ui-trace] started ${trace.session_id}`);
     return trace;
   }
 
   function stop() {
     const trace = profiler.stop();
-    activeEpoch = null;
     if (!trace) {
       alert("UI trace is not running.");
       return null;
@@ -126,7 +114,6 @@ export function createUiTraceWiring({
   }
 
   return {
-    currentEpoch,
     isTracing,
     registerPalette,
     start,

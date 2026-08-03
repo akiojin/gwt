@@ -191,14 +191,10 @@ export function createKnowledgeKanbanSurface({
             pendingSearchTimer: null,
             loadRequestId: 0,
             detailRequestId: 0,
-            selectionGeneration: 0,
             searchRequestId: 0,
             inFlightSearchRequestId: 0,
-            inFlightSearchQuery: "",
-            inFlightSearchSelectionGeneration: 0,
             searchInFlight: false,
             queuedSearchQuery: "",
-            queuedSearchPending: false,
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
             loadRecoveryRetryCount: 0,
@@ -290,11 +286,8 @@ export function createKnowledgeKanbanSurface({
         }
         if (state) {
           state.queuedSearchQuery = "";
-          state.queuedSearchPending = false;
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
-          state.inFlightSearchQuery = "";
-          state.inFlightSearchSelectionGeneration = 0;
           state.detailRequestId = 0;
           state.queuedLoadRefresh = false;
           state.loadRecoveryRetryCount = 0;
@@ -393,8 +386,9 @@ export function createKnowledgeKanbanSurface({
         state.loading = true;
         state.refreshing = Boolean(refresh);
         state.searching = false;
+        state.searchInFlight = false;
+        state.inFlightSearchRequestId = 0;
         state.queuedSearchQuery = "";
-        state.queuedSearchPending = state.inFlightSearchRequestId !== 0;
         state.queuedLoadRefresh = false;
         state.searchRequestId += 1;
         state.error = "";
@@ -457,31 +451,11 @@ export function createKnowledgeKanbanSurface({
       }
 
       function knowledgeDetailRequestMatches(state, event) {
-        if (event.request_id !== null && event.request_id !== undefined) {
-          if (event.request_id === state.detailRequestId) {
-            return true;
-          }
-          // A row click supersedes the detail bundled with the earlier
-          // load. Accepting that load response would move selection back
-          // to the initially selected Issue while the clicked row is still
-          // loading.
-          return (
-            state.detailRequestId === 0 &&
-            event.request_id === state.loadRequestId
-          );
-        }
-        const detailNumber = event.detail?.number;
-        if (detailNumber !== null && detailNumber !== undefined) {
-          // Legacy peers omit request_id. The selected Issue number is the
-          // only safe correlation key in that protocol shape.
-          return (
-            state.selectedNumber === null ||
-            state.selectedNumber === undefined ||
-            detailNumber === state.selectedNumber
-          );
-        }
-        // An uncorrelated legacy error must not cancel a newer row request.
-        return state.detailRequestId === 0;
+        return (
+          !event.request_id ||
+          event.request_id === state.loadRequestId ||
+          event.request_id === state.detailRequestId
+        );
       }
 
       function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
@@ -490,11 +464,7 @@ export function createKnowledgeKanbanSurface({
         const requestId = nextKnowledgeSearchRequestId++;
         state.searchRequestId = requestId;
         state.inFlightSearchRequestId = requestId;
-        state.inFlightSearchQuery = query;
-        state.inFlightSearchSelectionGeneration = state.selectionGeneration;
         state.searchInFlight = true;
-        state.queuedSearchQuery = "";
-        state.queuedSearchPending = false;
         state.searching = true;
         send({
           kind: "search_knowledge_bridge",
@@ -516,13 +486,9 @@ export function createKnowledgeKanbanSurface({
         state.error = "";
         if (!query) {
           state.searching = false;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
           state.queuedSearchQuery = "";
-          state.queuedSearchPending = state.inFlightSearchRequestId !== 0;
-          if (state.inFlightSearchRequestId === 0) {
-            state.searchInFlight = false;
-            state.inFlightSearchQuery = "";
-            state.inFlightSearchSelectionGeneration = 0;
-          }
           state.searchRequestId += 1;
           restoreKnowledgeBaseEntries(state);
           renderKnowledgeBridge(windowId);
@@ -533,19 +499,8 @@ export function createKnowledgeKanbanSurface({
           renderKnowledgeBridge(windowId);
           return;
         }
-        if (state.inFlightSearchRequestId !== 0) {
-          if (
-            query === state.inFlightSearchQuery &&
-            state.searchRequestId === state.inFlightSearchRequestId
-          ) {
-            state.queuedSearchQuery = "";
-            state.queuedSearchPending = false;
-            state.searching = true;
-            renderKnowledgeBridge(windowId);
-            return;
-          }
+        if (state.searchInFlight) {
           state.queuedSearchQuery = query;
-          state.queuedSearchPending = true;
           state.searching = true;
           renderKnowledgeBridge(windowId);
           return;
@@ -563,12 +518,8 @@ export function createKnowledgeKanbanSurface({
             renderKnowledgeBridge(windowId);
             return;
           }
-          if (state.inFlightSearchRequestId !== 0) {
-            const differsFromInFlight =
-              latestQuery !== state.inFlightSearchQuery ||
-              state.searchRequestId !== state.inFlightSearchRequestId;
-            state.queuedSearchQuery = differsFromInFlight ? latestQuery : "";
-            state.queuedSearchPending = differsFromInFlight;
+          if (state.searchInFlight) {
+            state.queuedSearchQuery = latestQuery;
             renderKnowledgeBridge(windowId);
             return;
           }
@@ -577,34 +528,8 @@ export function createKnowledgeKanbanSurface({
         renderKnowledgeBridge(windowId);
       }
 
-      function continueWithLatestKnowledgeSearch(
-        windowId,
-        knowledgeKind,
-        state,
-      ) {
-        if (!state.queuedSearchPending) {
-          return false;
-        }
-        const nextQuery = state.queuedSearchQuery;
-        state.queuedSearchQuery = "";
-        state.queuedSearchPending = false;
-        state.searchInFlight = false;
-        state.inFlightSearchRequestId = 0;
-        state.inFlightSearchQuery = "";
-        state.inFlightSearchSelectionGeneration = 0;
-        if (nextQuery && workspaceWindowById(windowId)) {
-          sendKnowledgeSemanticSearch(windowId, knowledgeKind, nextQuery);
-        } else {
-          state.searching = false;
-          restoreKnowledgeBaseEntries(state);
-        }
-        renderKnowledgeBridge(windowId);
-        return true;
-      }
-
       function requestKnowledgeDetail(windowId, knowledgeKind, number) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
-        state.selectionGeneration += 1;
         state.selectedNumber = number;
         state.detailLoading = true;
         const requestId = nextKnowledgeLoadRequestId++;
@@ -1878,34 +1803,22 @@ export function createKnowledgeKanbanSurface({
             );
             const isInFlightResponse =
               event.request_id === state.inFlightSearchRequestId;
-            if (!isInFlightResponse) {
-              break;
+            if (isInFlightResponse) {
+              state.searchInFlight = false;
+              state.inFlightSearchRequestId = 0;
             }
-            const selectionChangedDuringSearch =
-              state.inFlightSearchSelectionGeneration !==
-                state.selectionGeneration;
-            if (
-              continueWithLatestKnowledgeSearch(
-                event.id,
-                event.knowledge_kind,
-                state,
-              )
-            ) {
-              break;
-            }
-            state.searchInFlight = false;
-            state.inFlightSearchRequestId = 0;
-            state.inFlightSearchQuery = "";
-            state.inFlightSearchSelectionGeneration = 0;
             if (
               event.request_id !== state.searchRequestId ||
               event.query !== state.query.trim()
             ) {
-              break;
-            }
-            if (selectionChangedDuringSearch) {
-              state.searching = false;
-              renderKnowledgeBridge(event.id);
+              const nextQuery = state.queuedSearchQuery || state.query.trim();
+              state.queuedSearchQuery = "";
+              if (isInFlightResponse && nextQuery) {
+                scheduleKnowledgeSearch(
+                  event.id,
+                  event.knowledge_kind,
+                );
+              }
               break;
             }
             state.entries = event.entries || [];
@@ -1913,6 +1826,15 @@ export function createKnowledgeKanbanSurface({
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.error = "";
+            const nextQuery = state.queuedSearchQuery;
+            state.queuedSearchQuery = "";
+            if (nextQuery && nextQuery !== event.query) {
+              scheduleKnowledgeSearch(
+                event.id,
+                event.knowledge_kind,
+              );
+              break;
+            }
             state.searching = false;
             if (state.selectedNumber) {
               state.detailLoading = true;
@@ -2021,40 +1943,29 @@ export function createKnowledgeKanbanSurface({
             );
             const isSearchError =
               typeof event.request_id === "number" && typeof event.query === "string";
-            if (isSearchError) {
-              if (event.request_id !== state.inFlightSearchRequestId) {
-                break;
-              }
-              const selectionChangedDuringSearch =
-                state.inFlightSearchSelectionGeneration !==
-                state.selectionGeneration;
-              if (
-                continueWithLatestKnowledgeSearch(
-                  event.id,
-                  event.knowledge_kind,
-                  state,
-                )
-              ) {
-                break;
-              }
-              state.searchInFlight = false;
-              state.inFlightSearchRequestId = 0;
-              state.inFlightSearchQuery = "";
-              state.inFlightSearchSelectionGeneration = 0;
-              if (selectionChangedDuringSearch) {
-                state.searching = false;
-                renderKnowledgeBridge(event.id);
-              } else if (
-                event.request_id === state.searchRequestId &&
-                event.query === state.query.trim()
-              ) {
-                state.searching = false;
-                state.error = event.message;
-                renderKnowledgeBridge(event.id);
+            if (
+              isSearchError &&
+              (event.request_id !== state.inFlightSearchRequestId ||
+                event.query !== state.query.trim())
+            ) {
+              if (event.request_id === state.inFlightSearchRequestId) {
+                state.searchInFlight = false;
+                state.inFlightSearchRequestId = 0;
+                const nextQuery = state.queuedSearchQuery || state.query.trim();
+                state.queuedSearchQuery = "";
+                if (nextQuery) {
+                  scheduleKnowledgeSearch(
+                    event.id,
+                    event.knowledge_kind,
+                  );
+                }
               }
               break;
             }
-            if (!knowledgeDetailRequestMatches(state, event)) {
+            if (
+              !isSearchError &&
+              !knowledgeDetailRequestMatches(state, event)
+            ) {
               break;
             }
             const matchesLoadRequest =
@@ -2068,6 +1979,9 @@ export function createKnowledgeKanbanSurface({
               state.error = event.message;
             }
             state.searching = false;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            state.queuedSearchQuery = "";
             state.detailLoading = false;
             renderKnowledgeBridge(event.id);
             break;

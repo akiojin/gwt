@@ -12,7 +12,6 @@ use axum::{
     Json, Router,
 };
 use chrono::TimeZone;
-use gwt::cli::hook::event_dispatcher;
 use gwt::daemon_runtime::{handle_coordination_event, handle_forward, handle_runtime_state};
 use gwt_agent::{runtime_state_path, AgentId, Session};
 use gwt_core::paths::gwt_cache_dir;
@@ -109,14 +108,6 @@ impl CaptureServer {
             .recv_timeout(Duration::from_secs(1))
             .expect("expected hook live event")
     }
-
-    fn expect_no_event(&self) {
-        let unexpected = self.rx.recv_timeout(Duration::from_millis(150));
-        assert!(
-            unexpected.is_err(),
-            "expected no additional hook live event, got {unexpected:?}"
-        );
-    }
 }
 
 impl Drop for CaptureServer {
@@ -206,49 +197,6 @@ fn runtime_state_owner_forwards_live_event_to_loopback_target() {
     assert_eq!(payload["agent_session_id"], "agent-session-1");
     assert_eq!(payload["branch"], "feature/runtime-daemon");
     assert_eq!(payload["status"], "Running");
-}
-
-#[test]
-fn user_prompt_submit_dispatches_runtime_state_without_forward_live_event() {
-    let _lock = env_lock();
-    let mut env = EnvGuard::new();
-    let home = tempfile::tempdir().unwrap();
-    env.set("HOME", home.path().as_os_str().to_os_string());
-    env.set("USERPROFILE", home.path().as_os_str().to_os_string());
-    env.unset("CODEX_THREAD_ID");
-    env.unset("GWT_HOOK_PROFILE_PATH");
-
-    let sessions_dir = home.path().join(".gwt").join("sessions");
-    let worktree = home.path().join("repo");
-    fs::create_dir_all(&worktree).unwrap();
-
-    let session = Session::new(&worktree, "feature/runtime-daemon", AgentId::Codex);
-    session.save(&sessions_dir).unwrap();
-    let runtime_path = runtime_state_path(&sessions_dir, &session.id);
-
-    let server = CaptureServer::start();
-    env.set("GWT_SESSION_ID", session.id.clone());
-    env.set(
-        "GWT_SESSION_RUNTIME_PATH",
-        runtime_path.as_os_str().to_os_string(),
-    );
-    env.set("GWT_HOOK_FORWARD_URL", server.url.clone());
-    env.set("GWT_HOOK_FORWARD_TOKEN", "secret-token");
-
-    let input = serde_json::json!({
-        "session_id": "agent-session-prompt",
-        "cwd": worktree.display().to_string(),
-        "prompt": "inspect the current task"
-    })
-    .to_string();
-    event_dispatcher::handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
-        .unwrap();
-
-    let (_auth, payload) = server.recv();
-    assert_eq!(payload["kind"], "runtime_state");
-    assert_eq!(payload["source_event"], "UserPromptSubmit");
-    assert_eq!(payload["status"], "Running");
-    server.expect_no_event();
 }
 
 #[test]

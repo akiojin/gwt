@@ -10,7 +10,7 @@ import math
 import unittest
 from unittest import mock
 
-import numpy as np
+import numpy
 
 import chroma_index_runner as runner
 
@@ -44,37 +44,6 @@ class E5PrefixTests(unittest.TestCase):
         call_args = fake_model.encode.call_args
         passed = call_args[0][0]
         self.assertEqual(passed[0], "query: how do watchers work")
-
-    def test_embed_query_normalizes_numpy_scalars_to_native_finite_floats(self):
-        fake_model = mock.MagicMock()
-        fake_model.encode.return_value = np.asarray(
-            [[0.25, -0.5, 0.75]], dtype=np.float32
-        )
-
-        result = runner.E5EmbeddingFunction(model=fake_model).embed_query(
-            "native float contract"
-        )
-
-        self.assertEqual(len(result), 1)
-        self.assertTrue(
-            all(type(value) is float for value in result[0]),
-            f"query vector must contain only Python native floats: {result!r}",
-        )
-        self.assertTrue(
-            all(math.isfinite(value) for value in result[0]),
-            f"query vector must contain only finite values: {result!r}",
-        )
-
-    def test_embed_query_rejects_non_finite_scalars(self):
-        fake_model = mock.MagicMock()
-        fake_model.encode.return_value = np.asarray(
-            [[0.25, np.nan, np.inf]], dtype=np.float32
-        )
-
-        with self.assertRaisesRegex(ValueError, "finite"):
-            runner.E5EmbeddingFunction(model=fake_model).embed_query(
-                "invalid numeric contract"
-            )
 
     def test_passage_prefix_not_double_applied(self):
         fake_model = mock.MagicMock()
@@ -113,6 +82,45 @@ class E5PrefixTests(unittest.TestCase):
         # Chroma compatibility — __call__ should default to passage mode
         result = ef(["doc one", "doc two"])
         self.assertEqual(len(result), 2)
+
+    def test_embed_query_normalizes_numpy_scalars_to_native_finite_floats(self):
+        fake_model = mock.MagicMock()
+        fake_model.encode.return_value = numpy.asarray(
+            [[0.1, 0.2, 0.3]], dtype=numpy.float32
+        )
+
+        result = runner.E5EmbeddingFunction(model=fake_model).embed_query("query")
+
+        self.assertTrue(result)
+        self.assertTrue(
+            all(type(value) is float for value in result[0]),
+            f"Chroma query embeddings require native Python floats: {result!r}",
+        )
+        self.assertTrue(all(math.isfinite(value) for value in result[0]))
+
+    def test_embed_query_rejects_non_finite_values_before_chroma(self):
+        fake_model = mock.MagicMock()
+        fake_model.encode.return_value = numpy.asarray(
+            [[0.1, numpy.nan]], dtype=numpy.float32
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            runner.E5EmbeddingFunction(model=fake_model).embed_query("query")
+
+    def test_embed_documents_keeps_existing_model_scalar_conversion_path(self):
+        fake_model = mock.MagicMock()
+        fake_model.encode.return_value = numpy.asarray(
+            [[0.1, 0.2]], dtype=numpy.float32
+        )
+
+        result = runner.E5EmbeddingFunction(model=fake_model).embed_documents("document")
+
+        self.assertIsInstance(
+            result[0][0],
+            numpy.float32,
+            "FR-399 normalizes only the precomputed query boundary; document "
+            "embedding must not gain an extra per-scalar Python conversion",
+        )
 
 
 if __name__ == "__main__":

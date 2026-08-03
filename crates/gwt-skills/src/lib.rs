@@ -30,8 +30,9 @@ pub use coordination_guidance::{
 };
 pub use distribute::{
     apply_reduced_skill_set, distribute_to_worktree, distribute_to_worktree_for_targets,
-    prune_stale_gwt_assets, prune_stale_gwt_assets_for_targets, DistributeReport,
-    ManagedAssetTarget, CURATION_EXCLUDED_SKILLS,
+    distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
+    prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
+    TrackedAssetWritePolicy, CURATION_EXCLUDED_SKILLS,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
@@ -39,9 +40,10 @@ pub use hooks::{
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
 pub use lane::{
-    lane_file_path, read_lane_profile, resolve_lane_for_worktree, write_lane_file, GuidanceVariant,
-    LanePolicyFlags, LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE,
-    LANE_FILE_RELATIVE, LANE_FILE_VERSION,
+    lane_file_path, read_lane_profile, resolve_lane_for_worktree,
+    resolve_session_kind_for_worktree, write_lane_file, GuidanceVariant, LanePolicyFlags,
+    LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE, LANE_FILE_RELATIVE,
+    LANE_FILE_VERSION,
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
@@ -868,8 +870,8 @@ mod tests {
                 "execution.reopen",
                 "temporary question",
                 "params.derive:true",
-                "cannot be repaired in the same execution lifetime",
-                "fresh linked-owner launch",
+                "execution.repair",
+                "execution.status",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -1670,6 +1672,68 @@ mod tests {
             assert!(
                 !content.contains("summary in English"),
                 "unexpected English-only description guidance in {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn planning_and_verification_guidance_require_complete_blocking_gate_evidence() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
+        let required = [
+            "agent-reachable recovery operation",
+            "diagnostic visibility",
+            "positive test",
+            "false-positive negative test",
+        ];
+
+        for skill in ["gwt-plan-spec", "gwt-verify"] {
+            let source_relative = format!(".claude/skills/{skill}/SKILL.md");
+            let generated_relative = format!(".codex/skills/{skill}/SKILL.md");
+            let source = std::fs::read_to_string(workspace_root.join(&source_relative))
+                .unwrap_or_else(|err| panic!("failed to read {source_relative}: {err}"));
+            let generated = std::fs::read_to_string(workspace_root.join(&generated_relative))
+                .unwrap_or_else(|err| panic!("failed to read {generated_relative}: {err}"));
+            let materialized_claude = std::fs::read_to_string(
+                materialized.path().join(&source_relative),
+            )
+            .unwrap_or_else(|err| panic!("failed to read materialized {source_relative}: {err}"));
+            let materialized_codex =
+                std::fs::read_to_string(materialized.path().join(&generated_relative))
+                    .unwrap_or_else(|err| {
+                        panic!("failed to read materialized {generated_relative}: {err}")
+                    });
+
+            for phrase in required {
+                assert!(
+                    source.contains(phrase),
+                    "{source_relative} must require blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    generated.contains(phrase),
+                    "{generated_relative} must materialize blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    materialized_claude.contains(phrase),
+                    "materialized {source_relative} must require blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    materialized_codex.contains(phrase),
+                    "materialized {generated_relative} must require blocking-gate evidence: {phrase}"
+                );
+            }
+            assert_eq!(
+                generated, source,
+                "{generated_relative} drifted from canonical {source_relative}"
+            );
+            assert_eq!(
+                materialized_claude, source,
+                "materialized {source_relative} drifted from canonical source"
+            );
+            assert_eq!(
+                materialized_codex, source,
+                "materialized {generated_relative} drifted from canonical source"
             );
         }
     }

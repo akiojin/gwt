@@ -599,7 +599,7 @@ export function createProjectShellSurface({
         row.addEventListener("click", () => {
           windowListOpen = false;
           renderWindowList();
-          frameWindow(entry.id, { animate: false });
+          frameWindow(entry.id);
         });
         return row;
       }

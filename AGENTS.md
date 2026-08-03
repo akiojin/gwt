@@ -202,6 +202,7 @@
 ### ローカル検証/実行ルール（Rust）
 
 - このリポジトリのローカル検証・実行は Cargo を使用する
+- 現在の checkout で `gwtd` の JSON operation を実行する場合は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため使用しない
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
 - テスト: `cargo test -p gwt-core -p gwt --all-features`

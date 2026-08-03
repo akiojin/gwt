@@ -11,6 +11,11 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
+const workspaceRenderSyncSource = readFileSync(
+  resolve(here, "../workspace-render-sync.js"),
+  "utf8",
+);
 // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (state, interaction
 // guard, builders, renderLaunchWizard, chrome listeners) moved from app.js
 // to launch-wizard-surface.js; wizard render/source patterns are pinned
@@ -1653,9 +1658,12 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
 
 test("renderWorkspace refreshes operator telemetry when windows mount/unmount (SPEC-3038)", () => {
   const body = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the recompute is the render guard's `recompute` hook, which
+  // runs even when a per-window sync step throws — the badge / empty state /
+  // minimap must not freeze behind a poisoned window.
   assert.match(
     body,
-    /recomputeOperatorTelemetry\(\)/,
+    /recompute:\s*recomputeOperatorTelemetry/,
     "window-count badge + empty state must update when windows mount/unmount",
   );
 });
@@ -4198,10 +4206,23 @@ test("Recent Projects render key ignores workspace state", () => {
 
 test("viewport-only workspace_state skips unchanged window reconciliation", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  // Issue #3365: the rendered-key slot lives inside workspaceRenderSync so an
+  // exception mid-sync leaves the key uncommitted (the next workspace_state
+  // retries instead of freezing behind the diff skip).
   assert.match(
     appSource,
-    /let\s+renderedWorkspaceWindowsKey\s*=/,
-    "app.js must track the last reconciled Workspace Windows shell key",
+    /import\s*\{\s*createWorkspaceRenderSync\s*\}\s*from\s*"\/workspace-render-sync\.js"/,
+    "app.js must import the render-key sync guard",
+  );
+  assert.match(
+    appSource,
+    /const\s+workspaceRenderSync\s*=\s*createWorkspaceRenderSync\s*\(/,
+    "app.js must own one workspace render sync guard instance",
+  );
+  assert.match(
+    workspaceRenderSyncSource,
+    /if\s*\(\s*renderedKey\s*===\s*key\s*\)\s*\{\s*return\s*\{\s*skipped:\s*true/,
+    "the render guard must skip an unchanged window key before any sync work",
   );
   assert.match(
     appSource,
@@ -4222,11 +4243,9 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
   const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
   const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
-  const keyIndex = renderWorkspaceBody.indexOf(
-    "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
-  );
+  const keyIndex = renderWorkspaceBody.indexOf("workspaceRenderSync.render({");
   const guardIndex = renderWorkspaceBody.indexOf(
-    "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
+    "key: workspaceWindowsRenderKey(workspace)",
   );
   const classifyIndex = renderWorkspaceBody.indexOf(
     "classifyProjectWindowVisibility",
@@ -4234,6 +4253,12 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
   const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
+  const syncGuardIndex = workspaceRenderSyncSource.indexOf('guard("sync"');
+  const recomputeGuardIndex = workspaceRenderSyncSource.indexOf('guard("recompute"');
+  const afterSyncGuardIndex = workspaceRenderSyncSource.indexOf('guard("after_sync"');
+  const commitWindowKeyIndex = workspaceRenderSyncSource.indexOf(
+    "renderedKey = key;",
+  );
 
   assert.notEqual(
     nextViewportIndex,
@@ -4266,12 +4291,13 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
   assert.ok(
     guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
-    "unchanged window key must return before reconciliation and focus activation",
+    "reconciliation and focus activation must run inside the guarded render call",
   );
-  assert.match(
-    renderWorkspaceBody.slice(guardIndex, classifyIndex),
-    /return\s*;/,
-    "unchanged window key guard must return before reconciliation",
+  assert.ok(
+    commitWindowKeyIndex > syncGuardIndex &&
+      commitWindowKeyIndex > recomputeGuardIndex &&
+      commitWindowKeyIndex > afterSyncGuardIndex,
+    "workspace render sync must commit the window key only after reconciliation, telemetry, and focus all succeed",
   );
 });
 
@@ -5243,9 +5269,12 @@ test("Workspace visibility classification reuses direct id sets", () => {
     /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
     "renderWorkspace must not allocate an active window id array before classification",
   );
+  // Issue #3365: the set is assigned inside the guarded sync callback (the
+  // declaration lives outside so afterSync can reuse it), and topmost focus
+  // reads it optionally because a failed sync may have left it unset.
   assert.match(
     renderWorkspaceBody,
-    /const\s+activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
+    /activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
     "renderWorkspace must derive active window ids as a Set once",
   );
   assert.match(
@@ -5255,7 +5284,7 @@ test("Workspace visibility classification reuses direct id sets", () => {
   );
   assert.match(
     renderWorkspaceBody,
-    /topmostId\s*&&\s*activeWindowIdSet\.has\s*\(\s*topmostId\s*\)/,
+    /topmostId\s*&&\s*activeWindowIdSet\?\.has\s*\(\s*topmostId\s*\)/,
     "renderWorkspace must reuse the active id set for topmost focus membership",
   );
 });
@@ -5404,10 +5433,10 @@ test("Terminal output decode is deferred out of the receive path", () => {
     "flush merge must decode each encoded chunk in order",
   );
 
-  const writeOutputBody = extractFunctionBody(appSource, "writeOutputToTerminal");
+  const writeOutputBody = extractFunctionBody(appSource, "writeOutput");
   assert.match(
     writeOutputBody,
-    /terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*,\s*traceMetadata\s*\)/,
+    /terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\)/,
     "ready terminal output must enqueue encoded chunks without eager decode",
   );
   const readyEnqueueIndex = writeOutputBody.indexOf(
@@ -5418,192 +5447,6 @@ test("Terminal output decode is deferred out of the receive path", () => {
     readyPath,
     /decoder\.decode\s*\(|decodeBase64\s*\(/,
     "writeOutput ready path must not decode before the scheduled flush",
-  );
-});
-
-test("Playwright synthetic output uses the real terminal scheduler without trace markers", () => {
-  const bridgeBody = extractFunctionBody(appSource, "installPlaywrightTestBridge");
-  assert.match(
-    bridgeBody,
-    /enqueueSyntheticOutput\s*\(\s*windowId\s*,\s*base64\s*\)\s*\{\s*return\s+writeOutputToTerminal\(\s*windowId\s*,\s*base64\s*\);?\s*\}/,
-    "the test-only producer must enqueue through the production terminal output scheduler",
-  );
-  const syntheticOutputMethod = bridgeBody.match(
-    /enqueueSyntheticOutput\s*\(\s*windowId\s*,\s*base64\s*\)\s*\{([\s\S]*?)\n\s*\}/,
-  );
-  assert.ok(syntheticOutputMethod, "expected a Playwright synthetic output method");
-  assert.doesNotMatch(
-    syntheticOutputMethod[1],
-    /\bwriteOutput\s*\(/,
-    "synthetic busy load must not consume the active trace ring",
-  );
-});
-
-test("Terminal input uses one privacy-safe sequenced send helper", () => {
-  const helperBody = extractFunctionBody(appSource, "sendTerminalInput");
-  const sequenceIndex = helperBody.indexOf("inputTraceSeq += 1;");
-  const priorityIndex = helperBody.indexOf(
-    "terminalOutputBatcher.prioritize(windowId);",
-  );
-  const traceIndex = helperBody.indexOf(
-    "traceUi(UI_TRACE_EVENT.terminalInputEnqueue",
-  );
-  const sendIndex = helperBody.indexOf(
-    'send({ kind: "terminal_input", id: windowId, data });',
-  );
-  assert.ok(sequenceIndex !== -1, "the helper must assign the browser-local sequence");
-  assert.ok(priorityIndex > sequenceIndex, "priority must follow sequence assignment");
-  assert.ok(traceIndex > priorityIndex, "the enqueue marker must follow the priority hint");
-  assert.ok(sendIndex > traceIndex, "the unchanged wire send must follow the marker");
-  assert.match(
-    helperBody,
-    /if\s*\(\s*uiTraceWiring\.isTracing\(\)\s*\)\s*\{[\s\S]*?traceUi\(\s*UI_TRACE_EVENT\.terminalInputEnqueue\s*,\s*\{\s*sequence:\s*inputTraceSeq\s*,\s*window_id:\s*windowId\s*,?\s*\}\s*\)/,
-    "inactive tracing must skip input marker field allocation",
-  );
-  assert.doesNotMatch(
-    helperBody.slice(traceIndex, sendIndex),
-    /data_len|dataLen|typed_text|credential|env_secret|ws_state|wsState|reason|\.\.\./,
-    "the terminal input marker producer must use the exact sequence/window allowlist",
-  );
-
-  const wheelBody = extractFunctionBody(appSource, "attachTerminalContainerBindings");
-  const runtimeBody = extractFunctionBody(appSource, "createTerminalRuntime");
-  assert.match(wheelBody, /sendTerminalInput\(\s*windowId\s*,\s*data\s*\)/);
-  assert.match(runtimeBody, /sendTerminalInput\(\s*windowId\s*,\s*data\s*\)/);
-  assert.equal(
-    appSource.match(/send\(\{ kind: "terminal_input", id: windowId, data \}\);/g)?.length,
-    1,
-    "only the common helper may construct the public TerminalInput wire payload",
-  );
-  assert.doesNotMatch(
-    appSource,
-    /console\.debug\(\s*"\[gwt_input_trace:/,
-    "legacy console markers must not retain payload-length or socket-state fields",
-  );
-});
-
-test("Terminal output trace metadata stays internal through receive and batching", () => {
-  const socketOpenBody = extractFunctionBody(appSource, "handleSocketOpen");
-  const allocatorBody = extractFunctionBody(
-    appSource,
-    "nextTerminalOutputTraceSequence",
-  );
-  assert.match(allocatorBody, /outputTraceSeq\s*\+=\s*1/);
-  assert.match(allocatorBody, /return\s+outputTraceSeq/);
-  assert.ok(
-    appSource.indexOf("let outputTraceSeq = 0;")
-      < appSource.indexOf("function handleSocketOpen("),
-    "the output sequence must live for the browser app lifetime, not one connection",
-  );
-  assert.match(
-    socketOpenBody,
-    /nextTerminalOutputSequence:\s*nextTerminalOutputTraceSequence/,
-    "every recreated dispatcher must share the app-lifetime allocator",
-  );
-  assert.match(
-    socketOpenBody,
-    /shouldTrace:\s*\(\)\s*=>\s*ownGeneration\s*===\s*socketReceiveDispatcherGeneration\s*&&\s*uiTraceWiring\.isTracing\(\)/,
-    "stale dispatchers must short-circuit before trace allocation",
-  );
-  assert.match(
-    socketOpenBody,
-    /readTraceEpoch:\s*uiTraceWiring\.currentEpoch/,
-    "dispatcher metadata must retain the app-local trace epoch",
-  );
-  assert.match(
-    socketOpenBody,
-    /receive:\s*\(\s*event\s*,\s*traceMetadata\s*\)\s*=>\s*\{[\s\S]*?receive\(\s*event\s*,\s*traceMetadata\s*\)/,
-    "dispatcher metadata must use the private receive callback argument",
-  );
-  assert.match(appSource, /function\s+receive\(\s*event\s*,\s*traceMetadata\s*\)/);
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  assert.match(
-    receiveBody,
-    /case\s+"terminal_output"\s*:[\s\S]*?terminalHost\.writeOutput\(\s*event\.id\s*,\s*event\.data_base64\s*,\s*traceMetadata\s*,?\s*\)/,
-  );
-
-  assert.match(
-    appSource,
-    /function\s+writeOutput\(\s*windowId\s*,\s*base64\s*,\s*traceMetadata\s*\)/,
-  );
-  const writeOutputWrapperBody = extractFunctionBody(appSource, "writeOutput");
-  assert.match(
-    writeOutputWrapperBody,
-    /if\s*\(\s*!uiTraceWiring\.isTracing\(\)\s*\)\s*\{\s*return\s+writeOutputToTerminal\(\s*windowId\s*,\s*base64\s*,\s*traceMetadata\s*\)/,
-    "inactive tracing must skip write-output trace fields and callback allocation",
-  );
-  assert.match(
-    writeOutputWrapperBody,
-    /traceMeasure\(\s*UI_TRACE_EVENT\.writeOutput\s*,\s*\{\s*window_id:\s*windowId\s*\}/,
-    "active write timing may carry only the window id",
-  );
-  const writeOutputBody = extractFunctionBody(appSource, "writeOutputToTerminal");
-  assert.match(
-    writeOutputBody,
-    /terminalOutputBatcher\.enqueue\(\s*windowId\s*,\s*base64\s*,\s*traceMetadata\s*\)/,
-  );
-  assert.doesNotMatch(
-    writeOutputBody,
-    /bytes_base64|data_len|output_bytes|typed_text|credential|env_secret/,
-    "writeOutput diagnostics must not expose payload data or lengths",
-  );
-
-  const batcherConfig = appSource.match(
-    /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
-  );
-  assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
-  assert.match(batcherConfig[1], /onTrace:\s*\(\s*kind\s*,\s*fields\s*\)/);
-  assert.match(
-    batcherConfig[1],
-    /shouldTrace:\s*\(\)\s*=>\s*uiTraceWiring\.isTracing\(\)/,
-    "the pre-wiring batcher must defer trace-state lookup until output arrives",
-  );
-  assert.match(
-    batcherConfig[1],
-    /readTraceEpoch:\s*\(\)\s*=>\s*uiTraceWiring\.currentEpoch\(\)/,
-    "the pre-wiring batcher must validate queued metadata against the active epoch",
-  );
-  assert.match(
-    writeOutputBody,
-    /queue\.push\(\s*traceMetadata\s*\?\s*\{\s*base64\s*,\s*traceMetadata\s*\}\s*:\s*base64\s*,?\s*\)/,
-    "pending terminal output must retain opaque metadata unchanged",
-  );
-  assert.match(
-    writeOutputBody,
-    /runtime\.deferredWrites\.push\(\s*traceMetadata\s*\?\s*\{\s*base64\s*,\s*traceMetadata\s*\}\s*:\s*base64\s*,?\s*\)/,
-    "deferred terminal output must retain opaque metadata unchanged",
-  );
-});
-
-test("Stale terminal trace metadata bypasses current-session write timing", () => {
-  const staleHelperBody = extractFunctionBody(
-    appSource,
-    "isStaleTerminalTraceMetadata",
-  );
-  assert.match(
-    staleHelperBody,
-    /Object\.hasOwn\(\s*traceMetadata\s*,\s*["']epoch["']\s*\)/,
-    "only metadata carrying an internal epoch participates in stale checks",
-  );
-  assert.match(
-    staleHelperBody,
-    /traceMetadata\.epoch\s*!==\s*uiTraceWiring\.currentEpoch\(\)/,
-    "epoch identity must be compared with the active trace",
-  );
-
-  const writeOutputBody = extractFunctionBody(appSource, "writeOutput");
-  const staleGuardIndex = writeOutputBody.indexOf(
-    "isStaleTerminalTraceMetadata(traceMetadata)",
-  );
-  const writeIndex = writeOutputBody.indexOf(
-    "writeOutputToTerminal(windowId, base64, traceMetadata)",
-    staleGuardIndex,
-  );
-  const traceMeasureIndex = writeOutputBody.indexOf("traceMeasure(");
-  assert.ok(staleGuardIndex !== -1, "writeOutput must detect stale epochs");
-  assert.ok(
-    writeIndex > staleGuardIndex && writeIndex < traceMeasureIndex,
-    "stale replay must render normally without entering current-session timing",
   );
 });
 
@@ -5619,15 +5462,52 @@ test("Terminal output writes are gated while windows are hidden", () => {
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
-  assert.match(
-    renderWorkspaceBody,
-    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?rearmPendingTerminalViewportRefresh\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?\}\s*\)[\s\S]*?scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"visibility_reveal"[\s\S]*?\}\s*\)/,
-    "hidden project-tab reveal must re-arm pending output before viewport/focus activation",
+  const revealActivationBody = extractFunctionBody(
+    appSource,
+    "activateTerminalOnReveal",
   );
   assert.match(
     renderWorkspaceBody,
-    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowData\.id\)[\s\S]*?rearmPendingTerminalViewportRefresh\(\s*windowData\.id,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?\}\s*\)[\s\S]*?scheduleTerminalFocusActivation\(\s*windowData\.id,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"visibility_reveal"[\s\S]*?\}\s*\)/,
-    "hidden window-tab reveal must re-arm pending output before viewport/focus activation",
+    /onReveal:\s*\(\)\s*=>\s*activateTerminalOnReveal\(windowId\)/,
+    "hidden project-tab reveal must delegate to the shared activation router",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /onReveal:\s*\(\)\s*=>\s*activateTerminalOnReveal\(windowData\.id\)/,
+    "hidden window-tab reveal must delegate to the shared activation router",
+  );
+  assert.equal(
+    (renderWorkspaceBody.match(/activateTerminalOnReveal\(/g) || []).length,
+    2,
+    "the two reveal surfaces must each enter the shared router exactly once",
+  );
+  assert.match(
+    revealActivationBody,
+    /runTerminalRevealActivation\(\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?consumePendingRefresh:[\s\S]*?consumePendingTerminalViewportRefresh\(windowId\)[\s\S]*?scheduleTerminalFocusActivation\(windowId,\s*\{[\s\S]*?shouldPersistGeometry,[\s\S]*?reason:\s*"visibility_reveal"/,
+    "the shared router must consume pending refresh and use one activation scheduler owner",
+  );
+  const revealRouterSource = readFileSync(
+    resolve(here, "../terminal-viewport-reflow.js"),
+    "utf8",
+  );
+  const revealRouterBody = extractFunctionBody(
+    revealRouterSource,
+    "runTerminalRevealActivation",
+  );
+  assert.match(
+    revealRouterBody,
+    /const\s+options\s*=\s*\{\s*shouldPersistGeometry:\s*true\s*\}/,
+    "reveal routing must always request authoritative persisted geometry",
+  );
+  assert.match(
+    revealRouterBody,
+    /scheduleActivation\(options\)/,
+    "every reveal must schedule one persisted activation after consuming pending refresh",
+  );
+  assert.doesNotMatch(
+    revealRouterBody,
+    /if\s*\(!pendingRefreshConsumed/,
+    "pending refresh state must not select a competing geometry owner",
   );
 });
 

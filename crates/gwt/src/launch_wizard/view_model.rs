@@ -80,7 +80,7 @@ impl LaunchWizardState {
                 self.current_agent_supports_resume_picker(),
             ),
             selected_execution_mode: self.mode.clone(),
-            skip_permissions: self.skip_permissions,
+            skip_permissions: self.effective_skip_permissions(),
             show_agent_settings: show_manual_setup && self.launch_target_is_agent(),
             show_reasoning: show_manual_setup
                 && self.launch_target_is_agent()
@@ -98,7 +98,9 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
             show_execution_mode: false,
-            show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
+            show_skip_permissions: show_manual_setup
+                && self.launch_target_is_agent()
+                && self.mode == "normal",
             show_fast_mode,
             show_codex_fast_mode: show_manual_setup
                 && self.launch_target_is_agent()
@@ -512,7 +514,7 @@ impl LaunchWizardState {
         if self.launch_target_is_agent() {
             summary.push(LaunchWizardSummaryView {
                 label: "Permissions".to_string(),
-                value: if self.skip_permissions {
+                value: if self.effective_skip_permissions() {
                     "skip".to_string()
                 } else {
                     "prompt".to_string()
@@ -2185,13 +2187,23 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
+        let view = state.view();
+        assert!(
+            !view.skip_permissions,
+            "a Resume launch must not advertise a permission bypass"
+        );
+
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.command, custom_path.display().to_string());
                     assert_eq!(config.display_name, "Claude Proxy");
                     assert!(config.args.contains(&"--resume".to_string()));
-                    assert!(config.args.contains(&"--unsafe".to_string()));
+                    assert!(!config.skip_permissions);
+                    assert!(
+                        !config.args.contains(&"--unsafe".to_string()),
+                        "Quick Start Resume must suppress permission bypass"
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },

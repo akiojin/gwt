@@ -44,10 +44,11 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
         tail.to_string()
     };
     if tail.contains(EXACT_RESUME_FAILURE_SIGNATURE) {
-        return Some(format!(
-            "Exact session restore failed: {tail}. The agent no longer has this \
-             conversation; launch a new agent session when you want to continue."
-        ));
+        return Some(
+            "Exact session restore failed. The agent no longer has this conversation; \
+             use Continue work to start a new conversation with handoff context."
+                .to_string(),
+        );
     }
     match base {
         Some(base) if !base.is_empty() => Some(format!("{base} — last output: {tail}")),
@@ -56,6 +57,56 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
 }
 
 impl AppRuntime {
+    /// Issue #3366 — whether any project tab's workspace still holds a
+    /// window of the given preset. Docked windows stay in the workspace
+    /// window list, so tab groups are covered. The check spans every tab
+    /// (not just the active one) because surfaces on an inactive tab keep
+    /// their accumulated client state and do not re-request a snapshot
+    /// when their tab becomes active again.
+    fn any_window_open(&self, preset: WindowPreset) -> bool {
+        self.tabs.iter().any(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .any(|window| window.preset == preset)
+        })
+    }
+
+    /// Issue #3366 — deliver one external-process line to the client hub
+    /// only while a Console window exists. Raw `process_line` events are
+    /// consumed exclusively by Console window controllers, and every
+    /// Console mount replays the `ProcessConsoleHub` ring buffer through
+    /// `LoadProcessConsole`, so nothing is lost while suppressed.
+    /// Unconditional broadcast measured ≈956 msg/s under normal agent
+    /// load and delayed a new client's first workspace paint by ~1 min.
+    pub(crate) fn process_line_events(
+        &self,
+        line: gwt_core::process_console::ProcessLine,
+    ) -> Vec<OutboundEvent> {
+        if !self.any_window_open(WindowPreset::Console) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::ProcessLine { line })]
+    }
+
+    /// Issue #3366 — deliver one tracing log event to the client hub only
+    /// while a Logs window exists. `log_entry_appended` is consumed
+    /// exclusively by Logs window state, and `LoadLogs` re-reads the log
+    /// directory on mount, so the live stream is pure overhead without an
+    /// open Logs surface.
+    pub(crate) fn log_entry_events(
+        &self,
+        entry: gwt_core::logging::LogEvent,
+    ) -> Vec<OutboundEvent> {
+        if !self.any_window_open(WindowPreset::Logs) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::LogEntryAppended {
+            entry,
+        })]
+    }
+
     pub(crate) fn handle_runtime_output(
         &mut self,
         id: String,
@@ -117,7 +168,7 @@ impl AppRuntime {
         detail: Option<String>,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
-        let Some(_address) = self.window_lookup.get(&id).cloned() else {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
             self.remove_window_state_tracking(&id);
             self.mark_agent_session_stopped(&id);
             self.deregister_pty_writer(&id);
@@ -128,6 +179,9 @@ impl AppRuntime {
             // intake worktree.
             return self.take_ephemeral_worktree_cleanup_events();
         };
+        let issue_monitor_project_root = self
+            .tab(&address.tab_id)
+            .map(|tab| tab.project_root.clone());
         let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {
@@ -140,7 +194,9 @@ impl AppRuntime {
         // SPEC #3200 T-045/FR-025: a running agent on a monitored autonomous
         // issue is a liveness signal — refresh its stuck-detection window.
         if is_agent_window && matches!(status, WindowProcessStatus::Running) {
-            self.issue_monitor_heartbeat(&id);
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                self.issue_monitor_heartbeat(project_root, &id);
+            }
         }
 
         let keep_active_agent_session_for_recovery =
@@ -207,7 +263,9 @@ impl AppRuntime {
         {
             self.runtimes.remove(&id);
             self.remove_window_state_tracking(&id);
-            self.mark_agent_session_stopped(&id);
+            if !self.stop_pending_continue_work_session_without_projection(&id) {
+                self.mark_agent_session_stopped(&id);
+            }
         }
         let _ = self.persist();
 
@@ -223,7 +281,9 @@ impl AppRuntime {
                 .as_deref()
                 .unwrap_or("Agent entered error state")
                 .to_string();
-            events.extend(self.issue_monitor_agent_failed_events(&id, &message));
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                events.extend(self.issue_monitor_agent_failed_events(project_root, &id, &message));
+            }
         }
         if matches!(
             status,
@@ -280,13 +340,26 @@ impl AppRuntime {
         }
         let mut events = Vec::new();
         if Self::should_broadcast_runtime_hook_event_to_frontend(&event) {
+            let mut public_event = event.clone();
+            public_event.continuation_readiness_nonce = None;
             events.push(OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
-                event: event.clone(),
+                event: public_event,
             }));
         }
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
+        let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
+        if event.source_event.as_deref() == Some("SessionStart") {
+            events.extend(self.finalize_fresh_execution_launch_session_start(
+                &window_id,
+                event.continuation_readiness_nonce.as_deref(),
+            ));
+            events.extend(self.finalize_continue_work_session_start(
+                &window_id,
+                event.continuation_readiness_nonce.as_deref(),
+            ));
+        }
         let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
@@ -342,7 +415,13 @@ impl AppRuntime {
                 .as_deref()
                 .unwrap_or("Agent entered error state")
                 .to_string();
-            events.extend(self.issue_monitor_agent_failed_events(&window_id, &message));
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                events.extend(self.issue_monitor_agent_failed_events(
+                    project_root,
+                    &window_id,
+                    &message,
+                ));
+            }
         }
         if matches!(
             composed_state,

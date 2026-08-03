@@ -88,6 +88,16 @@ impl ContractRoutingRegistry {
 
     fn current() -> Self {
         Self::new(vec![
+            ContractRouteMapping {
+                contract_id: super::improvement_contract::MANAGED_HOOK_GATE_ID.to_string(),
+                contract_schema_revision:
+                    super::improvement_contract::MANAGED_HOOK_CONTRACT_REVISION,
+                failure_code: super::improvement_contract::MANAGED_HOOK_FAILURE_CODE.to_string(),
+                expected_outcome: super::improvement_contract::MANAGED_HOOK_EXPECTED_OUTCOME
+                    .to_string(),
+                routing_basis_revision: 1,
+                disposition: ContractRouteDisposition::ImplementationGap,
+            },
             #[cfg(test)]
             ContractRouteMapping {
                 contract_id: "coordination.board-status".to_string(),

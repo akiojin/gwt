@@ -55,6 +55,11 @@ pub struct LanePolicyFlags {
     /// Distribute only the curation skill subset (P4). `false` today (all
     /// skills go to every lane).
     pub reduced_skill_set: bool,
+    /// Overwrite tracked copies of gwt-managed skill/command assets with the
+    /// embedded bundle at materialization (#3374). `true` only for ephemeral
+    /// intake worktrees, where a tracked copy inherited from the base ref can
+    /// be months older than the running binary and the worktree is disposable.
+    pub embedded_assets_override_tracked: bool,
 }
 
 /// A declarative profile for one lane. Adding a lane = adding a profile.
@@ -82,6 +87,7 @@ pub const EXECUTION_PROFILE: LaneProfile = LaneProfile {
         completion_gate: false,
         sessionstart_onboarding: false,
         reduced_skill_set: false,
+        embedded_assets_override_tracked: false,
     },
 };
 
@@ -107,6 +113,9 @@ pub const INTAKE_PROFILE: LaneProfile = LaneProfile {
         sessionstart_onboarding: true,
         // SPEC-3248 P4: intake surfaces only curation skills.
         reduced_skill_set: true,
+        // #3374: an ephemeral intake worktree surfaces the embedded bundle
+        // even where the project tracks gwt skills (the gwt repo itself).
+        embedded_assets_override_tracked: true,
     },
 };
 
@@ -205,6 +214,19 @@ pub fn resolve_lane_for_worktree(worktree: &Path) -> &'static LaneProfile {
     }
 }
 
+/// [`SessionKind`] view of [`resolve_lane_for_worktree`] for call sites that
+/// still branch on the enum while hooks migrate lane-by-lane (#3377). The
+/// worktree lane file wins when present; only lane-file-less worktrees fall
+/// back to the ambient `GWT_SESSION_KIND` env fast-path.
+#[must_use]
+pub fn resolve_session_kind_for_worktree(worktree: &Path) -> SessionKind {
+    if resolve_lane_for_worktree(worktree).id == INTAKE_PROFILE.id {
+        SessionKind::Intake
+    } else {
+        SessionKind::Execution
+    }
+}
+
 /// Extract the `"lane"` string from the lane file body without pulling in a
 /// JSON dependency for such a tiny schema. Returns `None` on any shape it does
 /// not recognize (→ caller falls back to the default profile).
@@ -277,6 +299,7 @@ mod tests {
                     completion_gate: false,
                     sessionstart_onboarding: false,
                     reduced_skill_set: false,
+                    embedded_assets_override_tracked: false,
                 },
             }
         );
@@ -296,6 +319,8 @@ mod tests {
                     completion_gate: true,
                     sessionstart_onboarding: true,
                     reduced_skill_set: true,
+                    // #3374: intake worktrees are refreshed from the bundle.
+                    embedded_assets_override_tracked: true,
                 },
             }
         );
@@ -342,6 +367,32 @@ mod tests {
         write_lane_file(dir.path(), &EXECUTION_PROFILE).expect("write lane file");
         assert_eq!(resolve_lane_for_worktree(dir.path()), &EXECUTION_PROFILE);
         std::env::remove_var(crate::GWT_SESSION_KIND_ENV);
+    }
+
+    #[test]
+    fn resolve_session_kind_prefers_lane_file_over_env() {
+        let _guard = env_lock();
+        let dir = TempDir::new().expect("tempdir");
+        // Lane file wins over a conflicting ambient env (#3377: an intake
+        // session invoking gwtd against an execution worktree must not
+        // re-materialize it as intake).
+        std::env::set_var(crate::GWT_SESSION_KIND_ENV, "intake");
+        write_lane_file(dir.path(), &EXECUTION_PROFILE).expect("write lane file");
+        assert_eq!(
+            resolve_session_kind_for_worktree(dir.path()),
+            SessionKind::Execution
+        );
+        // A lane-file-less worktree keeps the env fast-path (transition).
+        let bare = TempDir::new().expect("tempdir");
+        assert_eq!(
+            resolve_session_kind_for_worktree(bare.path()),
+            SessionKind::Intake
+        );
+        std::env::remove_var(crate::GWT_SESSION_KIND_ENV);
+        assert_eq!(
+            resolve_session_kind_for_worktree(bare.path()),
+            SessionKind::Execution
+        );
     }
 
     #[test]

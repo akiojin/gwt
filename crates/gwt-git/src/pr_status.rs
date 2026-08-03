@@ -349,6 +349,48 @@ struct GhCliOutput {
     stderr: String,
 }
 
+/// Authoritative remote state used to reconcile an auto-merge effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrAutoMergeRemoteState {
+    Open {
+        head_sha: String,
+        auto_merge_requested: bool,
+    },
+    Merged {
+        head_sha: String,
+    },
+    Closed {
+        head_sha: String,
+    },
+}
+
+/// Result of a single auto-merge mutation attempt.
+///
+/// `RemoteOutcomeUnknown` is deliberately distinct from `PreSubmit`: callers
+/// must read the remote PR state before retrying an attempt whose process may
+/// have submitted the mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoMergeMutationOutcome {
+    Confirmed,
+    AlreadyTargetState,
+    PreSubmit(String),
+    RemoteOutcomeUnknown(String),
+    HeadChanged { expected: String, actual: String },
+    AuthorityMismatch(String),
+}
+
+impl AutoMergeMutationOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Confirmed | Self::AlreadyTargetState)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutoMergeCommandError {
+    PreSubmit(String),
+    RemoteOutcomeUnknown(String),
+}
+
 fn fetch_pr_list_with<F>(repo_path: &Path, mut run_gh: F) -> Result<Vec<PrStatus>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
@@ -389,6 +431,19 @@ where
 }
 
 fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+    run_gh_command_with(repo_path, args, spawn_gh_command)
+}
+
+fn run_gh_command_with<F>(repo_path: &Path, args: &[&str], mut spawn_gh: F) -> Result<GhCliOutput>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let command_root =
+        crate::worktree::main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    spawn_gh(&command_root, args)
+}
+
+fn spawn_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     let hub = gwt_core::process_console::global();
     let label = format!("gh {}", args.join(" "));
     let options =
@@ -644,14 +699,22 @@ pub fn extract_status_check_rollup(json: &str) -> String {
 
 /// Find the open PR number for a work `branch` (fail-closed `Option`).
 pub fn fetch_open_pr_number_for_branch(repo_path: &Path, branch: &str) -> Option<u64> {
-    fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh_command)
+    try_fetch_open_pr_number_for_branch(repo_path, branch)
+        .ok()
+        .flatten()
 }
 
-fn fetch_open_pr_number_for_branch_with<F>(
+/// Checked variant used by scan transactions that must preserve transport and
+/// deadline failures instead of conflating them with "no open PR".
+pub fn try_fetch_open_pr_number_for_branch(repo_path: &Path, branch: &str) -> Result<Option<u64>> {
+    try_fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh_command)
+}
+
+fn try_fetch_open_pr_number_for_branch_with<F>(
     repo_path: &Path,
     branch: &str,
     mut run_gh: F,
-) -> Option<u64>
+) -> Result<Option<u64>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
@@ -660,50 +723,102 @@ where
         &[
             "pr", "list", "--head", branch, "--state", "open", "--json", "number",
         ],
-    )
-    .ok()?;
+    )?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr list open branch: {}",
+            output.stderr.trim()
+        )));
     }
-    parse_open_pr_number(&output.stdout)
+    let _: Vec<serde_json::Value> = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr list open branch JSON: {error}")))?;
+    Ok(parse_open_pr_number(&output.stdout))
+}
+
+#[cfg(test)]
+fn fetch_open_pr_number_for_branch_with<F>(repo_path: &Path, branch: &str, run_gh: F) -> Option<u64>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    try_fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh)
+        .ok()
+        .flatten()
 }
 
 /// Fetch a PR's head SHA — the SHA the gate binds the review/merge to
 /// (fail-closed `Option`).
 pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
-    fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+    try_fetch_pr_head_sha(repo_path, number).ok().flatten()
 }
 
-fn fetch_pr_head_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_head_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    try_fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_head_sha_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<Option<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "headRefOid"]).ok()?;
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "headRefOid"])?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr view headRefOid: {}",
+            output.stderr.trim()
+        )));
     }
-    parse_pr_head_sha(&output.stdout)
+    let _: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view headRefOid JSON: {error}")))?;
+    Ok(parse_pr_head_sha(&output.stdout))
 }
 
 /// Fetch a PR's `statusCheckRollup` array JSON (fail-closed: `"[]"` on any
 /// failure so the gate treats CI as vacuous, never a pass).
 pub fn fetch_pr_status_check_rollup(repo_path: &Path, number: u64) -> String {
-    fetch_pr_status_check_rollup_with(repo_path, number, run_gh_command)
+    try_fetch_pr_status_check_rollup(repo_path, number).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn fetch_pr_status_check_rollup_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> String
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_status_check_rollup(repo_path: &Path, number: u64) -> Result<String> {
+    try_fetch_pr_status_check_rollup_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_status_check_rollup_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<String>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    match run_gh(
+    let output = run_gh(
         repo_path,
         &["pr", "view", &number, "--json", "statusCheckRollup"],
-    ) {
-        Ok(output) if output.success => extract_status_check_rollup(&output.stdout),
-        _ => "[]".to_string(),
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr view statusCheckRollup: {}",
+            output.stderr.trim()
+        )));
     }
+    let _: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view statusCheckRollup JSON: {error}")))?;
+    Ok(extract_status_check_rollup(&output.stdout))
+}
+
+#[cfg(test)]
+fn fetch_pr_status_check_rollup_with<F>(repo_path: &Path, number: u64, run_gh: F) -> String
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    try_fetch_pr_status_check_rollup_with(repo_path, number, run_gh)
+        .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Fetch a PR's unified diff for the independent review agent. Capped to
@@ -711,24 +826,53 @@ where
 /// `None` on any gh failure (the review then runs without a diff and, being
 /// adversarial + fail-closed, will reject).
 pub fn fetch_pr_diff(repo_path: &Path, number: u64, max_bytes: usize) -> Option<String> {
-    fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+    try_fetch_pr_diff(repo_path, number, max_bytes)
+        .ok()
+        .flatten()
 }
 
-fn fetch_pr_diff_with<F>(
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_diff(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+fn try_fetch_pr_diff_with<F>(
     repo_path: &Path,
     number: u64,
     max_bytes: usize,
     mut run_gh: F,
-) -> Option<String>
+) -> Result<Option<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    let output = run_gh(repo_path, &["pr", "diff", &number]).ok()?;
+    let output = run_gh(repo_path, &["pr", "diff", &number])?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr diff: {}",
+            output.stderr.trim()
+        )));
     }
-    Some(truncate_diff(&output.stdout, max_bytes))
+    Ok(Some(truncate_diff(&output.stdout, max_bytes)))
+}
+
+#[cfg(test)]
+fn fetch_pr_diff_with<F>(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+    run_gh: F,
+) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    try_fetch_pr_diff_with(repo_path, number, max_bytes, run_gh)
+        .ok()
+        .flatten()
 }
 
 fn truncate_diff(diff: &str, max_bytes: usize) -> String {
@@ -759,6 +903,130 @@ fn truncate_diff(diff: &str, max_bytes: usize) -> String {
 /// review→merge TOCTOU window.
 pub fn merge_pr_auto(repo_path: &Path, number: u64, reviewed_head_sha: &str) -> bool {
     merge_pr_auto_with(repo_path, number, reviewed_head_sha, run_gh_command)
+}
+
+/// Fetch the fields needed to reconcile an auto-merge effect after an
+/// ambiguous attempt or daemon restart.
+pub fn fetch_pr_auto_merge_remote_state(
+    repo_path: &Path,
+    number: u64,
+) -> Option<PrAutoMergeRemoteState> {
+    let number = number.to_string();
+    let output = run_gh_command(
+        repo_path,
+        &[
+            "pr",
+            "view",
+            &number,
+            "--json",
+            "state,headRefOid,autoMergeRequest,mergeCommit",
+        ],
+    )
+    .ok()?;
+    if !output.success {
+        return None;
+    }
+    parse_pr_auto_merge_remote_state(&output.stdout)
+}
+
+/// Parse an authoritative `gh pr view` response for auto-merge reconciliation.
+pub fn parse_pr_auto_merge_remote_state(json: &str) -> Option<PrAutoMergeRemoteState> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())?
+        .to_string();
+    let state = value.get("state").and_then(serde_json::Value::as_str)?;
+
+    if state.eq_ignore_ascii_case("open") {
+        Some(PrAutoMergeRemoteState::Open {
+            head_sha,
+            auto_merge_requested: value
+                .get("autoMergeRequest")
+                .is_some_and(|request| !request.is_null()),
+        })
+    } else if state.eq_ignore_ascii_case("merged") {
+        Some(PrAutoMergeRemoteState::Merged { head_sha })
+    } else if state.eq_ignore_ascii_case("closed") {
+        Some(PrAutoMergeRemoteState::Closed { head_sha })
+    } else {
+        None
+    }
+}
+
+/// Arm auto-merge only when the current remote HEAD still matches the SHA that
+/// passed review. The caller supplies a fresh remote readback so retries can
+/// first distinguish an already-applied target state.
+pub fn arm_pr_auto_merge(
+    repo_path: &Path,
+    number: u64,
+    reviewed_head_sha: &str,
+    remote: &PrAutoMergeRemoteState,
+) -> AutoMergeMutationOutcome {
+    arm_pr_auto_merge_with(
+        repo_path,
+        number,
+        reviewed_head_sha,
+        remote,
+        run_auto_merge_command,
+    )
+}
+
+fn arm_pr_auto_merge_with<F>(
+    repo_path: &Path,
+    number: u64,
+    reviewed_head_sha: &str,
+    remote: &PrAutoMergeRemoteState,
+    mut run_gh: F,
+) -> AutoMergeMutationOutcome
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    let (head_sha, auto_merge_requested) = match remote {
+        PrAutoMergeRemoteState::Open {
+            head_sha,
+            auto_merge_requested,
+        } => (head_sha, *auto_merge_requested),
+        PrAutoMergeRemoteState::Merged { head_sha } => {
+            if head_sha != reviewed_head_sha {
+                return AutoMergeMutationOutcome::HeadChanged {
+                    expected: reviewed_head_sha.to_string(),
+                    actual: head_sha.clone(),
+                };
+            }
+            return AutoMergeMutationOutcome::AlreadyTargetState;
+        }
+        PrAutoMergeRemoteState::Closed { .. } => {
+            return AutoMergeMutationOutcome::AuthorityMismatch(
+                "pull request is closed".to_string(),
+            );
+        }
+    };
+    if head_sha != reviewed_head_sha {
+        return AutoMergeMutationOutcome::HeadChanged {
+            expected: reviewed_head_sha.to_string(),
+            actual: head_sha.clone(),
+        };
+    }
+    if auto_merge_requested {
+        return AutoMergeMutationOutcome::AlreadyTargetState;
+    }
+
+    let number = number.to_string();
+    classify_auto_merge_command(run_gh(
+        repo_path,
+        &[
+            "pr",
+            "merge",
+            &number,
+            "--auto",
+            "--squash",
+            "--match-head-commit",
+            reviewed_head_sha,
+        ],
+    ))
 }
 
 fn merge_pr_auto_with<F>(
@@ -794,6 +1062,97 @@ pub fn disable_pr_auto_merge(repo_path: &Path, number: u64) -> bool {
     disable_pr_auto_merge_with(repo_path, number, run_gh_command)
 }
 
+/// Disarm auto-merge idempotently from a fresh remote state readback.
+pub fn disarm_pr_auto_merge(
+    repo_path: &Path,
+    number: u64,
+    remote: &PrAutoMergeRemoteState,
+) -> AutoMergeMutationOutcome {
+    disarm_pr_auto_merge_with(repo_path, number, remote, run_auto_merge_command)
+}
+
+fn disarm_pr_auto_merge_with<F>(
+    repo_path: &Path,
+    number: u64,
+    remote: &PrAutoMergeRemoteState,
+    mut run_gh: F,
+) -> AutoMergeMutationOutcome
+where
+    F: FnMut(&Path, &[&str]) -> std::result::Result<GhCliOutput, AutoMergeCommandError>,
+{
+    match remote {
+        PrAutoMergeRemoteState::Open {
+            auto_merge_requested: false,
+            ..
+        }
+        | PrAutoMergeRemoteState::Closed { .. } => {
+            return AutoMergeMutationOutcome::AlreadyTargetState;
+        }
+        PrAutoMergeRemoteState::Merged { .. } => {
+            return AutoMergeMutationOutcome::AuthorityMismatch(
+                "pull request merged before kill-switch disarm was confirmed".to_string(),
+            );
+        }
+        PrAutoMergeRemoteState::Open {
+            auto_merge_requested: true,
+            ..
+        } => {}
+    }
+
+    let number = number.to_string();
+    classify_auto_merge_command(run_gh(
+        repo_path,
+        &["pr", "merge", &number, "--disable-auto"],
+    ))
+}
+
+fn classify_auto_merge_command(
+    result: std::result::Result<GhCliOutput, AutoMergeCommandError>,
+) -> AutoMergeMutationOutcome {
+    match result {
+        Ok(output) if output.success => AutoMergeMutationOutcome::Confirmed,
+        Ok(output) => AutoMergeMutationOutcome::RemoteOutcomeUnknown(output.stderr),
+        Err(AutoMergeCommandError::PreSubmit(message)) => {
+            AutoMergeMutationOutcome::PreSubmit(message)
+        }
+        Err(AutoMergeCommandError::RemoteOutcomeUnknown(message)) => {
+            AutoMergeMutationOutcome::RemoteOutcomeUnknown(message)
+        }
+    }
+}
+
+fn run_auto_merge_command(
+    repo_path: &Path,
+    args: &[&str],
+) -> std::result::Result<GhCliOutput, AutoMergeCommandError> {
+    let hub = gwt_core::process_console::global();
+    let label = format!("gh {}", args.join(" "));
+    let options =
+        gwt_core::process_console::SpawnOptions::new(label.clone()).current_dir(repo_path);
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        args,
+        options,
+    )
+    .map_err(|error| {
+        let message = format!("{label}: {error}");
+        match error.kind() {
+            std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::InvalidInput => AutoMergeCommandError::PreSubmit(message),
+            _ => AutoMergeCommandError::RemoteOutcomeUnknown(message),
+        }
+    })?;
+
+    Ok(GhCliOutput {
+        success: output.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
 fn disable_pr_auto_merge_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> bool
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
@@ -820,24 +1179,78 @@ pub fn parse_pr_merge_commit_sha(json: &str) -> Option<String> {
 
 /// Fetch a merged PR's merge-commit SHA (fail-closed `Option`).
 pub fn fetch_pr_merge_commit_sha(repo_path: &Path, number: u64) -> Option<String> {
-    fetch_pr_merge_commit_sha_with(repo_path, number, run_gh_command)
+    try_fetch_pr_merge_commit_sha(repo_path, number)
+        .ok()
+        .flatten()
 }
 
-fn fetch_pr_merge_commit_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+/// Checked variant used by deadline-integral scans.
+pub fn try_fetch_pr_merge_commit_sha(repo_path: &Path, number: u64) -> Result<Option<String>> {
+    try_fetch_pr_merge_commit_sha_with(repo_path, number, run_gh_command)
+}
+
+fn try_fetch_pr_merge_commit_sha_with<F>(
+    repo_path: &Path,
+    number: u64,
+    mut run_gh: F,
+) -> Result<Option<String>>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
-    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "mergeCommit"]).ok()?;
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "mergeCommit"])?;
     if !output.success {
-        return None;
+        return Err(GwtError::Git(format!(
+            "gh pr view mergeCommit: {}",
+            output.stderr.trim()
+        )));
     }
-    parse_pr_merge_commit_sha(&output.stdout)
+    let _: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| GwtError::Other(format!("gh pr view mergeCommit JSON: {error}")))?;
+    Ok(parse_pr_merge_commit_sha(&output.stdout))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_pr_readbacks_preserve_runner_failures() {
+        let failure = || Err(GwtError::Git("operation deadline expired".to_string()));
+
+        assert!(try_fetch_open_pr_number_for_branch_with(
+            Path::new("/repo"),
+            "work/issue-42",
+            |_, _| failure(),
+        )
+        .expect_err("open PR readback must preserve failure")
+        .to_string()
+        .contains("deadline"));
+        assert!(
+            try_fetch_pr_head_sha_with(Path::new("/repo"), 42, |_, _| failure())
+                .expect_err("head SHA readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+        assert!(
+            try_fetch_pr_status_check_rollup_with(Path::new("/repo"), 42, |_, _| failure(),)
+                .expect_err("rollup readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+        assert!(
+            try_fetch_pr_diff_with(Path::new("/repo"), 42, 1024, |_, _| failure())
+                .expect_err("diff readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+        assert!(
+            try_fetch_pr_merge_commit_sha_with(Path::new("/repo"), 42, |_, _| failure())
+                .expect_err("merge readback must preserve failure")
+                .to_string()
+                .contains("deadline")
+        );
+    }
 
     #[test]
     fn parse_pr_titles_by_branch_maps_head_ref_to_title_and_prefers_latest() {
@@ -877,6 +1290,47 @@ mod tests {
         );
         assert!(!branches.contains("work/b"), "open PRs are excluded");
         assert_eq!(branches.len(), 2, "empty head refs are skipped");
+    }
+
+    #[test]
+    fn run_gh_command_uses_child_bare_repo_cwd_for_workspace_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo = tmp.path().join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args([
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ])
+            .output()
+            .expect("git init --bare");
+        assert!(
+            init.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        // `main_worktree_root` canonicalizes and then strips the Windows
+        // verbatim (`\\?\`) prefix, because a child process cannot always
+        // consume a verbatim path. Assert against that same contract so the
+        // expectation holds on Windows as well as on unix.
+        let expected = gwt_core::paths::normalize_windows_child_process_path(
+            &std::fs::canonicalize(&bare_repo).expect("canonical bare repo"),
+        );
+        let mut observed_cwd = None;
+
+        let output = run_gh_command_with(tmp.path(), &["pr", "list"], |cwd, args| {
+            observed_cwd = Some(cwd.to_path_buf());
+            assert_eq!(args, ["pr", "list"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: "[]".to_string(),
+                stderr: String::new(),
+            })
+        })
+        .expect("run fake gh command");
+
+        assert!(output.success);
+        assert_eq!(observed_cwd.as_deref(), Some(expected.as_path()));
     }
 
     #[test]
@@ -1399,6 +1853,316 @@ mod tests {
             })
         });
         assert!(ok);
+    }
+
+    // SPEC #3200 Phase 7 / T-143: remote auto-merge state must be observable
+    // independently from the mutation command so an ambiguous result can be
+    // reconciled after a daemon restart instead of being collapsed to `false`.
+    #[test]
+    fn parse_pr_auto_merge_remote_state_distinguishes_open_armed_merged_and_closed() {
+        assert_eq!(
+            parse_pr_auto_merge_remote_state(
+                r#"{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":{"enabledAt":"2026-07-27T00:00:00Z"},"mergeCommit":null}"#,
+            ),
+            Some(PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: true,
+            })
+        );
+        assert_eq!(
+            parse_pr_auto_merge_remote_state(
+                r#"{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":null}"#,
+            ),
+            Some(PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: false,
+            })
+        );
+        assert_eq!(
+            parse_pr_auto_merge_remote_state(
+                r#"{"state":"MERGED","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":{"oid":"merge456"}}"#,
+            ),
+            Some(PrAutoMergeRemoteState::Merged {
+                head_sha: "abc123".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_pr_auto_merge_remote_state(
+                r#"{"state":"CLOSED","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":null}"#,
+            ),
+            Some(PrAutoMergeRemoteState::Closed {
+                head_sha: "abc123".to_string(),
+            })
+        );
+        assert_eq!(parse_pr_auto_merge_remote_state("not json"), None);
+        assert_eq!(
+            parse_pr_auto_merge_remote_state(r#"{"state":"OPEN","headRefOid":""}"#),
+            None,
+            "missing HEAD is not an authoritative readback"
+        );
+    }
+
+    #[test]
+    fn arm_pr_auto_merge_preserves_confirmed_already_target_and_head_changed_outcomes() {
+        let repo = Path::new("/tmp/repo");
+        let mut calls = 0;
+        let already_armed = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: true,
+            },
+            |_p, _args| {
+                calls += 1;
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert_eq!(already_armed, AutoMergeMutationOutcome::AlreadyTargetState);
+        assert!(already_armed.is_success());
+        assert_eq!(calls, 0, "already-armed readback must not re-submit");
+
+        let already_merged = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Merged {
+                head_sha: "abc123".to_string(),
+            },
+            |_p, _args| {
+                calls += 1;
+                unreachable!("already-merged readback must not re-submit")
+            },
+        );
+        assert_eq!(already_merged, AutoMergeMutationOutcome::AlreadyTargetState);
+        assert!(already_merged.is_success());
+        assert_eq!(
+            calls, 0,
+            "same-head merged readback is already the target state"
+        );
+
+        let merged_head_changed = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Merged {
+                head_sha: "def456".to_string(),
+            },
+            |_p, _args| {
+                calls += 1;
+                unreachable!("changed merged HEAD must reject before mutation")
+            },
+        );
+        assert_eq!(
+            merged_head_changed,
+            AutoMergeMutationOutcome::HeadChanged {
+                expected: "abc123".to_string(),
+                actual: "def456".to_string(),
+            }
+        );
+        assert!(!merged_head_changed.is_success());
+        assert_eq!(calls, 0, "changed merged HEAD must not re-submit");
+
+        let head_changed = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Open {
+                head_sha: "def456".to_string(),
+                auto_merge_requested: false,
+            },
+            |_p, _args| {
+                calls += 1;
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert_eq!(
+            head_changed,
+            AutoMergeMutationOutcome::HeadChanged {
+                expected: "abc123".to_string(),
+                actual: "def456".to_string(),
+            }
+        );
+        assert!(!head_changed.is_success());
+        assert_eq!(calls, 0, "changed HEAD must reject before mutation");
+
+        let confirmed = arm_pr_auto_merge_with(
+            repo,
+            7,
+            "abc123",
+            &PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: false,
+            },
+            |_p, args| {
+                calls += 1;
+                assert_eq!(
+                    args,
+                    [
+                        "pr",
+                        "merge",
+                        "7",
+                        "--auto",
+                        "--squash",
+                        "--match-head-commit",
+                        "abc123",
+                    ]
+                );
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
+        assert!(confirmed.is_success());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn arm_pr_auto_merge_preserves_pre_submit_and_remote_unknown_failures() {
+        let repo = Path::new("/tmp/repo");
+        let remote = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: false,
+        };
+
+        let pre_submit = arm_pr_auto_merge_with(repo, 7, "abc123", &remote, |_p, _args| {
+            Err(AutoMergeCommandError::PreSubmit(
+                "gh executable unavailable".to_string(),
+            ))
+        });
+        assert_eq!(
+            pre_submit,
+            AutoMergeMutationOutcome::PreSubmit("gh executable unavailable".to_string())
+        );
+
+        let ambiguous = arm_pr_auto_merge_with(repo, 7, "abc123", &remote, |_p, _args| {
+            Err(AutoMergeCommandError::RemoteOutcomeUnknown(
+                "deadline expired after process start".to_string(),
+            ))
+        });
+        assert_eq!(
+            ambiguous,
+            AutoMergeMutationOutcome::RemoteOutcomeUnknown(
+                "deadline expired after process start".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn disarm_pr_auto_merge_treats_already_disarmed_as_success_and_preserves_failures() {
+        let repo = Path::new("/tmp/repo");
+        let mut calls = 0;
+        let already_disarmed = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &PrAutoMergeRemoteState::Open {
+                head_sha: "abc123".to_string(),
+                auto_merge_requested: false,
+            },
+            |_p, _args| {
+                calls += 1;
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert_eq!(
+            already_disarmed,
+            AutoMergeMutationOutcome::AlreadyTargetState
+        );
+        assert!(already_disarmed.is_success());
+        assert_eq!(calls, 0, "already-disarmed PR must not be mutated again");
+
+        let closed = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &PrAutoMergeRemoteState::Closed {
+                head_sha: "abc123".to_string(),
+            },
+            |_p, _args| {
+                calls += 1;
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert_eq!(closed, AutoMergeMutationOutcome::AlreadyTargetState);
+        assert!(closed.is_success());
+        assert_eq!(calls, 0);
+
+        let merged = disarm_pr_auto_merge_with(
+            repo,
+            7,
+            &PrAutoMergeRemoteState::Merged {
+                head_sha: "abc123".to_string(),
+            },
+            |_p, _args| {
+                calls += 1;
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert_eq!(
+            merged,
+            AutoMergeMutationOutcome::AuthorityMismatch(
+                "pull request merged before kill-switch disarm was confirmed".to_string()
+            )
+        );
+        assert!(!merged.is_success());
+        assert_eq!(calls, 0, "a merged PR cannot be disarmed after the fact");
+
+        let armed = PrAutoMergeRemoteState::Open {
+            head_sha: "abc123".to_string(),
+            auto_merge_requested: true,
+        };
+        let confirmed = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, args| {
+            calls += 1;
+            assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+        assert_eq!(confirmed, AutoMergeMutationOutcome::Confirmed);
+        assert_eq!(calls, 1);
+
+        let pre_submit = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
+            Err(AutoMergeCommandError::PreSubmit("not started".to_string()))
+        });
+        assert_eq!(
+            pre_submit,
+            AutoMergeMutationOutcome::PreSubmit("not started".to_string())
+        );
+
+        let ambiguous = disarm_pr_auto_merge_with(repo, 7, &armed, |_p, _args| {
+            Err(AutoMergeCommandError::RemoteOutcomeUnknown(
+                "response lost".to_string(),
+            ))
+        });
+        assert_eq!(
+            ambiguous,
+            AutoMergeMutationOutcome::RemoteOutcomeUnknown("response lost".to_string())
+        );
     }
 
     #[test]

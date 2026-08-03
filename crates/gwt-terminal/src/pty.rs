@@ -549,8 +549,7 @@ mod tests {
 
     impl Visit for CaptureInputTraceVisitor {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            let raw = format!("{value:?}");
-            self.insert(field, raw.trim_matches('"'));
+            self.insert(field, format!("{value:?}").trim_matches('"'));
         }
 
         fn record_str(&mut self, field: &Field, value: &str) {
@@ -594,6 +593,54 @@ mod tests {
 
     fn sleep_config(secs: &str) -> SpawnConfig {
         command_config(sleep_command(secs))
+    }
+
+    #[test]
+    fn pty_writer_trace_uses_exact_content_free_allowlist() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(command_config(stdin_echo_command())).expect("spawn failed");
+        answer_cursor_position_query(&handle);
+        let synthetic_input =
+            b"typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL data_base64_SENTINEL\n";
+
+        let traces = capture_input_traces(|| {
+            handle
+                .write_input(synthetic_input)
+                .expect("synthetic PTY input write");
+        });
+        let event = traces
+            .iter()
+            .find(|event| {
+                event.target == "gwt_input_trace"
+                    && event.fields.get("stage").map(String::as_str) == Some("pty_writer")
+            })
+            .expect("pty_writer input trace");
+        let mut actual = event.fields.keys().map(String::as_str).collect::<Vec<_>>();
+        actual.sort_unstable();
+        assert_eq!(
+            actual,
+            [
+                "flush_us",
+                "lock_wait_us",
+                "message",
+                "ok",
+                "stage",
+                "write_us",
+            ]
+        );
+        let rendered = format!("{:?}", event.fields);
+        for forbidden in [
+            "typed_text_SENTINEL",
+            "credential_SENTINEL",
+            "env_secret_SENTINEL",
+            "data_base64_SENTINEL",
+            "data_len",
+            "text_len",
+            "chunk_len",
+            "error",
+        ] {
+            assert!(!rendered.contains(forbidden), "trace leaked {forbidden}");
+        }
     }
 
     fn cwd_output_matches(text: &str, canonical_cwd: &str) -> bool {
@@ -711,59 +758,6 @@ mod tests {
             text.contains("test-input"),
             "Expected 'test-input' in: {text}"
         );
-    }
-
-    #[test]
-    fn pty_writer_trace_uses_exact_content_free_allowlist() {
-        let _pty_guard = lock_pty_test();
-        let config = command_config(stdin_echo_command());
-        let handle = PtyHandle::spawn(config).expect("spawn failed");
-        answer_cursor_position_query(&handle);
-        let synthetic_input =
-            b"typed_text_SENTINEL credential_SENTINEL env_secret_SENTINEL data_base64_SENTINEL\n";
-
-        let traces = capture_input_traces(|| {
-            handle
-                .write_input(synthetic_input)
-                .expect("synthetic PTY input write");
-        });
-        let event = traces
-            .iter()
-            .find(|event| {
-                event.target == "gwt_input_trace"
-                    && event.fields.get("stage").map(String::as_str) == Some("pty_writer")
-            })
-            .expect("pty_writer input trace");
-        let mut actual = event.fields.keys().map(String::as_str).collect::<Vec<_>>();
-        actual.sort_unstable();
-        assert_eq!(
-            actual,
-            [
-                "flush_us",
-                "lock_wait_us",
-                "message",
-                "ok",
-                "stage",
-                "write_us",
-            ]
-        );
-        let serialized = serde_json::to_string(&(&event.target, &event.fields))
-            .expect("serialize captured PTY writer trace as JSON");
-        for forbidden in [
-            "typed_text_SENTINEL",
-            "credential_SENTINEL",
-            "env_secret_SENTINEL",
-            "data_base64_SENTINEL",
-            "data_len",
-            "text_len",
-            "chunk_len",
-            "\"error\"",
-        ] {
-            assert!(
-                !serialized.contains(forbidden),
-                "pty_writer trace leaked {forbidden}: {serialized}"
-            );
-        }
     }
 
     #[test]

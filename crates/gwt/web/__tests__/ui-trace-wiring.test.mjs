@@ -182,41 +182,6 @@ test("UI trace wiring exposes profiler active state", () => {
   assert.equal(wiring.isTracing(), false);
 });
 
-test("UI trace wiring advances an opaque epoch across every trace start", () => {
-  const profiler = fakeProfiler();
-  const wiring = createUiTraceWiring({
-    profiler,
-    send: () => {},
-    alert: () => {},
-    log: () => {},
-  });
-
-  assert.equal(wiring.currentEpoch(), null, "inactive traces have no epoch");
-
-  wiring.start();
-  const firstEpoch = wiring.currentEpoch();
-  assert.notEqual(firstEpoch, null);
-  assert.equal(
-    wiring.currentEpoch(),
-    firstEpoch,
-    "one active trace keeps one process-local identity",
-  );
-
-  wiring.stop();
-  assert.equal(wiring.currentEpoch(), null, "stopped traces expose no stale epoch");
-
-  wiring.start();
-  const secondEpoch = wiring.currentEpoch();
-  assert.notEqual(secondEpoch, firstEpoch, "stop/start must advance the epoch");
-
-  wiring.start();
-  assert.notEqual(
-    wiring.currentEpoch(),
-    secondEpoch,
-    "restarting an already active trace must also advance the epoch",
-  );
-});
-
 test("app.js imports and instantiates the UI trace wiring module", () => {
   assert.match(
     appSource,
@@ -231,16 +196,7 @@ test("WebSocket dispatcher forwards timing trace events through the wiring facad
 });
 
 test("WebSocket dispatcher gates trace work through active UI trace state", () => {
-  assert.match(
-    appSource,
-    /shouldTrace:\s*\(\)\s*=>\s*ownGeneration\s*===\s*socketReceiveDispatcherGeneration\s*&&\s*uiTraceWiring\.isTracing\(\)/,
-    "stale dispatchers must short-circuit before trace state, allocation, and markers",
-  );
-  assert.match(
-    appSource,
-    /readTraceEpoch:\s*uiTraceWiring\.currentEpoch/,
-    "dispatcher metadata must capture the current trace epoch",
-  );
+  assert.match(appSource, /shouldTrace:\s*uiTraceWiring\.isTracing/);
 });
 
 test("pointer diagnostics use centralized event constants", () => {
@@ -258,6 +214,35 @@ test("terminal activation diagnostics use centralized metadata-only trace consta
     /traceUi\(UI_TRACE_EVENT\.terminalActivation,[\s\S]{0,300}\b(?:text|data|payload|input)\b/,
     "terminal activation trace fields must stay metadata-only",
   );
+});
+
+function terminalInputTraceFields(marker) {
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = appSource.match(
+    new RegExp(
+      `console\\.debug\\(\\s*["']${escapedMarker}["']\\s*,\\s*\\{([\\s\\S]*?)\\}\\s*\\);`,
+    ),
+  );
+  assert.ok(match, `missing terminal input trace marker ${marker}`);
+  return match[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.match(/^([A-Za-z_$][\w$]*)\s*(?::|,)/)?.[1])
+    .filter(Boolean)
+    .sort();
+}
+
+test("terminal input console traces use stage-local metadata-only exact allowlists", () => {
+  assert.deepEqual(
+    terminalInputTraceFields("[gwt_input_trace:onData:dropped]"),
+    ["reason", "seq", "windowId", "wsState"],
+  );
+  assert.deepEqual(terminalInputTraceFields("[gwt_input_trace:onData]"), [
+    "seq",
+    "windowId",
+    "wsState",
+  ]);
 });
 
 test("backend UI trace save result is surfaced to the user", () => {

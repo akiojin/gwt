@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
-    BoardProvider, CoordinationSnapshot, LocalProvider, PromptBoardRead,
+    BoardProvider, CoordinationSnapshot, LocalProvider,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
 use gwt_core::{GwtError, Result};
@@ -60,20 +60,10 @@ pub fn current_kind() -> BoardProviderKind {
 #[cfg(test)]
 pub(crate) mod test_provider_override {
     use super::BoardProviderKind;
-    use chrono::{DateTime, Utc};
-    use gwt_core::coordination::{
-        BoardAudienceScope, BoardEntryKind, BoardProvider, PromptBoardRead,
-    };
-    use std::{
-        cell::{Cell, RefCell},
-        path::Path,
-        rc::Rc,
-    };
+    use std::cell::Cell;
 
     thread_local! {
         static KIND: Cell<BoardProviderKind> = const { Cell::new(BoardProviderKind::Local) };
-        static PROVIDER_FOR_CALLS: Cell<usize> = const { Cell::new(0) };
-        static PROMPT_PROVIDER: RefCell<Option<Rc<dyn BoardProvider>>> = const { RefCell::new(None) };
     }
 
     /// Current override for this thread (defaults to `Local`).
@@ -87,61 +77,12 @@ pub(crate) mod test_provider_override {
         Guard(previous)
     }
 
-    pub(crate) fn record_provider_for_call() {
-        PROVIDER_FOR_CALLS.with(|calls| calls.set(calls.get() + 1));
-    }
-
-    pub(crate) fn reset_provider_for_calls() {
-        PROVIDER_FOR_CALLS.with(|calls| calls.set(0));
-    }
-
-    pub(crate) fn provider_for_calls() -> usize {
-        PROVIDER_FOR_CALLS.with(Cell::get)
-    }
-
-    pub(crate) fn force_prompt_provider(provider: Rc<dyn BoardProvider>) -> PromptProviderGuard {
-        let previous = PROMPT_PROVIDER.with(|cell| cell.replace(Some(provider)));
-        PromptProviderGuard(previous)
-    }
-
-    pub(crate) fn load_prompt_reminder(
-        worktree_root: &Path,
-        diff_since: DateTime<Utc>,
-        scope: &BoardAudienceScope,
-        status_author: &str,
-        status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
-    ) -> Option<gwt_core::Result<PromptBoardRead>> {
-        PROMPT_PROVIDER.with(|cell| {
-            cell.borrow().as_ref().map(|provider| {
-                provider.load_prompt_reminder(
-                    worktree_root,
-                    diff_since,
-                    scope,
-                    status_author,
-                    status_kind,
-                    status_since,
-                )
-            })
-        })
-    }
-
     /// RAII guard restoring the previous override on drop.
     pub(crate) struct Guard(BoardProviderKind);
 
     impl Drop for Guard {
         fn drop(&mut self) {
             KIND.with(|cell| cell.set(self.0));
-        }
-    }
-
-    pub(crate) struct PromptProviderGuard(Option<Rc<dyn BoardProvider>>);
-
-    impl Drop for PromptProviderGuard {
-        fn drop(&mut self) {
-            PROMPT_PROVIDER.with(|cell| {
-                cell.replace(self.0.take());
-            });
         }
     }
 }
@@ -364,9 +305,6 @@ fn build_remote_for(
 /// Each repo gets its own provider scoped to its own channel, so Board posts and
 /// reads never mix across projects. `local` stays on the zero-cost fast path.
 pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
-    #[cfg(test)]
-    test_provider_override::record_provider_for_call();
-
     let project = ProjectBoardConfig::load_from_work_dir(&gwt_repo_local_work_dir(worktree_root));
     let global_kind = current_kind();
     // Fast path: no project override and global is local → zero-cost local,
@@ -547,65 +485,6 @@ pub fn has_recent_post_by(
     provider_for(worktree_root).has_recent_post_by(worktree_root, author, kind, within)
 }
 
-/// Load a prompt's scoped Board diff and unscoped recent-status decision
-/// through one resolved built-in provider.
-pub fn load_prompt_reminder(
-    worktree_root: &Path,
-    diff_since: DateTime<Utc>,
-    scope: &BoardAudienceScope,
-    status_author: &str,
-    status_kind: &BoardEntryKind,
-    status_since: DateTime<Utc>,
-) -> Result<PromptBoardRead> {
-    crate::cli::hook::diagnostics::record_prompt_board_read();
-    provider_for(worktree_root).load_prompt_reminder(
-        worktree_root,
-        diff_since,
-        scope,
-        status_author,
-        status_kind,
-        status_since,
-    )
-}
-
-/// Load a prompt's Board data while reusing the repository identity already
-/// persisted in the managed Session. Local providers can resolve their
-/// canonical store without a prompt-time Git subprocess; remote providers
-/// preserve their existing channel read.
-pub fn load_prompt_reminder_for_repo_hash(
-    worktree_root: &Path,
-    repo_hash: Option<&str>,
-    diff_since: DateTime<Utc>,
-    scope: &BoardAudienceScope,
-    status_author: &str,
-    status_kind: &BoardEntryKind,
-    status_since: DateTime<Utc>,
-) -> Result<PromptBoardRead> {
-    crate::cli::hook::diagnostics::record_prompt_board_read();
-    #[cfg(test)]
-    if let Some(result) = test_provider_override::load_prompt_reminder(
-        worktree_root,
-        diff_since,
-        scope,
-        status_author,
-        status_kind,
-        status_since,
-    ) {
-        return result;
-    }
-    provider_for(worktree_root).load_prompt_reminder_for_repo_hash(
-        worktree_root,
-        repo_hash,
-        gwt_core::coordination::PromptBoardReadRequest {
-            diff_since,
-            scope,
-            status_author,
-            status_kind,
-            status_since,
-        },
-    )
-}
-
 /// Whether an entry with `entry_id` exists.
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
     provider_for(worktree_root).board_entry_exists(worktree_root, entry_id)
@@ -638,29 +517,6 @@ pub fn load_entries_before_for_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prompt_board_read_constructs_provider_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        test_provider_override::reset_provider_for_calls();
-
-        let _ = load_prompt_reminder(
-            dir.path(),
-            epoch,
-            &BoardAudienceScope::All,
-            "Codex",
-            &BoardEntryKind::Status,
-            epoch,
-        )
-        .unwrap();
-
-        assert_eq!(
-            test_provider_override::provider_for_calls(),
-            1,
-            "one prompt Board read must construct exactly one built-in provider"
-        );
-    }
 
     #[test]
     fn build_remote_local_reads_empty_board() {

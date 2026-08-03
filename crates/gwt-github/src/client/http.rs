@@ -246,7 +246,10 @@ impl Default for ReqwestTransport {
 
 impl HttpTransport for ReqwestTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        execute_reqwest(self.standard_client.as_ref(), request, None)
+        let timeout = ambient_deadline("github http request")?
+            .map(|deadline| ambient_remaining(deadline, "github http request"))
+            .transpose()?;
+        execute_reqwest(self.standard_client.as_ref(), request, timeout)
     }
 
     fn execute_with_deadline(
@@ -254,15 +257,33 @@ impl HttpTransport for ReqwestTransport {
         request: HttpRequest,
         deadline: &ResolutionDeadline,
     ) -> Result<HttpResponse, HttpError> {
+        let ambient = ambient_deadline("github http request")?;
         deadline
             .remaining("github http request")
             .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))?;
         let client = self.deadline_client(deadline)?;
-        let remaining = deadline
+        let mut remaining = deadline
             .remaining("github http request")
             .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))?;
+        if let Some(ambient) = ambient {
+            remaining = remaining.min(ambient_remaining(ambient, "github http request")?);
+        }
         execute_reqwest(client.as_ref(), request, Some(remaining))
     }
+}
+
+fn ambient_deadline(operation: &str) -> Result<Option<Instant>, HttpError> {
+    gwt_core::operation_deadline::ensure_remaining(operation)
+        .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))
+}
+
+fn ambient_remaining(deadline: Instant, operation: &str) -> Result<Duration, HttpError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            HttpError::PreSubmitTimeout(format!("operation deadline expired during {operation}"))
+        })
 }
 
 fn execute_reqwest(
@@ -843,17 +864,89 @@ fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<Strin
 mod transport_tests {
     #[cfg(unix)]
     use std::{ffi::OsString, sync::Mutex};
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        io::Write,
+        net::TcpListener,
+        sync::Arc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use super::{
-        issue_generation, HttpError, HttpMethod, HttpRequest, HttpTransport, ReqwestTransport,
-        ResolutionDeadline,
+        issue_generation, HttpError, HttpIssueClient, HttpMethod, HttpRequest, HttpTransport,
+        ReqwestTransport, ResolutionDeadline,
     };
     #[cfg(unix)]
     use super::{resolve_gh_token, resolve_gh_token_with_deadline};
+    use crate::client::{IssueClient, IssueNumber, OwnerMutationError};
 
     #[cfg(unix)]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ResponseLossTransport;
+
+    impl HttpTransport for ResponseLossTransport {
+        fn execute(&self, _request: HttpRequest) -> Result<super::HttpResponse, HttpError> {
+            Err(HttpError::Timeout("response lost".to_string()))
+        }
+
+        fn execute_with_deadline(
+            &self,
+            _request: HttpRequest,
+            _deadline: &ResolutionDeadline,
+        ) -> Result<super::HttpResponse, HttpError> {
+            Err(HttpError::Timeout("response lost".to_string()))
+        }
+    }
+
+    #[test]
+    fn claim_comment_response_loss_is_remote_outcome_unknown() {
+        let client = HttpIssueClient::with_transport(
+            ResponseLossTransport,
+            "token".to_string(),
+            "owner",
+            "repo",
+        );
+
+        let error = client
+            .create_comment_mutation(IssueNumber(42), "stable claim marker")
+            .expect_err("response loss must not be classified as pre-submit");
+
+        assert!(matches!(error, OwnerMutationError::RemoteOutcomeUnknown(_)));
+    }
+
+    fn delayed_loopback_request(delay: Duration) -> (HttpRequest, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let server = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking loopback listener");
+            let accept_deadline = Instant::now() + Duration::from_secs(2);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < accept_deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("loopback request failed: {error}"),
+                }
+            };
+            thread::sleep(delay);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        });
+        let request = HttpRequest {
+            method: HttpMethod::Get,
+            url: format!("http://{address}/delayed"),
+            headers: Vec::new(),
+            body: None,
+        };
+        (request, server)
+    }
 
     #[cfg(unix)]
     struct ScopedEnvVar {
@@ -933,6 +1026,69 @@ mod transport_tests {
         assert!(
             matches!(error, HttpError::PreSubmitTransport(_)),
             "{error:?}"
+        );
+    }
+
+    #[test]
+    fn reqwest_execute_stops_delayed_loopback_response_at_scoped_deadline() {
+        let (request, server) = delayed_loopback_request(Duration::from_secs(1));
+        let transport = ReqwestTransport::new().expect("transport");
+        let started = Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(200),
+        );
+
+        let result = transport.execute(request);
+        let elapsed = started.elapsed();
+        server.join().expect("delayed loopback server");
+        let error = result.expect_err("scoped deadline must stop a delayed response");
+
+        assert!(matches!(error, HttpError::Timeout(_)), "{error:?}");
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "delayed response outlived the scoped deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn reqwest_execute_rejects_expired_scoped_deadline_before_submission() {
+        let transport = ReqwestTransport::new().expect("transport");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() - Duration::from_millis(1),
+        );
+
+        let error = transport
+            .execute(HttpRequest {
+                method: HttpMethod::Get,
+                url: "://invalid-url".to_string(),
+                headers: Vec::new(),
+                body: None,
+            })
+            .expect_err("expired scoped deadline must reject before submission");
+
+        assert!(matches!(error, HttpError::PreSubmitTimeout(_)), "{error:?}");
+    }
+
+    #[test]
+    fn reqwest_execute_with_deadline_uses_earlier_scoped_deadline() {
+        let (request, server) = delayed_loopback_request(Duration::from_secs(1));
+        let transport = ReqwestTransport::new().expect("transport");
+        let explicit = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(2));
+        let started = Instant::now();
+        let _ambient = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(200),
+        );
+
+        let error = transport
+            .execute_with_deadline(request, &explicit)
+            .expect_err("earlier scoped deadline must stop a delayed response");
+        let elapsed = started.elapsed();
+        server.join().expect("delayed loopback server");
+
+        assert!(matches!(error, HttpError::Timeout(_)), "{error:?}");
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "explicit deadline outlived the earlier scoped deadline: {elapsed:?}"
         );
     }
 
@@ -1565,6 +1721,32 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         parse_rest_comment(&value)
     }
 
+    fn patch_comment_mutation(
+        &self,
+        comment_id: CommentId,
+        new_body: &str,
+    ) -> OwnerMutationResult<CommentSnapshot> {
+        let operation = "patch claim comment";
+        let deadline = ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30));
+        let response = self.owner_rest_mutation(
+            HttpMethod::Patch,
+            &format!(
+                "/repos/{}/{}/issues/comments/{}",
+                self.owner, self.repo, comment_id.0
+            ),
+            json!({ "body": new_body }),
+            &deadline,
+            operation,
+        )?;
+        let value = serde_json::from_str::<Value>(&response.body).map_err(|error| {
+            OwnerMutationError::RemoteOutcomeUnknown(ApiError::Parse {
+                operation: operation.to_string(),
+                message: error.to_string(),
+            })
+        })?;
+        parse_rest_comment(&value).map_err(OwnerMutationError::RemoteOutcomeUnknown)
+    }
+
     fn create_comment(&self, number: IssueNumber, body: &str) -> Result<CommentSnapshot, ApiError> {
         let path = format!(
             "/repos/{}/{}/issues/{}/comments",
@@ -1574,6 +1756,32 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("create_comment json: {e}")))?;
         parse_rest_comment(&value)
+    }
+
+    fn create_comment_mutation(
+        &self,
+        number: IssueNumber,
+        body: &str,
+    ) -> OwnerMutationResult<CommentSnapshot> {
+        let operation = "create claim comment";
+        let deadline = ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30));
+        let response = self.owner_rest_mutation(
+            HttpMethod::Post,
+            &format!(
+                "/repos/{}/{}/issues/{}/comments",
+                self.owner, self.repo, number.0
+            ),
+            json!({ "body": body }),
+            &deadline,
+            operation,
+        )?;
+        let value = serde_json::from_str::<Value>(&response.body).map_err(|error| {
+            OwnerMutationError::RemoteOutcomeUnknown(ApiError::Parse {
+                operation: operation.to_string(),
+                message: error.to_string(),
+            })
+        })?;
+        parse_rest_comment(&value).map_err(OwnerMutationError::RemoteOutcomeUnknown)
     }
 
     fn delete_comment(&self, comment_id: CommentId) -> Result<(), ApiError> {

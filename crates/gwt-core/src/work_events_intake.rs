@@ -18,8 +18,9 @@
 //! - only works.json is written — sessions / current.json / journal.jsonl
 //!   are untouched (SC-261).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,27 @@ pub struct WorkEventsIntakeReport {
 impl WorkEventsIntakeReport {
     pub fn changed(&self) -> bool {
         self.applied > 0
+    }
+}
+
+/// One shared `events.jsonl` source plus the execution container inferred from
+/// its worktree or remote ref. The raw content remains immutable and may be
+/// shared across several refs that point at the same Git blob.
+#[derive(Debug, Clone)]
+pub struct SharedWorkEventsSource {
+    content: Arc<str>,
+    fallback_execution_container: Option<WorkspaceExecutionContainerRef>,
+}
+
+impl SharedWorkEventsSource {
+    pub fn new(
+        content: impl Into<Arc<str>>,
+        fallback_execution_container: Option<WorkspaceExecutionContainerRef>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            fallback_execution_container,
+        }
     }
 }
 
@@ -90,8 +112,23 @@ pub fn ingest_work_events_contents<'a>(
     work_items_path: &Path,
     contents: impl IntoIterator<Item = &'a str>,
 ) -> Result<WorkEventsIntakeReport> {
+    ingest_work_events_sources(
+        work_items_path,
+        contents
+            .into_iter()
+            .map(|content| SharedWorkEventsSource::new(content, None)),
+    )
+}
+
+/// Ingest globally ordered shared sources without rewriting their raw JSON to
+/// attach source provenance.
+pub fn ingest_work_events_sources(
+    work_items_path: &Path,
+    sources: impl IntoIterator<Item = SharedWorkEventsSource>,
+) -> Result<WorkEventsIntakeReport> {
+    let sources = sources.into_iter().collect::<Vec<_>>();
     crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        ingest_work_events_contents_locked(work_items_path, contents, None)
+        ingest_work_events_sources_locked(work_items_path, sources, None)
     })
 }
 
@@ -104,6 +141,22 @@ pub fn ingest_work_events_with_local_path<'a>(
     shared_contents: impl IntoIterator<Item = &'a str>,
     local_path: Option<&Path>,
 ) -> Result<(WorkEventsIntakeReport, Option<String>)> {
+    ingest_work_event_sources_with_local_path(
+        work_items_path,
+        shared_contents
+            .into_iter()
+            .map(|content| SharedWorkEventsSource::new(content, None)),
+        local_path,
+    )
+}
+
+/// Context-aware variant of [`ingest_work_events_with_local_path`].
+pub fn ingest_work_event_sources_with_local_path(
+    work_items_path: &Path,
+    shared_sources: impl IntoIterator<Item = SharedWorkEventsSource>,
+    local_path: Option<&Path>,
+) -> Result<(WorkEventsIntakeReport, Option<String>)> {
+    let shared_sources = shared_sources.into_iter().collect::<Vec<_>>();
     crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
         let local_content = match local_path.map(std::fs::read_to_string) {
             Some(Ok(content)) => Some(content),
@@ -112,18 +165,18 @@ pub fn ingest_work_events_with_local_path<'a>(
             None => None,
         };
         let local_fingerprint = local_content.as_deref().map(content_fingerprint);
-        let report = ingest_work_events_contents_locked(
+        let report = ingest_work_events_sources_locked(
             work_items_path,
-            shared_contents,
+            shared_sources,
             local_content.as_deref(),
         )?;
         Ok((report, local_fingerprint))
     })
 }
 
-fn ingest_work_events_contents_locked<'a>(
+fn ingest_work_events_sources_locked(
     work_items_path: &Path,
-    contents: impl IntoIterator<Item = &'a str>,
+    sources: Vec<SharedWorkEventsSource>,
     local_content: Option<&str>,
 ) -> Result<WorkEventsIntakeReport> {
     let mut report = WorkEventsIntakeReport::default();
@@ -134,13 +187,9 @@ fn ingest_work_events_contents_locked<'a>(
         .iter()
         .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
         .collect();
-    let mut incoming = collect_work_events(contents, WorkEventContentKind::Shared, &mut report)?;
+    let mut incoming = collect_shared_work_event_sources(sources, &mut report)?;
     if let Some(content) = local_content {
-        incoming.extend(collect_work_events(
-            std::iter::once(content),
-            WorkEventContentKind::MachineLocalLifecycle,
-            &mut report,
-        )?);
+        incoming.extend(collect_machine_local_work_events(content)?);
     }
     if incoming.is_empty() {
         return Ok(report);
@@ -351,8 +400,12 @@ pub fn rebuild_work_events_contents<'a>(
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_content: Option<&str>,
 ) -> Result<WorkEventsIntakeReport> {
+    let shared_sources = shared_contents
+        .into_iter()
+        .map(|content| SharedWorkEventsSource::new(content, None))
+        .collect::<Vec<_>>();
     crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        rebuild_work_events_contents_locked(work_items_path, shared_contents, close_content)
+        rebuild_work_event_sources_locked(work_items_path, shared_sources, close_content)
     })
 }
 
@@ -364,6 +417,10 @@ pub fn rebuild_work_events_paths<'a>(
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_path: Option<&Path>,
 ) -> Result<WorkEventsIntakeReport> {
+    let shared_sources = shared_contents
+        .into_iter()
+        .map(|content| SharedWorkEventsSource::new(content, None))
+        .collect::<Vec<_>>();
     crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
         let close_content = match close_path.map(std::fs::read_to_string) {
             Some(Ok(content)) => Some(content),
@@ -371,11 +428,7 @@ pub fn rebuild_work_events_paths<'a>(
             Some(Err(error)) => return Err(error.into()),
             None => None,
         };
-        rebuild_work_events_contents_locked(
-            work_items_path,
-            shared_contents,
-            close_content.as_deref(),
-        )
+        rebuild_work_event_sources_locked(work_items_path, shared_sources, close_content.as_deref())
     })
 }
 
@@ -390,7 +443,7 @@ pub fn rebuild_work_events_with_shared_loader<F, T>(
     close_path: Option<&Path>,
 ) -> Result<(WorkEventsIntakeReport, T, Option<String>)>
 where
-    F: FnOnce() -> Result<(Vec<String>, T)>,
+    F: FnOnce() -> Result<(Vec<SharedWorkEventsSource>, T)>,
 {
     crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
         let (shared_contents, loaded_metadata) = load_shared_contents()?;
@@ -401,18 +454,18 @@ where
             None => None,
         };
         let close_fingerprint = close_content.as_deref().map(content_fingerprint);
-        let report = rebuild_work_events_contents_locked(
+        let report = rebuild_work_event_sources_locked(
             work_items_path,
-            shared_contents.iter().map(String::as_str),
+            shared_contents,
             close_content.as_deref(),
         )?;
         Ok((report, loaded_metadata, close_fingerprint))
     })
 }
 
-fn rebuild_work_events_contents_locked<'a>(
+fn rebuild_work_event_sources_locked(
     work_items_path: &Path,
-    shared_contents: impl IntoIterator<Item = &'a str>,
+    shared_sources: Vec<SharedWorkEventsSource>,
     close_content: Option<&str>,
 ) -> Result<WorkEventsIntakeReport> {
     let previous = match load_workspace_work_items_from_path(work_items_path) {
@@ -439,14 +492,9 @@ fn rebuild_work_events_contents_locked<'a>(
         .collect::<Vec<_>>();
 
     let mut report = WorkEventsIntakeReport::default();
-    let mut incoming =
-        collect_work_events(shared_contents, WorkEventContentKind::Shared, &mut report)?;
+    let mut incoming = collect_shared_work_event_sources(shared_sources, &mut report)?;
     if let Some(content) = close_content {
-        incoming.extend(collect_work_events(
-            std::iter::once(content),
-            WorkEventContentKind::MachineLocalLifecycle,
-            &mut report,
-        )?);
+        incoming.extend(collect_machine_local_work_events(content)?);
     }
 
     let initial_updated_at = incoming
@@ -468,57 +516,100 @@ fn rebuild_work_events_contents_locked<'a>(
     Ok(report)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkEventContentKind {
-    Shared,
-    MachineLocalLifecycle,
+#[derive(Debug, Clone)]
+enum CachedSharedWorkEventLine {
+    Known(Box<WorkEvent>),
+    Opaque,
+    Invalid(String),
 }
 
-fn collect_work_events<'a>(
-    contents: impl IntoIterator<Item = &'a str>,
-    content_kind: WorkEventContentKind,
+fn collect_shared_work_event_sources(
+    sources: impl IntoIterator<Item = SharedWorkEventsSource>,
     report: &mut WorkEventsIntakeReport,
 ) -> Result<Vec<(WorkEvent, String)>> {
+    collect_shared_work_event_sources_with_decoder(
+        sources,
+        report,
+        decode_workspace_work_event_line,
+    )
+}
+
+fn collect_shared_work_event_sources_with_decoder<F>(
+    sources: impl IntoIterator<Item = SharedWorkEventsSource>,
+    report: &mut WorkEventsIntakeReport,
+    mut decode: F,
+) -> Result<Vec<(WorkEvent, String)>>
+where
+    F: FnMut(&[u8]) -> Result<DecodedWorkspaceWorkEvent>,
+{
     let mut incoming = Vec::new();
-    for content in contents {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let event = match content_kind {
-                WorkEventContentKind::Shared => {
-                    match decode_workspace_work_event_line(line.as_bytes()) {
-                        Ok(DecodedWorkspaceWorkEvent::Known(event)) => *event,
-                        Ok(DecodedWorkspaceWorkEvent::Opaque) => {
-                            report.skipped_opaque += 1;
-                            continue;
+    let mut decoded_by_content_identity = HashMap::<usize, Vec<CachedSharedWorkEventLine>>::new();
+    for source in sources {
+        let content_identity = Arc::as_ptr(&source.content) as *const () as usize;
+        let decoded = decoded_by_content_identity
+            .entry(content_identity)
+            .or_insert_with(|| {
+                source
+                    .content
+                    .lines()
+                    .filter_map(|line| {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            return None;
                         }
-                        Err(error) => {
-                            report.skipped_invalid += 1;
-                            tracing::warn!(%error, "work events intake: skipping malformed line");
-                            continue;
-                        }
-                    }
-                }
-                WorkEventContentKind::MachineLocalLifecycle => {
-                    serde_json::from_str(line).map_err(|error| {
-                        GwtError::Other(format!("machine-local close event json: {error}"))
-                    })?
-                }
-            };
-            match content_kind {
-                WorkEventContentKind::Shared if is_close_kind(event.kind) => {
-                    report.skipped_close_kind += 1;
+                        Some(match decode(line.as_bytes()) {
+                            Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
+                                CachedSharedWorkEventLine::Known(event)
+                            }
+                            Ok(DecodedWorkspaceWorkEvent::Opaque) => {
+                                CachedSharedWorkEventLine::Opaque
+                            }
+                            Err(error) => CachedSharedWorkEventLine::Invalid(error.to_string()),
+                        })
+                    })
+                    .collect()
+            });
+        for cached in decoded.iter() {
+            let mut event = match cached {
+                CachedSharedWorkEventLine::Known(event) => event.as_ref().clone(),
+                CachedSharedWorkEventLine::Opaque => {
+                    report.skipped_opaque += 1;
                     continue;
                 }
-                _ => {}
+                CachedSharedWorkEventLine::Invalid(error) => {
+                    report.skipped_invalid += 1;
+                    tracing::warn!(%error, "work events intake: skipping malformed line");
+                    continue;
+                }
+            };
+            if event.execution_container.is_none() {
+                event.execution_container = source.fallback_execution_container.clone();
+            }
+            if is_close_kind(event.kind) {
+                report.skipped_close_kind += 1;
+                continue;
             }
             let stable_key = serde_json::to_string(&event).map_err(|error| {
                 GwtError::Other(format!("work events intake stable key: {error}"))
             })?;
             incoming.push((event, stable_key));
         }
+    }
+    Ok(incoming)
+}
+
+fn collect_machine_local_work_events(content: &str) -> Result<Vec<(WorkEvent, String)>> {
+    let mut incoming = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: WorkEvent = serde_json::from_str(line)
+            .map_err(|error| GwtError::Other(format!("machine-local close event json: {error}")))?;
+        let stable_key = serde_json::to_string(&event)
+            .map_err(|error| GwtError::Other(format!("work events intake stable key: {error}")))?;
+        incoming.push((event, stable_key));
     }
     Ok(incoming)
 }
@@ -600,7 +691,7 @@ fn fold_work_events(
                 continue;
             }
         }
-        if projection.apply_event(event) == WorkEventApplyOutcome::Applied {
+        if projection.apply_event_for_batch(event) == WorkEventApplyOutcome::Applied {
             if reported_applied_event_ids.insert(event_id.clone()) {
                 report.applied += 1;
             }
@@ -618,6 +709,7 @@ fn fold_work_events(
             }
         }
     }
+    projection.finalize_event_batch();
 }
 
 fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy: WorkItem) {
@@ -845,11 +937,99 @@ mod tests {
     use super::*;
     use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
+    use std::sync::Arc;
 
     fn event_json(id: &str, work_id: &str, kind: &str, updated_at: &str, extra: &str) -> String {
         format!(
             "{{\"id\":\"{id}\",\"work_item_id\":\"{work_id}\",\"kind\":\"{kind}\",\"updated_at\":\"{updated_at}\"{extra}}}"
         )
+    }
+
+    fn source_container(branch: &str) -> WorkspaceExecutionContainerRef {
+        WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }
+    }
+
+    #[test]
+    fn contextual_shared_content_decodes_once_and_preserves_source_provenance() {
+        let content: Arc<str> = Arc::from(
+            [
+                event_json(
+                    "evt-shared",
+                    "work-shared",
+                    "start",
+                    "2026-07-28T10:00:00Z",
+                    ",\"title\":\"shared\",\"status_category\":\"active\"",
+                ),
+                r#"{"id":"evt-future","work_item_id":"work-future","kind":"future-kind","updated_at":"2026-07-28T10:01:00Z"}"#.to_string(),
+                "{malformed".to_string(),
+            ]
+            .join("\n"),
+        );
+        let sources = vec![
+            SharedWorkEventsSource::new(Arc::clone(&content), Some(source_container("work/one"))),
+            SharedWorkEventsSource::new(Arc::clone(&content), Some(source_container("work/two"))),
+        ];
+        let mut report = WorkEventsIntakeReport::default();
+        let mut decode_calls = 0;
+
+        let incoming =
+            collect_shared_work_event_sources_with_decoder(sources, &mut report, |line| {
+                decode_calls += 1;
+                decode_workspace_work_event_line(line)
+            })
+            .expect("collect contextual sources");
+
+        assert_eq!(decode_calls, 3, "one decode per unique raw-content line");
+        assert_eq!(report.skipped_opaque, 2, "accounting remains per source");
+        assert_eq!(report.skipped_invalid, 2, "accounting remains per source");
+        assert_eq!(incoming.len(), 2);
+        assert_eq!(
+            incoming[0].0.execution_container.as_ref(),
+            Some(&source_container("work/one"))
+        );
+        assert_eq!(
+            incoming[1].0.execution_container.as_ref(),
+            Some(&source_container("work/two"))
+        );
+    }
+
+    #[test]
+    fn contextual_source_never_overwrites_an_event_container() {
+        let content: Arc<str> = Arc::from(event_json(
+            "evt-owned",
+            "work-owned",
+            "start",
+            "2026-07-28T10:00:00Z",
+            ",\"title\":\"owned\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/original\"}",
+        ));
+        let sources = vec![SharedWorkEventsSource::new(
+            content,
+            Some(source_container("work/fallback")),
+        )];
+        let mut report = WorkEventsIntakeReport::default();
+
+        let incoming = collect_shared_work_event_sources_with_decoder(
+            sources,
+            &mut report,
+            decode_workspace_work_event_line,
+        )
+        .expect("collect contextual source");
+
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(
+            incoming[0]
+                .0
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref()),
+            Some("work/original")
+        );
     }
 
     #[test]

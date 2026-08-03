@@ -139,13 +139,6 @@ fn sync_agent_session_id(
     )
 }
 
-fn agent_session_id_needs_sync(
-    session: Option<&Session>,
-    agent_session_id: &HookSessionId,
-) -> bool {
-    session.and_then(Session::exact_resume_session_id) != Some(agent_session_id.as_str())
-}
-
 fn validated_hook_agent_session_id(
     event: &str,
     gwt_session_id: &GwtSessionId,
@@ -214,18 +207,8 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
-    handle_with_input_prepared(event, input).map(|_| ())
-}
-
-/// Handle one runtime-state event and return the Session already loaded and
-/// advanced by this hook. The aggregate dispatcher reuses it for the remaining
-/// UserPromptSubmit handlers instead of deserializing the same TOML again.
-pub(crate) fn handle_with_input_prepared(
-    event: &str,
-    input: &str,
-) -> Result<Option<Session>, HookError> {
     let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
-        return Ok(None);
+        return Ok(());
     };
     let runtime_path = PathBuf::from(runtime_path);
     let hook_event = if input.trim().is_empty() {
@@ -235,39 +218,33 @@ pub(crate) fn handle_with_input_prepared(
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
-    let mut session = current_session_for_id(&sessions_dir, &gwt_session_id);
+    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     let agent_session_id = validated_hook_agent_session_id(
         event,
         &gwt_session_id,
         session.as_ref(),
         hook_event.as_ref(),
     )?;
-    if let Some(agent_session_id) = agent_session_id
-        .as_ref()
-        .filter(|agent_session_id| agent_session_id_needs_sync(session.as_ref(), agent_session_id))
-    {
+    if let Some(agent_session_id) = agent_session_id.as_ref() {
         if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
         {
             log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
         }
     }
     if session.is_some() {
-        match gwt_agent::update_session(&sessions_dir, gwt_session_id.as_str(), |session| {
-            session.record_hook_event(event);
-            Ok(())
-        }) {
-            Ok(updated) => session = Some(updated),
-            Err(error) => {
-                log_session_metadata_error("record hook event for", &gwt_session_id, &error);
-            }
+        if let Err(error) =
+            gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)
+        {
+            log_session_metadata_error("record hook event for", &gwt_session_id, &error);
         }
     }
 
-    let pending_discussion = session
-        .as_ref()
-        .and_then(|session| load_pending_resume(&session.worktree_path).ok().flatten());
+    let pending_discussion = session.as_ref().and_then(|session| {
+        pending_discussion_for_session(&sessions_dir, &session.id)
+            .ok()
+            .flatten()
+    });
     write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
-        .map(|_| session)
 }
 
 pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {
@@ -673,26 +650,6 @@ mod tests {
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
-    }
-
-    #[test]
-    fn current_agent_session_id_does_not_need_redundant_sync() {
-        let mut session = Session::new("/tmp/wt", "feature/demo", AgentId::Codex);
-        session.agent_session_id = Some("agent-current".to_string());
-        let current = RawHookEvent::read_from_str(r#"{"session_id":"agent-current"}"#)
-            .unwrap()
-            .unwrap()
-            .session_id()
-            .unwrap();
-        let next = RawHookEvent::read_from_str(r#"{"session_id":"agent-next"}"#)
-            .unwrap()
-            .unwrap()
-            .session_id()
-            .unwrap();
-
-        assert!(!agent_session_id_needs_sync(Some(&session), &current));
-        assert!(agent_session_id_needs_sync(Some(&session), &next));
-        assert!(agent_session_id_needs_sync(None, &current));
     }
 
     #[test]

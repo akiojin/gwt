@@ -245,7 +245,7 @@ class SearchClassificationBranchTests(unittest.TestCase):
                 )
             self.assertEqual(state, expected, health)
 
-    def test_search_multi_keeps_healthy_query_failure_out_of_corrupt_state(self):
+    def test_search_multi_keeps_healthy_scope_out_of_corrupt_on_query_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(
                 os.environ,
@@ -277,6 +277,42 @@ class SearchClassificationBranchTests(unittest.TestCase):
         self.assertIs(payload.get("retryable"), False, payload)
         self.assertEqual(payload.get("affected_scopes"), ["works"], payload)
         self.assertNotIn("scopes", payload)
+
+    def test_search_multi_marks_scope_corrupt_only_when_recheck_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GWT_INDEX_FAKE_EMBEDDING": "1",
+                    "GWT_INDEX_COORDINATOR_ROOT": tmp,
+                },
+                clear=False,
+            ), mock.patch.object(
+                runner,
+                "_classify_scope_for_search",
+                side_effect=[
+                    ("fresh", {"reason": "ready"}),
+                    ("corrupt", {"reason": "count_mismatch"}),
+                ],
+            ), mock.patch.object(
+                runner,
+                "_search_scope_collection",
+                side_effect=RuntimeError("store broke after classification"),
+            ):
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=None,
+                    project_root=None,
+                    query="q",
+                    n_results=3,
+                    scopes=["works"],
+                    db_root=Path(tmp),
+                )
+        self.assertTrue(payload.get("ok"), payload)
+        self.assertEqual(payload["scopes"]["works"]["state"], "corrupt", payload)
+        self.assertEqual(
+            payload["scopes"]["works"]["reason"], "count_mismatch", payload
+        )
 
     def test_search_scope_collection_emits_all_terms_suggestions(self):
         with tempfile.TemporaryDirectory() as tmp:

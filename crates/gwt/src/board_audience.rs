@@ -89,32 +89,18 @@ pub fn current_session_board_scope(
     let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(BoardAudienceScope::All);
     };
-    let projection = load_workspace_projection(repo_path)?;
-    Ok(current_session_board_scope_from_projection(
-        projection.as_ref(),
-        Some(session_id),
-    ))
-}
-
-pub(crate) fn current_session_board_scope_from_projection(
-    projection: Option<&WorkspaceProjection>,
-    session_id: Option<&str>,
-) -> BoardAudienceScope {
-    let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return BoardAudienceScope::All;
-    };
-    let Some(projection) = projection else {
-        return BoardAudienceScope::All;
+    let Some(projection) = load_workspace_projection(repo_path)? else {
+        return Ok(BoardAudienceScope::All);
     };
     let Some(agent) = projection.latest_agent_for_session(session_id) else {
-        return BoardAudienceScope::All;
+        return Ok(BoardAudienceScope::All);
     };
     if agent.is_unassigned() {
-        return BoardAudienceScope::Broadcast;
+        return Ok(BoardAudienceScope::Broadcast);
     }
-    workspace_id_for_agent(projection, agent)
+    Ok(workspace_id_for_agent(&projection, agent)
         .map(BoardAudienceScope::Workspace)
-        .unwrap_or(BoardAudienceScope::All)
+        .unwrap_or(BoardAudienceScope::All))
 }
 
 pub fn gui_default_board_scope(repo_path: &Path) -> gwt_core::Result<BoardAudienceScope> {
