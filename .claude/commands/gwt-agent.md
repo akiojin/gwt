@@ -32,6 +32,7 @@ JSON
 2. Auto-detect the appropriate action based on provided arguments.
 3. Resolve `gwtd` as `GWT_BIN` from `GWT_BIN_PATH`, `command -v gwtd`, or `target/debug/gwtd`.
 4. Execute pane management through JSON operations `pane.list`, `pane.read`, or `pane.close`, and route coordination through Board.
+5. For Issue Monitor queue work, use `issue.monitor.status`, `issue.monitor.priority.move`, `issue.monitor.priority.set`, or `issue.monitor.config.set` as documented by the skill. Enabling processing or autonomous mode remains a GUI-only action.
 
 ## Examples
 

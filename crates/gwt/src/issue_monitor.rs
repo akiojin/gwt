@@ -2243,8 +2243,16 @@ impl IssueMonitorState {
         self.queue.len()
     }
 
+    pub fn queued_issue_numbers(&self) -> Vec<u64> {
+        self.queue.iter().copied().collect()
+    }
+
     pub fn active_issue_number(&self) -> Option<u64> {
         self.active_launches.first().copied()
+    }
+
+    pub fn active_issue_numbers(&self) -> Vec<u64> {
+        self.active_launches.clone()
     }
 
     pub fn active_count(&self) -> usize {
@@ -4490,6 +4498,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn queue_and_active_issue_numbers_are_exposed_in_runtime_order() {
+        let prefs = IssueMonitorPrefs {
+            enabled: true,
+            priority_order: vec![2, 1],
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 9,
+                claimed_at: Some("2026-08-03T00:00:00Z".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut first = issue(1);
+        first.labels.push("auto-improve".to_string());
+        let mut second = issue(2);
+        second.labels.push("auto-improve".to_string());
+
+        scan_issue_monitor_candidates(&mut monitor, &[first, second], "2026-08-03T00:00:00Z");
+
+        assert_eq!(monitor.queued_issue_numbers(), vec![2, 1]);
+        assert_eq!(monitor.active_issue_numbers(), vec![9]);
+    }
+
     fn pending_arm_effect(
         effect_id: &str,
         authority_epoch: u64,
@@ -6621,6 +6652,37 @@ mod tests {
         assert!(
             prefs.autonomous_records.is_empty(),
             "no records in a pre-autonomous prefs file",
+        );
+    }
+
+    // SPEC #3245 FR-006 / AC-3: an Issue produced by the gwt-register-issue
+    // template (mandatory `- [ ] AC-N:` checkbox block + the `auto-merge`
+    // label applied by default) passes the autonomous-eligibility predicate,
+    // and the explicit opt-out (no auto-merge label) stays on the human gate.
+    #[test]
+    fn registration_template_issue_passes_autonomous_eligibility_by_default() {
+        use gwt_git::branch_protection::BranchProtectionStatus;
+        let template_body = "## Summary\n\nfix the thing\n\n## Background\n\ncontext\n\n\
+## Spec Status\n\nALIGNED — narrow bug\n\n## Related SPECs\n\n- None\n\n\
+## Acceptance Criteria\n\n- [ ] AC-1: the failing call succeeds\n- [ ] AC-2: regression test stays GREEN\n\n\
+## Expected Outcome\n\ngreen\n\n## Notes\n\n(none)\n";
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(template_body);
+        assert!(
+            criteria.machine_checkable,
+            "the template's AC block must classify as machine-checkable"
+        );
+        let verified = BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert_eq!(
+            autonomous_eligibility(true, true, &criteria, &verified, false, 0, 3),
+            EligibilityDecision::Eligible,
+            "template defaults (AC block + auto-merge label) must be eligible"
+        );
+        assert_eq!(
+            autonomous_eligibility(true, false, &criteria, &verified, false, 0, 3),
+            EligibilityDecision::HumanGate("issue lacks the auto-merge label".to_string()),
+            "the explicit opt-out (label removed) must stay on the human gate"
         );
     }
 

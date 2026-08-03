@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorPriorityPosition {
+    Head,
+    Index(usize),
+}
+
 /// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
@@ -103,6 +109,24 @@ pub enum IssueCommand {
         issue_number: u64,
         reviewed_sha: String,
         verdict_raw: String,
+    },
+    MonitorStatus {
+        project_root: Option<std::path::PathBuf>,
+    },
+    MonitorPriorityMove {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        position: IssueMonitorPriorityPosition,
+    },
+    MonitorPrioritySet {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+    },
+    MonitorConfigSet {
+        project_root: Option<std::path::PathBuf>,
+        enabled: Option<bool>,
+        autonomous_mode: Option<bool>,
+        max_active: Option<usize>,
     },
 }
 
