@@ -260,6 +260,68 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
     })
 }
 
+/// FR-003 crash-loop damper: uptime beyond this resets the consecutive-crash
+/// count (the PM ran healthily, so the next crash starts a fresh series).
+pub const PM_HEALTHY_UPTIME_SECS: i64 = 600;
+
+/// FR-003 backoff ladder indexed by `consecutive_crashes - 1` (last entry
+/// repeats). `0` means respawn immediately.
+pub const PM_CRASH_BACKOFF_SECS: &[i64] = &[0, 30, 120, 300];
+
+/// FR-003: record one crash on the registration and derive the respawn
+/// verdict. Returns `true` when an immediate respawn is allowed; `false`
+/// leaves `next_not_before` as the floor before which the auto-restart path
+/// (and the ensure gate) must not respawn. `now` is RFC3339 so callers and
+/// tests inject time explicitly.
+pub fn apply_pm_crash_backoff(registration: &mut PmRegistration, now: &str) -> bool {
+    let healthy_series_reset = registration
+        .created_at
+        .as_deref()
+        .and_then(|created| rfc3339_delta_secs(created, now))
+        .is_some_and(|uptime| uptime >= PM_HEALTHY_UPTIME_SECS);
+    let count = if healthy_series_reset {
+        1
+    } else {
+        registration.consecutive_crashes.saturating_add(1)
+    };
+    registration.consecutive_crashes = count;
+    let ladder_index = usize::min(
+        count.saturating_sub(1) as usize,
+        PM_CRASH_BACKOFF_SECS.len() - 1,
+    );
+    let backoff = PM_CRASH_BACKOFF_SECS[ladder_index];
+    if backoff <= 0 {
+        registration.next_not_before = None;
+        return true;
+    }
+    registration.next_not_before = rfc3339_plus_secs(now, backoff);
+    false
+}
+
+/// FR-003: whether the backoff floor allows a respawn at `now`. A missing or
+/// unparsable floor allows the respawn (fail-open: the damper protects
+/// against loops, not against recovery).
+pub fn pm_respawn_allowed(registration: &PmRegistration, now: &str) -> bool {
+    match registration.next_not_before.as_deref() {
+        None => true,
+        Some(floor) => rfc3339_delta_secs(floor, now).is_none_or(|delta| delta >= 0),
+    }
+}
+
+fn rfc3339_delta_secs(earlier: &str, later: &str) -> Option<i64> {
+    let earlier = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
+    let later = chrono::DateTime::parse_from_rfc3339(later).ok()?;
+    Some((later - earlier).num_seconds())
+}
+
+fn rfc3339_plus_secs(now: &str, secs: i64) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
+    Some(
+        (parsed + chrono::Duration::seconds(secs))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+}
+
 /// Diagnostic snapshot for the `pm.status` JSON operation (FR-001 diagnostic
 /// visibility). `session_record_present` / `stale_hint` are populated only
 /// when a registration exists; a missing durable session record is a stale
@@ -543,6 +605,49 @@ mod tests {
         let registered = pm_status_report(&prefs, |_| true);
         assert_eq!(registered.pm_bucket, 1);
         assert_eq!(registered.implementation_slots_consumed, 0);
+    }
+
+    #[test]
+    fn crash_backoff_first_crash_respawns_immediately() {
+        // FR-003: one crash is recoverable without delay.
+        let mut reg = registration("session-a");
+        reg.created_at = Some("2026-08-03T00:00:00Z".to_string());
+        let respawn = apply_pm_crash_backoff(&mut reg, "2026-08-03T00:01:00Z");
+        assert!(respawn);
+        assert_eq!(reg.consecutive_crashes, 1);
+        assert_eq!(reg.next_not_before, None);
+        assert!(pm_respawn_allowed(&reg, "2026-08-03T00:01:00Z"));
+    }
+
+    #[test]
+    fn crash_backoff_series_extends_floor_and_blocks_respawn() {
+        // FR-003: rapid consecutive crashes extend the floor.
+        let mut reg = registration("session-a");
+        reg.created_at = Some("2026-08-03T00:00:00Z".to_string());
+        reg.consecutive_crashes = 1;
+        let respawn = apply_pm_crash_backoff(&mut reg, "2026-08-03T00:01:00Z");
+        assert!(!respawn, "second crash in a series must back off");
+        assert_eq!(reg.consecutive_crashes, 2);
+        assert_eq!(
+            reg.next_not_before.as_deref(),
+            Some("2026-08-03T00:01:30Z"),
+            "floor = now + 30s at series position 2"
+        );
+        assert!(!pm_respawn_allowed(&reg, "2026-08-03T00:01:00Z"));
+        assert!(pm_respawn_allowed(&reg, "2026-08-03T00:01:30Z"));
+    }
+
+    #[test]
+    fn crash_backoff_resets_series_after_healthy_uptime() {
+        // FR-003: a long healthy run means the next crash starts fresh.
+        let mut reg = registration("session-a");
+        reg.created_at = Some("2026-08-03T00:00:00Z".to_string());
+        reg.consecutive_crashes = 3;
+        reg.next_not_before = Some("2026-08-03T00:05:00Z".to_string());
+        let respawn = apply_pm_crash_backoff(&mut reg, "2026-08-03T00:20:00Z");
+        assert!(respawn);
+        assert_eq!(reg.consecutive_crashes, 1);
+        assert_eq!(reg.next_not_before, None);
     }
 
     #[test]

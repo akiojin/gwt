@@ -70,6 +70,13 @@ impl AppRuntime {
         if let Some(window_id) = self.live_pm_window_id(&registration.session_id) {
             return self.focus_existing_live_work_agent_events(&window_id, None);
         }
+        // FR-003 crash-loop damper: while the backoff floor is in the future
+        // the ensure gate must not respawn; the next project open (or manual
+        // action) after the floor recovers the PM.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        if !pm_registry::pm_respawn_allowed(&registration, &now) {
+            return Vec::new();
+        }
         // Stale registration (FR-003): resume the same conversation when the
         // durable session is still materializable; otherwise fall back to a
         // fresh spawn whose completion replaces the stale registration.
@@ -153,6 +160,56 @@ impl AppRuntime {
         }
     }
 
+    /// FR-013: an explicit close of the PM pane clears the registration so
+    /// nothing auto-restarts it. Settings (auto_start) survive.
+    pub(super) fn deregister_pm_for_closed_window(
+        &mut self,
+        project_root: &Path,
+        session_id: &str,
+    ) {
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        match pm_registry::deregister_pm(&prefs_path, session_id) {
+            Ok((_, true)) => {
+                tracing::info!(%session_id, "PM pane closed; registration cleared");
+            }
+            Ok((_, false)) => {}
+            Err(error) => {
+                tracing::warn!(%error, "failed to deregister PM on window close");
+            }
+        }
+    }
+
+    /// FR-003: an unexpected exit of the registered PM records one crash on
+    /// the backoff ladder and, when the ladder allows, respawns immediately
+    /// by re-running the ensure gate (which resumes the same conversation).
+    pub(super) fn handle_pm_crash(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        session_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let respawn_now = match pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            let registration = prefs.registration.as_mut()?;
+            if registration.session_id != session_id {
+                return None;
+            }
+            Some(pm_registry::apply_pm_crash_backoff(registration, &now))
+        }) {
+            Ok((_, Some(respawn_now))) => respawn_now,
+            Ok((_, None)) => return Vec::new(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to record PM crash backoff");
+                return Vec::new();
+            }
+        };
+        if !respawn_now {
+            return Vec::new();
+        }
+        self.ensure_pm_agent_for_tab(tab_id)
+    }
+
     fn pm_window_ids(&self, tab_id: &str) -> HashSet<String> {
         self.tab(tab_id)
             .map(|tab| {
@@ -199,6 +256,11 @@ impl AppRuntime {
                 return Vec::new();
             }
         };
+        // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
+        // skill materialized in the PM worktree (both provider mirrors).
+        if let Err(error) = gwt_skills::pm_guidance::generate_pm_guidance(&worktree) {
+            tracing::warn!(%error, "failed to materialize gwt-pm guidance");
+        }
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir(worktree)
             .extra_arg(PM_BOOTSTRAP_PROMPT)

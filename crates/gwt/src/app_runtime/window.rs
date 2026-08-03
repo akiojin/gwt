@@ -440,6 +440,13 @@ impl AppRuntime {
         notify_issue_monitor: bool,
     ) -> Vec<OutboundEvent> {
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
+        // SPEC-3431 FR-013: snapshot the closing window's session while the
+        // active entry still exists — an explicit close of the PM pane is an
+        // intentional stop and clears the durable PM registration below.
+        let closing_session_id = self
+            .active_agent_sessions
+            .get(id)
+            .map(|session| session.session_id.clone());
         self.clear_agent_window_startup_restore(id);
         self.stop_window_runtime(id);
         self.remove_window_state_tracking(id);
@@ -451,6 +458,12 @@ impl AppRuntime {
             id,
         ) {
             return Vec::new();
+        }
+        if let (Some(session_id), Some(project_root)) = (
+            closing_session_id.as_deref(),
+            issue_monitor_project_root.as_ref(),
+        ) {
+            self.deregister_pm_for_closed_window(project_root, session_id);
         }
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];

@@ -40019,6 +40019,19 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         .pending_pm_launches
         .values()
         .all(|project_root| project_root == &repo));
+    // T-052: the $gwt-pm bootstrap prompt must resolve — the guidance skill
+    // is materialized into the PM worktree at spawn time (both mirrors).
+    let pm_worktree = gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
+        .join("pm")
+        .join("worktree");
+    assert!(
+        pm_worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+        "gwt-pm guidance must be materialized for Claude Code"
+    );
+    assert!(
+        pm_worktree.join(".codex/skills/gwt-pm/SKILL.md").exists(),
+        "gwt-pm guidance must be materialized for Codex"
+    );
 }
 
 #[test]
@@ -40172,4 +40185,114 @@ fn pm_open_project_skips_migration_pending_repo() {
         .iter()
         .all(|window| window.preset != WindowPreset::Agent));
     assert!(runtime.pending_pm_launches.is_empty());
+}
+
+#[test]
+fn pm_close_window_deregisters_pm() {
+    // FR-013: closing the PM pane is an intentional stop — the registration
+    // is cleared and no auto-restart may follow; settings survive.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    runtime.close_window_events(&window_id);
+
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
+    assert_eq!(
+        prefs.registration, None,
+        "closing the PM pane must deregister the PM"
+    );
+    assert!(
+        prefs.settings.auto_start,
+        "settings survive deregistration (FR-002)"
+    );
+}
+
+#[test]
+fn pm_crash_records_backoff_and_respawns() {
+    // FR-003/AS5: an unexpected exit keeps the registration, records the
+    // crash on the backoff ladder, and (first crash) respawns immediately by
+    // resuming the same conversation.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+
+    let mut session = gwt_agent::Session::new(repo.clone(), "work", gwt_agent::AgentId::ClaudeCode);
+    session.restore_window_on_startup = true;
+    session.save(&runtime.sessions_dir).expect("save session");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = session.id.clone();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture(&session.id, &repo),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("agent crashed".to_string()),
+    );
+
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
+    let registration = prefs
+        .registration
+        .expect("crash must keep the registration");
+    assert_eq!(
+        registration.consecutive_crashes, 1,
+        "crash is recorded on the backoff ladder"
+    );
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "immediate respawn resumes the PM conversation"
+    );
 }

@@ -183,6 +183,13 @@ impl AppRuntime {
             .tab(&address.tab_id)
             .map(|tab| tab.project_root.clone());
         let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
+        // SPEC-3431 FR-003: capture the exiting window's session before the
+        // teardown below removes the active entry — the PM crash handler
+        // matches it against the durable registration.
+        let pm_crash_candidate = self
+            .active_agent_sessions
+            .get(&id)
+            .map(|session| session.session_id.clone());
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {
                 if let Some(tab) = self.tab(&address.tab_id) {
@@ -283,6 +290,24 @@ impl AppRuntime {
                 .to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
                 events.extend(self.issue_monitor_agent_failed_events(project_root, &id, &message));
+            }
+        }
+        // SPEC-3431 FR-003: an unexpected exit of the registered PM records a
+        // crash and respawns when the backoff ladder allows. Clean self-exits
+        // take the auto-close branch above (resident turnover: the ensure
+        // gate revives the PM on the next project open); explicit closes run
+        // `close_window_events`, which deregisters instead.
+        if matches!(
+            status,
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
+        ) && !keep_active_agent_session_for_recovery
+        {
+            if let (Some(session_id), Some(project_root)) = (
+                pm_crash_candidate.as_deref(),
+                issue_monitor_project_root.as_ref(),
+            ) {
+                let tab_id = address.tab_id.clone();
+                events.extend(self.handle_pm_crash(&tab_id, project_root, session_id));
             }
         }
         if matches!(
