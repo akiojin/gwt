@@ -10,18 +10,17 @@ use gwt::{
 };
 use gwt_agent::AgentId;
 use gwt_core::process::hidden_command;
-use gwt_skills::{CodexHookDiscoveryMode, SessionKind};
+use gwt_skills::CodexHookDiscoveryMode;
 use serde_json::Value;
 use tempfile::tempdir;
 
-/// SPEC-3247 AS-2 / AS-3 (delivery wiring): materializing managed assets with
-/// `SessionKind::Intake` writes a coordination SKILL.md that omits the
-/// `workspace.update` Work-state instruction and frames curation, while
-/// `SessionKind::Execution` keeps the producing-work instruction. This guards
-/// the boundary a regression to a hardcoded kind would otherwise pass silently.
+/// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
+/// session kind. Every materialization gets the single guidance including the
+/// `workspace.update` Work-state instruction; the curation framing that told
+/// intake sessions they "produce no Work" is gone (#3379 contradiction).
 #[test]
-fn session_kind_selects_intake_or_execution_coordination_guidance() {
-    fn materialize_and_read(kind: SessionKind) -> String {
+fn coordination_guidance_is_identical_for_all_session_kinds() {
+    fn materialize_and_read(is_ephemeral: bool) -> String {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
         let _env_guard = env_lock();
@@ -34,7 +33,7 @@ fn session_kind_selects_intake_or_execution_coordination_guidance() {
             dir.path(),
             &AgentId::ClaudeCode,
             CodexHookDiscoveryMode::WorkspaceHome,
-            kind,
+            is_ephemeral,
         )
         .expect("materialize managed assets");
 
@@ -42,29 +41,28 @@ fn session_kind_selects_intake_or_execution_coordination_guidance() {
             .expect("read coordination SKILL.md")
     }
 
-    let intake = materialize_and_read(SessionKind::Intake);
-    assert!(
-        !intake.contains(r#""operation":"workspace.update""#),
-        "intake materialized guidance must omit the workspace.update Work-state instruction"
+    let intake = materialize_and_read(true);
+    let execution = materialize_and_read(false);
+    assert_eq!(
+        intake, execution,
+        "guidance must be identical for every session kind (single guidance, FR-004)"
     );
     assert!(
-        intake.contains("intake sessions produce no Work"),
-        "intake materialized guidance must frame curation"
+        intake.contains(r#""operation":"workspace.update""#),
+        "the single guidance must keep the workspace.update Work-state instruction"
     );
-
-    let execution = materialize_and_read(SessionKind::Execution);
     assert!(
-        execution.contains(r#""operation":"workspace.update""#),
-        "execution materialized guidance must keep the workspace.update Work-state instruction"
+        !intake.contains("intake sessions produce no Work"),
+        "the curation framing must be gone from the single guidance"
     );
 }
 
-/// SPEC-3248 P4 (FR-011): materializing with `SessionKind::Intake` applies the
-/// reduced (curation) skill set — implementation skills are dropped, curation
-/// skills stay; execution keeps the full set.
+/// SPEC #3245 FR-003 / AC-1: every session kind receives the full skill set.
+/// The reduced (curation) skill set is removed — implementation skills stay
+/// available in intake-kind materializations too.
 #[test]
-fn intake_materialize_applies_reduced_skill_set() {
-    fn materialize(kind: SessionKind) -> tempfile::TempDir {
+fn intake_materialize_keeps_full_skill_set() {
+    fn materialize(is_ephemeral: bool) -> tempfile::TempDir {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
         let _env_guard = env_lock();
@@ -76,26 +74,36 @@ fn intake_materialize_applies_reduced_skill_set() {
             dir.path(),
             &AgentId::ClaudeCode,
             CodexHookDiscoveryMode::WorkspaceHome,
-            kind,
+            is_ephemeral,
         )
         .expect("materialize managed assets");
         dir
     }
 
-    let intake = materialize(SessionKind::Intake);
+    let intake = materialize(true);
     assert!(
-        !intake.path().join(".claude/skills/gwt-build-spec").exists(),
-        "intake must drop the implementation skill gwt-build-spec"
+        intake
+            .path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "intake must keep the implementation skill gwt-build-spec (full set)"
     );
     assert!(
         intake
             .path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists(),
-        "intake must keep curation skills"
+        "intake must keep registration skills"
+    );
+    assert!(
+        intake
+            .path()
+            .join(".claude/skills/gwt-register-spec/SKILL.md")
+            .exists(),
+        "intake must keep the register-spec alias too (FR-005)"
     );
 
-    let execution = materialize(SessionKind::Execution);
+    let execution = materialize(false);
     assert!(
         execution
             .path()
@@ -105,19 +113,14 @@ fn intake_materialize_applies_reduced_skill_set() {
     );
 }
 
-/// #3377 (AC): a worktree whose lane file says intake keeps the reduced
-/// (curation) skill set when re-materialized by a process WITHOUT
-/// `GWT_SESSION_KIND` in its env (e.g. the GUI front door). Before #3399 the
-/// resolver read only the env, fell back to Execution, and wrote
-/// implementation skills back into the intake worktree.
+/// SPEC #3245 FR-003: an intake lane file no longer changes the distributed
+/// skill set — envless re-materialization (e.g. the GUI front door) writes
+/// the full set exactly like every other worktree.
 #[test]
-fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
+fn envless_rematerialize_keeps_full_skill_set_for_intake_lane_file() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), &gwt_skills::INTAKE_PROFILE)
-        .expect("write intake lane file");
     let _env_guard = env_lock();
-    let _kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
@@ -127,14 +130,16 @@ fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
         .expect("materialize managed assets");
 
     assert!(
-        !dir.path().join(".claude/skills/gwt-build-spec").exists(),
-        "intake lane file must keep the reduced skill set without env"
+        dir.path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "an intake lane file must not reduce the distributed skill set"
     );
     assert!(
         dir.path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists(),
-        "intake must keep curation skills"
+        "registration skills stay distributed everywhere"
     );
 }
 
@@ -145,7 +150,7 @@ fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
 /// refuses to heal. Execution worktrees keep the tracked copies (SPEC #1942).
 #[test]
 fn intake_materialize_overrides_stale_tracked_gwt_skills() {
-    fn materialize_with_stale_tracked(kind: SessionKind) -> tempfile::TempDir {
+    fn materialize_with_stale_tracked(is_ephemeral: bool) -> tempfile::TempDir {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
         // A stale tracked copy of a curation skill (survives the reduced set).
@@ -168,13 +173,13 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
             dir.path(),
             &AgentId::ClaudeCode,
             CodexHookDiscoveryMode::WorkspaceHome,
-            kind,
+            is_ephemeral,
         )
         .expect("materialize managed assets");
         dir
     }
 
-    let intake = materialize_with_stale_tracked(SessionKind::Intake);
+    let intake = materialize_with_stale_tracked(true);
     let refreshed = std::fs::read_to_string(
         intake
             .path()
@@ -186,7 +191,7 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
         "intake must refresh a stale tracked gwt skill from the embedded bundle"
     );
 
-    let execution = materialize_with_stale_tracked(SessionKind::Execution);
+    let execution = materialize_with_stale_tracked(false);
     let preserved = std::fs::read_to_string(
         execution
             .path()
@@ -203,8 +208,6 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -307,8 +310,6 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
 fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -356,8 +357,6 @@ fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
 fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -401,8 +400,6 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
 fn refresh_existing_managed_assets_refreshes_only_present_provider_surfaces() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
@@ -453,8 +450,6 @@ fn refresh_managed_gwt_assets_reports_the_failed_step() {
 fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 

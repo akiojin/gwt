@@ -55,7 +55,7 @@ use std::{
 };
 
 pub use board::{BoardCommand, BoardPostCommand};
-pub use commands::{IssueCommand, PrCommand};
+pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;

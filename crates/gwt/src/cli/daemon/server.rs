@@ -342,6 +342,7 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
     } else {
         hub.take_issue_monitor_control_receiver()
     };
+    refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
     tokio::spawn(async move {
         let LoadedDaemonIssueMonitorState {
             mut monitor,
@@ -526,6 +527,7 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                                 };
                                 revision = next_revision;
                                 let should_scan = apply_or_queue_issue_monitor_control(
+                                    &hub,
                                     &prefs_path,
                                     &mut monitor,
                                     control,
@@ -614,7 +616,11 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                                 );
                             }
                             if let Some(completion) = completion {
-                                completion.commit();
+                                commit_issue_monitor_control_completion(
+                                    &hub,
+                                    &monitor,
+                                    completion,
+                                );
                             }
                             if drained {
                                 pending_authority_controls = None;
@@ -1243,6 +1249,11 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    ConfigSet {
+        enabled: Option<bool>,
+        autonomous_mode: Option<bool>,
+        max_active_agents: Option<usize>,
+    },
     ClaimLaunchDelivery {
         issue_number: u64,
         delivery_id: String,
@@ -1450,10 +1461,18 @@ fn issue_monitor_control_is_authorizing(control: &IssueMonitorControl) -> bool {
     matches!(
         control,
         IssueMonitorControl::Enabled(_) | IssueMonitorControl::AutonomousMode(_)
+    ) || matches!(
+        control,
+        IssueMonitorControl::ConfigSet {
+            enabled,
+            autonomous_mode,
+            ..
+        } if enabled.is_some() || autonomous_mode.is_some()
     )
 }
 
 fn apply_or_queue_issue_monitor_control(
+    hub: &BroadcastHub,
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
@@ -1484,7 +1503,7 @@ fn apply_or_queue_issue_monitor_control(
                 effect_permit.reopen();
             }
             if let Some(completion) = completion {
-                completion.commit();
+                commit_issue_monitor_control_completion(hub, monitor, completion);
             }
             should_scan
         }
@@ -1529,6 +1548,31 @@ fn try_apply_issue_monitor_control(
         IssueMonitorControl::AutonomousMode(enabled) => monitor
             .set_autonomous_mode_with_effect_revocation(enabled)
             .map(|_| true),
+        IssueMonitorControl::ConfigSet {
+            enabled,
+            autonomous_mode,
+            max_active_agents,
+        } => {
+            if enabled == Some(true)
+                || autonomous_mode == Some(true)
+                || max_active_agents == Some(0)
+                || (enabled.is_none() && autonomous_mode.is_none() && max_active_agents.is_none())
+            {
+                return None;
+            }
+            let mut candidate = monitor.clone();
+            if let Some(enabled) = enabled {
+                candidate.set_enabled_with_effect_revocation(enabled)?;
+            }
+            if let Some(autonomous_mode) = autonomous_mode {
+                candidate.set_autonomous_mode_with_effect_revocation(autonomous_mode)?;
+            }
+            if let Some(max_active_agents) = max_active_agents {
+                candidate.set_max_active_agents(max_active_agents);
+            }
+            *monitor = candidate;
+            Some(true)
+        }
         control => Some(apply_routine_issue_monitor_control(monitor, control)),
     }
 }
@@ -1546,7 +1590,9 @@ fn apply_routine_issue_monitor_control(
     control: IssueMonitorControl,
 ) -> bool {
     match control {
-        IssueMonitorControl::Enabled(_) | IssueMonitorControl::AutonomousMode(_) => false,
+        IssueMonitorControl::Enabled(_)
+        | IssueMonitorControl::AutonomousMode(_)
+        | IssueMonitorControl::ConfigSet { .. } => false,
         IssueMonitorControl::ClaimLaunchDelivery {
             issue_number,
             delivery_id,
@@ -1805,6 +1851,37 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                 return None;
             }
             let payload = event.get("payload")?;
+            if let Some(config) = payload
+                .get("config_set")
+                .and_then(serde_json::Value::as_object)
+            {
+                let enabled = match config.get("enabled") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
+                let autonomous_mode = match config.get("autonomous_mode") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
+                let max_active_agents = match config.get("max_active_agents") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
+                };
+                if enabled == Some(true)
+                    || autonomous_mode == Some(true)
+                    || max_active_agents == Some(0)
+                    || (enabled.is_none()
+                        && autonomous_mode.is_none()
+                        && max_active_agents.is_none())
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::ConfigSet {
+                    enabled,
+                    autonomous_mode,
+                    max_active_agents,
+                });
+            }
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
             }
@@ -2998,6 +3075,7 @@ fn scan_issue_monitor_once_blocking(
 }
 
 fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
+    refresh_issue_monitor_agent_status(hub, monitor);
     let gui_connected = issue_monitor_gui_connected(hub);
     publish_issue_monitor_daemon_payloads(
         hub,
@@ -3009,10 +3087,27 @@ fn publish_issue_monitor_read_only_payloads(
     hub: &BroadcastHub,
     monitor: &crate::IssueMonitorState,
 ) {
+    refresh_issue_monitor_agent_status(hub, monitor);
     publish_issue_monitor_daemon_payloads(
         hub,
         crate::issue_monitor_worker::issue_monitor_read_only_daemon_payloads(monitor),
     );
+}
+
+fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::IssueMonitorState) {
+    hub.set_issue_monitor_status(
+        serde_json::to_value(monitor.agent_status())
+            .expect("Issue Monitor agent status serializes"),
+    );
+}
+
+fn commit_issue_monitor_control_completion(
+    hub: &BroadcastHub,
+    monitor: &crate::IssueMonitorState,
+    completion: IssueMonitorControlCompletion,
+) {
+    refresh_issue_monitor_agent_status(hub, monitor);
+    completion.commit();
 }
 
 fn publish_issue_monitor_daemon_payloads(
@@ -3196,6 +3291,7 @@ async fn handle_connection(
                     uptime_seconds: started_at.elapsed().as_secs(),
                     broadcast_channels: hub.channel_count(),
                     connections: connection_guard.snapshot(),
+                    issue_monitor: hub.issue_monitor_status(),
                 };
                 if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
                     break;
@@ -3657,6 +3753,7 @@ exit 0
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
             .expect("claim daemon control receiver");
+        super::refresh_issue_monitor_agent_status(&hub, monitor);
         let publisher = tokio::spawn({
             let hub = hub.clone();
             async move {
@@ -3678,6 +3775,7 @@ exit 0
         let mut pending = None;
 
         let should_scan = super::apply_or_queue_issue_monitor_control(
+            &hub,
             prefs_path,
             monitor,
             control,
@@ -3696,6 +3794,77 @@ exit 0
             "successful receipt is the daemon ACK boundary after durable commit"
         );
         should_scan
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_ack_follows_agent_projection_update() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            max_active_agents: 1,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let hub = BroadcastHub::new();
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("claim daemon control receiver");
+        hub.set_issue_monitor_status(
+            serde_json::to_value(monitor.agent_status()).expect("serialize initial status"),
+        );
+        let publisher = tokio::spawn({
+            let hub = hub.clone();
+            async move {
+                hub.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({
+                            "config_set": {
+                                "max_active_agents": 3,
+                            }
+                        }),
+                        std::process::id().wrapping_add(1),
+                    ),
+                })
+                .await
+            }
+        });
+        let request = receiver.recv().await.expect("receive admitted control");
+        let (frame, completion) = request.into_parts();
+        let DaemonFrame::Event { payload, .. } = frame else {
+            panic!("control queue must preserve the event frame");
+        };
+        let control = decode_issue_monitor_control(payload).expect("decode config control");
+        let mut effect_permit = super::IssueMonitorEffectPermit::new();
+        let mut pending = None;
+
+        assert!(super::apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            control,
+            &mut effect_permit,
+            &mut pending,
+            Some(completion),
+        ));
+        assert!(pending.is_none(), "config control commits immediately");
+        assert_eq!(
+            publisher.await.expect("publisher task joins"),
+            Ok(()),
+            "receipt reaches ACK after the durable transaction"
+        );
+        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+            hub.issue_monitor_status()
+                .expect("ready daemon exposes agent projection"),
+        )
+        .expect("deserialize agent projection");
+
+        assert_eq!(projected, monitor.agent_status());
+        assert_eq!(projected.max_active, 3);
     }
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
@@ -3782,6 +3951,7 @@ exit 0
         let mut pending = None;
 
         assert!(!super::apply_or_queue_issue_monitor_control(
+            &hub,
             &prefs_path,
             &mut monitor,
             control,
@@ -3841,11 +4011,25 @@ exit 0
         ));
         let (drained, completion, _) = pending_controls.committed_front();
         assert!(drained);
-        completion.expect("receipt completion retained").commit();
+        super::commit_issue_monitor_control_completion(
+            &hub,
+            &monitor,
+            completion.expect("receipt completion retained"),
+        );
         assert_eq!(
             publisher.await.expect("publisher task joins"),
             Ok(()),
             "the exact receipt ACKs only after the retry commits"
+        );
+        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+            hub.issue_monitor_status()
+                .expect("retry ACK retains the live agent projection"),
+        )
+        .expect("deserialize retry projection");
+        assert_eq!(
+            projected,
+            monitor.agent_status(),
+            "retry ACK follows the reconciled agent projection"
         );
 
         let final_record = monitor
@@ -4823,6 +5007,101 @@ exit 0
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_decodes_and_commits_atomically() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "config_set": {
+                    "enabled": false,
+                    "autonomous_mode": false,
+                    "max_active_agents": 4,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("config control");
+        assert_eq!(
+            control,
+            IssueMonitorControl::ConfigSet {
+                enabled: Some(false),
+                autonomous_mode: Some(false),
+                max_active_agents: Some(4),
+            }
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(!persisted.enabled);
+        assert!(!persisted.autonomous_mode);
+        assert_eq!(persisted.max_active_agents, 4);
+        assert_eq!(persisted.effect_authority_epoch, 9);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_decoder_rejects_enabling_controls() {
+        for config_set in [
+            serde_json::json!({"enabled": true}),
+            serde_json::json!({"autonomous_mode": true}),
+            serde_json::json!({"max_active_agents": 0}),
+            serde_json::json!({}),
+        ] {
+            let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": config_set}),
+                std::process::id() + 1,
+            );
+            assert!(decode_issue_monitor_control(payload).is_none());
+        }
+    }
+
+    #[test]
+    fn issue_monitor_config_set_epoch_overflow_is_atomic() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 1,
+            effect_authority_epoch: u64::MAX,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            initial.clone(),
+        );
+
+        assert!(!super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            IssueMonitorControl::ConfigSet {
+                enabled: Some(false),
+                autonomous_mode: Some(false),
+                max_active_agents: Some(4),
+            },
+        ));
+        assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+        assert_eq!(monitor.prefs(), initial);
     }
 
     #[test]
@@ -6222,8 +6501,15 @@ exit 1
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global GWT home must stay isolated for the worker lifetime
     async fn recovery_blocked_worker_never_publishes_or_drains_launch_delivery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create gwt home");
+        let _home = ScopedGwtHome::set(&home);
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let scope = RuntimeScope::new(
@@ -6258,26 +6544,53 @@ exit 1
         let shutdown = Arc::new(DaemonShutdown::new());
         let worker = super::spawn_issue_monitor_worker_with_config(
             scope,
-            hub,
+            hub.clone(),
             Arc::clone(&shutdown),
             crate::IssueMonitorConfig::default(),
         );
 
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
-        let mut published_events = Vec::new();
-        while let Ok(Ok(DaemonFrame::Event { payload, .. })) =
-            tokio::time::timeout_at(deadline, events.recv()).await
-        {
-            if let Some(event) = payload.get("event").and_then(serde_json::Value::as_str) {
-                published_events.push(event.to_string());
-            }
-        }
+        assert_eq!(
+            hub.publish_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: serde_json::json!({"enabled": false}),
+            })
+            .await,
+            Err(super::IssueMonitorControlQueueError::RecoveryBlocked),
+            "overlapping authority exposes a stable recovery-blocked control state",
+        );
 
         shutdown.request();
         tokio::time::timeout(Duration::from_secs(2), worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
+        let mut published_events = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(DaemonFrame::Event { channel, payload }) => {
+                    assert_eq!(
+                        channel,
+                        crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+                        "recovery-blocked worker published on an unexpected channel",
+                    );
+                    let event = payload
+                        .get("event")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!("recovery-blocked worker published a malformed event: {payload}")
+                        });
+                    published_events.push(event.to_string());
+                }
+                Ok(frame) => {
+                    panic!("recovery-blocked worker published a non-event frame: {frame:?}")
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    panic!("recovery-blocked event buffer lagged by {skipped} frames")
+                }
+            }
+        }
         assert!(
             published_events
                 .iter()
@@ -6285,14 +6598,17 @@ exit 1
             "recovery-blocked worker published delivery events: {published_events:?}",
         );
         assert!(published_events.iter().any(|event| event == "status"));
+        assert!(published_events.iter().any(|event| event == "inbox"));
+        let reloaded = crate::load_issue_monitor_prefs(&prefs_path).expect("reload delivery");
         assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path)
-                .expect("reload delivery")
-                .pending_launch_deliveries
-                .len(),
+            reloaded.pending_launch_deliveries.len(),
             1,
             "read-only recovery projection must not drain the durable outbox",
         );
+        let delivery = &reloaded.pending_launch_deliveries[0];
+        assert_eq!(delivery.delivery_id, "launch:effect-42");
+        assert_eq!(delivery.issue_number, 42);
+        assert_eq!(delivery.claim_id, "claim-42");
         drop(authority_owner);
     }
 
@@ -9133,8 +9449,10 @@ exit 1
         let mut permit = super::IssueMonitorEffectPermit::new();
         let captured_grant = permit.capture();
         let mut pending = None;
+        let hub = BroadcastHub::new();
 
         let should_scan = super::apply_or_queue_issue_monitor_control(
+            &hub,
             &prefs_path,
             &mut stale_local,
             IssueMonitorControl::Enabled(false),
