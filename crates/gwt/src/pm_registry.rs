@@ -276,6 +276,13 @@ pub struct PmStatusReport {
     pub session_record_present: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_hint: Option<bool>,
+    /// FR-014: the PM never occupies an Issue Monitor implementation slot.
+    /// Always 0; kept explicit so operators can see the accounting rule.
+    /// The global resource cap engine itself remains SPEC #3200's
+    /// unimplemented FR — this report only exposes the PM bucket.
+    pub implementation_slots_consumed: u32,
+    /// FR-014 visibility: resident PM bucket (1 while a PM is registered).
+    pub pm_bucket: u32,
 }
 
 /// Build the `pm.status` report from loaded prefs. The durable-session probe
@@ -293,6 +300,8 @@ pub fn pm_status_report(
         schema_version: 1,
         registered: registration.is_some(),
         auto_start: prefs.settings.auto_start,
+        pm_bucket: u32::from(registration.is_some()),
+        implementation_slots_consumed: 0,
         registration,
         session_record_present: record_present,
         stale_hint: record_present.map(|present| !present),
@@ -516,5 +525,39 @@ mod tests {
         assert!(report.registered);
         assert_eq!(report.session_record_present, Some(false));
         assert_eq!(report.stale_hint, Some(true));
+    }
+
+    #[test]
+    fn status_report_accounts_pm_outside_implementation_slots() {
+        // SPEC-3431 T-060 (FR-014): the PM is visible as its own resident
+        // bucket and never consumes an implementation slot. The global cap
+        // engine itself remains SPEC #3200's unimplemented FR.
+        let unregistered = pm_status_report(&PmPrefs::default(), |_| true);
+        assert_eq!(unregistered.pm_bucket, 0);
+        assert_eq!(unregistered.implementation_slots_consumed, 0);
+
+        let prefs = PmPrefs {
+            registration: Some(registration("session-a")),
+            ..Default::default()
+        };
+        let registered = pm_status_report(&prefs, |_| true);
+        assert_eq!(registered.pm_bucket, 1);
+        assert_eq!(registered.implementation_slots_consumed, 0);
+    }
+
+    #[test]
+    fn pm_registration_never_touches_issue_monitor_slot_accounting() {
+        // SPEC-3431 T-060 (FR-014): registering a PM must leave the Issue
+        // Monitor's implementation-slot ledger untouched. The stores are
+        // structurally separate files; this test pins that separation so a
+        // future coupling has to break it consciously.
+        let (_dir, path) = temp_prefs_path();
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let before = monitor.active_count();
+
+        try_register_pm(&path, registration("session-a"), |_| true).expect("register");
+
+        assert_eq!(monitor.active_count(), before);
+        assert_eq!(monitor.active_count(), 0);
     }
 }
