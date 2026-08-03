@@ -105,6 +105,7 @@ mod launch_output_mirror;
 mod loaders;
 mod migration;
 pub(crate) mod persist_dispatcher;
+mod pm;
 mod profile;
 mod project_tabs;
 mod pty_io;
@@ -650,6 +651,16 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
+    /// project root whose `pm.json` must record the resulting session. The
+    /// entry is consumed by `handle_launch_complete`, which writes the PM
+    /// registration once the session id exists.
+    pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
+    /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
+    /// runs once the frontend reports canvas bounds (same deferral rule as
+    /// startup auto-resume — agent panes never spawn before the canvas is
+    /// ready).
+    pub(crate) pending_startup_pm_tabs: Vec<String>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -1257,6 +1268,8 @@ impl AppRuntime {
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            pending_pm_launches: HashMap::new(),
+            pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),

@@ -3054,6 +3054,8 @@ fn sample_runtime_with_events(
         launch_wizard: None,
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
+        pending_pm_launches: HashMap::new(),
+        pending_startup_pm_tabs: Vec::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
@@ -39861,4 +39863,313 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
     assert_eq!(prefs_b.failed_issues.len(), 1);
     assert_eq!(prefs_b.failed_issues[0].issue_number, 42);
     assert_eq!(prefs_b.failed_issues[0].message, "agent failed");
+}
+
+// ---- SPEC-3431: resident PM pane lifecycle (T-010/T-011) ----
+
+/// Opt this test's project out of the SPEC-3431 PM auto-start: the test
+/// exercises startup/restore behavior that predates the resident PM pane and
+/// its window/session counts intentionally exclude it.
+fn disable_pm_auto_start(project_root: &Path) {
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(project_root);
+    gwt::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+        prefs.settings.auto_start = false;
+    })
+    .expect("disable PM auto-start");
+}
+
+fn pm_registration_fixture(session_id: &str, worktree: &Path) -> gwt::pm_registry::PmRegistration {
+    gwt::pm_registry::PmRegistration {
+        session_id: session_id.to_string(),
+        agent_id: "claude".to_string(),
+        worktree_path: worktree.to_string_lossy().into_owned(),
+        created_at: Some("2026-08-03T00:00:00Z".to_string()),
+        consecutive_crashes: 0,
+        next_not_before: None,
+    }
+}
+
+#[test]
+fn pm_ensure_focuses_live_pm_instead_of_spawning() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // AS4 / FR-001 positive: a live registered PM must not be duplicated.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime.active_agent_sessions.insert(window_id, session);
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    let windows_before = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .len();
+
+    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+
+    let windows_after = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .len();
+    assert_eq!(
+        windows_before, windows_after,
+        "live PM must not spawn a duplicate pane"
+    );
+    assert!(
+        !events.is_empty(),
+        "ensure focuses the live PM (focus/broadcast events)"
+    );
+    assert!(runtime.pending_pm_launches.is_empty());
+}
+
+#[test]
+fn pm_ensure_respects_auto_start_opt_out() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // FR-002 negative: the opt-out must suppress the auto-start entirely.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    disable_pm_auto_start(&repo);
+
+    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+
+    assert!(events.is_empty(), "opt-out must be a no-op");
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+    assert!(runtime.pending_pm_launches.is_empty());
+}
+
+#[test]
+fn pm_ensure_spawns_fresh_pm_when_unregistered() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // FR-001/FR-002: no registration + auto_start default ON => silent spawn
+    // with a pending PM marker so launch completion can register the session.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+
+    assert!(!events.is_empty(), "fresh spawn emits workspace events");
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "pending PM marker tracks the launch for registration at completion"
+    );
+    assert!(runtime
+        .pending_pm_launches
+        .values()
+        .all(|project_root| project_root == &repo));
+}
+
+#[test]
+fn pm_ensure_resumes_stale_registration_conversation() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // AS5 / FR-003: a dead PM with a materializable session resumes the same
+    // conversation instead of spawning a fresh PM.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut session = gwt_agent::Session::new(repo.clone(), "work", gwt_agent::AgentId::ClaudeCode);
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.restore_window_on_startup = true;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture(&session.id, &repo),
+        |_| false,
+    )
+    .expect("seed stale registration");
+
+    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+
+    assert!(!events.is_empty(), "stale PM resumes");
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "resume spawns exactly one PM pane");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "resumed launch still registers the successor session at completion"
+    );
+}
+
+#[test]
+fn pm_bootstrap_ensures_pm_for_open_git_tabs() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // FR-002: tabs already open at launch get the PM pane from bootstrap.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.bootstrap();
+
+    // Agent panes never spawn before the canvas reports bounds: bootstrap
+    // only queues the ensure (same deferral rule as startup auto-resume).
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+    assert_eq!(runtime.pending_startup_pm_tabs, vec!["tab-1".to_string()]);
+
+    let events = runtime.startup_auto_resume_ready_events(canvas_bounds());
+
+    assert!(!events.is_empty(), "canvas-ready drain spawns the PM pane");
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert_eq!(runtime.pending_pm_launches.len(), 1);
+    assert!(runtime.pending_startup_pm_tabs.is_empty());
+}
+
+#[test]
+fn pm_bootstrap_respects_opt_out() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // FR-002 negative: the project-level opt-out suppresses bootstrap too.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    disable_pm_auto_start(&repo);
+
+    runtime.bootstrap();
+    runtime.startup_auto_resume_ready_events(canvas_bounds());
+
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+    assert!(runtime.pending_pm_launches.is_empty());
+}
+
+#[test]
+fn pm_open_project_skips_migration_pending_repo() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // A Normal-layout repo opens with migration pending; PM ensure must wait
+    // until the migration decision instead of spawning into a layout gwt is
+    // about to rewrite.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project dir");
+    init_repo(&project);
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+    runtime.open_project_path_events(project);
+
+    let tab_id = runtime.active_tab_id.clone().expect("active tab");
+    assert!(runtime
+        .tab(&tab_id)
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .all(|window| window.preset != WindowPreset::Agent));
+    assert!(runtime.pending_pm_launches.is_empty());
 }

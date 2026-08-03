@@ -2637,6 +2637,8 @@ mod tests {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
+            pending_pm_launches: HashMap::new(),
+            pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
