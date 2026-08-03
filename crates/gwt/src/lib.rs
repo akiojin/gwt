@@ -36,6 +36,7 @@ pub mod migration;
 pub mod native_app;
 pub(crate) mod path_filter;
 pub mod persistence;
+pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;

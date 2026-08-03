@@ -372,6 +372,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
+        "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
+            project_root: optional_string(params, "project_root")?,
+        }),
         "workflow.bypass" => CliCommand::Workflow(WorkflowCommand::Bypass {
             mode: WorkflowBypassMode::parse(&required_string(params, "mode")?).ok_or(
                 CliParseError::InvalidValue {
@@ -1750,6 +1753,21 @@ mod tests {
             ),
             CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
         ));
+    }
+
+    // SPEC-3431: PM agent diagnostics parse variants.
+    #[test]
+    fn pm_status_variants() {
+        assert!(matches!(
+            ok("pm.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::Status { project_root: None })
+        ));
+        match ok("pm.status", json!({"project_root": "/tmp/elsewhere"})) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::Status { project_root }) => {
+                assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     // SPEC-3248 P8a: execution settlement parse variants.

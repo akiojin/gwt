@@ -64,6 +64,7 @@ fn print_help() {
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
+    println!("  pm          PM agent diagnostics (SPEC-3431)");
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
@@ -89,6 +90,7 @@ fn family_help(family: &str) -> Option<String> {
         "verify" => Some(format_verify_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
+        "pm" => Some(format_pm_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
@@ -451,6 +453,26 @@ fn format_register_help() -> String {
         "Key params:",
         "  spec, label, reason",
         "",
+    ]
+    .join("\n")
+}
+
+fn format_pm_help() -> String {
+    [
+        "pm.* — PM agent diagnostics via JSON envelope (SPEC-3431).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  pm.status    Report the per-project PM registration, auto-start setting,",
+        "               and a stale hint from the durable session store (read-only,",
+        "               ownerless-safe).",
+        "",
+        "Key params:",
+        "  project_root (optional; defaults to the current repository path)",
     ]
     .join("\n")
 }
