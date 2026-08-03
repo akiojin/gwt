@@ -331,6 +331,19 @@ impl AppRuntime {
         linked_issue_kind: LinkedIssueKind,
         previous_profiles: gwt::LaunchWizardPreviousProfiles,
     ) -> LaunchWizardSession {
+        // #3426: the unified Issue surface preset collapses SPEC entries to
+        // LinkedIssueKind::Issue, so re-canonicalize the kind from the cached
+        // label evidence before it seeds the Work owner context. Absent
+        // evidence keeps the caller-declared kind.
+        let linked_issue_kind =
+            match gwt::cli::execution_state::detect_owner_kind_evidence(project_root, issue_number)
+            {
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Spec) => LinkedIssueKind::Spec,
+                Some(gwt::cli::execution_state::ExecutionOwnerKind::Issue) => {
+                    LinkedIssueKind::Issue
+                }
+                None => linked_issue_kind,
+            };
         let base_branch_name = normalize_branch_name(base_branch_name);
         let target_branch_name =
             knowledge_launch_target_branch_name(linked_issue_kind, issue_number);

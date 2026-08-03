@@ -2472,10 +2472,10 @@ pub(super) fn agent_launch_purpose_title(
 }
 
 fn issue_title_from_cache(project_root: &Path, issue_number: u64) -> Option<String> {
-    let repo_hash = gwt_core::repo_hash::detect_repo_hash(project_root)?;
-    let cache_root = gwt_core::paths::gwt_cache_dir()
-        .join("issues")
-        .join(repo_hash.as_str());
+    // #3426: use the canonical workspace-home-aware cache resolution (with the
+    // detached fallback) so managed roots read the same cache as execution
+    // owner-kind detection and title sync.
+    let cache_root = gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
     let entry =
         gwt_github::Cache::new(cache_root).load_entry(gwt_github::IssueNumber(issue_number))?;
     let title = entry.snapshot.title.trim();
@@ -2505,6 +2505,7 @@ pub(super) fn save_start_work_workspace_projection(
     session: &ActiveAgentSession,
     base_branch: &str,
     linked_issue_number: Option<u64>,
+    canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
@@ -2526,6 +2527,7 @@ pub(super) fn save_start_work_workspace_projection(
         session,
         Some(base_branch),
         linked_issue_number,
+        canonical_owner,
         workspace_resume_context,
         WorkspaceLaunchProjectionKind::StartWork,
         live_session_ids,
@@ -2545,6 +2547,7 @@ pub(super) fn save_resumed_workspace_projection(
         session,
         base_branch,
         linked_issue_number,
+        None,
         Some(workspace_resume_context),
         WorkspaceLaunchProjectionKind::Resume {
             created_by_start_work: session.branch_name.starts_with("work/"),

@@ -832,13 +832,74 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 .ok_or_else(|| {
                     "the current execution binding has no integrity-valid owner ledger".to_string()
                 })?;
-            if ledger.current_effective_status()
-                != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+            let effective_status = ledger.current_effective_status();
+            if effective_status != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
             {
-                return Err(
-                    "an execution generation already exists; use Continue work to create a successor"
-                        .to_string(),
-                );
+                // #3426: a stranded Active generation whose producing Session
+                // is durably defunct self-recovers here — settle it Blocked
+                // with audited evidence and fall through to the ordinary
+                // Blocked-successor preparation below. Anything else keeps
+                // the guard, with diagnostics naming the exact next action.
+                let owner_text = format!("{} #{}", owner.kind.as_str(), owner.number);
+                if effective_status
+                    != Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+                {
+                    return Err(format!(
+                        "an execution generation for {owner_text} already exists \
+                         (status: {effective_status:?}); use Continue work to create a successor"
+                    ));
+                }
+                let record = gwt::cli::execution_state::load(worktree)
+                    .map_err(|error| error.to_string())?
+                    .filter(|record| {
+                        record.owner_kind == owner.kind
+                            && record.owner_number == owner.number
+                            && record.status
+                                == gwt::cli::execution_state::ExecutionControlStatus::Active
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "an Active execution generation for {owner_text} already exists but \
+                             its projection could not be read; use Continue work to create a \
+                             successor"
+                        )
+                    })?;
+                let bound_session_id = record.primary_session_id.clone();
+                let generation_id = current_binding
+                    .as_ref()
+                    .map(|identity| identity.generation_id.clone())
+                    .unwrap_or_default();
+                match super::continuation::classify_nonlocal_active_owner_liveness_at(
+                    sessions_dir,
+                    &bound_session_id,
+                ) {
+                    super::continuation::ActiveOwnerLiveness::Stale(evidence) => {
+                        gwt::cli::execution_state::block_defunct_active_generation(
+                            worktree,
+                            owner,
+                            &bound_session_id,
+                            &format!(
+                                "fresh launch self-recovery: producing Session \
+                                 {bound_session_id} is defunct ({evidence})"
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "the stranded Active generation {generation_id} for \
+                                 {owner_text} (bound Session {bound_session_id}, {evidence}) \
+                                 could not self-recover: {error}"
+                            )
+                        })?;
+                    }
+                    super::continuation::ActiveOwnerLiveness::Unknown => {
+                        return Err(format!(
+                            "an Active execution generation ({generation_id}) for {owner_text} \
+                             is still bound to Session {bound_session_id} and may be live; use \
+                             Continue work to create a successor, or settle the stalled \
+                             execution from its owning session with execution.blocked"
+                        ));
+                    }
+                }
             }
 
             let repo_hash = session
@@ -2278,6 +2339,7 @@ impl AppRuntime {
                                     &active_session,
                                     base_branch,
                                     linked_issue_number,
+                                    materialized_genesis.as_ref().map(|genesis| genesis.owner),
                                     workspace_resume_context.as_ref(),
                                     &live_session_ids,
                                 ) {
@@ -5181,6 +5243,231 @@ mod agent_endpoint_env_tests {
         );
         assert!(!grant.principal().authorizes_producing_mutation());
         assert_eq!(grant.principal().execution_binding(), Some(&binding));
+    }
+
+    // #3426: a stranded Active generation whose producing Session is durably
+    // stopped must self-recover on the next fresh linked-owner launch instead
+    // of looping on the genesis guard.
+    #[test]
+    fn explicit_linked_owner_launch_self_recovers_defunct_active_predecessor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        // The producing Session dies before authenticated SessionStart; the
+        // generation stays Active while the Session is durably Stopped.
+        gwt_agent::persist_session_status(
+            &predecessor.sessions_dir,
+            &predecessor.session.id,
+            gwt_agent::AgentStatus::Stopped,
+        )
+        .expect("mark predecessor Session durably stopped");
+        let predecessor_binding = gwt::cli::execution_state::current_execution_binding(
+            &predecessor.project,
+            predecessor.owner,
+        )
+        .expect("read Active predecessor binding")
+        .expect("Active predecessor generation");
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
+        persist_finalized_launch_session(
+            &predecessor.sessions_dir,
+            &runtime_path,
+            &mut successor,
+            None,
+        )
+        .expect("persist fresh launch Session before authority");
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("fresh launch must self-recover a durably defunct Active predecessor");
+
+        let ledger = gwt::cli::execution_state::load_generation_ledger(
+            &predecessor.project,
+            predecessor.owner,
+        )
+        .expect("read recovered ledger")
+        .expect("recovered ledger");
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+            "the defunct predecessor must be settled Blocked with audit, not erased"
+        );
+        assert!(
+            ledger.lifecycle_events.iter().any(|event| {
+                event.session_id == predecessor.session.id
+                    && event.to_status == gwt::cli::execution_state::ExecutionControlStatus::Blocked
+                    && event.reason.contains("self-recovery")
+            }),
+            "the recovery settle must carry an audited defunct-evidence reason"
+        );
+        let current_after_recovery = gwt::cli::execution_state::current_execution_binding(
+            &predecessor.project,
+            predecessor.owner,
+        )
+        .expect("read current generation")
+        .expect("current generation after recovery");
+        assert_eq!(
+            current_after_recovery.generation_id, predecessor_binding.generation_id,
+            "pre-readiness preparation must keep the settled predecessor generation current",
+        );
+        assert_eq!(
+            current_after_recovery.binding_id, predecessor_binding.binding_id,
+            "the settled predecessor must keep its exact session binding",
+        );
+        let token = env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("fresh launch Prepared capability token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate fresh Prepared capability");
+        assert_eq!(
+            grant.principal().execution_authority_kind(),
+            crate::embedded_server::AgentExecutionAuthorityKind::Prepared,
+        );
+    }
+
+    // #3426: an Active generation whose producing Session cannot be proven
+    // defunct keeps the guard, but the refusal must carry actionable
+    // diagnostics instead of only advertising Continue work.
+    #[test]
+    fn explicit_linked_owner_launch_refuses_possibly_live_active_predecessor_with_diagnostics() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        // A live current-Host runtime sidecar keeps the owner liveness
+        // Unknown: the guard must refuse without any automatic settle.
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&gwt_agent::runtime_state_path(
+                &predecessor.sessions_dir,
+                &predecessor.session.id,
+            ))
+            .expect("persist live predecessor runtime sidecar");
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
+        persist_finalized_launch_session(
+            &predecessor.sessions_dir,
+            &runtime_path,
+            &mut successor,
+            None,
+        )
+        .expect("persist fresh launch Session before authority");
+
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect_err("a possibly-live Active predecessor must keep the guard");
+
+        assert!(
+            error.contains(&predecessor.session.id),
+            "diagnostics must name the bound Session: {error}"
+        );
+        assert!(
+            error.contains("Active"),
+            "diagnostics must state the generation status: {error}"
+        );
+        assert!(
+            error.contains("Continue work"),
+            "diagnostics must keep an actionable next step: {error}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(
+                &predecessor.project,
+                predecessor.owner,
+            )
+            .expect("read refused ledger")
+            .expect("refused ledger")
+            .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+            "a refusal must not settle or mutate the live predecessor"
+        );
     }
 
     #[test]

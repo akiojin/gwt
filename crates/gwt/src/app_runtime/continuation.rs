@@ -124,7 +124,7 @@ use super::{
 use regex::Regex;
 
 #[derive(Debug)]
-struct ContinueWorkFailure {
+pub(super) struct ContinueWorkFailure {
     outcome: gwt::ContinueWorkOutcomeKind,
     message: String,
     code: &'static str,
@@ -788,12 +788,12 @@ fn canonical_continue_work_branch(worktree_path: &Path) -> Result<String, Contin
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProjectionOwnerRef {
+pub(super) struct ProjectionOwnerRef {
     declared_kind: Option<gwt::cli::execution_state::ExecutionOwnerKind>,
     number: u64,
 }
 
-fn strict_projection_owner(raw_owner: &str) -> Option<ProjectionOwnerRef> {
+pub(super) fn strict_projection_owner(raw_owner: &str) -> Option<ProjectionOwnerRef> {
     let owner = raw_owner.trim();
     if owner.is_empty() {
         return None;
@@ -860,17 +860,18 @@ fn projection_only_continue_owner(
     })
 }
 
-fn canonical_continue_work_owner(
+pub(super) fn canonical_continue_work_owner(
     project_root: &Path,
     worktree_path: &Path,
     projected: ProjectionOwnerRef,
 ) -> Result<gwt::cli::execution_state::ExecutionOwnerKey, ContinueWorkFailure> {
+    // #3426: a same-number kind-only disagreement self-heals toward the
+    // trusted authority (generation ledger, ECR hint, or cache label
+    // evidence); the corrected owner is committed back to the Work
+    // projection by the continuation transaction. Number mismatches stay
+    // fail-closed.
     let validate = |owner: gwt::cli::execution_state::ExecutionOwnerKey| {
-        if owner.number != projected.number
-            || projected
-                .declared_kind
-                .is_some_and(|kind| kind != owner.kind)
-        {
+        if owner.number != projected.number {
             Err(ContinueWorkFailure::failed(
                 "execution_owner_ambiguous",
                 "The Work owner does not match its current execution authority.",
@@ -885,13 +886,21 @@ fn canonical_continue_work_owner(
         Ok(None) => {
             match gwt::cli::execution_state::recovery_projection_owner_hint(worktree_path) {
                 Ok(Some(owner)) => validate(owner),
-                Ok(None) => validate(gwt::cli::execution_state::ExecutionOwnerKey {
-                    kind: gwt::cli::execution_state::detect_owner_kind(
+                Ok(None) => {
+                    // No trusted execution authority exists yet. Prefer cache
+                    // label evidence; absent evidence, retain the declared
+                    // kind rather than silently downgrading to Issue.
+                    let kind = gwt::cli::execution_state::detect_owner_kind_evidence(
                         project_root,
                         projected.number,
-                    ),
-                    number: projected.number,
-                }),
+                    )
+                    .or(projected.declared_kind)
+                    .unwrap_or(gwt::cli::execution_state::ExecutionOwnerKind::Issue);
+                    validate(gwt::cli::execution_state::ExecutionOwnerKey {
+                        kind,
+                        number: projected.number,
+                    })
+                }
                 Err(_) => Err(ContinueWorkFailure::conflict(
                     "The Work execution authority could not be read safely.",
                 )),
@@ -2266,6 +2275,7 @@ fn transact_pending_continue_work_with_activation(
                     work_id: Some(pending.work_id.clone()),
                     base_branch: None,
                     linked_issue_number: Some(pending.owner.number),
+                    canonical_owner: Some(pending.owner),
                     resume_context: Some(&pending.resume_context),
                     kind: WorkspaceLaunchProjectionKind::Resume {
                         created_by_start_work: active_session.branch_name.starts_with("work/"),
@@ -2296,17 +2306,6 @@ fn fresh_execution_commit_readback_matches(
         .ok()
         .flatten()
         == Some(session.execution_binding.identity.clone())
-}
-
-fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
 }
 
 fn resolve_activated_fresh_execution_commit(
@@ -3657,13 +3656,22 @@ impl AppRuntime {
         &self,
         session_id: &str,
     ) -> ActiveOwnerLiveness {
-        let durable_path = self.sessions_dir.join(format!("{session_id}.toml"));
+        classify_nonlocal_active_owner_liveness_at(&self.sessions_dir, session_id)
+    }
+}
+
+pub(super) fn classify_nonlocal_active_owner_liveness_at(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> ActiveOwnerLiveness {
+    {
+        let durable_path = sessions_dir.join(format!("{session_id}.toml"));
         let durable = match gwt_agent::inspect_session_path(&durable_path) {
             gwt_agent::SessionPathState::Present(session) => Some(session),
             gwt_agent::SessionPathState::Missing => None,
             gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
         };
-        let runtime_root = self.sessions_dir.join("runtime");
+        let runtime_root = sessions_dir.join("runtime");
         let entries = match std::fs::read_dir(&runtime_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -3702,7 +3710,11 @@ impl AppRuntime {
                 Ok(true) => {}
                 Err(_) => return ActiveOwnerLiveness::Unknown,
             }
-            if gwt::process::is_process_alive(pid) {
+            // #3426: use the cross-platform Host probe — `is_process_alive`
+            // is a Windows daemon-bootstrap stub that reports every PID dead,
+            // which would let a live local Host be classified Stale and its
+            // Active generation taken over or auto-settled.
+            if gwt::process::is_host_process_alive(pid) {
                 match gwt_agent::SessionRuntimeState::load(&sidecar) {
                     Ok(state)
                         if matches!(
@@ -3737,7 +3749,9 @@ impl AppRuntime {
         }
         ActiveOwnerLiveness::Unknown
     }
+}
 
+impl AppRuntime {
     pub(crate) fn stop_pending_continue_work_session_without_projection(
         &mut self,
         window_id: &str,
@@ -6153,12 +6167,6 @@ impl AppRuntime {
                         &pending.operation_id,
                         |projection, _work_items, _| {
                             let now = chrono::Utc::now();
-                            let owner_context = WorkspaceResumeContext {
-                                title: None,
-                                owner: Some(workspace_owner_label(pending.owner)),
-                                summary: None,
-                                next_action: None,
-                            };
                             let event = apply_workspace_launch_transition(
                                 projection,
                                 &active_session,
@@ -6170,10 +6178,8 @@ impl AppRuntime {
                                     ),
                                     base_branch: pending.base_branch.as_deref(),
                                     linked_issue_number: pending.linked_issue_number,
-                                    resume_context: pending
-                                        .resume_context
-                                        .as_ref()
-                                        .or(Some(&owner_context)),
+                                    canonical_owner: Some(pending.owner),
+                                    resume_context: pending.resume_context.as_ref(),
                                     kind: if pending.base_branch.is_some() {
                                         WorkspaceLaunchProjectionKind::StartWork
                                     } else {

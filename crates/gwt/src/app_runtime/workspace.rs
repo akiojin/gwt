@@ -192,10 +192,26 @@ pub(super) struct WorkspaceLaunchTransition<'a> {
     pub(super) work_id: Option<String>,
     pub(super) base_branch: Option<&'a str>,
     pub(super) linked_issue_number: Option<u64>,
+    /// Trusted execution owner (#3426). When present it overrides any
+    /// presentation-derived `resume_context.owner` so the Work projection can
+    /// never fork from the ECR/ledger owner kind.
+    pub(super) canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     pub(super) resume_context: Option<&'a WorkspaceResumeContext>,
     pub(super) kind: WorkspaceLaunchProjectionKind,
     pub(super) live_session_ids: &'a std::collections::HashSet<String>,
     pub(super) now: chrono::DateTime<chrono::Utc>,
+}
+
+/// Canonical Work owner label for a trusted execution owner key.
+pub(super) fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
+    match owner.kind {
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
+            format!("SPEC-{}", owner.number)
+        }
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
+            format!("Issue #{}", owner.number)
+        }
+    }
 }
 
 impl WorkspaceLaunchProjectionKind {
@@ -216,11 +232,13 @@ impl WorkspaceLaunchProjectionKind {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn save_workspace_launch_projection(
     project_root: &Path,
     session: &ActiveAgentSession,
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
+    canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     launch_kind: WorkspaceLaunchProjectionKind,
     live_session_ids: &std::collections::HashSet<String>,
@@ -242,6 +260,7 @@ pub(super) fn save_workspace_launch_projection(
                     work_id,
                     base_branch,
                     linked_issue_number,
+                    canonical_owner,
                     resume_context: workspace_resume_context,
                     kind: launch_kind,
                     live_session_ids,
@@ -260,8 +279,13 @@ pub(super) fn apply_workspace_launch_transition(
     transition: WorkspaceLaunchTransition<'_>,
 ) -> gwt_core::workspace_projection::WorkEvent {
     let owner = transition
-        .resume_context
-        .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
+        .canonical_owner
+        .map(workspace_owner_label)
+        .or_else(|| {
+            transition
+                .resume_context
+                .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
+        })
         .or_else(|| {
             transition
                 .linked_issue_number

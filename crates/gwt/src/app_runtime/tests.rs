@@ -1520,6 +1520,7 @@ fn save_assigned_workspace_projection_for_test(
         &session,
         Some("develop"),
         None,
+        None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
         &live,
@@ -1559,6 +1560,7 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
         &session,
         "develop",
         Some(3412),
+        None,
         None,
         &std::collections::HashSet::from([session.session_id.clone()]),
     )
@@ -1662,6 +1664,69 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     );
     assert_eq!(paused_rows[0].lifecycle_state, "paused");
     assert_eq!(paused_rows[0].active_agents, 0);
+}
+
+// #3426: the genesis Start Work projection must let the canonical execution
+// owner override a presentation-derived Issue-kind resume context, mirroring
+// the Blocked-successor path.
+#[test]
+fn start_work_projection_prefers_canonical_execution_owner_over_resume_context() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project_root = temp.path().join("repo");
+    fs::create_dir_all(&project_root).expect("create repo");
+    init_repo(&project_root);
+    let mut session = sample_active_agent_session("tab-1", "window-1921");
+    session.session_id = "session-launch-1921".to_string();
+    session.branch_name = "work/issue-1921".to_string();
+    session.worktree_path = project_root.clone();
+    session.agent_project_root = project_root.display().to_string();
+    let context = WorkspaceResumeContext {
+        title: Some("SPEC-1921: agent management".to_string()),
+        owner: Some("Issue #1921".to_string()),
+        summary: None,
+        next_action: None,
+    };
+
+    save_start_work_workspace_projection(
+        &project_root,
+        &session,
+        "develop",
+        Some(1921),
+        Some(gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 1921,
+        }),
+        Some(&context),
+        &std::collections::HashSet::from([session.session_id.clone()]),
+    )
+    .expect("Start Work launch publication");
+
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+    let work = work_items
+        .work_items
+        .iter()
+        .find(|item| {
+            item.agents
+                .iter()
+                .any(|agent| agent.session_id == session.session_id)
+        })
+        .expect("materialized Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("SPEC-1921"),
+        "trusted execution owner must override the mis-kinded resume context"
+    );
+    assert_eq!(
+        work.title, "SPEC-1921: agent management",
+        "non-owner resume context fields stay presentation-owned"
+    );
 }
 
 fn workspace_agent_summary_for_test(
@@ -1799,6 +1864,7 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
         &repo,
         &session,
         Some("develop"),
+        None,
         None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
@@ -7837,6 +7903,7 @@ fn ordinary_blocked_transition_is_not_genesis_failure_compensation_authority() {
         &session,
         Some("develop"),
         Some(owner.number),
+        None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
         &HashSet::from([session.session_id.clone()]),
@@ -7946,6 +8013,7 @@ fn terminalized_genesis_compensation_uses_repo_global_work_items() {
         &session,
         Some("develop"),
         Some(owner.number),
+        None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
         &HashSet::from([session.session_id.clone()]),
@@ -8049,6 +8117,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         &prior,
         Some("develop"),
         Some(owner.number),
+        None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
         &HashSet::from([prior.session_id.clone()]),
@@ -8226,6 +8295,7 @@ fn terminalized_genesis_compensation_retries_after_discard_before_agent_cleanup(
         &session,
         Some("develop"),
         Some(owner.number),
+        None,
         Some(&context),
         WorkspaceLaunchProjectionKind::StartWork,
         &HashSet::from([session.session_id.clone()]),
@@ -11314,10 +11384,22 @@ fn projection_only_continue_rejects_branch_only_container_conflict_without_mutat
     );
 }
 
+// #3426: a same-number kind-only mismatch (Work says `Issue #N`, trusted
+// ledger says `spec/N`) previously wedged Continue work behind
+// execution_owner_ambiguous even though the trusted authority is unambiguous.
+// The trusted owner now wins and the continuation proceeds under it.
 #[test]
-fn projection_only_continue_rejects_explicit_owner_kind_mismatch_without_mutation() {
-    assert_projection_only_continue_rejection(
-        "projection-only-owner-kind-conflict",
+fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        temp.path(),
+        "projection-only-owner-kind-heal",
         ProjectionOnlyContinueFixture {
             work_owner: Some("Issue #2359"),
             owner_number: 2359,
@@ -11331,7 +11413,65 @@ fn projection_only_continue_rejects_explicit_owner_kind_mismatch_without_mutatio
             conflicting_agent: false,
             legacy_flat_only: false,
         },
-        "execution_owner_ambiguous",
+    );
+
+    let events = runtime.continue_work_events(
+        "client-owner-kind-heal",
+        "owner-kind-heal-operation".to_string(),
+        work_id.clone(),
+        canvas_bounds(),
+    );
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                error_code: Some(code),
+                ..
+            } if code == "execution_owner_ambiguous"
+        )),
+        "a kind-only mismatch against an unambiguous trusted authority must self-heal: {events:?}"
+    );
+    let pending = runtime
+        .pending_continue_work
+        .values()
+        .find(|pending| pending.operation_id == "owner-kind-heal-operation")
+        .expect("healed continuation must prepare one pending attempt");
+    assert_eq!(pending.work_id, work_id);
+    assert_eq!(
+        pending.owner, owner,
+        "the continuation must run under the trusted spec authority"
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .expect("read healed ledger")
+        .expect("healed ledger");
+    assert_eq!(ledger.continuation_attempts.len(), 1);
+}
+
+// #3426: with no trusted generation authority and no cache evidence, a
+// Work-declared kind must be retained instead of failing ambiguous or being
+// silently downgraded to Issue by the detection default.
+#[test]
+fn canonical_continue_owner_without_authority_or_evidence_retains_declared_kind() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_root = temp.path().join("plain-project");
+    fs::create_dir_all(&project_root).expect("create project root");
+
+    let projected = super::continuation::strict_projection_owner("SPEC #4444")
+        .expect("strict projection owner");
+    let resolved =
+        super::continuation::canonical_continue_work_owner(&project_root, &project_root, projected)
+            .expect("declared kind must resolve without authority or evidence");
+    assert_eq!(
+        resolved,
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 4444,
+        }
     );
 }
 
@@ -12698,6 +12838,7 @@ fn continue_work_activated_successor_recovery_case(
                     work_id: Some(work_id.to_string()),
                     base_branch: None,
                     linked_issue_number: Some(owner.number),
+                    canonical_owner: Some(owner),
                     resume_context: Some(&resume_context),
                     kind: WorkspaceLaunchProjectionKind::Resume {
                         created_by_start_work: true,
@@ -14264,6 +14405,61 @@ fn fresh_execution_session_start_preserves_spec_owner_kind_in_work_projection() 
     }));
 }
 
+// #3426: a stale Issue-kind resume context supplied to a SPEC-owner successor
+// must not overwrite the canonical owner in the committed Work projection.
+#[test]
+fn fresh_execution_session_start_overrides_mis_kinded_resume_context_owner() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture_with_owner_kind(
+        temp.path(),
+        "fresh-mis-kinded-context",
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+    );
+    let pending = fixture
+        .runtime
+        .pending_fresh_execution_launches
+        .get_mut(&fixture.window_id)
+        .expect("pending fresh launch");
+    pending.resume_context = Some(WorkspaceResumeContext {
+        title: Some("Stale launch title".to_string()),
+        owner: Some("Issue #2359".to_string()),
+        summary: Some("Stale summary".to_string()),
+        next_action: None,
+    });
+    let readiness_nonce = pending.readiness_nonce.clone();
+
+    let events = fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&readiness_nonce));
+
+    assert!(!events.is_empty(), "SPEC successor must complete");
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
+        .expect("load WorkItems")
+        .expect("WorkItems");
+    let work = work_items
+        .work_items
+        .iter()
+        .find(|item| {
+            item.agents
+                .iter()
+                .any(|agent| agent.session_id == fixture.candidate_session_id)
+        })
+        .expect("successor Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("SPEC-2359"),
+        "canonical execution owner must override the mis-kinded resume context"
+    );
+    assert_eq!(
+        work.title, "Stale launch title",
+        "non-owner resume context fields stay presentation-owned"
+    );
+}
+
 #[test]
 fn fresh_execution_ready_timeout_aborts_candidate_and_preserves_blocked_predecessor() {
     let _env_guard = env_test_lock()
@@ -15546,6 +15742,7 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
         &old_agent,
         Some("develop"),
         Some(old_owner.number),
+        None,
         Some(&old_work_context),
         WorkspaceLaunchProjectionKind::StartWork,
         &HashSet::from([session_id.to_string()]),
@@ -18938,6 +19135,54 @@ fn app_runtime_issue_launch_wizard_seeds_issue_workspace_context() {
         .expect("issue launch wizard should carry workspace context");
     assert_eq!(context.owner.as_deref(), Some("Issue #3096"));
     assert_eq!(context.title.as_deref(), Some("Fix Launch Agent trace"));
+}
+
+// #3426: the unified Issue surface preset collapses to LinkedIssueKind::Issue,
+// so the wizard must re-canonicalize the kind from the cached gwt-spec label
+// before seeding the Work owner context.
+#[test]
+fn app_runtime_issue_launch_wizard_prefers_cached_spec_label_over_preset_kind() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            1921,
+            "SPEC-1921: agent management",
+            &["gwt-spec", "phase/implementation"],
+            "spec body",
+            "2026-08-03T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            1921,
+            LinkedIssueKind::Issue,
+        )
+        .expect("open issue launch wizard");
+
+    let context = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.workspace_resume_context.as_ref())
+        .expect("issue launch wizard should carry workspace context");
+    assert_eq!(
+        context.owner.as_deref(),
+        Some("SPEC #1921"),
+        "cached gwt-spec label evidence must override the collapsed preset kind"
+    );
 }
 
 #[test]
@@ -25115,6 +25360,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         "origin/main",
         None,
         None,
+        None,
         &std::collections::HashSet::new(),
     )
     .expect("save projection");
@@ -29227,6 +29473,41 @@ fn app_runtime_agent_window_initial_title_uses_linked_issue_title() {
         Some("SPEC: Workspace purpose titles")
     );
     assert_eq!(agent_window.title, "Codex");
+}
+
+// #3426: purpose-title lookup must use the canonical, workspace-home-aware
+// issue-cache resolution (with the detached fallback) instead of the raw
+// repo-root hash, matching title_sync.
+#[test]
+fn agent_launch_purpose_title_reads_detached_issue_cache_for_non_repo_root() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project_root = temp.path().join("plain-project");
+    fs::create_dir_all(&project_root).expect("create project root");
+    Cache::new(gwt::issue_cache::detached_issue_cache_root())
+        .write_snapshot(&sample_issue_snapshot(
+            3426,
+            "fix(launch): stranded Active generation recovery",
+            &[],
+            "issue body",
+            "2026-08-03T00:00:00Z",
+        ))
+        .expect("write detached issue cache");
+
+    assert_eq!(
+        super::workspace_views::agent_launch_purpose_title(
+            &project_root,
+            Some(3426),
+            Some("work/issue-3426"),
+            temp.path(),
+        )
+        .as_deref(),
+        Some("fix(launch): stranded Active generation recovery"),
+    );
 }
 
 #[test]
