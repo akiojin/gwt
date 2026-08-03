@@ -40296,3 +40296,78 @@ fn pm_crash_records_backoff_and_respawns() {
         "immediate respawn resumes the PM conversation"
     );
 }
+
+#[test]
+fn pm_close_removes_clean_pm_worktree_and_keeps_dirty_one() {
+    // T-016 (research R-10): the PM worktree's lifecycle is bound to the
+    // registration — a clean worktree is reaped on deregistration, while
+    // local work (fail-closed: anything the reaper is unsure about) keeps
+    // the worktree for reuse by the next PM.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let pm_worktree = gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
+        .join("pm")
+        .join("worktree");
+    fs::create_dir_all(pm_worktree.parent().expect("parent")).expect("pm dir");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+
+    let close_pm = |suffix: &str, dirty: bool| {
+        let tab_id = format!("tab-{suffix}");
+        let raw_id = "agent-1";
+        let tab = sample_project_tab_with_window_at(
+            &tab_id,
+            raw_id,
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some(&tab_id));
+        let window_id = format!("{tab_id}::{raw_id}");
+        let session_id = format!("pm-session-{suffix}");
+        let mut session = sample_active_agent_session(&tab_id, &window_id);
+        session.session_id = session_id.clone();
+        runtime
+            .active_agent_sessions
+            .insert(window_id.clone(), session);
+        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+        gwt::pm_registry::try_register_pm(
+            &prefs_path,
+            pm_registration_fixture(&session_id, &pm_worktree),
+            |_| false,
+        )
+        .expect("seed registration");
+        if dirty {
+            fs::write(pm_worktree.join("pm-notes.md"), "local work").expect("write note");
+        }
+        runtime.close_window_events(&window_id);
+    };
+
+    close_pm("dirty", true);
+    assert!(
+        pm_worktree.exists(),
+        "a PM worktree with local work must be kept for reuse"
+    );
+
+    fs::remove_file(pm_worktree.join("pm-notes.md")).expect("clear note");
+    close_pm("clean", false);
+    assert!(
+        !pm_worktree.exists(),
+        "a clean PM worktree is reaped when the PM deregisters"
+    );
+}

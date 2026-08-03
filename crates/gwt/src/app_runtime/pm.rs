@@ -161,7 +161,9 @@ impl AppRuntime {
     }
 
     /// FR-013: an explicit close of the PM pane clears the registration so
-    /// nothing auto-restarts it. Settings (auto_start) survive.
+    /// nothing auto-restarts it. Settings (auto_start) survive. A clean PM
+    /// worktree is reaped with the registration (T-016); local work keeps it
+    /// for reuse by the next PM.
     pub(super) fn deregister_pm_for_closed_window(
         &mut self,
         project_root: &Path,
@@ -171,10 +173,40 @@ impl AppRuntime {
         match pm_registry::deregister_pm(&prefs_path, session_id) {
             Ok((_, true)) => {
                 tracing::info!(%session_id, "PM pane closed; registration cleared");
+                Self::cleanup_pm_worktree(project_root);
             }
             Ok((_, false)) => {}
             Err(error) => {
                 tracing::warn!(%error, "failed to deregister PM on window close");
+            }
+        }
+    }
+
+    /// T-016: remove the canonical PM worktree when it holds no local work.
+    /// Only the canonical `<gwt_project_dir>/pm/worktree` location is ever
+    /// touched — a corrupted registration cannot direct the reaper at an
+    /// arbitrary path. Fail-closed: any uncertainty keeps the worktree.
+    fn cleanup_pm_worktree(project_root: &Path) {
+        let worktree =
+            gwt_core::paths::gwt_project_dir_for_repo_path(project_root).join("pm/worktree");
+        if !worktree.exists() {
+            return;
+        }
+        let manager = gwt_git::WorktreeManager::new(project_root);
+        match manager.ephemeral_worktree_has_local_work(&worktree) {
+            Ok(false) => {
+                if let Err(error) = manager.remove_force_twice(&worktree) {
+                    tracing::warn!(%error, "failed to remove the clean PM worktree");
+                }
+            }
+            Ok(true) => {
+                tracing::info!(
+                    worktree = %worktree.display(),
+                    "PM worktree has local work; keeping it for reuse"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "PM worktree local-work check failed; keeping it");
             }
         }
     }
