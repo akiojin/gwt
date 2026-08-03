@@ -769,6 +769,21 @@ pub(super) fn run<E: CliEnv>(
                         .to_string(),
                 ));
             }
+            let legacy_repo_path = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            let operation_repo_path = match crate::agent_project_state::durable_session_runtime_target_if_session_exists(&session_id) {
+                Some(Ok(gwt_agent::LaunchRuntimeTarget::Host)) => {
+                    match crate::agent_project_state::resolve_execution_recovery_context_if_session_exists(
+                        env.repo_path(),
+                        &session_id,
+                    ) {
+                        Some(Ok(context)) => context.worktree().to_path_buf(),
+                        Some(Err(error)) => return Err(core_error(error)),
+                        None => legacy_repo_path,
+                    }
+                }
+                Some(Ok(gwt_agent::LaunchRuntimeTarget::Docker)) | None => legacy_repo_path,
+                Some(Err(error)) => return Err(core_error(error)),
+            };
             let intent = crate::AgentWorkspaceUpdateIntent {
                 title,
                 status_category,
@@ -788,7 +803,7 @@ pub(super) fn run<E: CliEnv>(
                 // first. When container isolation makes local authority unavailable, authenticated
                 // Host 2xx remains authoritative, but no local continuation is allowed.
                 let bridge_authority = match snapshot_workspace_update_bridge_authority(
-                    env.repo_path(),
+                    &operation_repo_path,
                     &session_id,
                 ) {
                     WorkspaceUpdateBridgeAuthoritySnapshot::Exact(authority) => Some(*authority),
@@ -800,7 +815,7 @@ pub(super) fn run<E: CliEnv>(
                     }
                     WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable => None,
                 };
-                let observation = crate::observe_agent_runtime(env.repo_path())
+                let observation = crate::observe_agent_runtime(&operation_repo_path)
                     .map_err(|error| string_error(error.to_string()))?;
                 let request = crate::AgentWorkspaceUpdateRequest {
                     schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
@@ -849,7 +864,7 @@ pub(super) fn run<E: CliEnv>(
                 ));
             }
             let target = crate::agent_project_state::resolve_session_work_mutation_target(
-                env.repo_path(),
+                &operation_repo_path,
                 &session_id,
             )
             .map_err(core_error)?;
@@ -884,7 +899,7 @@ pub(super) fn run<E: CliEnv>(
                 agent_title_summary: intent.title_summary,
             };
             let transaction = LocalWorkspaceUpdateTransaction {
-                invocation_repo_path: env.repo_path(),
+                invocation_repo_path: &operation_repo_path,
                 session_id: &session_id,
                 target: &target,
                 tracked_event_policy,
@@ -5636,6 +5651,64 @@ pub(crate) mod tests {
         assert!(
             !gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo).exists(),
             "container client must not invent local Work authority after Host 2xx"
+        );
+        probe.expect_request();
+    }
+
+    #[test]
+    fn managed_docker_workspace_update_keeps_host_bridge_authoritative_for_runtime_path() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host_repo = temp.path().join("host-worktree");
+        let runtime_repo = temp.path().join("container-worktree");
+        let session_id = "docker-runtime-update-session";
+        write_docker_session(session_id, &host_repo);
+        std::fs::create_dir_all(&runtime_repo).expect("container worktree");
+        crate::cli::trusted_store::init_git_repo_with_origin(&runtime_repo);
+
+        let probe = WorkspaceUpdateSuccessProbe::start("host-authoritative-docker-work");
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let _forward_url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            &probe.forward_url,
+        );
+        let _forward_token = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "docker-host-token",
+        );
+        let _runtime = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_repo.join("managed-runtime.json"),
+        );
+        let mut env = TestEnv::new(runtime_repo.clone());
+        let mut output = String::new();
+
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: Some("Authenticated Host owns Docker mutation".to_string()),
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: None,
+                current_focus: None,
+                title_summary: None,
+            },
+            &mut output,
+        )
+        .expect("Docker runtime path must retain authenticated Host 2xx compatibility");
+
+        assert_eq!(code, 0, "{output}");
+        assert!(output.contains("workspace updated: fake-host-journal"));
+        assert!(
+            !gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&runtime_repo).exists(),
+            "container client must not materialize local Work authority"
         );
         probe.expect_request();
     }
