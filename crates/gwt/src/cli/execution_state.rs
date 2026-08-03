@@ -7282,19 +7282,65 @@ fn generation_writer(ledger: &ExecutionGenerationLedger, generation_id: &str) ->
         .map(|record| record.primary_session_id)
 }
 
-/// Collect the current execution diagnosis without mutating trusted state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionDiagnosisMode {
+    OperationLocal,
+    Projection,
+}
+
+const PROTECTED_RECOVERY_OPERATIONS: [&str; 6] = [
+    "execution.continue",
+    "execution.repair",
+    "execution.adopt",
+    "execution.reopen",
+    "workspace.update",
+    "workspace.ensure",
+];
+
+/// Collect the current operation-local diagnosis without mutating trusted state.
 #[must_use]
 pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosisSnapshot {
+    diagnose_with_mode(worktree, session_id, ExecutionDiagnosisMode::OperationLocal)
+}
+
+/// Read an exact Worktree's durable diagnosis for GUI projection without
+/// resolving Git identity or advertising unvalidated protected recovery.
+#[doc(hidden)]
+#[must_use]
+pub fn diagnose_for_projection(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> ExecutionDiagnosisSnapshot {
+    diagnose_with_mode(worktree, session_id, ExecutionDiagnosisMode::Projection)
+}
+
+fn diagnose_with_mode(
+    invocation_scope: &Path,
+    session_id: Option<&str>,
+    mode: ExecutionDiagnosisMode,
+) -> ExecutionDiagnosisSnapshot {
     let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
-    let invocation_scope = worktree;
-    let recovery_context = session_id.map(|session_id| {
-        crate::agent_project_state::resolve_execution_recovery_context(invocation_scope, session_id)
-    });
-    let legacy_worktree = gwt_core::paths::resolve_current_worktree_root(invocation_scope);
-    let worktree = recovery_context
+    let recovery_context = (mode == ExecutionDiagnosisMode::OperationLocal)
+        .then(|| {
+            session_id.map(|session_id| {
+                crate::agent_project_state::resolve_execution_recovery_context(
+                    invocation_scope,
+                    session_id,
+                )
+            })
+        })
+        .flatten();
+    let resolved_worktree = recovery_context
         .as_ref()
         .and_then(|context| context.as_ref().ok())
-        .map_or(legacy_worktree.as_path(), |context| context.worktree());
+        .map(|context| context.worktree().to_path_buf())
+        .unwrap_or_else(|| match mode {
+            ExecutionDiagnosisMode::OperationLocal => {
+                gwt_core::paths::resolve_current_worktree_root(invocation_scope)
+            }
+            ExecutionDiagnosisMode::Projection => invocation_scope.to_path_buf(),
+        });
+    let worktree = resolved_worktree.as_path();
     let mut snapshot = ExecutionDiagnosisSnapshot {
         schema_version: 1,
         ecr_status: ExecutionDiagnosisState::Missing,
@@ -7329,7 +7375,8 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
     let record = match load(worktree) {
         Ok(Some(record)) => record,
         Ok(None) => {
-            return finalize_recovery_probes(
+            return finalize_diagnosis(
+                mode,
                 worktree,
                 session_id,
                 recovery_context.as_ref(),
@@ -7344,7 +7391,8 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
             snapshot
                 .warnings
                 .push(format!("execution control is unreadable: {error}"));
-            return finalize_recovery_probes(
+            return finalize_diagnosis(
+                mode,
                 worktree,
                 session_id,
                 recovery_context.as_ref(),
@@ -7367,7 +7415,13 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
         snapshot
             .warnings
             .push("execution control integrity validation failed".to_string());
-        return finalize_recovery_probes(worktree, session_id, recovery_context.as_ref(), snapshot);
+        return finalize_diagnosis(
+            mode,
+            worktree,
+            session_id,
+            recovery_context.as_ref(),
+            snapshot,
+        );
     }
 
     snapshot.ecr_status = match record.status {
@@ -7529,7 +7583,9 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
     }
 
     if let Some(session_id) = session_id {
-        if snapshot.ecr_status == ExecutionDiagnosisState::Active {
+        if mode == ExecutionDiagnosisMode::OperationLocal
+            && snapshot.ecr_status == ExecutionDiagnosisState::Active
+        {
             match crate::agent_project_state::diagnose_session_work_mutation_target(
                 worktree, session_id,
             ) {
@@ -7563,13 +7619,15 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
                 }
             }
         }
-        snapshot.verification_state =
-            evidence_status_name(crate::cli::verification_record::evaluate_evidence(
-                worktree,
-                session_id,
-                Some(record.owner_number),
-            ))
-            .to_string();
+        if mode == ExecutionDiagnosisMode::OperationLocal {
+            snapshot.verification_state =
+                evidence_status_name(crate::cli::verification_record::evaluate_evidence(
+                    worktree,
+                    session_id,
+                    Some(record.owner_number),
+                ))
+                .to_string();
+        }
         if let Ok(Some(plan)) = crate::cli::verification_record::load_plan(worktree) {
             snapshot
                 .generated_outputs
@@ -7782,7 +7840,42 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
     execution_recoveries.sort();
     execution_recoveries.dedup();
     snapshot.available_recoveries = execution_recoveries;
-    finalize_recovery_probes(worktree, session_id, recovery_context.as_ref(), snapshot)
+    finalize_diagnosis(
+        mode,
+        worktree,
+        session_id,
+        recovery_context.as_ref(),
+        snapshot,
+    )
+}
+
+fn finalize_diagnosis(
+    mode: ExecutionDiagnosisMode,
+    worktree: &Path,
+    session_id: Option<&str>,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+    snapshot: ExecutionDiagnosisSnapshot,
+) -> ExecutionDiagnosisSnapshot {
+    match mode {
+        ExecutionDiagnosisMode::OperationLocal => {
+            finalize_recovery_probes(worktree, session_id, recovery_context, snapshot)
+        }
+        ExecutionDiagnosisMode::Projection => finalize_projection_recovery_probes(snapshot),
+    }
+}
+
+fn finalize_projection_recovery_probes(
+    mut snapshot: ExecutionDiagnosisSnapshot,
+) -> ExecutionDiagnosisSnapshot {
+    snapshot
+        .available_recoveries
+        .retain(|operation| !PROTECTED_RECOVERY_OPERATIONS.contains(&operation.as_str()));
+    snapshot.available_recoveries.sort();
+    snapshot.available_recoveries.dedup();
+    snapshot.recovery_probes.clear();
+    snapshot
 }
 
 fn finalize_recovery_probes(
@@ -14596,6 +14689,54 @@ mod tests {
             record
         }
 
+        fn write_failing_git_recorder(bin_dir: &Path) -> PathBuf {
+            fs::create_dir_all(bin_dir).expect("create fake git directory");
+            #[cfg(windows)]
+            {
+                let fake_git = bin_dir.join("git.cmd");
+                fs::write(
+                    &fake_git,
+                    "@echo off\r\nif not \"%GWT_FAKE_GIT_LOG%\"==\"\" echo %*>>\"%GWT_FAKE_GIT_LOG%\"\r\nexit /b 1\r\n",
+                )
+                .expect("write fake git recorder");
+                fake_git
+            }
+            #[cfg(not(windows))]
+            {
+                let fake_git = bin_dir.join("git");
+                fs::write(
+                    &fake_git,
+                    r#"#!/bin/sh
+if [ -n "$GWT_FAKE_GIT_LOG" ]; then
+  printf '%s\n' "$*" >> "$GWT_FAKE_GIT_LOG"
+fi
+exit 1
+"#,
+                )
+                .expect("write fake git recorder");
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
+                    .expect("make fake git executable");
+                fake_git
+            }
+        }
+
+        fn assert_projection_has_no_protected_recovery(snapshot: &ExecutionDiagnosisSnapshot) {
+            assert!(
+                snapshot.recovery_probes.is_empty(),
+                "projection must leave protected recovery probes unevaluated"
+            );
+            for operation in PROTECTED_RECOVERY_OPERATIONS {
+                assert!(
+                    !snapshot
+                        .available_recoveries
+                        .iter()
+                        .any(|candidate| candidate == operation),
+                    "projection must not advertise unvalidated protected recovery {operation}"
+                );
+            }
+        }
+
         #[test]
         fn status_is_read_only_and_reports_missing_execution_without_session() {
             let _env_lock = crate::env_test_lock()
@@ -15555,6 +15696,139 @@ mod tests {
                 corrupt_repo.path(),
                 Some("corrupt-session"),
             ));
+        }
+
+        #[test]
+        fn projection_reads_active_blocked_and_corrupt_durable_state_without_spawning_git() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _live_session_env = unset_live_session_env();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            let blocked_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3249,
+            };
+            let corrupt_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3250,
+            };
+
+            let active_repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(active_repo.path());
+            save(active_repo.path(), &active_record("projection-active")).unwrap();
+            ensure_generation_ledger(active_repo.path(), owner, LegacyActiveDisposition::Live)
+                .unwrap();
+            let active_binding = current_execution_binding(active_repo.path(), owner)
+                .unwrap()
+                .expect("active generation binding");
+            persist_generation_session_binding(
+                active_repo.path(),
+                owner,
+                "projection-active",
+                active_binding,
+            );
+            fs::write(active_repo.path().join("projection-artifact.json"), "{}")
+                .expect("write generated output fixture");
+            crate::cli::verification_record::save_plan(
+                active_repo.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "projection-active".to_string(),
+                    owner_number: Some(owner.number),
+                    execution_binding: None,
+                    commands: vec!["git --version".to_string()],
+                    derived: true,
+                    surfaces: vec!["rust".to_string()],
+                    generated_outputs: vec!["projection-artifact.json".to_string()],
+                    worktree_fingerprint: String::new(),
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            crate::cli::verification_record::run_verification(
+                active_repo.path(),
+                "projection-active",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+
+            let blocked_repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(blocked_repo.path());
+            let mut blocked_record = active_record("projection-blocked");
+            blocked_record.owner_number = blocked_owner.number;
+            save(blocked_repo.path(), &blocked_record).unwrap();
+            ensure_generation_ledger(
+                blocked_repo.path(),
+                blocked_owner,
+                LegacyActiveDisposition::Live,
+            )
+            .unwrap();
+            settle_blocked(blocked_repo.path(), "projection-blocked");
+
+            let corrupt_repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(corrupt_repo.path());
+            let mut corrupt_record = active_record("projection-corrupt");
+            corrupt_record.owner_number = corrupt_owner.number;
+            save(corrupt_repo.path(), &corrupt_record).unwrap();
+            let corrupt_ecr =
+                crate::cli::trusted_store::trusted_dir_for_worktree(corrupt_repo.path())
+                    .expect("corrupt fixture trusted directory")
+                    .join("execution-control.json");
+            fs::write(corrupt_ecr, b"{corrupt").expect("corrupt ECR fixture");
+
+            let fake_git = write_failing_git_recorder(&home.path().join("fake-git"));
+            let mut path = vec![fake_git.parent().unwrap().to_path_buf()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                path.extend(std::env::split_paths(&existing));
+            }
+            let _path = ScopedEnvVar::set("PATH", std::env::join_paths(path).unwrap());
+            let git_log = home.path().join("projection-git.log");
+            let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+
+            let active = diagnose_for_projection(active_repo.path(), Some("projection-active"));
+            assert_eq!(active.ecr_status, ExecutionDiagnosisState::Active);
+            assert_eq!(active.binding_state, ExecutionBindingState::Bound);
+            assert_eq!(active.owner_number, Some(owner.number));
+            assert!(active.generation_id.is_some());
+            assert_eq!(active.verification_state, "not_evaluated");
+            assert_eq!(active.workspace_update_applicable, None);
+            assert_eq!(
+                active.generated_outputs,
+                vec!["projection-artifact.json".to_string()]
+            );
+            assert_projection_has_no_protected_recovery(&active);
+
+            let blocked = diagnose_for_projection(blocked_repo.path(), Some("projection-blocked"));
+            assert_eq!(blocked.ecr_status, ExecutionDiagnosisState::Blocked);
+            assert_eq!(blocked.binding_state, ExecutionBindingState::Terminal);
+            assert_eq!(
+                blocked.blocked_reason.as_deref(),
+                Some("verification dependency unresolved")
+            );
+            assert_eq!(blocked.verification_state, "not_evaluated");
+            assert_eq!(
+                blocked.available_recoveries,
+                vec!["verify.plan".to_string(), "verify.run".to_string()]
+            );
+            assert_projection_has_no_protected_recovery(&blocked);
+
+            let corrupt = diagnose_for_projection(corrupt_repo.path(), Some("projection-corrupt"));
+            assert_eq!(corrupt.ecr_status, ExecutionDiagnosisState::Corrupt);
+            assert_eq!(corrupt.verification_state, "not_evaluated");
+            assert_projection_has_no_protected_recovery(&corrupt);
+
+            let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+            assert!(
+                invocations.trim().is_empty(),
+                "projection must not spawn Git; invocations:\n{invocations}"
+            );
         }
 
         #[test]

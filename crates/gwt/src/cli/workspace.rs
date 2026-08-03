@@ -772,20 +772,6 @@ pub(super) fn run<E: CliEnv>(
                 ));
             }
             let legacy_repo_path = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-            let operation_repo_path = match crate::agent_project_state::durable_session_runtime_target_if_session_exists(&session_id) {
-                Some(Ok(gwt_agent::LaunchRuntimeTarget::Host)) => {
-                    match crate::agent_project_state::resolve_execution_recovery_context_if_session_exists(
-                        env.repo_path(),
-                        &session_id,
-                    ) {
-                        Some(Ok(context)) => context.worktree().to_path_buf(),
-                        Some(Err(error)) => return Err(core_error(error)),
-                        None => legacy_repo_path,
-                    }
-                }
-                Some(Ok(gwt_agent::LaunchRuntimeTarget::Docker)) | None => legacy_repo_path,
-                Some(Err(error)) => return Err(core_error(error)),
-            };
             let intent = crate::AgentWorkspaceUpdateIntent {
                 title,
                 status_category,
@@ -805,7 +791,7 @@ pub(super) fn run<E: CliEnv>(
                 // first. When container isolation makes local authority unavailable, authenticated
                 // Host 2xx remains authoritative, but no local continuation is allowed.
                 let bridge_authority = match snapshot_workspace_update_bridge_authority(
-                    &operation_repo_path,
+                    &legacy_repo_path,
                     &session_id,
                 ) {
                     WorkspaceUpdateBridgeAuthoritySnapshot::Exact(authority) => Some(*authority),
@@ -817,7 +803,11 @@ pub(super) fn run<E: CliEnv>(
                     }
                     WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable => None,
                 };
-                let observation = crate::observe_agent_runtime(&operation_repo_path)
+                // A complete bridge capability makes Host the authority boundary. Do not read a
+                // container-local Session ledger to redirect this observation: it may be absent or
+                // deliberately isolated, and Host revalidates the claimed Session against these
+                // exact invocation facts before committing anything.
+                let observation = crate::observe_agent_runtime(&legacy_repo_path)
                     .map_err(|error| string_error(error.to_string()))?;
                 let request = crate::AgentWorkspaceUpdateRequest {
                     schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
@@ -865,6 +855,20 @@ pub(super) fn run<E: CliEnv>(
                         .to_string(),
                 ));
             }
+            let operation_repo_path = match crate::agent_project_state::durable_session_runtime_target_if_session_exists(&session_id) {
+                Some(Ok(gwt_agent::LaunchRuntimeTarget::Host)) => {
+                    match crate::agent_project_state::resolve_execution_recovery_context_if_session_exists(
+                        env.repo_path(),
+                        &session_id,
+                    ) {
+                        Some(Ok(context)) => context.worktree().to_path_buf(),
+                        Some(Err(error)) => return Err(core_error(error)),
+                        None => legacy_repo_path,
+                    }
+                }
+                Some(Ok(gwt_agent::LaunchRuntimeTarget::Docker)) | None => legacy_repo_path,
+                Some(Err(error)) => return Err(core_error(error)),
+            };
             let target = crate::agent_project_state::resolve_session_work_mutation_target(
                 &operation_repo_path,
                 &session_id,
