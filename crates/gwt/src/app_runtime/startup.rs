@@ -314,8 +314,12 @@ impl AppRuntime {
             if config.session_mode != gwt_agent::SessionMode::Resume {
                 continue;
             }
+            let project_state_root = session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path);
             let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                &session.worktree_path,
+                project_state_root,
                 Some(session.branch.as_str()),
                 &session.worktree_path,
             ));
@@ -433,8 +437,12 @@ impl AppRuntime {
         let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
             return Vec::new();
         };
+        let project_state_root = session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(&session.worktree_path);
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            &session.worktree_path,
+            project_state_root,
             Some(session.branch.as_str()),
             &session.worktree_path,
         ));
@@ -502,8 +510,12 @@ impl AppRuntime {
                 {
                     continue;
                 }
+                let project_state_root = session
+                    .project_state_root
+                    .as_deref()
+                    .unwrap_or(&session.worktree_path);
                 let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                    &session.worktree_path,
+                    project_state_root,
                     Some(session.branch.as_str()),
                     &session.worktree_path,
                 ));

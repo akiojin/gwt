@@ -2190,7 +2190,7 @@ mod tests {
         let view = state.view();
         assert!(
             !view.skip_permissions,
-            "inspection Resume must not advertise a permission bypass"
+            "a Resume launch must not advertise a permission bypass"
         );
 
         match state.completion.as_ref() {
@@ -2202,7 +2202,7 @@ mod tests {
                     assert!(!config.skip_permissions);
                     assert!(
                         !config.args.contains(&"--unsafe".to_string()),
-                        "Quick Start inspection Resume must suppress permission bypass"
+                        "Quick Start Resume must suppress permission bypass"
                     );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),

@@ -1,6 +1,33 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.71.2] - 2026-08-03
+
+### Bug Fixes
+
+- **workspace:** Reconcile rolling Host authority
+- **workspace:** Validate confirm-only close ledger
+- **runtime:** Reject continuation redirects
+- **launch:** ReboundCurrent の resume 回復を Active authority として install し、monitor 再起動の無限失敗を解消する
+
+### Miscellaneous Tasks
+
+- **work:** Record work event backfill
+
+## [9.71.1] - 2026-08-01
+
+### Bug Fixes
+
+- **launch:** Inspection（観察専用）モードを機構ごと全廃し、全 Resume 経路を即入力可能にする
+- **workspace:** Durable Session から Work projection を復旧
+- **workspace:** 旧Hostで同一Session更新を安全に継続
+- **workspace:** Split-root回復時の旧状態を保全
+- **workspace:** 回復境界のレビュー指摘を解消
+
+### Miscellaneous Tasks
+
+- **work:** Record work event backfill
+
 ## [9.71.0] - 2026-07-31
 
 ### Bug Fixes

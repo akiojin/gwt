@@ -266,7 +266,7 @@ pub struct Session {
     pub docker_service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_runtime_binding: Option<DockerRuntimeBinding>,
-    /// Optional producing authority projection. Legacy and Inspection Resume
+    /// Optional producing authority projection. Legacy and unbound Resume
     /// Sessions keep this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<SessionExecutionBinding>,
@@ -1496,7 +1496,7 @@ pub fn persist_session_execution_binding(
 /// one producing Session.
 ///
 /// Every Host issuance gets a distinct durable epoch under the per-Session
-/// lock. Inspection/legacy Sessions have no producing binding and therefore
+/// lock. Unbound/legacy Sessions have no producing binding and therefore
 /// cannot be promoted implicitly by capability issuance.
 pub fn rotate_session_execution_capability(
     sessions_dir: &Path,
@@ -1506,7 +1506,7 @@ pub fn rotate_session_execution_capability(
         let mut binding = session.execution_binding.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "Inspection or legacy Session has no producing execution binding",
+                "Session has no producing execution binding",
             )
         })?;
         binding.capability_generation =
@@ -1824,7 +1824,7 @@ display_name = "Codex"
         let loaded: Session = toml::from_str(legacy).expect("deserialize legacy Session");
         assert!(
             loaded.execution_binding.is_none(),
-            "legacy and Inspection Resume sessions must remain non-producing"
+            "legacy and unbound Resume sessions must remain non-producing"
         );
         assert!(
             !toml::to_string(&loaded)
@@ -2284,7 +2284,7 @@ display_name = "Codex"
         );
 
         persist_session_execution_binding(dir.path(), &session_id, None)
-            .expect("clear producing binding for Inspection Resume");
+            .expect("clear producing binding for an unbound Resume");
         assert!(Session::load(&path)
             .expect("reload cleared Session")
             .execution_binding
@@ -2423,7 +2423,7 @@ display_name = "Codex"
         let unbound_path = dir.path().join(format!("{unbound_id}.toml"));
         let before = fs::read_to_string(&unbound_path).expect("read unbound Session");
         let error = rotate_session_execution_capability(dir.path(), &unbound_id)
-            .expect_err("Inspection Session cannot receive producing capability");
+            .expect_err("an unbound Session cannot receive producing capability");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
             fs::read_to_string(&unbound_path).expect("read unchanged unbound Session"),

@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(view.selected_execution_mode, "continue");
         assert!(
             !view.skip_permissions,
-            "inspection Continue must not advertise a permission bypass"
+            "a Continue launch must not advertise a permission bypass"
         );
         assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
@@ -444,7 +444,7 @@ mod tests {
         assert!(config.codex_fast_mode);
         assert!(
             !config.skip_permissions,
-            "the preference stays visible but Automatic Continue launches as inspection"
+            "the preference stays persisted but an Automatic Continue launch never carries the bypass"
         );
         assert_eq!(config.working_dir.as_deref(), Some(current_repo.as_path()));
     }
