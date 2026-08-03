@@ -3753,7 +3753,7 @@ exit 0
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
             .expect("claim daemon control receiver");
-        super::refresh_issue_monitor_agent_status(&hub, &monitor);
+        super::refresh_issue_monitor_agent_status(&hub, monitor);
         let publisher = tokio::spawn({
             let hub = hub.clone();
             async move {
