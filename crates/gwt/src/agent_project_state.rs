@@ -3126,6 +3126,12 @@ fn resolve_unique_existing_work(
                 ),
             ));
         }
+        if other.is_terminal()
+            || other.status_category
+                == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+        {
+            continue;
+        }
         if other.execution_containers.iter().any(|container| {
             mutation_container_matches(
                 container,
@@ -7353,6 +7359,83 @@ mod tests {
                 "ambiguous",
             );
         });
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_ignores_terminal_and_paused_foreign_history() {
+        for (label, status) in [
+            (
+                "terminal",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            ),
+            (
+                "paused",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+            ),
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let work_id = "work-current";
+                seed_unique_mutation_target(repo, repo, session, work_id);
+
+                let mut work_items = mutation_work_items(repo, session, work_id);
+                let mut history = work_items.work_items[0].clone();
+                history.id = format!("work-{label}-history");
+                history.status_category = status;
+                history.completed_at = (status
+                    == gwt_core::workspace_projection::WorkspaceStatusCategory::Done)
+                    .then(Utc::now);
+                history.agents[0].session_id = "historical-session".to_string();
+                work_items.work_items.push(history);
+                save_mutation_work_items(repo, &work_items);
+
+                let target = resolve_session_work_mutation_target(repo, &session.id)
+                    .expect("historical foreign Work must not shadow exact current authority");
+                assert_eq!(target.work_id, work_id);
+            });
+        }
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_rejects_nonhistorical_or_current_paused_shadow() {
+        for (label, status, shadow_is_current) in [
+            (
+                "blocked",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked,
+                false,
+            ),
+            (
+                "unknown",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown,
+                false,
+            ),
+            (
+                "paused-current",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+                true,
+            ),
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let work_id = "work-current";
+                seed_unique_mutation_target(repo, repo, session, work_id);
+
+                let mut work_items = mutation_work_items(repo, session, work_id);
+                let mut shadow = work_items.work_items[0].clone();
+                shadow.id = format!("work-{label}-shadow");
+                shadow.status_category = status;
+                shadow.completed_at = None;
+                if !shadow_is_current {
+                    shadow.agents[0].session_id = "historical-session".to_string();
+                }
+                work_items.work_items.push(shadow);
+                save_mutation_work_items(repo, &work_items);
+
+                assert_workspace_ensure_error(
+                    resolve_session_work_mutation_target(repo, &session.id)
+                        .expect_err("unsafe container shadow must fail closed"),
+                    "ambiguous",
+                );
+            });
+        }
     }
 
     #[test]

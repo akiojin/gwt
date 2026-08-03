@@ -2830,7 +2830,7 @@ fn resolve_session_bound_terminal_target_locked(
                 .to_string(),
         ));
     }
-    validate_session_bound_work_authority_uniqueness(
+    validate_session_bound_work_authority_uniqueness_ignoring_foreign_history(
         work_items,
         work_id,
         &target.session_id,
@@ -3022,7 +3022,7 @@ fn validate_session_bound_target_locked(
         )
     })?;
 
-    validate_session_bound_work_authority_uniqueness(
+    validate_session_bound_work_authority_uniqueness_ignoring_foreign_history(
         work_items,
         &target.work_id,
         &target.session_id,
@@ -3170,17 +3170,66 @@ fn validate_session_bound_work_authority_uniqueness(
     worktree_identity: &Path,
     context: &str,
 ) -> Result<()> {
+    validate_session_bound_work_authority_uniqueness_inner(
+        work_items,
+        target_work_id,
+        session_id,
+        branch_identity,
+        worktree_identity,
+        context,
+        false,
+    )
+}
+
+/// Exact Session-bound mutations already proved their canonical Work before
+/// entering the transaction. A terminal or paused foreign Work that merely
+/// reuses the branch/worktree is audit history, not a competing authority.
+/// Legacy/external reconciliation must keep using the strict wrapper above.
+fn validate_session_bound_work_authority_uniqueness_ignoring_foreign_history(
+    work_items: &WorkItemsProjection,
+    target_work_id: &str,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+) -> Result<()> {
+    validate_session_bound_work_authority_uniqueness_inner(
+        work_items,
+        target_work_id,
+        session_id,
+        branch_identity,
+        worktree_identity,
+        context,
+        true,
+    )
+}
+
+fn validate_session_bound_work_authority_uniqueness_inner(
+    work_items: &WorkItemsProjection,
+    target_work_id: &str,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+    ignore_foreign_history: bool,
+) -> Result<()> {
     let canonical_worktree_identity = canonical_session_bound_path(worktree_identity)?;
     for other in work_items
         .work_items
         .iter()
         .filter(|item| item.id != target_work_id)
     {
-        if other
+        let contains_current_session = other
             .agents
             .iter()
-            .any(|agent| agent.session_id == session_id)
+            .any(|agent| agent.session_id == session_id);
+        if ignore_foreign_history
+            && !contains_current_session
+            && (other.is_terminal() || other.status_category == WorkspaceStatusCategory::Idle)
         {
+            continue;
+        }
+        if contains_current_session {
             return Err(GwtError::Other(format!(
                 "{context} Session is attached to multiple Works"
             )));

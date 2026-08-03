@@ -718,6 +718,14 @@ mod tests {
     // untouched.
     #[test]
     fn revive_deferred_reopens_only_deferred_kinds() {
+        // The revival record round-trips through the HOME-scoped trusted-store
+        // mirror; a parallel test swapping HOME mid-test loses the record
+        // (issue #3411). Hold the env lock and pin a private HOME.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         mark_from_prompt(dir.path(), "sess-1", "Issue #1 にコメントを追加して").unwrap();
@@ -779,6 +787,13 @@ mod tests {
 
     #[test]
     fn revive_deferred_reports_persist_failed_truthfully() {
+        // Same trusted-store mirror isolation as
+        // `revive_deferred_reopens_only_deferred_kinds` (issue #3411).
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         fs::create_dir_all(state_path(dir.path()).parent().unwrap()).unwrap();

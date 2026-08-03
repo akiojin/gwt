@@ -604,6 +604,7 @@ fn daemon_frame_status_carries_uptime_and_channel_count() {
         uptime_seconds: 42,
         broadcast_channels: 3,
         connections: 2,
+        issue_monitor: None,
     });
     let json_value = serde_json::to_value(&frame).unwrap();
     assert_eq!(json_value["type"], "status");
@@ -633,6 +634,7 @@ fn daemon_status_connections_field_defaults_to_zero_when_missing() {
     match frame {
         DaemonFrame::Status(status) => {
             assert_eq!(status.connections, 0);
+            assert!(status.issue_monitor.is_none());
         }
         other => panic!("expected Status frame, got: {other:?}"),
     }

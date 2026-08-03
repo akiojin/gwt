@@ -428,6 +428,7 @@ mod tests {
             uptime_seconds: 12,
             broadcast_channels: 2,
             connections: 1,
+            issue_monitor: None,
         };
         let formatted = format_probe_result(&Ok(status));
         #[cfg(unix)]

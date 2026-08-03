@@ -1,6 +1,6 @@
 ---
 name: gwt-agent
-description: "Use proactively when monitoring or controlling running agent panes. Auto-detects mode: no args lists panes, pane ID reads output, stop/close stops a pane. For agent-to-agent communication, use the shared Board. Triggers: 'list panes', 'check agent', 'stop agent'."
+description: "Use proactively when monitoring or controlling running agent panes or the Issue Monitor queue. Auto-detects pane mode from arguments. For agent-to-agent communication, use the shared Board."
 allowed-tools: Bash, Read
 argument-hint: "[list | <pane-id> [--lines N] | stop <pane-id>]"
 ---
@@ -103,6 +103,51 @@ JSON
 ```
 
 Stops the specified pane.
+
+## Issue Monitor Queue Operations
+
+Use these JSON operations for project-scoped queue inspection and control. The
+optional `project_root` parameter defaults to the caller's current worktree.
+
+Read the ordered runtime queue and active launches:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.status","params":{}}
+JSON
+```
+
+Move an Issue to the head (the default) or to a zero-based numeric index:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.priority.move","params":{"number":42,"position":"head"}}
+JSON
+```
+
+Replace the complete priority order (an empty array clears it):
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.priority.set","params":{"issue_numbers":[42,17]}}
+JSON
+```
+
+Safely stop processing or lower/raise the positive concurrency limit:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.config.set","params":{"enabled":false,"autonomous_mode":false,"max_active":2}}
+JSON
+```
+
+`enabled=true` and `autonomous_mode=true` are intentionally rejected. Enabling
+either capability requires an explicit GUI action. Configuration changes are
+committed atomically to the project preferences source of truth; OFF operations
+also revoke outstanding effect authority. Priority changes become visible to
+the GUI and daemon on their next scan/rebase. Configuration changes use an
+atomic daemon control when it is available; the fence-aware local fallback is
+observed on the next scan.
 
 ## Workflows
 
