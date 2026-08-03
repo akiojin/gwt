@@ -342,10 +342,7 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
     } else {
         hub.take_issue_monitor_control_receiver()
     };
-    hub.set_issue_monitor_status(
-        serde_json::to_value(loaded.monitor.agent_status())
-            .expect("Issue Monitor agent status serializes"),
-    );
+    refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
     tokio::spawn(async move {
         let LoadedDaemonIssueMonitorState {
             mut monitor,
@@ -530,6 +527,7 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                                 };
                                 revision = next_revision;
                                 let should_scan = apply_or_queue_issue_monitor_control(
+                                    &hub,
                                     &prefs_path,
                                     &mut monitor,
                                     control,
@@ -618,7 +616,11 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                                 );
                             }
                             if let Some(completion) = completion {
-                                completion.commit();
+                                commit_issue_monitor_control_completion(
+                                    &hub,
+                                    &monitor,
+                                    completion,
+                                );
                             }
                             if drained {
                                 pending_authority_controls = None;
@@ -1470,6 +1472,7 @@ fn issue_monitor_control_is_authorizing(control: &IssueMonitorControl) -> bool {
 }
 
 fn apply_or_queue_issue_monitor_control(
+    hub: &BroadcastHub,
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
@@ -1500,7 +1503,7 @@ fn apply_or_queue_issue_monitor_control(
                 effect_permit.reopen();
             }
             if let Some(completion) = completion {
-                completion.commit();
+                commit_issue_monitor_control_completion(hub, monitor, completion);
             }
             should_scan
         }
@@ -3072,10 +3075,7 @@ fn scan_issue_monitor_once_blocking(
 }
 
 fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
-    hub.set_issue_monitor_status(
-        serde_json::to_value(monitor.agent_status())
-            .expect("Issue Monitor agent status serializes"),
-    );
+    refresh_issue_monitor_agent_status(hub, monitor);
     let gui_connected = issue_monitor_gui_connected(hub);
     publish_issue_monitor_daemon_payloads(
         hub,
@@ -3087,14 +3087,27 @@ fn publish_issue_monitor_read_only_payloads(
     hub: &BroadcastHub,
     monitor: &crate::IssueMonitorState,
 ) {
-    hub.set_issue_monitor_status(
-        serde_json::to_value(monitor.agent_status())
-            .expect("Issue Monitor agent status serializes"),
-    );
+    refresh_issue_monitor_agent_status(hub, monitor);
     publish_issue_monitor_daemon_payloads(
         hub,
         crate::issue_monitor_worker::issue_monitor_read_only_daemon_payloads(monitor),
     );
+}
+
+fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::IssueMonitorState) {
+    hub.set_issue_monitor_status(
+        serde_json::to_value(monitor.agent_status())
+            .expect("Issue Monitor agent status serializes"),
+    );
+}
+
+fn commit_issue_monitor_control_completion(
+    hub: &BroadcastHub,
+    monitor: &crate::IssueMonitorState,
+    completion: IssueMonitorControlCompletion,
+) {
+    refresh_issue_monitor_agent_status(hub, monitor);
+    completion.commit();
 }
 
 fn publish_issue_monitor_daemon_payloads(
@@ -3740,6 +3753,7 @@ exit 0
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
             .expect("claim daemon control receiver");
+        super::refresh_issue_monitor_agent_status(&hub, monitor);
         let publisher = tokio::spawn({
             let hub = hub.clone();
             async move {
@@ -3761,6 +3775,7 @@ exit 0
         let mut pending = None;
 
         let should_scan = super::apply_or_queue_issue_monitor_control(
+            &hub,
             prefs_path,
             monitor,
             control,
@@ -3779,6 +3794,77 @@ exit 0
             "successful receipt is the daemon ACK boundary after durable commit"
         );
         should_scan
+    }
+
+    #[tokio::test]
+    async fn issue_monitor_control_ack_follows_agent_projection_update() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            max_active_agents: 1,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+        let hub = BroadcastHub::new();
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("claim daemon control receiver");
+        hub.set_issue_monitor_status(
+            serde_json::to_value(monitor.agent_status()).expect("serialize initial status"),
+        );
+        let publisher = tokio::spawn({
+            let hub = hub.clone();
+            async move {
+                hub.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({
+                            "config_set": {
+                                "max_active_agents": 3,
+                            }
+                        }),
+                        std::process::id().wrapping_add(1),
+                    ),
+                })
+                .await
+            }
+        });
+        let request = receiver.recv().await.expect("receive admitted control");
+        let (frame, completion) = request.into_parts();
+        let DaemonFrame::Event { payload, .. } = frame else {
+            panic!("control queue must preserve the event frame");
+        };
+        let control = decode_issue_monitor_control(payload).expect("decode config control");
+        let mut effect_permit = super::IssueMonitorEffectPermit::new();
+        let mut pending = None;
+
+        assert!(super::apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            control,
+            &mut effect_permit,
+            &mut pending,
+            Some(completion),
+        ));
+        assert!(pending.is_none(), "config control commits immediately");
+        assert_eq!(
+            publisher.await.expect("publisher task joins"),
+            Ok(()),
+            "receipt reaches ACK after the durable transaction"
+        );
+        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+            hub.issue_monitor_status()
+                .expect("ready daemon exposes agent projection"),
+        )
+        .expect("deserialize agent projection");
+
+        assert_eq!(projected, monitor.agent_status());
+        assert_eq!(projected.max_active, 3);
     }
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
@@ -3865,6 +3951,7 @@ exit 0
         let mut pending = None;
 
         assert!(!super::apply_or_queue_issue_monitor_control(
+            &hub,
             &prefs_path,
             &mut monitor,
             control,
@@ -3924,11 +4011,25 @@ exit 0
         ));
         let (drained, completion, _) = pending_controls.committed_front();
         assert!(drained);
-        completion.expect("receipt completion retained").commit();
+        super::commit_issue_monitor_control_completion(
+            &hub,
+            &monitor,
+            completion.expect("receipt completion retained"),
+        );
         assert_eq!(
             publisher.await.expect("publisher task joins"),
             Ok(()),
             "the exact receipt ACKs only after the retry commits"
+        );
+        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+            hub.issue_monitor_status()
+                .expect("retry ACK retains the live agent projection"),
+        )
+        .expect("deserialize retry projection");
+        assert_eq!(
+            projected,
+            monitor.agent_status(),
+            "retry ACK follows the reconciled agent projection"
         );
 
         let final_record = monitor
@@ -9311,8 +9412,10 @@ exit 1
         let mut permit = super::IssueMonitorEffectPermit::new();
         let captured_grant = permit.capture();
         let mut pending = None;
+        let hub = BroadcastHub::new();
 
         let should_scan = super::apply_or_queue_issue_monitor_control(
+            &hub,
             &prefs_path,
             &mut stale_local,
             IssueMonitorControl::Enabled(false),

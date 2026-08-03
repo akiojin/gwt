@@ -225,12 +225,13 @@ impl BroadcastHub {
             .expect("Issue Monitor status mutex poisoned") = Some(status);
     }
 
-    /// Read the latest projection only while the Issue Monitor worker is a
-    /// live authority or an explicitly recovery-blocked read-only observer.
+    /// Read the latest projection only while the Issue Monitor worker is the
+    /// live control authority. Recovery-blocked workers retain their GUI
+    /// diagnostics, but must fail closed for agent status requests.
     pub(crate) fn issue_monitor_status(&self) -> Option<Value> {
         if !matches!(
             *self.issue_monitor_controls.state.borrow(),
-            IssueMonitorControlState::Ready | IssueMonitorControlState::RecoveryBlocked
+            IssueMonitorControlState::Ready
         ) {
             return None;
         }
@@ -653,6 +654,7 @@ mod tests {
     #[tokio::test]
     async fn issue_monitor_control_starting_resolves_to_recovery_blocked_or_closed() {
         let recovery_hub = BroadcastHub::new();
+        recovery_hub.set_issue_monitor_status(json!({"queue": []}));
         let recovery_publish = tokio::spawn({
             let hub = recovery_hub.clone();
             async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
@@ -666,6 +668,10 @@ mod tests {
         assert_eq!(
             recovery_error.message(),
             crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+        );
+        assert!(
+            recovery_hub.issue_monitor_status().is_none(),
+            "recovery-blocked worker must not expose a normal agent status projection"
         );
         assert_eq!(
             recovery_hub
