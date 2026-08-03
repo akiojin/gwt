@@ -14,7 +14,7 @@ use gwt_skills::{
     generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
     generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
-    CodexHookDiscoveryMode, ManagedAssetTarget, SessionKind,
+    CodexHookDiscoveryMode, ManagedAssetTarget,
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
@@ -24,7 +24,7 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
         worktree,
         &ManagedAssetTarget::ALL,
         CodexHookDiscoveryMode::WorkspaceHome,
-        session_kind_for_worktree(worktree),
+        worktree_is_ephemeral(worktree),
     )?;
     update_git_exclude(worktree).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
@@ -37,7 +37,7 @@ pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId)
         worktree,
         agent_id,
         CodexHookDiscoveryMode::WorkspaceHome,
-        session_kind_for_worktree(worktree),
+        worktree_is_ephemeral(worktree),
     )
 }
 
@@ -45,7 +45,7 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     worktree: &Path,
     agent_id: &AgentId,
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
-    session_kind: SessionKind,
+    is_ephemeral: bool,
 ) -> io::Result<()> {
     let targets = managed_targets_for_agent(agent_id)
         .into_iter()
@@ -54,7 +54,7 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         worktree,
         &targets,
         codex_hook_discovery_mode,
-        session_kind,
+        is_ephemeral,
     )?;
     let exclude_targets = detect_existing_managed_asset_targets(worktree);
     update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
@@ -69,7 +69,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
         worktree,
         &targets,
         CodexHookDiscoveryMode::WorkspaceHome,
-        session_kind_for_worktree(worktree),
+        worktree_is_ephemeral(worktree),
     )?;
     update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
@@ -77,24 +77,22 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
     Ok(())
 }
 
-/// Determine the [`SessionKind`] for a non-launch (re-)materialization
-/// (SPEC-3247 FR-002 / FR-004). The worktree lane file is the source of truth
-/// (#3377): resolving from the ambient `GWT_SESSION_KIND` alone let an intake
-/// session's gwtd invocation against another worktree (e.g. develop) apply the
-/// reduced intake asset policy there and delete tracked skill files. Worktrees
-/// materialized before hooks v2 (no lane file) keep the env fast-path, which
-/// preserves hook-time re-materialization for old intake worktrees. (The
-/// launch path does NOT use this: it passes the kind from
-/// `config.is_ephemeral` directly.)
-fn session_kind_for_worktree(worktree: &Path) -> SessionKind {
-    gwt_skills::resolve_session_kind_for_worktree(worktree)
+/// Whether a non-launch (re-)materialization targets an ephemeral worktree.
+/// SPEC #3245 FR-007 replaced the lane-file resolution with the structural
+/// worktree-form predicate (`.intake` / `.intake-<n>` naming): the decision is
+/// deterministic per worktree path, so an ambient env value from another
+/// session can never redirect asset policy (#3377), and disposable ephemeral
+/// worktrees keep the embedded-bundle override (#3374). (The launch path does
+/// NOT use this: it passes `config.is_ephemeral` directly.)
+fn worktree_is_ephemeral(worktree: &Path) -> bool {
+    crate::worktree_form::is_ephemeral_intake_worktree(worktree)
 }
 
 fn materialize_managed_gwt_assets_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
-    session_kind: SessionKind,
+    is_ephemeral: bool,
 ) -> io::Result<()> {
     // Fail fast with a clear, attributed error when the worktree was not
     // properly created (e.g. branch/worktree materialization failed). Without
@@ -112,11 +110,10 @@ fn materialize_managed_gwt_assets_for_targets(
             ),
         ));
     }
-    let lane_flags = gwt_skills::LaneRegistry::for_session_kind(session_kind).policy_flags;
-    // #3374: an ephemeral intake worktree refreshes tracked gwt-* assets from
-    // the embedded bundle — its tracked copies are a stale base-ref snapshot,
-    // not user content. Execution lanes keep the preserve-tracked default.
-    let policy = if lane_flags.embedded_assets_override_tracked {
+    // #3374: an ephemeral worktree refreshes tracked gwt-* assets from the
+    // embedded bundle — its tracked copies are a stale base-ref snapshot, not
+    // user content. Persistent worktrees keep the preserve-tracked default.
+    let policy = if is_ephemeral {
         gwt_skills::TrackedAssetWritePolicy::OverrideGwtManaged
     } else {
         gwt_skills::TrackedAssetWritePolicy::PreserveTracked
@@ -124,14 +121,6 @@ fn materialize_managed_gwt_assets_for_targets(
     distribute_to_worktree_for_targets_with_policy(worktree, targets, policy).map_err(|error| {
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
     })?;
-    // SPEC-3248 P4 (FR-011): a lane with a reduced skill set (intake) omits the
-    // implementation skills/commands. Applied as a post-pass so the
-    // distribution core is untouched; a non-reduced lane keeps the full set.
-    if lane_flags.reduced_skill_set {
-        gwt_skills::apply_reduced_skill_set(worktree).map_err(|error| {
-            io::Error::other(format!("failed to apply reduced skill set: {error}"))
-        })?;
-    }
     if targets.is_empty() {
         return Ok(());
     }
@@ -142,7 +131,7 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to regenerate Claude hook settings: {error}"
             ))
         })?;
-        generate_coordination_guidance_for_claude(worktree, session_kind).map_err(|error| {
+        generate_coordination_guidance_for_claude(worktree).map_err(|error| {
             io::Error::other(format!(
                 "failed to generate Claude coordination skill: {error}"
             ))
@@ -152,7 +141,7 @@ fn materialize_managed_gwt_assets_for_targets(
         generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
             io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
         })?;
-        generate_coordination_guidance_for_codex(worktree, session_kind).map_err(|error| {
+        generate_coordination_guidance_for_codex(worktree).map_err(|error| {
             io::Error::other(format!(
                 "failed to generate Codex coordination skill: {error}"
             ))
@@ -442,29 +431,19 @@ mod tests {
         );
     }
 
+    // SPEC #3245 FR-007: the (re-)materialization asset policy is decided by
+    // the structural worktree form (`.intake*` naming), never by ambient env.
     #[test]
-    fn session_kind_for_worktree_prefers_lane_file_over_env() {
-        // #3377: an intake session invoking gwtd against an execution worktree
-        // (e.g. develop) must materialize with that worktree's lane, not the
-        // caller's ambient env — the env-only read applied the reduced intake
-        // skill set there and deleted tracked skill files.
-        let _lock = ENV_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _env = EnvVarGuard::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
-        let worktree = tempfile::tempdir().expect("worktree");
-        gwt_skills::write_lane_file(worktree.path(), gwt_skills::LaneRegistry::default_profile())
-            .expect("write lane file");
-        assert_eq!(
-            super::session_kind_for_worktree(worktree.path()),
-            gwt_skills::SessionKind::Execution
-        );
-        // A pre-hooks-v2 worktree (no lane file) keeps the env fast-path.
-        let bare = tempfile::tempdir().expect("bare worktree");
-        assert_eq!(
-            super::session_kind_for_worktree(bare.path()),
-            gwt_skills::SessionKind::Intake
-        );
+    fn worktree_is_ephemeral_is_path_based() {
+        let persistent = tempfile::tempdir().expect("worktree");
+        assert!(!super::worktree_is_ephemeral(persistent.path()));
+        let root = tempfile::tempdir().expect("root");
+        let ephemeral = root.path().join(".intake");
+        std::fs::create_dir_all(&ephemeral).expect("mk ephemeral");
+        assert!(super::worktree_is_ephemeral(&ephemeral));
+        let suffixed = root.path().join(".intake-2");
+        std::fs::create_dir_all(&suffixed).expect("mk suffixed");
+        assert!(super::worktree_is_ephemeral(&suffixed));
     }
 
     #[test]

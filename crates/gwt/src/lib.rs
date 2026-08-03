@@ -47,6 +47,7 @@ pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
 pub mod work_notes;
+pub mod worktree_form;
 pub mod worktree_inventory;
 
 #[cfg(test)]

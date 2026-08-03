@@ -7,10 +7,8 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
-pub mod lane;
 pub mod provider_hooks;
 pub mod registry;
-pub mod session_kind;
 pub mod settings_local;
 pub mod validate;
 
@@ -29,21 +27,15 @@ pub use coordination_guidance::{
     generate_coordination_guidance_for_codex,
 };
 pub use distribute::{
-    apply_reduced_skill_set, distribute_to_worktree, distribute_to_worktree_for_targets,
+    distribute_to_worktree, distribute_to_worktree_for_targets,
     distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
     prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
-    TrackedAssetWritePolicy, CURATION_EXCLUDED_SKILLS,
+    TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
-};
-pub use lane::{
-    lane_file_path, read_lane_profile, resolve_lane_for_worktree,
-    resolve_session_kind_for_worktree, write_lane_file, GuidanceVariant, LanePolicyFlags,
-    LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE, LANE_FILE_RELATIVE,
-    LANE_FILE_VERSION,
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
@@ -51,7 +43,6 @@ pub use provider_hooks::{
     hermes_source_home, opencode_is_configured, opencode_is_configured_global,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use session_kind::{SessionKind, GWT_SESSION_KIND_ENV};
 pub use settings_local::{
     generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
     managed_hook_config_has_user_content, CodexHookDiscoveryMode,
@@ -721,6 +712,44 @@ mod tests {
             assert!(
                 !command.contains("/gwt:gwt-issue-search"),
                 "unexpected legacy gwt-issue-search command reference"
+            );
+        }
+    }
+
+    // SPEC #3245 FR-006 / AC-3: the registration template produces
+    // autonomous-eligible Issues by default — a mandatory `- [ ] AC-N:`
+    // checkbox structure plus the `auto-merge` label applied by default with
+    // an explicit opt-out. The `issue.create` operation itself stays neutral
+    // (labels optional, no unconditional default).
+    #[test]
+    fn registration_template_defaults_to_autonomous_eligible_issues() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-register-issue/SKILL.md",
+            ".codex/skills/gwt-register-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("## Acceptance Criteria"),
+                "expected a mandatory Acceptance Criteria section in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("- [ ] AC-1:"),
+                "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("\"labels\":[\"auto-merge\"]"),
+                "expected the auto-merge label applied by default at issue.create: {relative}"
+            );
+            assert!(
+                issue_skill.contains("opt-out") || issue_skill.contains("opt out"),
+                "expected an explicit auto-merge opt-out path: {relative}"
+            );
+            assert!(
+                issue_skill.contains("Issue Monitor"),
+                "expected the Issue Monitor eligibility alignment note: {relative}"
             );
         }
     }
