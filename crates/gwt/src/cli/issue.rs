@@ -208,6 +208,19 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
+    #[cfg(unix)]
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(&project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    {
+        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        out.push_str(
+            &serde_json::to_string(&status)
+                .map_err(|error| io_as_api_error(io::Error::other(error)))?,
+        );
+        out.push('\n');
+        return Ok(0);
+    }
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     let mut monitor =
@@ -901,6 +914,17 @@ pub(crate) fn body_closes_issue(body: &str, issue_number: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::{
+        io::{BufRead, Write},
+        os::unix::net::UnixListener,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
     use gwt_core::test_support::ScopedGwtHome;
     use gwt_github::client::{IssueSnapshot, IssueState, UpdatedAt};
     use tempfile::TempDir;
@@ -1123,6 +1147,138 @@ mod tests {
                 "autonomous_mode": false,
                 "has_launch_profile": false,
             })
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn issue_monitor_status_prefers_live_daemon_queue_over_cached_candidates() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("save prefs");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        gwt_github::Cache::new(cache_root)
+            .write_snapshot(&IssueSnapshot {
+                number: IssueNumber(42),
+                title: "Claimed elsewhere".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                updated_at: UpdatedAt::new("2026-08-03T00:00:00Z"),
+                comments: Vec::new(),
+            })
+            .expect("write stale cache candidate");
+
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            &repo,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .expect("runtime scope");
+        let socket_path = tmp.path().join("live-status.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind live daemon");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking live daemon");
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.to_string_lossy().to_string(),
+            "live-status-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(
+            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+            &endpoint,
+        )
+        .expect("persist live daemon endpoint");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while !server_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                let (stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("accept status client: {error}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking status client stream");
+                let mut reader =
+                    std::io::BufReader::new(stream.try_clone().expect("clone status stream"));
+                let mut writer = stream;
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read status handshake");
+                let request: gwt_core::daemon::IpcHandshakeRequest =
+                    serde_json::from_str(line.trim_end()).expect("parse status handshake");
+                assert_eq!(request.scope, scope);
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                        protocol_version: gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                        daemon_version: "test-daemon".to_string(),
+                        accepted: true,
+                        rejection_reason: None,
+                    })
+                    .expect("serialize status handshake")
+                )
+                .expect("write status handshake");
+                line.clear();
+                reader.read_line(&mut line).expect("read status request");
+                assert!(matches!(
+                    serde_json::from_str::<gwt_core::daemon::ClientFrame>(line.trim_end())
+                        .expect("parse status request"),
+                    gwt_core::daemon::ClientFrame::Status
+                ));
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::json!({
+                        "type": "status",
+                        "protocol_version": gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+                        "daemon_version": "test-daemon",
+                        "uptime_seconds": 1,
+                        "broadcast_channels": 1,
+                        "connections": 1,
+                        "issue_monitor": {
+                            "queue": [],
+                            "active_launches": [],
+                            "max_active": 1,
+                            "enabled": false,
+                            "autonomous_mode": false,
+                            "has_launch_profile": false
+                        }
+                    })
+                )
+                .expect("write live status");
+                return;
+            }
+        });
+
+        let mut env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        );
+        stop.store(true, Ordering::Release);
+        server.join().expect("live daemon joins");
+        result.expect("status");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(out.trim())
+                .expect("status json")
+                .get("queue"),
+            Some(&serde_json::json!([]))
         );
     }
 
