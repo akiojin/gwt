@@ -15,7 +15,11 @@ use std::{
 
 use chrono::Utc;
 use gwt::cli::{
-    hook::{event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput},
+    governance::GovernanceEffect,
+    hook::{
+        effect_classifier::{self, ObservationConfidence, RepositoryTarget},
+        event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput,
+    },
     improvement::{
         candidate_public_values, ImprovementCaptureCommand, ImprovementCommand,
         ImprovementPromoteIssueCommand, ImprovementTypedEvidenceCommand,
@@ -113,6 +117,274 @@ fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Opt
     {
         HookOutput::Silent => None,
         other => Some(other),
+    }
+}
+
+#[test]
+fn semantic_classifier_distinguishes_json_operation_effects() {
+    let cases = [
+        ("issue.view", json!({}), GovernanceEffect::Observe),
+        (
+            "pr.create",
+            json!({ "draft": true }),
+            GovernanceEffect::Reversible,
+        ),
+        ("pr.create", json!({}), GovernanceEffect::Protected),
+        (
+            "pr.create",
+            json!({ "draft": false }),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "pr.create",
+            json!({ "draft": "true" }),
+            GovernanceEffect::Protected,
+        ),
+        ("pr.edit", json!({}), GovernanceEffect::Reversible),
+        ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        ("workspace.update", json!({}), GovernanceEffect::Reversible),
+        ("execution.continue", json!({}), GovernanceEffect::Protected),
+        ("execution.adopt", json!({}), GovernanceEffect::Protected),
+        ("execution.repair", json!({}), GovernanceEffect::Protected),
+        ("execution.reopen", json!({}), GovernanceEffect::Protected),
+        ("workspace.ensure", json!({}), GovernanceEffect::Protected),
+        ("pr.ready", json!({}), GovernanceEffect::Protected),
+        ("build.complete", json!({}), GovernanceEffect::Protected),
+        ("release.publish", json!({}), GovernanceEffect::Protected),
+        ("pr.comment", json!({}), GovernanceEffect::Protected),
+        (
+            "pr.unknown_remote_mutation",
+            json!({}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "pr.review_threads.reply_and_resolve",
+            json!({}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "future.local.operation",
+            json!({}),
+            GovernanceEffect::Protected,
+        ),
+    ];
+
+    for (operation, params, expected_effect) in cases {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, params) }),
+        );
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .unwrap_or_else(|| panic!("expected classification for {operation}"));
+
+        assert_eq!(observation.target, RepositoryTarget::ManagedCurrent);
+        assert_eq!(observation.operation, operation);
+        assert_eq!(observation.effect, expected_effect, "{operation}");
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+            None,
+            "classifier observation must preserve the exact existing HookOutput for {operation}"
+        );
+    }
+}
+
+#[test]
+fn protected_observation_does_not_change_workflow_hook_output() {
+    // P6-A observes these protected effects but deliberately leaves exact
+    // authorization to their operation/transport sinks.
+    for operation in ["execution.continue", "pr.ready", "build.complete"] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({})) }),
+        );
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .expect("protected operation must be observed");
+
+        assert_eq!(
+            observation.effect,
+            GovernanceEffect::Protected,
+            "{operation}"
+        );
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+            None,
+            "classifier observation must not add a protected deny for {operation}"
+        );
+    }
+
+    let scratch = root()
+        .parent()
+        .unwrap_or_else(|| Path::new("/tmp"))
+        .join("semantic-classifier-scratch");
+    let event = event(
+        "Bash",
+        json!({ "command": format!("git -C {} status --short", scratch.display()) }),
+    );
+    let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+        .expect("scratch read must be observed");
+
+    assert_eq!(observation.target, RepositoryTarget::ExternalPath);
+    assert_eq!(observation.effect, GovernanceEffect::Observe);
+    assert_eq!(
+        evaluate(&event, workflow_policy::WorkflowContext::unknown()),
+        None,
+        "scratch read-only work must keep the existing allow decision"
+    );
+}
+
+#[test]
+fn file_tool_authority_surfaces_are_protected_observations_only() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
+    let cases = vec![
+        (
+            event(
+                "Edit",
+                json!({ "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" }),
+            ),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            event(
+                "Write",
+                json!({ "file_path": ".git/config", "content": "[core]" }),
+            ),
+            GovernanceEffect::Protected,
+        ),
+        (
+            event(
+                "Edit",
+                json!({ "file_path": ".gwt/config.json", "old_string": "old", "new_string": "new" }),
+            ),
+            GovernanceEffect::Protected,
+        ),
+        (
+            event(
+                "apply_patch",
+                json!({
+                    "patch": "*** Begin Patch\n*** Update File: .gwt/work/events.jsonl\n@@\n-old\n+new\n*** End Patch\n"
+                }),
+            ),
+            GovernanceEffect::Protected,
+        ),
+        (
+            event(
+                "apply_patch",
+                json!({
+                    "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"
+                }),
+            ),
+            GovernanceEffect::Reversible,
+        ),
+    ];
+
+    for (event, expected_effect) in cases {
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .expect("file mutation must be observed");
+
+        assert_eq!(observation.effect, expected_effect, "{event:?}");
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::plain_issue(1942)),
+            None,
+            "observe-only classification must preserve the exact existing HookOutput for {event:?}"
+        );
+    }
+}
+
+#[test]
+fn multi_edit_and_notebook_payloads_use_security_strongest_path_observations_only() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
+    let external = outside_root().join("external.rs");
+    let cases = vec![
+        (
+            "multi-edit source paths",
+            event(
+                "MultiEdit",
+                json!({
+                    "edits": [
+                        { "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" },
+                        { "file_path": "src/main.rs", "old_string": "old", "new_string": "new" }
+                    ]
+                }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Reversible,
+            "lexical_managed_path_unverified",
+        ),
+        (
+            "multi-edit authority path",
+            event(
+                "MultiEdit",
+                json!({
+                    "edits": [
+                        { "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" },
+                        { "file_path": ".git/config", "old_string": "old", "new_string": "new" }
+                    ]
+                }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Protected,
+            "lexical_managed_path_unverified",
+        ),
+        (
+            "multi-edit external path",
+            event(
+                "MultiEdit",
+                json!({
+                    "edits": [
+                        { "file_path": "src/lib.rs", "old_string": "old", "new_string": "new" },
+                        { "file_path": external, "old_string": "old", "new_string": "new" }
+                    ]
+                }),
+            ),
+            RepositoryTarget::ExternalPath,
+            GovernanceEffect::Reversible,
+            "lexical_external_repository_unverified",
+        ),
+        (
+            "notebook source path",
+            event(
+                "NotebookEdit",
+                json!({ "notebook_path": "notebooks/report.ipynb", "new_source": "1 + 1" }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Reversible,
+            "lexical_managed_path_unverified",
+        ),
+        (
+            "notebook authority path",
+            event(
+                "NotebookEdit",
+                json!({ "notebook_path": ".gwt/notebooks/report.ipynb", "new_source": "1 + 1" }),
+            ),
+            RepositoryTarget::ManagedCurrent,
+            GovernanceEffect::Protected,
+            "lexical_managed_path_unverified",
+        ),
+    ];
+
+    for (label, event, expected_target, expected_effect, expected_reason) in cases {
+        let observation = effect_classifier::classify_event(&event, Path::new(&root()))
+            .unwrap_or_else(|| panic!("{label} must be observed"));
+
+        assert_eq!(observation.target, expected_target, "{label}");
+        assert_eq!(observation.effect, expected_effect, "{label}");
+        assert_eq!(
+            observation.confidence,
+            ObservationConfidence::Heuristic,
+            "{label}"
+        );
+        assert_eq!(observation.reason, expected_reason, "{label}");
+        assert_eq!(
+            evaluate(&event, workflow_policy::WorkflowContext::plain_issue(1942)),
+            None,
+            "observation must preserve the exact existing HookOutput for {label}"
+        );
     }
 }
 

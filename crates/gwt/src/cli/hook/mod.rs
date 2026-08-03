@@ -21,6 +21,7 @@ pub mod board_reminder;
 pub mod context;
 pub mod coordination_event;
 pub mod diagnostics;
+pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;

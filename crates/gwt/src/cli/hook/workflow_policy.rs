@@ -30,7 +30,7 @@ use serde::Deserialize;
 
 use crate::discussion_resume::PendingDiscussionGoal;
 
-use super::{block_bash_policy, HookError, HookEvent, HookOutput};
+use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -115,7 +115,8 @@ pub fn evaluate_with_context(
     worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
-    let safety = block_bash_policy::evaluate(event, worktree_root)?;
+    effect_classifier::observe_event(event, worktree_root);
+    let safety = block_bash_policy::evaluate_without_observation(event, worktree_root)?;
     if safety != HookOutput::Silent {
         return Ok(safety);
     }
@@ -514,7 +515,7 @@ fn event_targets_documentation_or_guidance(event: &HookEvent, worktree_root: &Pa
             .all(|path| is_documentation_or_guidance_path(path, worktree_root))
 }
 
-fn event_target_paths(event: &HookEvent) -> Vec<String> {
+pub(crate) fn event_target_paths(event: &HookEvent) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(path) = event
         .tool_input
@@ -957,7 +958,15 @@ fn is_read_only_json_envelope_command(command: &str) -> bool {
         .is_some_and(is_read_only_json_envelope_operation)
 }
 
-fn json_envelope_operation(command: &str) -> Option<String> {
+pub(crate) fn json_envelope_operation(command: &str) -> Option<String> {
+    let value = json_envelope(command)?;
+    value
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
     let segments = super::segments::split_command_segments(command);
     if segments.len() != 1
         || !segments
@@ -967,14 +976,10 @@ fn json_envelope_operation(command: &str) -> Option<String> {
         return None;
     }
     let json = extract_json_object(command)?;
-    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    value
-        .get("operation")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
+    serde_json::from_str::<serde_json::Value>(json).ok()
 }
 
-fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
@@ -1046,7 +1051,7 @@ fn has_file_output_redirection(command: &str) -> bool {
     !super::segments::output_redirect_file_targets(command).is_empty()
 }
 
-fn is_read_only_segment(segment: &str) -> bool {
+pub(crate) fn is_read_only_segment(segment: &str) -> bool {
     let tokens = segment_tokens(segment);
     let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
         return true;
@@ -1083,7 +1088,7 @@ fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
     )
 }
 
-fn segment_tokens(segment: &str) -> Vec<&str> {
+pub(crate) fn segment_tokens(segment: &str) -> Vec<&str> {
     let raw = segment.split_whitespace().collect::<Vec<_>>();
     let mut start = 0;
     while raw
@@ -1139,7 +1144,7 @@ fn is_env_assignment(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn normalize_command_name(token: &str) -> String {
+pub(crate) fn normalize_command_name(token: &str) -> String {
     let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
     // Skills resolve gwtd through `resolve_gwt_bin` and invoke it as
     // `"$GWT_BIN"`; treat that documented convention as the gwtd command so
