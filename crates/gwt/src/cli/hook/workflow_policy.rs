@@ -496,6 +496,7 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.read"
             | "issue.spec.section"
             | "issue.spec.list"
+            | "issue.monitor.status"
             | "pr.current"
             | "pr.view"
             | "pr.checks"
@@ -1151,6 +1152,42 @@ mod tests {
             HookOutput::Silent,
             "production source writes must pass ownerless after the owner guard removal"
         );
+    }
+
+    #[test]
+    fn issue_monitor_json_operations_have_the_expected_policy_classification() {
+        assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
+        for operation in [
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+
+        let repo = tempfile::tempdir().expect("repo");
+        let context = WorkflowContext::unknown();
+        for operation in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": command})),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(&event, repo.path(), &context).expect("policy"),
+                HookOutput::Silent,
+                "operation must pass the ownerless execution policy: {operation}"
+            );
+        }
     }
 
     #[test]

@@ -1574,6 +1574,13 @@ mod tests {
                     && content.contains("\"operation\":\"pane.list\"")
                     && content.contains("\"operation\":\"pane.read\"")
                     && content.contains("\"operation\":\"pane.close\"")
+                    && content.contains("\"operation\":\"issue.monitor.status\"")
+                    && content.contains("\"operation\":\"issue.monitor.priority.move\"")
+                    && content.contains("\"operation\":\"issue.monitor.priority.set\"")
+                    && content.contains("\"operation\":\"issue.monitor.config.set\"")
+                    && content.contains("enabled=true")
+                    && content.contains("autonomous_mode=true")
+                    && content.contains("next scan")
                     && content.contains("params.targets")
                     && content.contains("handoff")
                     && content.contains("request"),
@@ -1597,10 +1604,34 @@ mod tests {
             command.contains("Board")
                 && command.contains("\"operation\":\"board.post\"")
                 && command.contains("`pane.list`, `pane.read`, or `pane.close`")
+                && command.contains("issue.monitor.status")
+                && command.contains("issue.monitor.priority.move")
+                && command.contains("issue.monitor.priority.set")
+                && command.contains("issue.monitor.config.set")
                 && !command.contains("[message]")
                 && !command.contains("sending"),
             "expected gwt-agent command to route pane operations through JSON and communication through Board"
         );
+
+        for relative in ["README.md", "README.ja.md"] {
+            let readme = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for operation in [
+                "issue.monitor.status",
+                "issue.monitor.priority.move",
+                "issue.monitor.priority.set",
+                "issue.monitor.config.set",
+            ] {
+                assert!(
+                    readme.contains(operation),
+                    "expected {relative} to document {operation}"
+                );
+            }
+            assert!(
+                readme.contains("next scan"),
+                "expected {relative} to document eventual consistency"
+            );
+        }
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));

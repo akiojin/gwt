@@ -1243,6 +1243,11 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    ConfigSet {
+        enabled: Option<bool>,
+        autonomous_mode: Option<bool>,
+        max_active_agents: Option<usize>,
+    },
     ClaimLaunchDelivery {
         issue_number: u64,
         delivery_id: String,
@@ -1450,6 +1455,13 @@ fn issue_monitor_control_is_authorizing(control: &IssueMonitorControl) -> bool {
     matches!(
         control,
         IssueMonitorControl::Enabled(_) | IssueMonitorControl::AutonomousMode(_)
+    ) || matches!(
+        control,
+        IssueMonitorControl::ConfigSet {
+            enabled,
+            autonomous_mode,
+            ..
+        } if enabled.is_some() || autonomous_mode.is_some()
     )
 }
 
@@ -1529,6 +1541,31 @@ fn try_apply_issue_monitor_control(
         IssueMonitorControl::AutonomousMode(enabled) => monitor
             .set_autonomous_mode_with_effect_revocation(enabled)
             .map(|_| true),
+        IssueMonitorControl::ConfigSet {
+            enabled,
+            autonomous_mode,
+            max_active_agents,
+        } => {
+            if enabled == Some(true)
+                || autonomous_mode == Some(true)
+                || max_active_agents == Some(0)
+                || (enabled.is_none() && autonomous_mode.is_none() && max_active_agents.is_none())
+            {
+                return None;
+            }
+            let mut candidate = monitor.clone();
+            if let Some(enabled) = enabled {
+                candidate.set_enabled_with_effect_revocation(enabled)?;
+            }
+            if let Some(autonomous_mode) = autonomous_mode {
+                candidate.set_autonomous_mode_with_effect_revocation(autonomous_mode)?;
+            }
+            if let Some(max_active_agents) = max_active_agents {
+                candidate.set_max_active_agents(max_active_agents);
+            }
+            *monitor = candidate;
+            Some(true)
+        }
         control => Some(apply_routine_issue_monitor_control(monitor, control)),
     }
 }
@@ -1546,7 +1583,9 @@ fn apply_routine_issue_monitor_control(
     control: IssueMonitorControl,
 ) -> bool {
     match control {
-        IssueMonitorControl::Enabled(_) | IssueMonitorControl::AutonomousMode(_) => false,
+        IssueMonitorControl::Enabled(_)
+        | IssueMonitorControl::AutonomousMode(_)
+        | IssueMonitorControl::ConfigSet { .. } => false,
         IssueMonitorControl::ClaimLaunchDelivery {
             issue_number,
             delivery_id,
@@ -1805,6 +1844,37 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                 return None;
             }
             let payload = event.get("payload")?;
+            if let Some(config) = payload
+                .get("config_set")
+                .and_then(serde_json::Value::as_object)
+            {
+                let enabled = match config.get("enabled") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
+                let autonomous_mode = match config.get("autonomous_mode") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_bool()?),
+                };
+                let max_active_agents = match config.get("max_active_agents") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(usize::try_from(value.as_u64()?).ok()?),
+                };
+                if enabled == Some(true)
+                    || autonomous_mode == Some(true)
+                    || max_active_agents == Some(0)
+                    || (enabled.is_none()
+                        && autonomous_mode.is_none()
+                        && max_active_agents.is_none())
+                {
+                    return None;
+                }
+                return Some(IssueMonitorControl::ConfigSet {
+                    enabled,
+                    autonomous_mode,
+                    max_active_agents,
+                });
+            }
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
             }
@@ -4823,6 +4893,101 @@ exit 0
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_decodes_and_commits_atomically() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "config_set": {
+                    "enabled": false,
+                    "autonomous_mode": false,
+                    "max_active_agents": 4,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("config control");
+        assert_eq!(
+            control,
+            IssueMonitorControl::ConfigSet {
+                enabled: Some(false),
+                autonomous_mode: Some(false),
+                max_active_agents: Some(4),
+            }
+        );
+
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            effect_authority_epoch: 7,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
+
+        assert!(super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            control,
+        ));
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(!persisted.enabled);
+        assert!(!persisted.autonomous_mode);
+        assert_eq!(persisted.max_active_agents, 4);
+        assert_eq!(persisted.effect_authority_epoch, 9);
+    }
+
+    #[test]
+    fn issue_monitor_config_set_decoder_rejects_enabling_controls() {
+        for config_set in [
+            serde_json::json!({"enabled": true}),
+            serde_json::json!({"autonomous_mode": true}),
+            serde_json::json!({"max_active_agents": 0}),
+            serde_json::json!({}),
+        ] {
+            let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": config_set}),
+                std::process::id() + 1,
+            );
+            assert!(decode_issue_monitor_control(payload).is_none());
+        }
+    }
+
+    #[test]
+    fn issue_monitor_config_set_epoch_overflow_is_atomic() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let initial = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 1,
+            effect_authority_epoch: u64::MAX,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            initial.clone(),
+        );
+
+        assert!(!super::apply_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            IssueMonitorControl::ConfigSet {
+                enabled: Some(false),
+                autonomous_mode: Some(false),
+                max_active_agents: Some(4),
+            },
+        ));
+        assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+        assert_eq!(monitor.prefs(), initial);
     }
 
     #[test]

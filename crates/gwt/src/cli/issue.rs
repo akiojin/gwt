@@ -5,7 +5,9 @@ use gwt_github::{
     IssueState, SpecOpsError,
 };
 
-use crate::cli::{CliEnv, CliParseError, IssueCommand, LinkedPrSummary};
+use crate::cli::{
+    CliEnv, CliParseError, IssueCommand, IssueMonitorPriorityPosition, LinkedPrSummary,
+};
 
 fn io_as_api_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
@@ -144,9 +146,260 @@ pub(super) fn run<E: CliEnv>(
             reviewed_sha,
             verdict_raw,
         } => run_monitor_review_verdict(env, issue_number, &reviewed_sha, &verdict_raw, out),
+        IssueCommand::MonitorStatus { project_root } => {
+            run_monitor_status(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorPriorityMove {
+            project_root,
+            number,
+            position,
+        } => run_monitor_priority_move(env, project_root.as_deref(), number, position, out)?,
+        IssueCommand::MonitorPrioritySet {
+            project_root,
+            issue_numbers,
+        } => run_monitor_priority_set(env, project_root.as_deref(), &issue_numbers, out)?,
+        IssueCommand::MonitorConfigSet {
+            project_root,
+            enabled,
+            autonomous_mode,
+            max_active,
+        } => run_monitor_config_set(
+            env,
+            project_root.as_deref(),
+            enabled,
+            autonomous_mode,
+            max_active,
+            out,
+        )?,
         _ => unreachable!("issue::run called with non-issue command"),
     };
     Ok(code)
+}
+
+fn issue_monitor_project_root<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+) -> Result<PathBuf, SpecOpsError> {
+    let requested = project_root.unwrap_or_else(|| env.repo_path());
+    let canonical = fs::canonicalize(requested).map_err(|error| {
+        io_as_api_error(io::Error::new(
+            error.kind(),
+            format!(
+                "Issue Monitor project_root {} is unavailable: {error}",
+                requested.display()
+            ),
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(io_as_api_error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Issue Monitor project_root {} is not a directory",
+                requested.display()
+            ),
+        )));
+    }
+    Ok(gwt_core::paths::resolve_current_worktree_root(&canonical))
+}
+
+fn run_monitor_status<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
+    let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "gwtd-status");
+    out.push_str(
+        &serde_json::json!({
+            "queue": monitor.queued_issue_numbers(),
+            "active_launches": monitor.active_issue_numbers(),
+            "max_active": prefs.max_active_agents.max(1),
+            "enabled": prefs.enabled,
+            "autonomous_mode": prefs.autonomous_mode,
+            "has_launch_profile": prefs.launch_profile.is_some(),
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_priority_move<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    position: IssueMonitorPriorityPosition,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.priority_order.retain(|existing| *existing != number);
+        let index = match position {
+            IssueMonitorPriorityPosition::Head => 0,
+            IssueMonitorPriorityPosition::Index(index) => index,
+        };
+        if index > prefs.priority_order.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "position {index} is outside priority_order length {}",
+                    prefs.priority_order.len()
+                ),
+            ));
+        }
+        prefs.priority_order.insert(index, number);
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+    out.push_str(&serde_json::json!({"priority_order": prefs.priority_order}).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_priority_set<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    issue_numbers: &[u64],
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.priority_order = issue_numbers.to_vec();
+        Ok(())
+    })
+    .map_err(io_as_api_error)?;
+    out.push_str(&serde_json::json!({"priority_order": prefs.priority_order}).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn apply_monitor_config_set(
+    prefs: &mut crate::IssueMonitorPrefs,
+    enabled: Option<bool>,
+    autonomous_mode: Option<bool>,
+    max_active: Option<usize>,
+) -> io::Result<()> {
+    validate_monitor_config_set(enabled, autonomous_mode, max_active)?;
+    let mut candidate =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    if let Some(enabled) = enabled {
+        candidate
+            .set_enabled_with_effect_revocation(enabled)
+            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+    }
+    if let Some(autonomous_mode) = autonomous_mode {
+        candidate
+            .set_autonomous_mode_with_effect_revocation(autonomous_mode)
+            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+    }
+    if let Some(max_active) = max_active {
+        candidate.set_max_active_agents(max_active);
+    }
+    *prefs = candidate.prefs();
+    Ok(())
+}
+
+fn validate_monitor_config_set(
+    enabled: Option<bool>,
+    autonomous_mode: Option<bool>,
+    max_active: Option<usize>,
+) -> io::Result<()> {
+    if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "at least one Issue Monitor config field is required",
+        ));
+    }
+    if enabled == Some(true) || autonomous_mode == Some(true) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "enabling Issue Monitor or autonomous mode requires an explicit GUI action",
+        ));
+    }
+    if max_active == Some(0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "max_active must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+fn run_monitor_config_set<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    enabled: Option<bool>,
+    autonomous_mode: Option<bool>,
+    max_active: Option<usize>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    validate_monitor_config_set(enabled, autonomous_mode, max_active).map_err(io_as_api_error)?;
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "config_set": {
+                "enabled": enabled,
+                "autonomous_mode": autonomous_mode,
+                "max_active_agents": max_active,
+            }
+        }),
+        std::process::id(),
+    );
+    let publication = publish_monitor_config_set(&project_root, payload);
+    if let Err(error) = publication {
+        if !error.allows_local_fallback() {
+            return Err(io_as_api_error(io::Error::other(error.to_string())));
+        }
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+            apply_monitor_config_set(prefs, enabled, autonomous_mode, max_active)
+        })
+        .map_err(io_as_api_error)?;
+    }
+    let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
+    .map_err(io_as_api_error)?;
+    out.push_str(
+        &serde_json::json!({
+            "enabled": prefs.enabled,
+            "autonomous_mode": prefs.autonomous_mode,
+            "max_active": prefs.max_active_agents.max(1),
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+#[cfg(unix)]
+fn publish_monitor_config_set(
+    project_root: &std::path::Path,
+    payload: serde_json::Value,
+) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+    crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+}
+
+#[cfg(not(unix))]
+fn publish_monitor_config_set(
+    _project_root: &std::path::Path,
+    _payload: serde_json::Value,
+) -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError> {
+    Err(
+        crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+            "Issue Monitor daemon control is unavailable on this platform".to_string(),
+        ),
+    )
 }
 
 /// SPEC #3200 Option A: publish an independent-review verdict to the Issue
@@ -648,6 +901,7 @@ pub(crate) fn body_closes_issue(body: &str, issue_number: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::test_support::ScopedGwtHome;
     use gwt_github::client::{IssueSnapshot, IssueState, UpdatedAt};
     use tempfile::TempDir;
 
@@ -804,6 +1058,279 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(out.contains("#42 [OPEN] Issue family direct run"));
+    }
+
+    #[test]
+    fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 3,
+                priority_order: vec![2, 1],
+                launching_issues: vec![crate::IssueMonitorLaunchingIssue {
+                    issue_number: 9,
+                    claimed_at: Some("2026-08-03T00:00:00Z".to_string()),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+        let cache = gwt_github::Cache::new(cache_root);
+        for number in [1, 2] {
+            cache
+                .write_snapshot(&IssueSnapshot {
+                    number: IssueNumber(number),
+                    title: format!("Issue {number}"),
+                    body: String::new(),
+                    labels: Vec::new(),
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("2026-08-03T00:00:00Z"),
+                    comments: Vec::new(),
+                })
+                .expect("write cache");
+        }
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let prefs_before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            prefs_before,
+            "status must stay read-only"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(out.trim()).expect("status json"),
+            serde_json::json!({
+                "queue": [2, 1],
+                "active_launches": [9],
+                "max_active": 3,
+                "enabled": true,
+                "autonomous_mode": false,
+                "has_launch_profile": false,
+            })
+        );
+    }
+
+    #[test]
+    fn issue_monitor_priority_operations_roundtrip_and_reject_out_of_range() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                priority_order: vec![1, 2, 3],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorPriorityMove {
+                    project_root: Some(repo.clone()),
+                    number: 1,
+                    position: crate::cli::IssueMonitorPriorityPosition::Index(2),
+                },
+                &mut out,
+            )
+            .expect("move backward"),
+            0
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("load backward move")
+                .priority_order,
+            vec![2, 3, 1]
+        );
+        run(
+            &mut env,
+            IssueCommand::MonitorPrioritySet {
+                project_root: Some(repo.clone()),
+                issue_numbers: vec![1, 2, 3],
+            },
+            &mut out,
+        )
+        .expect("restore priorities");
+        out.clear();
+
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorPriorityMove {
+                    project_root: Some(repo.clone()),
+                    number: 2,
+                    position: crate::cli::IssueMonitorPriorityPosition::Head,
+                },
+                &mut out,
+            )
+            .expect("move"),
+            0
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("load moved prefs")
+                .priority_order,
+            vec![2, 1, 3]
+        );
+
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorPrioritySet {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![8, 5],
+                },
+                &mut out,
+            )
+            .expect("set"),
+            0
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("load set prefs")
+                .priority_order,
+            vec![8, 5]
+        );
+
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorPriorityMove {
+                    project_root: Some(repo.clone()),
+                    number: 13,
+                    position: crate::cli::IssueMonitorPriorityPosition::Index(1),
+                },
+                &mut out,
+            )
+            .expect("insert missing priority"),
+            0
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("load inserted prefs")
+                .priority_order,
+            vec![8, 13, 5]
+        );
+
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        out.clear();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorPriorityMove {
+                project_root: Some(repo.clone()),
+                number: 13,
+                position: crate::cli::IssueMonitorPriorityPosition::Index(4),
+            },
+            &mut out,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorPrioritySet {
+                    project_root: Some(repo),
+                    issue_numbers: Vec::new(),
+                },
+                &mut out,
+            )
+            .expect("clear priorities"),
+            0
+        );
+        assert!(crate::load_issue_monitor_prefs(&prefs_path)
+            .expect("load cleared prefs")
+            .priority_order
+            .is_empty());
+
+        out.clear();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorPrioritySet {
+                project_root: Some(tmp.path().join("missing-project")),
+                issue_numbers: vec![99],
+            },
+            &mut out,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn issue_monitor_config_set_falls_back_safely_when_daemon_is_absent() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: Some(repo),
+                enabled: Some(false),
+                autonomous_mode: Some(false),
+                max_active: Some(3),
+            },
+            &mut out,
+        )
+        .expect("config set");
+
+        assert_eq!(code, 0);
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(!prefs.enabled);
+        assert!(!prefs.autonomous_mode);
+        assert_eq!(prefs.max_active_agents, 3);
+        assert_eq!(prefs.effect_authority_epoch, 2);
+
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        out.clear();
+        assert!(run(
+            &mut env,
+            IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: Some(true),
+                autonomous_mode: None,
+                max_active: None,
+            },
+            &mut out,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
     }
 
     // -------------------------------------------------------------------
