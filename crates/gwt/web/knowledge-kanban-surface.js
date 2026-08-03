@@ -1585,9 +1585,6 @@ export function createKnowledgeKanbanSurface({
         if (state.error) {
           status.classList.add("visible", "error");
           status.textContent = state.error;
-        } else if (state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = "Searching semantic index";
         } else if (state.loading && state.entries.length > 0) {
           status.classList.add("visible", "info");
           status.textContent = state.refreshing
@@ -1654,9 +1651,6 @@ export function createKnowledgeKanbanSurface({
         if (state.error) {
           status.classList.add("visible", "error");
           status.textContent = state.error;
-        } else if (state.searching) {
-          status.classList.add("visible", "info");
-          status.textContent = "Searching semantic index";
         } else if (state.loading && state.entries.length > 0) {
           status.classList.add("visible", "info");
           status.textContent = state.refreshing
