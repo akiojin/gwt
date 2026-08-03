@@ -8,6 +8,7 @@ pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
 pub mod lane;
+pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
 pub mod session_kind;
