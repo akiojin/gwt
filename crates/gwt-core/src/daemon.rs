@@ -237,6 +237,11 @@ pub struct DaemonStatus {
     /// asking for the status snapshot.
     #[serde(default)]
     pub connections: usize,
+    /// Latest atomic Issue Monitor projection owned by this daemon. Older
+    /// daemons omit it; clients must not treat a missing projection from a live
+    /// daemon as permission to reconstruct runtime state from stale cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_monitor: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
