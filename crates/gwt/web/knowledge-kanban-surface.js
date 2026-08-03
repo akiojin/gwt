@@ -182,6 +182,9 @@ export function createKnowledgeKanbanSurface({
             entries: [],
             baseEntries: [],
             selectedNumber: null,
+            // SPEC #3170 FR-101: independent monotonically increasing
+            // explicit-selection generation; 0 means no explicit selection.
+            selectionGeneration: 0,
             detail: null,
             query: "",
             loading: false,
@@ -451,8 +454,13 @@ export function createKnowledgeKanbanSurface({
       }
 
       function knowledgeDetailRequestMatches(state, event) {
+        if (!event.request_id) {
+          // FR-101: a request-ID-less legacy detail is accepted only for the
+          // currently selected number — it can never satisfy (or overwrite)
+          // a newer explicit selection of a different row.
+          return event.detail?.number === state.selectedNumber;
+        }
         return (
-          !event.request_id ||
           event.request_id === state.loadRequestId ||
           event.request_id === state.detailRequestId
         );
@@ -530,11 +538,39 @@ export function createKnowledgeKanbanSurface({
 
       function requestKnowledgeDetail(windowId, knowledgeKind, number) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        // SPEC #3170 FR-101 (T-950): an explicit selection is a local state
+        // transition first — bump the independent selection generation and
+        // materialize the row's preview before any detail I/O is sent.
+        state.selectionGeneration = (state.selectionGeneration || 0) + 1;
         state.selectedNumber = number;
+        const findRow = (rows) =>
+          Array.isArray(rows)
+            ? rows.find((entry) => entry && entry.number === number)
+            : null;
+        const row = findRow(state.entries) || findRow(state.baseEntries) || null;
+        const authoritative = state.detail && state.detail.number === number;
+        if (!authoritative) {
+          // The previous row's body / related work / Launch action must
+          // disappear in the same turn; without a resolvable preview the old
+          // detail is cleared rather than shown against the new number.
+          state.detail = row
+            ? {
+                number: row.number,
+                title: row.title || "",
+                subtitle: "",
+                state: row.state || "",
+                labels: Array.isArray(row.labels) ? row.labels.slice() : [],
+                sections: [],
+                launch_issue_number: row.number,
+                related_works: [],
+              }
+            : null;
+        }
         state.detailLoading = true;
         const requestId = nextKnowledgeLoadRequestId++;
         state.detailRequestId = requestId;
         const effectiveKind = knowledgeKind || state.kind;
+        renderKnowledgeBridge(windowId);
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
@@ -1777,9 +1813,15 @@ export function createKnowledgeKanbanSurface({
               state.emptyMessage = state.baseEmptyMessage;
               state.searching = false;
             }
-            state.selectedNumber = keepSelectedNumber
-              ? state.selectedNumber
-              : event.selected_number ?? null;
+            // FR-101: an initial-load / list completion may refresh rows
+            // but must never move an explicit selection.
+            if (state.selectionGeneration > 0) {
+              // keep state.selectedNumber untouched
+            } else {
+              state.selectedNumber = keepSelectedNumber
+                ? state.selectedNumber
+                : event.selected_number ?? null;
+            }
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.error = "";
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
@@ -1822,7 +1864,11 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             state.entries = event.entries || [];
-            state.selectedNumber = event.selected_number ?? null;
+            // FR-101: a search completion updates its own row snapshot but
+            // must never move a newer explicit selection.
+            if (!(state.selectionGeneration > 0)) {
+              state.selectedNumber = event.selected_number ?? null;
+            }
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.error = "";
