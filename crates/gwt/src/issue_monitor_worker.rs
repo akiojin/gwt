@@ -951,6 +951,88 @@ mod tests {
     }
 
     #[test]
+    fn needs_human_is_visible_in_read_only_projection_without_gui() {
+        // SPEC-3431 T-040 (FR-011): the PM agent consumes NeedsHuman through
+        // the always-emitted status/inbox projection and must never depend on
+        // toasts, which are drained only while a GUI is connected. Escalation
+        // therefore has to be visible with gui_connected=false, and no toast
+        // may be the only carrier.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.inbox.push(crate::IssueMonitorInboxItem {
+            issue: issue(42),
+            state: MonitorInboxState::Launched,
+            claim_id: None,
+            blocked_by_owner: None,
+            claim_expires_at: None,
+            launched_window_id: Some("window-1".to_string()),
+            launch_plan: None,
+            error_message: None,
+        });
+        monitor.record_attempt(42);
+        monitor.escalate_to_needs_human(42, "review rejected");
+
+        let payloads = issue_monitor_daemon_payloads(&mut monitor, false);
+
+        let status = payloads
+            .iter()
+            .find(|payload| payload.event == "status")
+            .expect("status projection is emitted without a GUI");
+        let summary = status
+            .payload
+            .get("autonomous_issues")
+            .and_then(|value| value.as_array())
+            .and_then(|summaries| {
+                summaries.iter().find(|summary| {
+                    summary.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
+                })
+            })
+            .expect("escalated issue appears in autonomous_issues");
+        assert_eq!(
+            summary.get("needs_human").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let inbox = payloads
+            .iter()
+            .find(|payload| payload.event == "inbox")
+            .expect("inbox projection is emitted without a GUI");
+        let item = inbox
+            .payload
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("issue")
+                        .and_then(|issue| issue.get("number"))
+                        .and_then(|v| v.as_u64())
+                        == Some(42)
+                })
+            })
+            .expect("escalated issue appears in the inbox projection");
+        assert_eq!(
+            item.get("state").and_then(|v| v.as_str()),
+            Some("needs_human")
+        );
+        assert!(item
+            .get("error_message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|message| message.contains("review rejected")));
+
+        assert!(
+            payloads.iter().all(|payload| payload.event != "toast"),
+            "toasts must not be emitted while no GUI is connected"
+        );
+    }
+
+    #[test]
     fn payloads_surface_autonomous_notices_as_toasts_when_gui_is_connected() {
         // SPEC #3200 FR-034 (T-111): daemon-side autonomous transitions queue
         // operator notices; the worker drains them into `toast` payloads so the
