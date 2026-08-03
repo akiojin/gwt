@@ -4024,6 +4024,55 @@ mod tests {
         });
     }
 
+    #[test]
+    fn execution_continuation_refuses_a_takeover_suffix_byte_identically() {
+        with_strict_target_fixture(|repo, session| {
+            let (bound, _) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &bound, "work-takeover-suffix");
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 2359,
+            };
+            let takeover = crate::cli::execution_state::GenerationTakeoverRequest {
+                operation_id: "takeover-suffix-continuation".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: Some("work-takeover-suffix-continuation".to_string()),
+                source: Some("continue-work:handoff".to_string()),
+                from_session_id: bound.id.clone(),
+                to_session_id: "session-adopting".to_string(),
+                reason: "explicit handoff".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
+                .expect("prepare takeover suffix");
+            crate::cli::execution_state::activate_generation_takeover(repo, owner, &takeover)
+                .expect("activate takeover suffix");
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &bound.id);
+
+            let probe = probe_authenticated_execution_continuation(repo, &bound.id);
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            let error = continue_authenticated_execution(
+                repo,
+                &bound.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-after-takeover-suffix".to_string(),
+                },
+            )
+            .expect_err("the predecessor Session must not continue after a takeover suffix");
+            assert_eq!(probe.reason.as_deref(), Some(error.message.as_str()));
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &bound.id),
+                before,
+                "takeover-suffix refusal must preserve Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+        });
+    }
+
     fn seed_foreign_active_exact_unbound(
         repo: &Path,
         session: &Session,

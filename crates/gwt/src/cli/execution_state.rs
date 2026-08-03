@@ -7398,219 +7398,421 @@ fn protected_recovery_metadata(
     }
 }
 
+#[derive(Debug, Clone)]
+struct RecoveryPrerequisiteRefusal {
+    cause: crate::cli::governance::GovernanceCause,
+    reason: String,
+}
+
+impl RecoveryPrerequisiteRefusal {
+    fn new(cause: crate::cli::governance::GovernanceCause, reason: impl Into<String>) -> Self {
+        Self {
+            cause,
+            reason: reason.into(),
+        }
+    }
+}
+
+fn unavailable_recovery_prerequisite(
+    cause: crate::cli::governance::GovernanceCause,
+    reason: impl Into<String>,
+) -> RecoveryPrerequisiteRefusal {
+    RecoveryPrerequisiteRefusal::new(cause, reason)
+}
+
+fn corrupt_owner_generation_authority_refusal(
+    status: ExecutionControlStatus,
+) -> RecoveryPrerequisiteRefusal {
+    RecoveryPrerequisiteRefusal::new(
+        crate::cli::governance::GovernanceCause::Integrity,
+        format!(
+            "owner generation authority is corrupt or unreadable; {}",
+            integrity_repair_guidance(status)
+        ),
+    )
+}
+
+fn recovery_record_prerequisite(
+    worktree: &Path,
+    missing_reason: &'static str,
+) -> Result<ExecutionControlRecord, RecoveryPrerequisiteRefusal> {
+    use crate::cli::governance::GovernanceCause;
+    let contents = read_record_contents(worktree).map_err(|error| {
+        RecoveryPrerequisiteRefusal::new(
+            GovernanceCause::Integrity,
+            format!("execution control record is unreadable: {error}"),
+        )
+    })?;
+    let Some(contents) = contents else {
+        return Err(RecoveryPrerequisiteRefusal::new(
+            GovernanceCause::NotReady,
+            missing_reason,
+        ));
+    };
+    serde_json::from_str::<ExecutionControlRecord>(&contents)
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            RecoveryPrerequisiteRefusal::new(
+                GovernanceCause::Integrity,
+                format!("execution control record is unreadable: {error}"),
+            )
+        })
+}
+
+fn strict_recovery_generation_binding(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+) -> Result<Option<gwt_agent::ExecutionBindingIdentity>, RecoveryPrerequisiteRefusal> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    let corrupt_authority = || corrupt_owner_generation_authority_refusal(record.status);
+    let authority_present = owner_generation_ledger_exists(worktree, owner)
+        .map_err(|_| corrupt_authority())?
+        || read_generation_pointer_contents(worktree)
+            .map_err(|_| corrupt_authority())?
+            .is_some();
+    if !authority_present {
+        return Ok(None);
+    }
+    let ledger = load_generation_ledger(worktree, owner)
+        .map_err(|_| corrupt_authority())?
+        .ok_or_else(corrupt_authority)?;
+    let current = ledger.current_generation().ok_or_else(corrupt_authority)?;
+    let projection =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|_| corrupt_authority())?;
+    if ledger.owner != owner
+        || current.identity.worktree_binding_hash != worktree_binding_hash(worktree)
+        || ledger.effective_status_for(current) != record.status
+        || projection != *record
+    {
+        return Err(corrupt_authority());
+    }
+    Ok(Some(execution_binding_for_generation(&ledger, current)))
+}
+
+#[derive(Debug)]
+enum ExecutionAdoptPrerequisites {
+    Available {
+        record: ExecutionControlRecord,
+        binding: Option<gwt_agent::ExecutionBindingIdentity>,
+    },
+    Satisfied {
+        record: ExecutionControlRecord,
+        binding: Option<gwt_agent::ExecutionBindingIdentity>,
+    },
+}
+
+fn evaluate_execution_adopt_prerequisites(
+    worktree: &Path,
+    session_id: &str,
+) -> Result<ExecutionAdoptPrerequisites, RecoveryPrerequisiteRefusal> {
+    use crate::cli::governance::GovernanceCause;
+    if session_id.trim().is_empty() {
+        return Err(RecoveryPrerequisiteRefusal::new(
+            GovernanceCause::ManagedIdentity,
+            "session_id_unavailable",
+        ));
+    }
+    let record = recovery_record_prerequisite(worktree, "execution_adopt_record_missing")?;
+    if !integrity_ok(&record) {
+        return Err(RecoveryPrerequisiteRefusal::new(
+            GovernanceCause::Integrity,
+            integrity_repair_guidance(record.status),
+        ));
+    }
+    let binding = strict_recovery_generation_binding(worktree, &record)?;
+    if record.status != ExecutionControlStatus::Active {
+        return Err(RecoveryPrerequisiteRefusal::new(
+            GovernanceCause::DomainInvalid,
+            "execution_adopt_requires_active",
+        ));
+    }
+    if record.primary_session_id == session_id {
+        Ok(ExecutionAdoptPrerequisites::Satisfied { record, binding })
+    } else {
+        Ok(ExecutionAdoptPrerequisites::Available { record, binding })
+    }
+}
+
 fn probe_execution_adopt(
     worktree: &Path,
     session_id: &str,
 ) -> crate::cli::governance::RecoveryProbe {
-    use crate::cli::governance::{GovernanceCause, RecoveryProbe};
-    if session_id.trim().is_empty() {
-        return RecoveryProbe::unavailable(
-            "execution.adopt",
-            protected_recovery_metadata(Some(GovernanceCause::ManagedIdentity), false),
-            "session_id_unavailable",
-        );
-    }
-    let record = match load(worktree) {
-        Ok(Some(record)) => record,
-        Ok(None) => {
-            return RecoveryProbe::unavailable(
-                "execution.adopt",
-                protected_recovery_metadata(Some(GovernanceCause::NotReady), false),
-                "execution_adopt_record_missing",
-            )
+    use crate::cli::governance::RecoveryProbe;
+    match evaluate_execution_adopt_prerequisites(worktree, session_id) {
+        Ok(ExecutionAdoptPrerequisites::Available { record, binding })
+        | Ok(ExecutionAdoptPrerequisites::Satisfied { record, binding }) => {
+            let satisfied = record.primary_session_id == session_id;
+            let metadata = crate::cli::governance::GovernanceMetadata {
+                fingerprint: Some(format!(
+                    "execution.adopt:{}:{}:{}",
+                    record.owner_number, record.primary_session_id, session_id
+                )),
+                execution_generation: binding.map(|binding| binding.generation_id),
+                ..protected_recovery_metadata(None, true)
+            };
+            if satisfied {
+                RecoveryProbe::satisfied("execution.adopt", metadata)
+            } else {
+                RecoveryProbe::available("execution.adopt", metadata)
+            }
         }
-        Err(error) => {
-            return RecoveryProbe::unavailable(
-                "execution.adopt",
-                protected_recovery_metadata(Some(GovernanceCause::Integrity), false),
-                error.to_string(),
-            )
-        }
-    };
-    if !integrity_ok(&record) {
-        return RecoveryProbe::unavailable(
+        Err(refusal) => RecoveryProbe::unavailable(
             "execution.adopt",
-            protected_recovery_metadata(Some(GovernanceCause::Integrity), false),
-            integrity_repair_guidance(record.status),
-        );
-    }
-    if record.status != ExecutionControlStatus::Active {
-        return RecoveryProbe::unavailable(
-            "execution.adopt",
-            protected_recovery_metadata(Some(GovernanceCause::DomainInvalid), false),
-            "execution_adopt_requires_active",
-        );
-    }
-    let metadata = crate::cli::governance::GovernanceMetadata {
-        fingerprint: Some(format!(
-            "execution.adopt:{}:{}:{}",
-            record.owner_number, record.primary_session_id, session_id
-        )),
-        execution_generation: current_execution_binding(
-            worktree,
-            ExecutionOwnerKey {
-                kind: record.owner_kind,
-                number: record.owner_number,
-            },
-        )
-        .ok()
-        .flatten()
-        .map(|binding| binding.generation_id),
-        ..protected_recovery_metadata(None, true)
-    };
-    if record.primary_session_id == session_id {
-        RecoveryProbe::satisfied("execution.adopt", metadata)
-    } else {
-        RecoveryProbe::available("execution.adopt", metadata)
+            protected_recovery_metadata(Some(refusal.cause), false),
+            refusal.reason,
+        ),
     }
 }
 
-fn probe_execution_reopen(
+#[derive(Debug)]
+enum ExecutionReopenPrerequisites {
+    Available {
+        record: ExecutionControlRecord,
+        binding: Option<gwt_agent::ExecutionBindingIdentity>,
+        blocked_at: DateTime<Utc>,
+        plan: Box<crate::cli::verification_record::VerificationPlanRecord>,
+        verification: Box<crate::cli::verification_record::VerificationRunRecord>,
+        verification_started_at: DateTime<Utc>,
+    },
+    Satisfied {
+        record: ExecutionControlRecord,
+        binding: Option<gwt_agent::ExecutionBindingIdentity>,
+    },
+}
+
+fn evaluate_execution_reopen_prerequisites(
     worktree: &Path,
     session_id: &str,
-) -> crate::cli::governance::RecoveryProbe {
-    use crate::cli::governance::{GovernanceCause, GovernanceMetadata, RecoveryProbe};
-    let unavailable = |cause, reason: String| {
-        RecoveryProbe::unavailable(
-            "execution.reopen",
-            protected_recovery_metadata(Some(cause), false),
-            reason,
-        )
-    };
+) -> Result<ExecutionReopenPrerequisites, RecoveryPrerequisiteRefusal> {
+    use crate::cli::governance::GovernanceCause;
     if session_id.trim().is_empty() {
-        return unavailable(
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::ManagedIdentity,
-            "session_id_unavailable".to_string(),
-        );
+            "session_id_unavailable",
+        ));
     }
-    let record = match load(worktree) {
-        Ok(Some(record)) => record,
-        Ok(None) => {
-            return unavailable(
-                GovernanceCause::NotReady,
-                "execution_reopen_record_missing".to_string(),
-            )
-        }
-        Err(error) => return unavailable(GovernanceCause::Integrity, error.to_string()),
-    };
-    if !integrity_ok(&record) {
-        return unavailable(
+    let record = recovery_record_prerequisite(
+        worktree,
+        "no execution control record exists; start the linked owner through gwt-execute",
+    )?;
+    if record.content_hash.is_empty() || !integrity_ok(&record) {
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::Integrity,
-            "execution_reopen_integrity_failure".to_string(),
-        );
+            "the execution control record has no valid integrity hash; use the canonical repair/fresh-launch path",
+        ));
     }
-    if record.status == ExecutionControlStatus::Active {
-        return if record.primary_session_id == session_id {
-            RecoveryProbe::satisfied("execution.reopen", protected_recovery_metadata(None, true))
-        } else {
-            unavailable(
+    let binding = strict_recovery_generation_binding(worktree, &record)?;
+    match record.status {
+        ExecutionControlStatus::Active if record.primary_session_id == session_id => {
+            return Ok(ExecutionReopenPrerequisites::Satisfied { record, binding });
+        }
+        ExecutionControlStatus::Active => {
+            return Err(unavailable_recovery_prerequisite(
                 GovernanceCause::Authority,
-                "execution_reopen_foreign_active_owner".to_string(),
-            )
-        };
-    }
-    if record.status == ExecutionControlStatus::Completed {
-        return unavailable(
-            GovernanceCause::DomainInvalid,
-            "execution_reopen_completed_immutable".to_string(),
-        );
+                format!(
+                    "the Active record belongs to session {owner}, not the current session {current}; use the authorized ownership-transfer path",
+                    owner = record.primary_session_id,
+                    current = session_id,
+                ),
+            ));
+        }
+        ExecutionControlStatus::Completed => {
+            return Err(unavailable_recovery_prerequisite(
+                GovernanceCause::DomainInvalid,
+                format!(
+                    "Completed {kind} #{number} is immutable; use a fresh launch for new work",
+                    kind = record.owner_kind.as_str(),
+                    number = record.owner_number,
+                ),
+            ));
+        }
+        ExecutionControlStatus::Blocked => {}
     }
     if record.primary_session_id != session_id {
-        return unavailable(
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::Authority,
-            "execution_reopen_foreign_blocked_owner".to_string(),
-        );
+            format!(
+                "the Blocked record belongs to session {owner}, not the current session {current}; use a fresh launch or the authorized ownership-transfer path",
+                owner = record.primary_session_id,
+                current = session_id,
+            ),
+        ));
     }
     let Some(blocked_at) = record.settled_at else {
-        return unavailable(
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::Integrity,
-            "execution_reopen_blocked_at_missing".to_string(),
-        );
+            "the Blocked record has no settled_at timestamp and cannot prove post-block evidence ordering",
+        ));
     };
     if record
         .blocked_reason
         .as_deref()
         .is_none_or(|reason| reason.trim().is_empty())
     {
-        return unavailable(
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::Integrity,
-            "execution_reopen_blocked_reason_missing".to_string(),
-        );
+            "the Blocked record has no non-empty blocker reason and cannot be recovered canonically",
+        ));
     }
     use crate::cli::verification_record as vr;
-    let plan = match vr::load_plan(worktree) {
-        Ok(Some(plan)) => plan,
-        Ok(None) => {
-            return unavailable(
-                GovernanceCause::NotReady,
-                "execution_reopen_plan_missing".to_string(),
+    let plan = vr::load_plan(worktree)
+        .map_err(|error| {
+            unavailable_recovery_prerequisite(
+                GovernanceCause::Integrity,
+                format!(
+                    "verification plan is unreadable: {error}; rerun verify.plan with params.derive:true"
+                ),
             )
-        }
-        Err(error) => return unavailable(GovernanceCause::Integrity, error.to_string()),
-    };
+        })?
+        .ok_or_else(|| {
+            unavailable_recovery_prerequisite(
+                GovernanceCause::NotReady,
+                "no verification plan exists; run verify.plan with params.derive:true, then verify.run",
+            )
+        })?;
     if plan.content_hash.is_empty()
         || !vr::plan_integrity_ok(&plan)
         || plan.session_id != session_id
         || plan.owner_number != Some(record.owner_number)
-        || !plan.derived
-        || plan.created_at <= blocked_at
     {
-        return unavailable(
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::NotReady,
-            "execution_reopen_plan_not_fresh_derived_exact".to_string(),
-        );
+            "verification plan hash/integrity/session/owner does not match the Blocked execution",
+        ));
     }
-    let verification = match vr::load(worktree) {
-        Ok(Some(verification)) => verification,
-        Ok(None) => {
-            return unavailable(
-                GovernanceCause::NotReady,
-                "execution_reopen_verification_missing".to_string(),
+    if !plan.derived {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::NotReady,
+            "recovery requires a derived verification plan; run verify.plan with params.derive:true, then verify.run",
+        ));
+    }
+    if plan.created_at <= blocked_at {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::NotReady,
+            "the derived verification plan must be registered after the block; rerun verify.plan with params.derive:true",
+        ));
+    }
+    let verification = vr::load(worktree)
+        .map_err(|error| {
+            unavailable_recovery_prerequisite(
+                GovernanceCause::Integrity,
+                format!("verification run is unreadable: {error}; rerun verify.run"),
             )
-        }
-        Err(error) => return unavailable(GovernanceCause::Integrity, error.to_string()),
-    };
-    if verification.content_hash.is_empty()
-        || !vr::integrity_ok(&verification)
-        || vr::evaluate_evidence_snapshot(
-            worktree,
-            session_id,
-            Some(record.owner_number),
-            Some(&plan),
-            &verification,
-        ) != vr::EvidenceStatus::Fresh
-        || !verification.plan_derived
-        || verification
-            .started_at
-            .is_none_or(|started_at| started_at <= blocked_at)
-        || verification.created_at <= blocked_at
-    {
-        return unavailable(
-            GovernanceCause::NotReady,
-            "execution_reopen_verification_not_fresh_derived_exact".to_string(),
-        );
+        })?
+        .ok_or_else(|| {
+            unavailable_recovery_prerequisite(
+                GovernanceCause::NotReady,
+                "no verification run record exists; run verify.run",
+            )
+        })?;
+    if verification.content_hash.is_empty() || !vr::integrity_ok(&verification) {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::Integrity,
+            "the verification run has no valid integrity hash; rerun verify.run",
+        ));
     }
-    let fingerprint = match vr::worktree_fingerprint_excluding(worktree, &plan.generated_outputs) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => return unavailable(GovernanceCause::Integrity, error.to_string()),
+    let evidence_status = vr::evaluate_evidence_snapshot(
+        worktree,
+        session_id,
+        Some(record.owner_number),
+        Some(&plan),
+        &verification,
+    );
+    if evidence_status != vr::EvidenceStatus::Fresh {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::NotReady,
+            evidence_status.describe(),
+        ));
+    }
+    if !verification.plan_derived {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::NotReady,
+            "recovery requires a run bound to a derived verification plan; run verify.plan with params.derive:true, then verify.run",
+        ));
+    }
+    let Some(verification_started_at) = verification.started_at else {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::Integrity,
+            "the verification run has no trusted start timestamp; rerun verify.run after the block",
+        ));
     };
+    if verification_started_at <= blocked_at {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::NotReady,
+            "verification must start after the block; rerun verify.run",
+        ));
+    }
+    if verification.created_at <= blocked_at {
+        return Err(unavailable_recovery_prerequisite(
+            GovernanceCause::NotReady,
+            "verification evidence must be created after the block; rerun verify.run",
+        ));
+    }
+    let fingerprint = vr::worktree_fingerprint_excluding(worktree, &plan.generated_outputs)
+        .map_err(|error| {
+            unavailable_recovery_prerequisite(
+                GovernanceCause::Integrity,
+                format!("generated output allowlist could not be evaluated: {error}"),
+            )
+        })?;
     if fingerprint != verification.worktree_fingerprint {
-        return unavailable(
+        return Err(unavailable_recovery_prerequisite(
             GovernanceCause::NotReady,
-            "execution_reopen_worktree_changed".to_string(),
-        );
+            "the worktree changed after verification; rerun verify.run on the final state",
+        ));
     }
-    RecoveryProbe::available(
-        "execution.reopen",
-        GovernanceMetadata {
-            fingerprint: Some(format!(
-                "execution.reopen:{}:{}:{}",
-                record.owner_number, plan.content_hash, verification.content_hash
-            )),
-            audit_id: Some(verification.record_id),
-            ..protected_recovery_metadata(None, true)
-        },
-    )
+    Ok(ExecutionReopenPrerequisites::Available {
+        record,
+        binding,
+        blocked_at,
+        plan: Box::new(plan),
+        verification: Box::new(verification),
+        verification_started_at,
+    })
+}
+
+fn probe_execution_reopen(
+    worktree: &Path,
+    session_id: &str,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceMetadata, RecoveryProbe};
+    match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+        Ok(ExecutionReopenPrerequisites::Satisfied { binding, .. }) => RecoveryProbe::satisfied(
+            "execution.reopen",
+            GovernanceMetadata {
+                execution_generation: binding.map(|binding| binding.generation_id),
+                ..protected_recovery_metadata(None, true)
+            },
+        ),
+        Ok(ExecutionReopenPrerequisites::Available {
+            record,
+            binding,
+            plan,
+            verification,
+            ..
+        }) => RecoveryProbe::available(
+            "execution.reopen",
+            GovernanceMetadata {
+                fingerprint: Some(format!(
+                    "execution.reopen:{}:{}:{}",
+                    record.owner_number, plan.content_hash, verification.content_hash
+                )),
+                audit_id: Some(verification.record_id),
+                execution_generation: binding.map(|binding| binding.generation_id),
+                ..protected_recovery_metadata(None, true)
+            },
+        ),
+        Err(refusal) => RecoveryProbe::unavailable(
+            "execution.reopen",
+            protected_recovery_metadata(Some(refusal.cause), false),
+            refusal.reason,
+        ),
+    }
 }
 
 fn repair_audit_hash(audit: &ExecutionRepairAudit) -> String {
@@ -8432,7 +8634,6 @@ fn run_reopen(
             "execution.reopen requires a non-empty params.reason".to_string(),
         )));
     }
-    let probe = probe_execution_reopen(worktree, session_id);
     let code = crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_reopen_locked(worktree, session_id, reason, out))
     })
@@ -8441,7 +8642,6 @@ fn run_reopen(
             crate::cli::trusted_store::store_health_error("settling execution state", &err),
         ))
     })??;
-    debug_assert!(probe.executable() || code != 0);
     // T-248 absorbed core: a real reopen revives the obligations the block
     // deferred, except the kinds the recovery evidence already covers
     // (implementation/verification are proven by the mandatory post-block
@@ -8473,33 +8673,16 @@ fn run_reopen_locked(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let Some(mut record) = load(worktree).map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })?
-    else {
-        out.push_str(
-            "execution: reopen refused — no execution control record exists; start the linked owner through gwt-execute\n",
-        );
-        return Ok(2);
+    let prerequisites = match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+        Ok(prerequisites) => prerequisites,
+        Err(refusal) => {
+            out.push_str(&format!("execution: reopen refused — {}\n", refusal.reason));
+            return Ok(2);
+        }
     };
-    if record.content_hash.is_empty() || !integrity_ok(&record) {
-        out.push_str(
-            "execution: reopen refused — the execution control record has no valid integrity hash; use the canonical repair/fresh-launch path\n",
-        );
-        return Ok(2);
-    }
-    match record.status {
-        ExecutionControlStatus::Active => {
-            if record.primary_session_id != session_id {
-                out.push_str(&format!(
-                    "execution: reopen refused — the Active record belongs to session {owner}, not the current session {current}; use the authorized ownership-transfer path\n",
-                    owner = record.primary_session_id,
-                    current = session_id,
-                ));
-                return Ok(2);
-            }
+    let (mut record, blocked_at, plan, verification, verification_started_at) = match prerequisites
+    {
+        ExecutionReopenPrerequisites::Satisfied { record, binding } => {
             // Only an in-flight record with embedded recoveries needs the
             // rolling-upgrade write. A modern idempotent retry stays a true
             // no-op and cannot fail because of an unnecessary rewrite.
@@ -8507,18 +8690,8 @@ fn run_reopen_locked(
                 SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
                 ))
-            })? && !owner_generation_ledger_exists(
-                worktree,
-                ExecutionOwnerKey {
-                    kind: record.owner_kind,
-                    number: record.owner_number,
-                },
-            )
-            .map_err(|err| {
-                SpecOpsError::from(ApiError::Unexpected(
-                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                ))
-            })? {
+            })? && binding.is_none()
+            {
                 save(worktree, &record).map_err(|err| {
                     SpecOpsError::from(ApiError::Unexpected(
                         crate::cli::trusted_store::store_health_error(
@@ -8536,148 +8709,21 @@ fn run_reopen_locked(
             ));
             return Ok(0);
         }
-        ExecutionControlStatus::Completed => {
-            out.push_str(&format!(
-                "execution: reopen refused — Completed {kind} #{number} is immutable; use a fresh launch for new work\n",
-                kind = record.owner_kind.as_str(),
-                number = record.owner_number,
-            ));
-            return Ok(2);
-        }
-        ExecutionControlStatus::Blocked => {}
-    }
-    if record.primary_session_id != session_id {
-        out.push_str(&format!(
-            "execution: reopen refused — the Blocked record belongs to session {owner}, not the current session {current}; use a fresh launch or the authorized ownership-transfer path\n",
-            owner = record.primary_session_id,
-            current = session_id,
-        ));
-        return Ok(2);
-    }
-    let Some(blocked_at) = record.settled_at else {
-        out.push_str(
-            "execution: reopen refused — the Blocked record has no settled_at timestamp and cannot prove post-block evidence ordering\n",
-        );
-        return Ok(2);
+        ExecutionReopenPrerequisites::Available {
+            record,
+            blocked_at,
+            plan,
+            verification,
+            verification_started_at,
+            ..
+        } => (
+            record,
+            blocked_at,
+            plan,
+            verification,
+            verification_started_at,
+        ),
     };
-    if record
-        .blocked_reason
-        .as_deref()
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        out.push_str(
-            "execution: reopen refused — the Blocked record has no non-empty blocker reason and cannot be recovered canonically\n",
-        );
-        return Ok(2);
-    }
-
-    use crate::cli::verification_record as vr;
-    let Some(plan) = vr::load_plan(worktree).map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })?
-    else {
-        out.push_str(
-            "execution: reopen refused — no verification plan exists; run verify.plan with params.derive:true, then verify.run\n",
-        );
-        return Ok(2);
-    };
-    if plan.content_hash.is_empty()
-        || !vr::plan_integrity_ok(&plan)
-        || plan.session_id != session_id
-        || plan.owner_number != Some(record.owner_number)
-    {
-        out.push_str(
-            "execution: reopen refused — verification plan hash/integrity/session/owner does not match the Blocked execution\n",
-        );
-        return Ok(2);
-    }
-    if !plan.derived {
-        out.push_str(
-            "execution: reopen refused — recovery requires a derived verification plan; run verify.plan with params.derive:true, then verify.run\n",
-        );
-        return Ok(2);
-    }
-    if plan.created_at <= blocked_at {
-        out.push_str(
-            "execution: reopen refused — the derived verification plan must be registered after the block; rerun verify.plan with params.derive:true\n",
-        );
-        return Ok(2);
-    }
-    let Some(verification) = vr::load(worktree).map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })?
-    else {
-        out.push_str(
-            "execution: reopen refused — no verification run record exists; run verify.run\n",
-        );
-        return Ok(2);
-    };
-    if verification.content_hash.is_empty() || !vr::integrity_ok(&verification) {
-        out.push_str(
-            "execution: reopen refused — the verification run has no valid integrity hash; rerun verify.run\n",
-        );
-        return Ok(2);
-    }
-    let evidence_status = vr::evaluate_evidence_snapshot(
-        worktree,
-        session_id,
-        Some(record.owner_number),
-        Some(&plan),
-        &verification,
-    );
-    if evidence_status != vr::EvidenceStatus::Fresh {
-        out.push_str(&format!(
-            "execution: reopen refused — {}\n",
-            evidence_status.describe()
-        ));
-        return Ok(2);
-    }
-    if !verification.plan_derived {
-        out.push_str(
-            "execution: reopen refused — recovery requires a run bound to a derived verification plan; run verify.plan with params.derive:true, then verify.run\n",
-        );
-        return Ok(2);
-    }
-    let Some(verification_started_at) = verification.started_at else {
-        out.push_str(
-            "execution: reopen refused — the verification run has no trusted start timestamp; rerun verify.run after the block\n",
-        );
-        return Ok(2);
-    };
-    if verification_started_at <= blocked_at {
-        out.push_str(
-            "execution: reopen refused — verification must start after the block; rerun verify.run\n",
-        );
-        return Ok(2);
-    }
-    if verification.created_at <= blocked_at {
-        out.push_str(
-            "execution: reopen refused — verification evidence must be created after the block; rerun verify.run\n",
-        );
-        return Ok(2);
-    }
-    let current_fingerprint = match vr::worktree_fingerprint_excluding(
-        worktree,
-        &plan.generated_outputs,
-    ) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            out.push_str(&format!(
-                "execution: reopen refused — generated output allowlist could not be evaluated: {error}\n"
-            ));
-            return Ok(2);
-        }
-    };
-    if current_fingerprint != verification.worktree_fingerprint {
-        out.push_str(
-            "execution: reopen refused — the worktree changed after verification; rerun verify.run on the final state\n",
-        );
-        return Ok(2);
-    }
 
     let reopened_at = Utc::now();
     record.recoveries.push(ExecutionRecovery {
@@ -8748,17 +8794,6 @@ fn run_adopt(
             "execution.adopt reason uses a reserved recovery-envelope namespace".to_string(),
         )));
     }
-    let probe = probe_execution_adopt(worktree, session_id);
-    if !probe.executable() {
-        out.push_str(&format!(
-            "execution: adopt refused — {}\n",
-            probe
-                .reason
-                .as_deref()
-                .unwrap_or("execution_adopt_unavailable")
-        ));
-        return Ok(2);
-    }
     // T-149: adoption is a read-modify-write cycle — leased.
     crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_adopt_locked(worktree, session_id, reason, out))
@@ -8776,33 +8811,20 @@ fn run_adopt_locked(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let Some(mut record) = load(worktree).map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })?
-    else {
-        out.push_str("execution: no execution control record to adopt — a linked-owner launch materializes one\n");
-        return Ok(0);
+    let prerequisites = match evaluate_execution_adopt_prerequisites(worktree, session_id) {
+        Ok(prerequisites) => prerequisites,
+        Err(refusal) => {
+            out.push_str(&format!("execution: adopt refused — {}\n", refusal.reason));
+            return Ok(2);
+        }
     };
-    if record.status != ExecutionControlStatus::Active {
-        out.push_str(&format!(
-            "execution: record is already settled ({status:?}) — nothing to adopt; a fresh launch takes over\n",
-            status = record.status,
-        ));
-        return Ok(0);
-    }
-    if !integrity_ok(&record) {
-        out.push_str(&format!(
-            "execution: adopt refused — {}\n",
-            integrity_repair_guidance(record.status)
-        ));
-        return Ok(2);
-    }
-    if record.primary_session_id == session_id {
-        out.push_str("execution: the current session already owns this record\n");
-        return Ok(0);
-    }
+    let mut record = match prerequisites {
+        ExecutionAdoptPrerequisites::Satisfied { .. } => {
+            out.push_str("execution: the current session already owns this record\n");
+            return Ok(0);
+        }
+        ExecutionAdoptPrerequisites::Available { record, .. } => record,
+    };
     let transfer = OwnershipTransfer {
         from_session_id: record.primary_session_id.clone(),
         to_session_id: session_id.to_string(),
@@ -13247,6 +13269,86 @@ mod tests {
             }
         }
 
+        #[derive(Debug, PartialEq, Eq)]
+        struct RecoveryOperationAuthorityBytes {
+            generation: GenerationAuthorityBytes,
+            sessions: Vec<(String, Option<Vec<u8>>)>,
+            capabilities: Vec<(String, Option<String>)>,
+            work: Vec<(PathBuf, Option<Vec<u8>>)>,
+        }
+
+        fn recovery_operation_authority_bytes(
+            worktree: &Path,
+            owner: ExecutionOwnerKey,
+            session_ids: &[&str],
+        ) -> RecoveryOperationAuthorityBytes {
+            let sessions = session_ids
+                .iter()
+                .map(|session_id| {
+                    let path =
+                        gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+                    ((*session_id).to_string(), fs::read(path).ok())
+                })
+                .collect();
+            let capabilities = session_ids
+                .iter()
+                .map(|session_id| {
+                    let path =
+                        gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+                    let capability = gwt_agent::Session::load(&path)
+                        .ok()
+                        .and_then(|session| session.execution_binding)
+                        .map(|binding| format!("{binding:?}"));
+                    ((*session_id).to_string(), capability)
+                })
+                .collect();
+            let work_paths = [
+                gwt_core::paths::gwt_workspace_projection_path_for_repo_path(worktree),
+                gwt_core::paths::gwt_workspace_journal_path_for_repo_path(worktree),
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(worktree),
+                gwt_core::paths::gwt_repo_local_work_events_path(worktree),
+            ];
+            let work = work_paths
+                .into_iter()
+                .map(|path| {
+                    let bytes = fs::read(&path).ok();
+                    (path, bytes)
+                })
+                .collect();
+            RecoveryOperationAuthorityBytes {
+                generation: generation_authority_bytes(worktree, owner),
+                sessions,
+                capabilities,
+                work,
+            }
+        }
+
+        fn seed_recovery_work_bytes(worktree: &Path) {
+            for (index, path) in [
+                gwt_core::paths::gwt_workspace_projection_path_for_repo_path(worktree),
+                gwt_core::paths::gwt_workspace_journal_path_for_repo_path(worktree),
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(worktree),
+                gwt_core::paths::gwt_repo_local_work_events_path(worktree),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                fs::create_dir_all(path.parent().expect("recovery Work path parent")).unwrap();
+                fs::write(path, format!("recovery-work-sentinel-{index}\n")).unwrap();
+            }
+        }
+
+        fn recovery_probe<'a>(
+            snapshot: &'a ExecutionDiagnosisSnapshot,
+            operation: &str,
+        ) -> &'a crate::cli::governance::RecoveryProbe {
+            snapshot
+                .recovery_probes
+                .iter()
+                .find(|probe| probe.operation == operation)
+                .unwrap_or_else(|| panic!("missing {operation} recovery probe"))
+        }
+
         #[test]
         fn status_always_reports_all_six_operation_local_probes() {
             let _env_lock = crate::env_test_lock()
@@ -13323,6 +13425,323 @@ mod tests {
                 corrupt_repo.path(),
                 Some("corrupt-session"),
             ));
+        }
+
+        #[test]
+        fn adopt_refuses_corrupt_owner_ledger_before_any_authority_mutation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(repo.path(), &active_record("session-original")).unwrap();
+            ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .expect("current generation binding");
+            persist_generation_session_binding(repo.path(), owner, "session-original", binding);
+            seed_recovery_work_bytes(repo.path());
+            fs::write(
+                generation_ledger_path(repo.path(), owner).unwrap(),
+                b"{corrupt",
+            )
+            .unwrap();
+            let before = recovery_operation_authority_bytes(
+                repo.path(),
+                owner,
+                &["session-original", "session-adopting"],
+            );
+
+            let probe = probe_execution_adopt(repo.path(), "session-adopting");
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            let reason = probe.reason.clone().expect("stable adopt refusal reason");
+            assert!(reason.contains("owner generation authority"), "{reason}");
+            let diagnosis = diagnose(repo.path(), Some("session-adopting"));
+            assert!(!diagnosis
+                .available_recoveries
+                .contains(&"execution.adopt".to_string()));
+            assert_eq!(
+                recovery_probe(&diagnosis, "execution.adopt")
+                    .reason
+                    .as_deref(),
+                Some(reason.as_str())
+            );
+
+            let mut out = String::new();
+            assert_eq!(
+                run_adopt(
+                    repo.path(),
+                    "session-adopting",
+                    "recover crashed owner",
+                    &mut out,
+                )
+                .unwrap(),
+                2,
+                "{out}"
+            );
+            assert!(out.contains(&reason), "{out}");
+            assert_eq!(
+                recovery_operation_authority_bytes(
+                    repo.path(),
+                    owner,
+                    &["session-original", "session-adopting"],
+                ),
+                before,
+                "adopt refusal must preserve Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+        }
+
+        #[test]
+        fn reopen_refuses_corrupt_owner_ledger_before_any_authority_mutation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(repo.path(), &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .expect("current generation binding");
+            persist_generation_session_binding(repo.path(), owner, "sess-reopen", binding);
+            settle_blocked(repo.path(), "sess-reopen");
+            seed_recovery_work_bytes(repo.path());
+            save_covering_evidence(repo.path(), "sess-reopen", true);
+            fs::write(
+                generation_ledger_path(repo.path(), owner).unwrap(),
+                b"{corrupt",
+            )
+            .unwrap();
+            let before = recovery_operation_authority_bytes(repo.path(), owner, &["sess-reopen"]);
+
+            let probe = probe_execution_reopen(repo.path(), "sess-reopen");
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            let reason = probe.reason.clone().expect("stable reopen refusal reason");
+            assert!(reason.contains("owner generation authority"), "{reason}");
+            let diagnosis = diagnose(repo.path(), Some("sess-reopen"));
+            assert!(!diagnosis
+                .available_recoveries
+                .contains(&"execution.reopen".to_string()));
+            assert_eq!(
+                recovery_probe(&diagnosis, "execution.reopen")
+                    .reason
+                    .as_deref(),
+                Some(reason.as_str())
+            );
+
+            let mut out = String::new();
+            assert_eq!(
+                run_reopen(
+                    repo.path(),
+                    "sess-reopen",
+                    "fresh evidence is available",
+                    &mut out,
+                )
+                .unwrap(),
+                2,
+                "{out}"
+            );
+            assert!(out.contains(&reason), "{out}");
+            assert_eq!(
+                recovery_operation_authority_bytes(
+                    repo.path(),
+                    owner,
+                    &["sess-reopen"],
+                ),
+                before,
+                "reopen refusal must preserve Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+        }
+
+        #[test]
+        fn available_adopt_probe_executes_successfully() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(repo.path(), &active_record("session-original")).unwrap();
+            ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+
+            let probe = probe_execution_adopt(repo.path(), "session-adopting");
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Available
+            );
+            let mut out = String::new();
+            assert_eq!(
+                run_adopt(
+                    repo.path(),
+                    "session-adopting",
+                    "recover crashed owner",
+                    &mut out,
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            assert_eq!(
+                load(repo.path()).unwrap().unwrap().primary_session_id,
+                "session-adopting"
+            );
+        }
+
+        #[test]
+        fn available_reopen_probe_executes_successfully() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(repo.path(), &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .expect("current generation binding");
+            persist_generation_session_binding(repo.path(), owner, "sess-reopen", binding);
+            settle_blocked(repo.path(), "sess-reopen");
+            save_covering_evidence(repo.path(), "sess-reopen", true);
+
+            let probe = probe_execution_reopen(repo.path(), "sess-reopen");
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Available
+            );
+            let mut out = String::new();
+            assert_eq!(
+                run_reopen(
+                    repo.path(),
+                    "sess-reopen",
+                    "fresh evidence is available",
+                    &mut out,
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            assert_eq!(
+                load(repo.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+        }
+
+        #[test]
+        fn unavailable_recovery_probe_reasons_match_execution_refusals() {
+            let missing = tempfile::tempdir().unwrap();
+            let missing_probe = probe_execution_reopen(missing.path(), "sess-reopen");
+            let mut missing_out = String::new();
+            assert_eq!(
+                run_reopen(missing.path(), "sess-reopen", "resolved", &mut missing_out,).unwrap(),
+                2
+            );
+            assert!(
+                missing_out.contains(missing_probe.reason.as_deref().unwrap()),
+                "{missing_out}"
+            );
+
+            let completed = tempfile::tempdir().unwrap();
+            save(completed.path(), &active_record("sess-reopen")).unwrap();
+            settle(
+                completed.path(),
+                "sess-reopen",
+                ExecutionSettlement::Completed,
+            )
+            .unwrap();
+            let completed_probe = probe_execution_reopen(completed.path(), "sess-reopen");
+            let mut completed_out = String::new();
+            assert_eq!(
+                run_reopen(
+                    completed.path(),
+                    "sess-reopen",
+                    "resolved",
+                    &mut completed_out,
+                )
+                .unwrap(),
+                2
+            );
+            assert!(
+                completed_out.contains(completed_probe.reason.as_deref().unwrap()),
+                "{completed_out}"
+            );
+
+            let foreign = tempfile::tempdir().unwrap();
+            settle_blocked(foreign.path(), "session-original");
+            let foreign_probe = probe_execution_reopen(foreign.path(), "sess-reopen");
+            let mut foreign_out = String::new();
+            assert_eq!(
+                run_reopen(foreign.path(), "sess-reopen", "resolved", &mut foreign_out,).unwrap(),
+                2
+            );
+            assert!(
+                foreign_out.contains(foreign_probe.reason.as_deref().unwrap()),
+                "{foreign_out}"
+            );
+
+            let active = tempfile::tempdir().unwrap();
+            save(active.path(), &active_record("session-original")).unwrap();
+            let adopt_probe = probe_execution_adopt(active.path(), "session-adopting");
+            assert_eq!(
+                adopt_probe.state,
+                crate::cli::governance::RecoveryProbeState::Available
+            );
+            let terminal = tempfile::tempdir().unwrap();
+            save(terminal.path(), &active_record("session-original")).unwrap();
+            settle(
+                terminal.path(),
+                "session-original",
+                ExecutionSettlement::Completed,
+            )
+            .unwrap();
+            let terminal_probe = probe_execution_adopt(terminal.path(), "session-adopting");
+            let mut terminal_out = String::new();
+            assert_eq!(
+                run_adopt(
+                    terminal.path(),
+                    "session-adopting",
+                    "recover owner",
+                    &mut terminal_out,
+                )
+                .unwrap(),
+                2
+            );
+            assert!(
+                terminal_out.contains(terminal_probe.reason.as_deref().unwrap()),
+                "{terminal_out}"
+            );
         }
 
         #[test]
