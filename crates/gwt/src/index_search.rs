@@ -42,12 +42,26 @@ pub struct IndexSearchFailed {
     pub affected_scopes: Vec<String>,
 }
 
+/// Retryable infrastructure failure of the search attempt itself (Phase 70d
+/// FR-097/FR-103): spawn failure, deadline expiry, unavailable transport, or
+/// an unstructured runner termination. The index store may be healthy — the
+/// attempt could not produce a classified answer, so callers retry later and
+/// no repair is queued.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexSearchUnavailable {
+    pub reason: String,
+    pub retry_after_ms: u64,
+}
+
 /// Search error surface (Phase 70 FR-388). `NotReady` is retryable and maps
 /// to exit code 75 / `error_code=INDEX_NOT_READY` on the CLI surface.
+/// `Unavailable` is the retryable attempt-infrastructure failure
+/// (`error_code=SEARCH_UNAVAILABLE`, Phase 70d FR-097).
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexSearchError {
     NotReady(IndexSearchNotReady),
     SearchFailed(IndexSearchFailed),
+    Unavailable(IndexSearchUnavailable),
     Other(String),
 }
 
@@ -55,7 +69,9 @@ impl IndexSearchError {
     pub fn exit_code(&self) -> i32 {
         match self {
             IndexSearchError::NotReady(_) => INDEX_NOT_READY_EXIT_CODE,
-            IndexSearchError::SearchFailed(_) | IndexSearchError::Other(_) => 1,
+            IndexSearchError::SearchFailed(_)
+            | IndexSearchError::Unavailable(_)
+            | IndexSearchError::Other(_) => 1,
         }
     }
 
@@ -63,12 +79,25 @@ impl IndexSearchError {
         match self {
             IndexSearchError::NotReady(_) => Some("INDEX_NOT_READY"),
             IndexSearchError::SearchFailed(_) => Some("SEARCH_FAILED"),
+            IndexSearchError::Unavailable(_) => Some("SEARCH_UNAVAILABLE"),
             IndexSearchError::Other(_) => None,
         }
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(self, IndexSearchError::NotReady(_))
+        matches!(
+            self,
+            IndexSearchError::NotReady(_) | IndexSearchError::Unavailable(_)
+        )
+    }
+
+    /// Retry delay hint carried by the retryable variants (FR-098 metadata).
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            IndexSearchError::NotReady(not_ready) => Some(not_ready.retry_after_ms),
+            IndexSearchError::Unavailable(unavailable) => Some(unavailable.retry_after_ms),
+            IndexSearchError::SearchFailed(_) | IndexSearchError::Other(_) => None,
+        }
     }
 }
 
@@ -84,6 +113,11 @@ impl std::fmt::Display for IndexSearchError {
                 not_ready.retry_after_ms,
             ),
             IndexSearchError::SearchFailed(failed) => f.write_str(&failed.reason),
+            IndexSearchError::Unavailable(unavailable) => write!(
+                f,
+                "search unavailable: {} (retry in {} ms)",
+                unavailable.reason, unavailable.retry_after_ms,
+            ),
             IndexSearchError::Other(message) => f.write_str(message),
         }
     }
@@ -158,13 +192,16 @@ pub fn search_project_index(
     let mut broken = broken_scopes(&payload);
     if !broken.is_empty() {
         // FR-388: missing / corrupt scopes never degrade into a silent
-        // empty success. With auto_build the caller joins the coordinated
-        // repair and waits up to the deadline; without it (GUI, watcher owns
-        // builds) the typed retryable error returns immediately.
+        // empty success. FR-097 (T-IDX-417): every caller queues the
+        // coordinated repair first — the host-wide coordinator coalesces
+        // concurrent admissions into one job. With auto_build the caller
+        // then joins that repair and waits up to the deadline; without it
+        // (GUI, watcher owns builds) the typed retryable error returns
+        // promptly while the repair proceeds in the background.
+        queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         if !auto_build {
             return Err(build_not_ready_error(&broken, 0));
         }
-        queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         loop {
             let elapsed = started.elapsed();
             if elapsed >= repair_deadline {
@@ -542,6 +579,22 @@ fn resolve_file_search_worktree(
     Ok(FileSearchWorktree { hash })
 }
 
+/// Hard deadline for one interactive runner attempt (FR-103: 30 seconds).
+/// Env-overridable so fault-injection tests can bound it tightly.
+fn search_runner_deadline_ms() -> u64 {
+    std::env::var("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(30_000)
+}
+
+fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchError {
+    IndexSearchError::Unavailable(IndexSearchUnavailable {
+        reason: reason.into(),
+        retry_after_ms: SEARCH_RETRY_AFTER_MS,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_batch_scope_search(
     project_root: &Path,
@@ -552,30 +605,66 @@ fn run_batch_scope_search(
     limit: usize,
     match_mode: IndexSearchMatchMode,
 ) -> Result<Value, IndexSearchError> {
-    let output =
-        gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
-            .args(batch_scope_search_command_args(
-                project_root,
-                repo_hash,
-                scopes,
-                worktree_hash,
-                query,
-                limit,
-                match_mode,
-            ))
+    let args = batch_scope_search_command_args(
+        project_root,
+        repo_hash,
+        scopes,
+        worktree_hash,
+        query,
+        limit,
+        match_mode,
+    );
+    // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
+    // shared process lifecycle boundary — captured output without terminal
+    // forwarding, one hard deadline, and full process-tree termination and
+    // reaping on expiry. Spawn failure and deadline expiry are retryable
+    // SEARCH_UNAVAILABLE, never a raw error string.
+    let hub = gwt_core::process_console::global();
+    let deadline = std::time::Instant::now() + Duration::from_millis(search_runner_deadline_ms());
+    let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
+        &hub,
+        gwt_core::process_console::ProcessKind::IndexRunner,
+        crate::index_worker::project_index_python_path(),
+        &args,
+        gwt_core::process_console::SpawnOptions::new("project index search-multi")
             .current_dir(project_root)
-            .output()
-            .map_err(|error| {
-                IndexSearchError::Other(format!("run project index search: {error}"))
-            })?;
-    if !output.status.success() {
-        return Err(IndexSearchError::Other(format_runner_failure(&output)));
+            .forward_output(false),
+        deadline,
+    )
+    .map_err(|error| search_unavailable_error(format!("run project index search: {error}")))?;
+    if !output.success() {
+        return Err(classify_failed_runner_output(&output));
     }
-    let payload = parse_runner_payload(&output.stdout).map_err(IndexSearchError::Other)?;
+    let payload =
+        parse_runner_payload(output.stdout.as_bytes()).map_err(search_unavailable_error)?;
     if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return Err(runner_payload_error(&payload));
     }
     Ok(payload)
+}
+
+/// Classify a non-zero runner exit (T-IDX-419): a structured stdout
+/// diagnostic wins over stderr progress noise; an unstructured termination
+/// is a retryable `SEARCH_UNAVAILABLE`.
+fn classify_failed_runner_output(
+    output: &gwt_core::process_console::SpawnOutput,
+) -> IndexSearchError {
+    if let Ok(payload) = parse_runner_payload(output.stdout.as_bytes()) {
+        if payload.get("ok").is_some() || payload.get("error").is_some() {
+            return runner_payload_error(&payload);
+        }
+    }
+    let stderr = output.stderr.trim();
+    let detail = if stderr.is_empty() {
+        output.stdout.trim()
+    } else {
+        stderr
+    };
+    let exit = output
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    search_unavailable_error(format!("project index runner exited with {exit}: {detail}"))
 }
 
 /// One versioned `search-multi` request covering every scope (FR-384):
@@ -935,18 +1024,6 @@ fn runner_payload_error(payload: &Value) -> IndexSearchError {
         });
     }
     IndexSearchError::Other(payload_error(payload))
-}
-
-fn format_runner_failure(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-    format!("runner exited with {}", output.status)
 }
 
 fn parse_runner_payload(stdout: &[u8]) -> Result<Value, String> {
@@ -1487,6 +1564,60 @@ mod tests {
                 ("files-docs".to_string(), "corrupt".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn broken_scopes_extracts_missing_issue_and_corrupt_spec_states() {
+        // T-IDX-416 (SPEC #1939 Phase 70d, bundled-required by SPEC #3170
+        // FR-097): the Knowledge Bridge consumer scopes classify exactly like
+        // the file scopes — missing / corrupt block searching, stale does not.
+        let payload = json!({
+            "ok": true,
+            "scopes": {
+                "issues": {"state": "missing"},
+                "specs": {"state": "corrupt"},
+                "board": {"state": "fresh"},
+                "works": {"state": "stale"},
+            },
+        });
+        let mut broken = broken_scopes(&payload);
+        broken.sort();
+        assert_eq!(
+            broken,
+            vec![
+                ("issues".to_string(), "missing".to_string()),
+                ("specs".to_string(), "corrupt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_and_spec_not_ready_errors_carry_prompt_retry_contract() {
+        // T-IDX-416: the non-blocking (GUI) path reports waited_ms = 0 — a
+        // prompt typed failure — while keeping the mandatory retry delay.
+        let error = build_not_ready_error(
+            &[
+                ("issues".to_string(), "missing".to_string()),
+                ("specs".to_string(), "corrupt".to_string()),
+            ],
+            0,
+        );
+        assert_eq!(error.exit_code(), INDEX_NOT_READY_EXIT_CODE);
+        assert_eq!(error.error_code(), Some("INDEX_NOT_READY"));
+        assert!(error.retryable());
+        match error {
+            IndexSearchError::NotReady(not_ready) => {
+                assert_eq!(
+                    not_ready.affected_scopes,
+                    vec!["issues".to_string(), "specs".to_string()]
+                );
+                assert_eq!(not_ready.waited_ms, 0);
+                assert!(not_ready.retry_after_ms > 0);
+                assert!(not_ready.reason.contains("issues index is missing"));
+                assert!(not_ready.reason.contains("specs index is corrupt"));
+            }
+            other => panic!("expected NotReady, got {other:?}"),
+        }
     }
 
     #[test]

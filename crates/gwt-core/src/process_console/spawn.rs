@@ -1083,6 +1083,73 @@ mod tests {
         assert_eq!(hub.snapshot_kind(ProcessKind::Gh).len(), line_count);
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deadline_terminates_and_reaps_child_process_tree_windows() {
+        // T-IDX-418 (SPEC #1939 Phase 70d): Windows counterpart of the POSIX
+        // deadline tree test — the descendant a child backgrounds must not
+        // survive the deadline-driven `taskkill /T` cleanup.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let descendant_file = directory.path().join("descendant.pid");
+        let script = format!(
+            "$child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
+             -PassThru -WindowStyle Hidden; \
+             Set-Content -Path '{}' -Value $child.Id -Encoding ascii; \
+             Start-Sleep -Seconds 60",
+            descendant_file.display()
+        );
+        let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
+        let started = std::time::Instant::now();
+        let error = spawn_logged_with_deadline(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Gh,
+            "powershell",
+            &args,
+            SpawnOptions::new("test deadline tree windows"),
+            started + Duration::from_millis(2_000),
+        )
+        .await
+        .expect_err("long-running windows process tree must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let descendant = wait_for_pid_file_windows(&descendant_file);
+        wait_for_process_exit_windows(descendant);
+    }
+
+    #[cfg(windows)]
+    fn wait_for_pid_file_windows(path: &std::path::Path) -> u32 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("descendant pid file was not written at {}", path.display());
+    }
+
+    #[cfg(windows)]
+    fn wait_for_process_exit_windows(pid: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let filter = format!("PID eq {pid}");
+        while std::time::Instant::now() < deadline {
+            let output = crate::process::hidden_command("tasklist")
+                .args(["/FI", filter.as_str(), "/NH"])
+                .output()
+                .expect("probe process via tasklist");
+            let listing = String::from_utf8_lossy(&output.stdout);
+            if !listing.contains(&pid.to_string()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("process {pid} remained alive after deadline cleanup");
+    }
+
     #[cfg(unix)]
     fn read_pid(path: &std::path::Path) -> u32 {
         std::fs::read_to_string(path)
