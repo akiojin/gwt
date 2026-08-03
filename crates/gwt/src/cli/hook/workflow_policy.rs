@@ -991,6 +991,7 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.read"
             | "issue.spec.section"
             | "issue.spec.list"
+            | "issue.monitor.status"
             | "pr.current"
             | "pr.view"
             | "pr.checks"
@@ -1944,6 +1945,47 @@ Coverage requirements.
             ),
             "production source writes still need an owner"
         );
+    }
+
+    #[test]
+    fn issue_monitor_json_operations_have_the_expected_policy_classification() {
+        assert!(is_read_only_json_envelope_operation("issue.monitor.status"));
+        for operation in [
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
+        let context = WorkflowContext::unknown();
+        for operation in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert!(
+                command_segments_are_ownerless_safe(&command, repo.path()),
+                "operation must remain ownerless-safe: {operation}"
+            );
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": command})),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(&event, repo.path(), &context).expect("policy"),
+                HookOutput::Silent,
+                "operation must pass the full ownerless intake policy: {operation}"
+            );
+        }
     }
 
     #[test]

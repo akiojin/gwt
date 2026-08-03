@@ -2243,8 +2243,16 @@ impl IssueMonitorState {
         self.queue.len()
     }
 
+    pub fn queued_issue_numbers(&self) -> Vec<u64> {
+        self.queue.iter().copied().collect()
+    }
+
     pub fn active_issue_number(&self) -> Option<u64> {
         self.active_launches.first().copied()
+    }
+
+    pub fn active_issue_numbers(&self) -> Vec<u64> {
+        self.active_launches.clone()
     }
 
     pub fn active_count(&self) -> usize {
@@ -4488,6 +4496,29 @@ mod tests {
             body: None,
             url: None,
         }
+    }
+
+    #[test]
+    fn queue_and_active_issue_numbers_are_exposed_in_runtime_order() {
+        let prefs = IssueMonitorPrefs {
+            enabled: true,
+            priority_order: vec![2, 1],
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 9,
+                claimed_at: Some("2026-08-03T00:00:00Z".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut first = issue(1);
+        first.labels.push("auto-improve".to_string());
+        let mut second = issue(2);
+        second.labels.push("auto-improve".to_string());
+
+        scan_issue_monitor_candidates(&mut monitor, &[first, second], "2026-08-03T00:00:00Z");
+
+        assert_eq!(monitor.queued_issue_numbers(), vec![2, 1]);
+        assert_eq!(monitor.active_issue_numbers(), vec![9]);
     }
 
     fn pending_arm_effect(

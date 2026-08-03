@@ -163,12 +163,20 @@ fn format_issue_help() -> String {
         "  issue.spec.read | issue.spec.section | issue.spec.edit",
         "  issue.spec.create | issue.spec.list | issue.spec.pull",
         "  issue.spec.repair | issue.spec.rename",
+        "  issue.monitor.status | issue.monitor.priority.move",
+        "  issue.monitor.priority.set | issue.monitor.config.set",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
         "  structured                             Treat issue.spec body as structured JSON",
         "  replace                                Replace structured SPEC section instead of merging",
         "  all, numbers                           Controls issue.spec.pull",
+        "  project_root                          Optional Issue Monitor project scope",
+        "  number, position                      Move one priority (head or numeric index)",
+        "  issue_numbers                         Replace the complete priority order",
+        "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
+        "  max_active                            Positive concurrent-agent limit",
+        "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
     ]
     .join("\n")
@@ -847,6 +855,25 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "board help must document {expected} JSON param. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
+    fn format_issue_help_documents_issue_monitor_queue_operations() {
+        let help = format_issue_help();
+        for expected in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            "project_root",
+            "enabled=false",
+            "autonomous_mode=false",
+        ] {
+            assert!(
+                help.contains(expected),
+                "issue help must document {expected}. help:\n{help}"
             );
         }
     }
