@@ -36637,6 +36637,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
             settlement_severity: "warning".to_string(),
             settlement_obligation_open: true,
             open_obligations: vec!["user_verification".to_string()],
+            recovery_probes: Vec::new(),
             available_recoveries: vec!["verify.run".to_string(), "execution.reopen".to_string()],
             warnings: vec!["Host status is temporarily unavailable".to_string()],
         },

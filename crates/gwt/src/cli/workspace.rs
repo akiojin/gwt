@@ -1371,7 +1371,7 @@ pub(super) fn ensure_workspace_for_agent(
     repo_path: &std::path::Path,
     input: WorkspaceEnsureInput,
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
-    let probe = probe_workspace_ensure(repo_path, &input.agent_session);
+    let probe = probe_workspace_ensure(repo_path, &input);
     if !probe.executable() {
         return Err(core_error(GwtError::Other(format!(
             "workspace.ensure prerequisite probe refused: {}",
@@ -1524,7 +1524,7 @@ pub(super) fn ensure_workspace_for_agent(
 /// the `workspace.ensure` mutation preflight.
 pub(crate) fn probe_workspace_ensure(
     repo_path: &Path,
-    session_id: &str,
+    input: &WorkspaceEnsureInput,
 ) -> crate::cli::governance::RecoveryProbe {
     use crate::cli::governance::{
         GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
@@ -1536,14 +1536,18 @@ pub(crate) fn probe_workspace_ensure(
         ..GovernanceMetadata::default()
     };
     let recovery = match crate::agent_project_state::validated_workspace_recovery_session(
-        repo_path, session_id,
+        repo_path,
+        &input.agent_session,
     ) {
         Ok(Some(recovery)) => recovery,
         Ok(None) => {
             return RecoveryProbe::unavailable(
                 "workspace.ensure",
                 protected(Some(GovernanceCause::ManagedIdentity)),
-                format!("Session ledger is missing for Session {session_id}"),
+                format!(
+                    "Session ledger is missing for Session {}",
+                    input.agent_session
+                ),
             )
         }
         Err(error) => {
@@ -1562,16 +1566,17 @@ pub(crate) fn probe_workspace_ensure(
             (recovery, WorkspaceEnsurePolicy::DockerExistingOnly)
         }
     };
-    let owner = match resolve_workspace_ensure_owner(Some(&recovery.session), None, None) {
-        Ok(owner) => owner,
-        Err(error) => {
-            return RecoveryProbe::unavailable(
-                "workspace.ensure",
-                protected(Some(GovernanceCause::ManagedIdentity)),
-                error.to_string(),
-            )
-        }
-    };
+    let owner =
+        match resolve_workspace_ensure_owner(Some(&recovery.session), input.spec, input.issue) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return RecoveryProbe::unavailable(
+                    "workspace.ensure",
+                    protected(Some(GovernanceCause::ManagedIdentity)),
+                    error.to_string(),
+                )
+            }
+        };
     let projection_path = gwt_workspace_projection_path_for_repo_path(&recovery.project_state_root);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(&recovery.project_state_root);
     let projection = match load_workspace_projection_from_path(&projection_path) {
@@ -1596,15 +1601,6 @@ pub(crate) fn probe_workspace_ensure(
             )
         }
     };
-    let input = WorkspaceEnsureInput {
-        agent_session: session_id.to_string(),
-        title_summary: String::new(),
-        current_focus: None,
-        spec: None,
-        issue: None,
-        topic: None,
-        boundary: None,
-    };
     let generation = recovery
         .session
         .execution_binding
@@ -1614,7 +1610,7 @@ pub(crate) fn probe_workspace_ensure(
         effect: Some(GovernanceEffect::Protected),
         fingerprint: Some(format!(
             "workspace.ensure:{}:{}",
-            session_id,
+            input.agent_session,
             generation.as_deref().unwrap_or("unbound")
         )),
         retryable: Some(true),
@@ -1625,7 +1621,7 @@ pub(crate) fn probe_workspace_ensure(
     };
     match validate_workspace_ensure_recovery_state(
         recovery,
-        &input,
+        input,
         owner.as_deref(),
         policy,
         &projection,
@@ -1645,6 +1641,20 @@ pub(crate) fn probe_workspace_ensure(
             },
             error.to_string(),
         ),
+    }
+}
+
+/// Canonical, explicit status candidate used only for read-only diagnosis.
+/// Mutation callers must pass their real request to [`probe_workspace_ensure`].
+pub(crate) fn workspace_ensure_status_candidate(session_id: &str) -> WorkspaceEnsureInput {
+    WorkspaceEnsureInput {
+        agent_session: session_id.to_string(),
+        title_summary: "Recovered Work".to_string(),
+        current_focus: None,
+        spec: None,
+        issue: None,
+        topic: None,
+        boundary: None,
     }
 }
 
@@ -3555,6 +3565,158 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn foreign_active_exact_unbound_recovery_reaches_ensure_and_update() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        initialize_session_git_layout(&repo, &repo);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3393,
+        };
+        let foreign_session_id = "foreign-predecessor-session";
+        crate::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            foreign_session_id,
+            "$gwt-execute #3393",
+            false,
+        )
+        .expect("materialize foreign Active predecessor");
+        crate::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize predecessor ledger");
+        let predecessor = crate::cli::execution_state::current_execution_binding(&repo, owner)
+            .expect("read predecessor binding")
+            .expect("predecessor binding");
+        let repo_hash = gwt_core::repo_hash::detect_repo_hash(&repo)
+            .expect("repo hash")
+            .to_string();
+        crate::cli::execution_state::record_rebound_continuation_validation(
+            &repo,
+            owner,
+            "foreign-predecessor-rebound-audit",
+            foreign_session_id,
+            &gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: foreign_session_id.to_string(),
+                repo_hash: repo_hash.clone(),
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity: predecessor,
+                capability_generation: 1,
+            },
+        )
+        .expect("record valid foreign rebound audit");
+
+        let session_id = "exact-unbound-successor-session";
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/20260601-0934", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = None;
+        session.execution_binding = None;
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+        session.docker_runtime_binding = None;
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("write exact unbound Host Session");
+
+        let before = crate::cli::execution_state::diagnose(&repo, Some(session_id));
+        assert!(before
+            .available_recoveries
+            .contains(&"execution.continue".to_string()));
+        assert!(!before
+            .available_recoveries
+            .contains(&"workspace.ensure".to_string()));
+        assert!(!before
+            .available_recoveries
+            .contains(&"execution.repair".to_string()));
+
+        let (continuation, binding) = crate::agent_project_state::continue_authenticated_execution(
+            &repo,
+            session_id,
+            crate::AgentExecutionContinuationRequest {
+                schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "foreign-active-exact-unbound-e2e".to_string(),
+            },
+        )
+        .expect("create exact successor");
+        assert_eq!(
+            continuation.outcome,
+            crate::AgentExecutionContinuationOutcome::SuccessorCreated
+        );
+
+        let after_continue = crate::cli::execution_state::diagnose(&repo, Some(session_id));
+        assert!(after_continue
+            .available_recoveries
+            .contains(&"workspace.ensure".to_string()));
+        assert!(!after_continue
+            .available_recoveries
+            .contains(&"execution.repair".to_string()));
+
+        let _session_env =
+            crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let (repair_code, repair_out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Repair {
+                    reason: "prove non-corrupt authority".to_string(),
+                },
+            ),
+        )
+        .expect("run actual repair operation");
+        assert_eq!(repair_code, 2, "{repair_out}");
+        assert!(
+            repair_out.contains("execution_repair_not_corrupt"),
+            "{repair_out}"
+        );
+
+        let ensure_input = WorkspaceEnsureInput {
+            agent_session: session_id.to_string(),
+            title_summary: "P6-A exact recovery".to_string(),
+            current_focus: Some("Exercise continuation recovery end to end".to_string()),
+            spec: None,
+            issue: Some(owner.number),
+            topic: Some("recovery".to_string()),
+            boundary: Some("continuation and Workspace".to_string()),
+        };
+        let ensured = ensure_workspace_for_agent(&repo, ensure_input)
+            .expect("execute advertised workspace.ensure");
+        let after_ensure = crate::cli::execution_state::diagnose(&repo, Some(session_id));
+        assert!(after_ensure
+            .available_recoveries
+            .contains(&"workspace.update".to_string()));
+        assert!(!after_ensure
+            .available_recoveries
+            .contains(&"workspace.ensure".to_string()));
+        let update = crate::agent_project_state::apply_bound_authenticated_workspace_update(
+            &repo,
+            session_id,
+            &binding,
+            crate::AgentWorkspaceUpdateRequest {
+                schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session_id.to_string(),
+                observation: crate::observe_agent_runtime(&repo)
+                    .expect("observe exact successor worktree"),
+                intent: crate::AgentWorkspaceUpdateIntent {
+                    summary: Some("Recovery reached authenticated Workspace update".to_string()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("execute workspace.update after ensure");
+        assert_eq!(update.work_id, ensured.workspace_id);
+    }
+
+    #[test]
     fn typed_ensure_required_continuation_keeps_split_roots_and_settlement_evidence_aligned() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
@@ -4917,6 +5079,49 @@ pub(crate) mod tests {
         assert_eq!(items.work_items.len(), 1);
         assert_eq!(items.work_items[0].title, "Work materialization");
         assert_eq!(items.work_items[0].owner.as_deref(), Some("SPEC-2359"));
+    }
+
+    #[test]
+    fn workspace_ensure_probe_and_execute_share_actual_input_facts() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let session_id = "session-ensure-input-parity";
+        write_bound_projectionless_session(session_id, &repo, &repo, 3412);
+        let paths = workspace_recovery_state_paths(&repo, &repo);
+        let before = workspace_recovery_state_bytes(&paths);
+        let input = WorkspaceEnsureInput {
+            agent_session: session_id.to_string(),
+            title_summary: "Input parity must reject foreign ownership".to_string(),
+            current_focus: Some("Evaluate the exact ensure request".to_string()),
+            spec: None,
+            issue: Some(9999),
+            topic: Some("input-parity".to_string()),
+            boundary: Some("No synthesized ownership facts".to_string()),
+        };
+
+        let probe = probe_workspace_ensure(&repo, &input);
+        assert_eq!(
+            probe.state,
+            crate::cli::governance::RecoveryProbeState::Unavailable
+        );
+        let error = ensure_workspace_for_agent(&repo, input)
+            .expect_err("the same input must be refused by execution");
+        let message = error.to_string();
+        assert!(
+            probe
+                .reason
+                .as_deref()
+                .is_some_and(|reason| message.contains(reason)),
+            "probe and execution must preserve the same refusal fact: probe={probe:?}, error={message}"
+        );
+        assert_eq!(
+            workspace_recovery_state_bytes(&paths),
+            before,
+            "probe and refused execution must preserve Workspace bytes"
+        );
     }
 
     #[test]
