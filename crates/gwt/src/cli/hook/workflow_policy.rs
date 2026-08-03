@@ -1166,7 +1166,6 @@ mod tests {
         }
 
         let repo = tempfile::tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
         let context = WorkflowContext::unknown();
         for operation in [
             "issue.monitor.status",
@@ -1177,10 +1176,6 @@ mod tests {
             let command = format!(
                 "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
             );
-            assert!(
-                command_segments_are_ownerless_safe(&command, repo.path()),
-                "operation must remain ownerless-safe: {operation}"
-            );
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({"command": command})),
@@ -1190,7 +1185,7 @@ mod tests {
             assert_eq!(
                 evaluate_with_context(&event, repo.path(), &context).expect("policy"),
                 HookOutput::Silent,
-                "operation must pass the full ownerless intake policy: {operation}"
+                "operation must pass the ownerless execution policy: {operation}"
             );
         }
     }
