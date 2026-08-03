@@ -141,8 +141,25 @@ Safely stop processing or lower/raise the positive concurrency limit:
 JSON
 ```
 
-`enabled=true` and `autonomous_mode=true` are intentionally rejected. Enabling
-either capability requires an explicit GUI action. Configuration changes are
+Ask the Issue Monitor to take an Issue next — move it to the priority head and
+trigger an immediate scan. The launch itself still goes through the Monitor's
+own claim/slot path, so this can never produce a duplicate agent:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.launch_now","params":{"number":42}}
+JSON
+```
+
+The response reports `scan_delivery`: `immediate` when a daemon accepted the
+scan request, `next-scheduled-scan` when none was reachable (the new order is
+already durable either way).
+
+`enabled=true` and `autonomous_mode=true` are intentionally rejected for agent
+sessions. Enabling either capability requires an explicit GUI action — the one
+exception is the project's resident PM agent (SPEC-3431), which may raise them
+from the CLI; run `pm.status` to see whether the current session holds that
+privilege (`caller_is_registered_pm`). Configuration changes are
 committed atomically to the project preferences source of truth; OFF operations
 also revoke outstanding effect authority. Priority changes become visible to
 the GUI and daemon on their next scan/rebase. Configuration changes use an
