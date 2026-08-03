@@ -155,6 +155,35 @@ fn fail_repair_audit_write_if_requested() -> io::Result<()> {
     })
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static REPAIR_QUARANTINE_FAILURE_AFTER:
+        std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn set_repair_quarantine_failure_after(quarantined_count: usize) {
+    REPAIR_QUARANTINE_FAILURE_AFTER.with(|slot| {
+        assert!(
+            slot.replace(Some(quarantined_count)).is_none(),
+            "repair quarantine failure injection must not be nested"
+        );
+    });
+}
+
+#[cfg(test)]
+fn fail_repair_quarantine_if_requested(quarantined_count: usize) -> io::Result<()> {
+    REPAIR_QUARANTINE_FAILURE_AFTER.with(|slot| {
+        if slot.get() == Some(quarantined_count) {
+            slot.set(None);
+            return Err(io::Error::other(format!(
+                "injected repair quarantine failure after {quarantined_count} sources"
+            )));
+        }
+        Ok(())
+    })
+}
+
 /// Linked owner kind. A `gwt-spec`-labeled Issue is a SPEC owner; everything
 /// else is a plain Issue owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,6 +685,58 @@ struct ExecutionRepairSource {
     source_path: String,
     quarantine_path: String,
     source_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    source_path_os_bytes_hex: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    quarantine_path_os_bytes_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuarantinedExecutionAuthority {
+    source_path: PathBuf,
+    quarantine_path: PathBuf,
+    source_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepairSessionSnapshot {
+    id: String,
+    worktree_path: PathBuf,
+    project_state_root: Option<PathBuf>,
+    repo_hash: Option<String>,
+    branch: String,
+    agent_id: gwt_agent::AgentId,
+    linked_issue_number: Option<u64>,
+    execution_binding: Option<gwt_agent::SessionExecutionBinding>,
+}
+
+impl From<&gwt_agent::Session> for RepairSessionSnapshot {
+    fn from(session: &gwt_agent::Session) -> Self {
+        Self {
+            id: session.id.clone(),
+            worktree_path: session.worktree_path.clone(),
+            project_state_root: session.project_state_root.clone(),
+            repo_hash: session.repo_hash.clone(),
+            branch: session.branch.clone(),
+            agent_id: session.agent_id.clone(),
+            linked_issue_number: session.linked_issue_number,
+            execution_binding: session.execution_binding.clone(),
+        }
+    }
+}
+
+impl QuarantinedExecutionAuthority {
+    fn audit_source(&self) -> ExecutionRepairSource {
+        ExecutionRepairSource {
+            source_path: self.source_path.to_string_lossy().into_owned(),
+            quarantine_path: self.quarantine_path.to_string_lossy().into_owned(),
+            source_hash: self.source_hash.clone(),
+            source_path_os_bytes_hex: hex::encode(self.source_path.as_os_str().as_encoded_bytes()),
+            quarantine_path_os_bytes_hex: hex::encode(
+                self.quarantine_path.as_os_str().as_encoded_bytes(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7174,17 +7255,80 @@ fn discover_repair_owner(
     session_id: &str,
     trusted_dir: &Path,
 ) -> io::Result<ExecutionOwnerKey> {
-    let mut hints = Vec::new();
-    for file_name in ["execution-control.json", GENERATION_POINTER_FILE] {
-        if let Some(contents) =
-            crate::cli::trusted_store::read_from_resolved_dir(trusted_dir, file_name)?
-        {
-            if let Some(owner) = owner_hint_from_json(&contents) {
-                if !hints.contains(&owner) {
-                    hints.push(owner);
+    let mut trusted_hints = Vec::new();
+    for path in [
+        trusted_dir.join("execution-control.json"),
+        trusted_dir.join(GENERATION_POINTER_FILE),
+    ] {
+        match fs::read(&path) {
+            Ok(contents) => {
+                if let Some(owner) = std::str::from_utf8(&contents)
+                    .ok()
+                    .and_then(owner_hint_from_json)
+                {
+                    if !trusted_hints.contains(&owner) {
+                        trusted_hints.push(owner);
+                    }
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut ledger_hints = Vec::new();
+    let worktree_binding = worktree_binding_hash(worktree);
+    let owners_root = trusted_dir
+        .parent()
+        .ok_or_else(|| invalid_generation_data("trusted worktree directory has no parent"))?
+        .join("execution-owners");
+    match fs::read_dir(owners_root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let ledger_path = entry.path().join(GENERATION_LEDGER_FILE);
+                let Some(contents) = read_optional_authority_bytes(&ledger_path)? else {
+                    continue;
+                };
+                let Ok(ledger) = serde_json::from_slice::<ExecutionGenerationLedger>(&contents)
+                else {
+                    continue;
+                };
+                if validate_generation_ledger(&ledger, ledger.owner).is_ok()
+                    && ledger.current_generation().is_some_and(|generation| {
+                        generation.identity.worktree_binding_hash == worktree_binding
+                    })
+                    && !ledger_hints.contains(&ledger.owner)
+                {
+                    ledger_hints.push(ledger.owner);
                 }
             }
         }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut hints = trusted_hints;
+    if hints.is_empty() {
+        for path in [state_path(worktree), generation_pointer_path(worktree)] {
+            match fs::read(&path) {
+                Ok(contents) => {
+                    if let Some(owner) = std::str::from_utf8(&contents)
+                        .ok()
+                        .and_then(owner_hint_from_json)
+                    {
+                        if !hints.contains(&owner) {
+                            hints.push(owner);
+                        }
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    if hints.is_empty() {
+        hints = ledger_hints;
     }
     if hints.is_empty() {
         let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
@@ -7208,18 +7352,26 @@ fn discover_repair_owner(
     }
 }
 
-fn raw_execution_control_is_corrupt(contents: &str) -> bool {
-    serde_json::from_str::<ExecutionControlRecord>(contents)
+fn raw_execution_control_is_corrupt(contents: &[u8]) -> bool {
+    serde_json::from_slice::<ExecutionControlRecord>(contents)
         .map(hydrate_recovery_envelopes)
         .map_or(true, |record| !integrity_ok(&record))
 }
 
-fn raw_pointer_is_corrupt(contents: &str) -> bool {
-    serde_json::from_str::<ExecutionGenerationPointer>(contents).map_or(true, |pointer| {
+fn raw_pointer_is_corrupt(contents: &[u8]) -> bool {
+    serde_json::from_slice::<ExecutionGenerationPointer>(contents).map_or(true, |pointer| {
         pointer.schema_version != GENERATION_LEDGER_SCHEMA_VERSION
             || pointer.content_hash.is_empty()
             || pointer.content_hash != compute_generation_pointer_hash(&pointer)
     })
+}
+
+fn read_optional_authority_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn repair_session_binding(
@@ -7227,6 +7379,7 @@ fn repair_session_binding(
     session_id: &str,
     owner: ExecutionOwnerKey,
     identity: gwt_agent::ExecutionBindingIdentity,
+    expected: &RepairSessionSnapshot,
 ) -> io::Result<()> {
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)
         .ok_or_else(|| invalid_generation_data("execution repair repository hash is unavailable"))?
@@ -7235,6 +7388,21 @@ fn repair_session_binding(
         &gwt_core::paths::gwt_sessions_dir(),
         session_id,
         move |session| {
+            if session.id != expected.id
+                || session.worktree_path != expected.worktree_path
+                || session.project_state_root != expected.project_state_root
+                || session.repo_hash != expected.repo_hash
+                || session.branch != expected.branch
+                || session.agent_id != expected.agent_id
+                || session.linked_issue_number != expected.linked_issue_number
+                || session.execution_binding != expected.execution_binding
+                || dunce::canonicalize(&session.worktree_path).ok().as_deref() != Some(worktree)
+            {
+                return Err(io::Error::new(
+                    ErrorKind::WouldBlock,
+                    "durable Session changed before execution repair binding publication",
+                ));
+            }
             let capability_generation = session
                 .execution_binding
                 .as_ref()
@@ -7257,9 +7425,18 @@ fn repair_session_binding(
 
 fn restore_quarantined_execution_authority(
     authority_paths: &[&Path],
-    quarantined: &[ExecutionRepairSource],
+    quarantined: &[QuarantinedExecutionAuthority],
+    remove_all_authority: bool,
 ) -> io::Result<()> {
-    for path in authority_paths {
+    let paths_to_remove = if remove_all_authority {
+        authority_paths.to_vec()
+    } else {
+        quarantined
+            .iter()
+            .map(|source| source.source_path.as_path())
+            .collect()
+    };
+    for path in paths_to_remove {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -7267,9 +7444,8 @@ fn restore_quarantined_execution_authority(
         }
     }
     for source in quarantined {
-        let source_path = Path::new(&source.source_path);
-        fs::hard_link(&source.quarantine_path, source_path)?;
-        let restored = fs::read(source_path)?;
+        fs::hard_link(&source.quarantine_path, &source.source_path)?;
+        let restored = fs::read(&source.source_path)?;
         if sha256_hex(&restored) != source.source_hash {
             return Err(invalid_generation_data(
                 "execution repair rollback restored bytes with the wrong hash",
@@ -7282,11 +7458,12 @@ fn restore_quarantined_execution_authority(
 fn repair_error_after_audit_and_authority_restore(
     error: io::Error,
     authority_paths: &[&Path],
-    quarantined: &[ExecutionRepairSource],
+    quarantined: &[QuarantinedExecutionAuthority],
     audit_dir: &Path,
     previous_audit_bytes: Option<&[u8]>,
 ) -> io::Error {
-    let authority_restore = restore_quarantined_execution_authority(authority_paths, quarantined);
+    let authority_restore =
+        restore_quarantined_execution_authority(authority_paths, quarantined, true);
     let audit_restore = match previous_audit_bytes {
         Some(bytes) => crate::cli::trusted_store::write_to_resolved_dir(
             audit_dir,
@@ -7316,6 +7493,378 @@ fn repair_error_after_audit_and_authority_restore(
     }
 }
 
+fn repair_error_after_partial_authority_restore(
+    error: io::Error,
+    authority_paths: &[&Path],
+    quarantined: &[QuarantinedExecutionAuthority],
+) -> io::Error {
+    match restore_quarantined_execution_authority(authority_paths, quarantined, false) {
+        Ok(()) => error,
+        Err(restore_error) => io::Error::new(
+            ErrorKind::InvalidData,
+            format!("execution_repair_rollback_failed: {error}; authority_restore={restore_error}"),
+        ),
+    }
+}
+
+fn repair_corrupt_execution_under_leases(
+    context: &GenerationTransactionContext,
+    owner: ExecutionOwnerKey,
+    session_id: &str,
+    reason: &str,
+) -> io::Result<ExecutionRepairOutcome> {
+    let worktree = &context.worktree;
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let expected_session = gwt_agent::Session::load(&session_path)
+        .map(|session| RepairSessionSnapshot::from(&session));
+    let audit_dir = repair_audit_dir(context)?;
+    let previous_audit_bytes = match fs::read(audit_dir.join(EXECUTION_REPAIR_AUDIT_FILE)) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let mut audits = load_repair_audits(&audit_dir)?;
+    let ecr_path = context.worktree_trusted_dir.join("execution-control.json");
+    let mirror_ecr_path = state_path(&context.worktree);
+    let pointer_path = context.worktree_trusted_dir.join(GENERATION_POINTER_FILE);
+    let mirror_pointer_path = generation_pointer_path(&context.worktree);
+    let ledger_path = context.owner_dir.join(GENERATION_LEDGER_FILE);
+    let authority_paths = [
+        ecr_path.as_path(),
+        mirror_ecr_path.as_path(),
+        pointer_path.as_path(),
+        mirror_pointer_path.as_path(),
+        ledger_path.as_path(),
+    ];
+    let ecr = read_optional_authority_bytes(&ecr_path)?;
+    let mirror_ecr = read_optional_authority_bytes(&mirror_ecr_path)?;
+    let pointer = read_optional_authority_bytes(&pointer_path)?;
+    let mirror_pointer = read_optional_authority_bytes(&mirror_pointer_path)?;
+    let ledger = read_optional_authority_bytes(&ledger_path)?;
+    let ecr_corrupt = ecr.as_deref().is_some_and(raw_execution_control_is_corrupt)
+        || (ecr.is_none()
+            && mirror_ecr
+                .as_deref()
+                .is_some_and(raw_execution_control_is_corrupt));
+    let pointer_corrupt = pointer.as_deref().is_some_and(raw_pointer_is_corrupt)
+        || (pointer.is_none()
+            && mirror_pointer
+                .as_deref()
+                .is_some_and(raw_pointer_is_corrupt));
+    let ledger_corrupt = ledger.as_deref().is_some_and(|contents| {
+        serde_json::from_slice::<ExecutionGenerationLedger>(contents).map_or(true, |ledger| {
+            validate_generation_ledger(&ledger, owner).is_err()
+        })
+    });
+    let strict_authority_corrupt =
+        if ledger.is_some() || pointer.is_some() || mirror_pointer.is_some() {
+            !matches!(load_generation_ledger_from_context(context), Ok(Some(_)))
+        } else {
+            false
+        };
+    if !ecr_corrupt && !pointer_corrupt && !ledger_corrupt && !strict_authority_corrupt {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "execution_repair_not_corrupt: current authority does not require repair",
+        ));
+    }
+
+    let authority_snapshots = [
+        (&ecr_path, ecr.as_deref()),
+        (&mirror_ecr_path, mirror_ecr.as_deref()),
+        (&pointer_path, pointer.as_deref()),
+        (&mirror_pointer_path, mirror_pointer.as_deref()),
+        (&ledger_path, ledger.as_deref()),
+    ];
+    let mut quarantined = Vec::new();
+    for (path, expected) in authority_snapshots {
+        let Some(expected) = expected else {
+            continue;
+        };
+        let moved = match crate::cli::trusted_store::quarantine_file(path) {
+            Ok(moved) => moved,
+            Err(error) => {
+                return Err(repair_error_after_partial_authority_restore(
+                    error,
+                    &authority_paths,
+                    &quarantined,
+                ));
+            }
+        };
+        let moved_source = QuarantinedExecutionAuthority {
+            source_path: path.clone(),
+            quarantine_path: moved.destination,
+            source_hash: moved.source_hash,
+        };
+        quarantined.push(moved_source);
+
+        #[cfg(test)]
+        if let Err(error) = fail_repair_quarantine_if_requested(quarantined.len()) {
+            return Err(repair_error_after_partial_authority_restore(
+                error,
+                &authority_paths,
+                &quarantined,
+            ));
+        }
+
+        let expected_hash = sha256_hex(expected);
+        let quarantined_hash = quarantined
+            .last()
+            .and_then(|source| fs::read(&source.quarantine_path).ok())
+            .map(sha256_hex);
+        if quarantined.last().map(|source| source.source_hash.as_str())
+            != Some(expected_hash.as_str())
+            || quarantined_hash.as_deref() != Some(expected_hash.as_str())
+        {
+            return Err(repair_error_after_partial_authority_restore(
+                generation_conflict(
+                    "execution repair authority changed while it was being quarantined",
+                ),
+                &authority_paths,
+                &quarantined,
+            ));
+        }
+    }
+    for (path, expected) in authority_snapshots {
+        if expected.is_none() {
+            let appeared = match read_optional_authority_bytes(path) {
+                Ok(contents) => contents.is_some(),
+                Err(error) => {
+                    return Err(repair_error_after_partial_authority_restore(
+                        error,
+                        &authority_paths,
+                        &quarantined,
+                    ));
+                }
+            };
+            if appeared {
+                return Err(repair_error_after_partial_authority_restore(
+                    generation_conflict(
+                        "execution repair authority appeared after the repair snapshot",
+                    ),
+                    &authority_paths,
+                    &quarantined,
+                ));
+            }
+        }
+    }
+    if quarantined.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            "execution_repair_source_missing: no authority file was available to quarantine",
+        ));
+    }
+
+    let now = Utc::now();
+    let mut record = ExecutionControlRecord {
+        owner_kind: owner.kind,
+        owner_number: owner.number,
+        primary_session_id: session_id.to_string(),
+        entrypoint: "execution.repair".to_string(),
+        bundled_required_owners: Vec::new(),
+        status: ExecutionControlStatus::Active,
+        blocked_reason: None,
+        missing_verification: None,
+        launched_at: now,
+        settled_at: None,
+        transfers: Vec::new(),
+        recoveries: Vec::new(),
+        content_hash: String::new(),
+    };
+    let projection = String::from_utf8(serialize_execution_control(&record)?).map_err(|error| {
+        invalid_generation_data(format!("repair projection is not UTF-8: {error}"))
+    })?;
+    record = serde_json::from_str(&projection).map_err(|error| {
+        invalid_generation_data(format!("repair projection is malformed: {error}"))
+    })?;
+    let generation_id = format!("gen-repair-{}", uuid::Uuid::new_v4().simple());
+    let mut generation = ExecutionGeneration {
+        identity: ExecutionGenerationIdentity {
+            owner,
+            generation_id: generation_id.clone(),
+            predecessor_generation_id: None,
+            predecessor_content_hash: None,
+            session_binding_id: format!("repair-{}", uuid::Uuid::new_v4().simple()),
+            initial_session_id: session_id.to_string(),
+            worktree_binding_hash: context.worktree_binding_hash.clone(),
+            entrypoint: record.entrypoint.clone(),
+            activated_at: now,
+        },
+        status: ExecutionControlStatus::Active,
+        execution_control_json: projection.clone(),
+        content_hash: String::new(),
+    };
+    generation.content_hash = compute_generation_hash(&generation);
+    let mut fresh = ExecutionGenerationLedger {
+        schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
+        owner,
+        generations: vec![generation],
+        continuation_attempts: Vec::new(),
+        takeover_attempts: Vec::new(),
+        takeovers: Vec::new(),
+        lifecycle_events: Vec::new(),
+        continuation_validations: Vec::new(),
+        current_generation_id: generation_id.clone(),
+        content_hash: String::new(),
+    };
+    stamp_generation_ledger(&mut fresh);
+    let repair_id = format!("repair-{}", uuid::Uuid::new_v4().simple());
+    let audit_sources = quarantined
+        .iter()
+        .map(QuarantinedExecutionAuthority::audit_source)
+        .collect::<Vec<_>>();
+    let mut audit = ExecutionRepairAudit {
+        repair_id: repair_id.clone(),
+        actor_session_id: session_id.to_string(),
+        owner,
+        reason: reason.to_string(),
+        sources: audit_sources.clone(),
+        new_generation_id: generation_id.clone(),
+        repaired_at: Utc::now(),
+        previous_audit_hash: audits
+            .last()
+            .map_or_else(String::new, |entry| entry.content_hash.clone()),
+        content_hash: String::new(),
+    };
+    audit.content_hash = repair_audit_hash(&audit);
+    audits.push(audit);
+    #[cfg(test)]
+    if let Err(error) = fail_repair_audit_write_if_requested() {
+        return Err(repair_error_after_audit_and_authority_restore(
+            error,
+            &authority_paths,
+            &quarantined,
+            &audit_dir,
+            previous_audit_bytes.as_deref(),
+        ));
+    }
+    if let Err(error) = save_repair_audits(&audit_dir, &audits) {
+        return Err(repair_error_after_audit_and_authority_restore(
+            error,
+            &authority_paths,
+            &quarantined,
+            &audit_dir,
+            previous_audit_bytes.as_deref(),
+        ));
+    }
+    let audited = match load_repair_audits(&audit_dir) {
+        Ok(audited) => audited,
+        Err(error) => {
+            return Err(repair_error_after_audit_and_authority_restore(
+                error,
+                &authority_paths,
+                &quarantined,
+                &audit_dir,
+                previous_audit_bytes.as_deref(),
+            ));
+        }
+    };
+    if audited.last().map(|entry| entry.repair_id.as_str()) != Some(repair_id.as_str()) {
+        return Err(repair_error_after_audit_and_authority_restore(
+            invalid_generation_data(
+                "execution_repair_audit_readback_failed: trusted repair audit is missing",
+            ),
+            &authority_paths,
+            &quarantined,
+            &audit_dir,
+            previous_audit_bytes.as_deref(),
+        ));
+    }
+
+    // Commit the independent audit before materializing authority. If
+    // the audit store is unavailable, the corrupt sources remain
+    // preserved in quarantine and no fresh authority can become
+    // active without its required audit trail.
+    if let Err(error) = write_activated_generation(context, &fresh, &projection) {
+        return Err(repair_error_after_audit_and_authority_restore(
+            error,
+            &authority_paths,
+            &quarantined,
+            &audit_dir,
+            previous_audit_bytes.as_deref(),
+        ));
+    }
+    let readback = match load_generation_ledger_from_context(context) {
+        Ok(Some(readback)) => readback,
+        Ok(None) => {
+            return Err(repair_error_after_audit_and_authority_restore(
+                invalid_generation_data(
+                    "execution_repair_readback_failed: fresh authority disappeared",
+                ),
+                &authority_paths,
+                &quarantined,
+                &audit_dir,
+                previous_audit_bytes.as_deref(),
+            ));
+        }
+        Err(error) => {
+            return Err(repair_error_after_audit_and_authority_restore(
+                error,
+                &authority_paths,
+                &quarantined,
+                &audit_dir,
+                previous_audit_bytes.as_deref(),
+            ));
+        }
+    };
+    let loaded_record = match load(worktree) {
+        Ok(record) => record,
+        Err(error) => {
+            return Err(repair_error_after_audit_and_authority_restore(
+                error,
+                &authority_paths,
+                &quarantined,
+                &audit_dir,
+                previous_audit_bytes.as_deref(),
+            ));
+        }
+    };
+    if readback != fresh
+        || loaded_record.as_ref() != Some(&record)
+        || readback.current_effective_status() != Some(ExecutionControlStatus::Active)
+    {
+        return Err(repair_error_after_audit_and_authority_restore(
+            invalid_generation_data(
+                "execution_repair_readback_failed: owner ledger, ECR, and pointer disagree",
+            ),
+            &authority_paths,
+            &quarantined,
+            &audit_dir,
+            previous_audit_bytes.as_deref(),
+        ));
+    }
+    let binding = execution_binding_for_generation(
+        &readback,
+        readback
+            .current_generation()
+            .expect("validated current generation"),
+    );
+    let mut outcome = ExecutionRepairOutcome {
+        status: "repaired",
+        owner,
+        generation_id,
+        repair_id,
+        quarantined: audit_sources,
+        binding_repaired: false,
+        warnings: Vec::new(),
+    };
+    match expected_session.and_then(|expected| {
+                    repair_session_binding(
+                        &context.worktree,
+                        session_id,
+                        owner,
+                        binding,
+                        &expected,
+                    )
+                }) {
+                    Ok(()) => outcome.binding_repaired = true,
+                    Err(error) => outcome.warnings.push(format!(
+                        "execution_repair_binding_warning: fresh authority is valid, but the Session projection was not updated: {error}"
+                    )),
+                }
+    Ok(outcome)
+}
+
 fn repair_corrupt_execution(
     worktree: &Path,
     session_id: &str,
@@ -7327,272 +7876,32 @@ fn repair_corrupt_execution(
             "execution.repair requires a non-empty params.reason",
         ));
     }
+    let worktree = dunce::canonicalize(worktree).map_err(|error| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("execution repair worktree cannot be canonicalized: {error}"),
+        )
+    })?;
     let trusted_dir =
-        crate::cli::trusted_store::trusted_dir_for_worktree(worktree).ok_or_else(|| {
+        crate::cli::trusted_store::trusted_dir_for_worktree(&worktree).ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidInput,
                 "execution_repair_unmanaged: repair requires repo-scoped trusted authority",
             )
         })?;
-    let owner = discover_repair_owner(worktree, session_id, &trusted_dir)?;
-    let (mut outcome, binding) = with_generation_activation_leases(worktree, owner, |context| {
-        let audit_dir = repair_audit_dir(context)?;
-        let previous_audit_bytes = match fs::read(audit_dir.join(EXECUTION_REPAIR_AUDIT_FILE)) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        let mut audits = load_repair_audits(&audit_dir)?;
-        let ecr_path = context.worktree_trusted_dir.join("execution-control.json");
-        let pointer_path = context.worktree_trusted_dir.join(GENERATION_POINTER_FILE);
-        let ledger_path = context.owner_dir.join(GENERATION_LEDGER_FILE);
-        let authority_paths = [
-            ecr_path.as_path(),
-            pointer_path.as_path(),
-            ledger_path.as_path(),
-        ];
-        let ecr = fs::read_to_string(&ecr_path).ok();
-        let pointer = fs::read_to_string(&pointer_path).ok();
-        let ledger = fs::read_to_string(&ledger_path).ok();
-        let ecr_corrupt = ecr.as_deref().is_some_and(raw_execution_control_is_corrupt);
-        let pointer_corrupt = pointer.as_deref().is_some_and(raw_pointer_is_corrupt);
-        let ledger_corrupt = ledger.as_deref().is_some_and(|contents| {
-            serde_json::from_str::<ExecutionGenerationLedger>(contents).map_or(true, |ledger| {
-                validate_generation_ledger(&ledger, owner).is_err()
-            })
-        });
-        let strict_authority_corrupt = if ledger.is_some() || pointer.is_some() {
-            !matches!(load_generation_ledger_from_context(context), Ok(Some(_)))
-        } else {
-            false
-        };
-        if !ecr_corrupt && !pointer_corrupt && !ledger_corrupt && !strict_authority_corrupt {
-            return Err(io::Error::new(
-                ErrorKind::AlreadyExists,
-                "execution_repair_not_corrupt: current authority does not require repair",
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+        let owner = discover_repair_owner(&worktree, session_id, &trusted_dir)?;
+        let context = GenerationTransactionContext::resolve(&worktree, owner)?;
+        if context.worktree_trusted_dir != trusted_dir {
+            return Err(generation_conflict(
+                "execution repair repository identity changed before lease acquisition",
             ));
         }
-
-        let mut quarantined = Vec::new();
-        for path in [&ecr_path, &pointer_path, &ledger_path] {
-            if path.exists() {
-                let moved = crate::cli::trusted_store::quarantine_file(path)?;
-                quarantined.push(ExecutionRepairSource {
-                    source_path: path.to_string_lossy().into_owned(),
-                    quarantine_path: moved.destination.to_string_lossy().into_owned(),
-                    source_hash: moved.source_hash,
-                });
-            }
-        }
-        if quarantined.is_empty() {
-            return Err(io::Error::new(
-                ErrorKind::NotFound,
-                "execution_repair_source_missing: no authority file was available to quarantine",
-            ));
-        }
-
-        let now = Utc::now();
-        let mut record = ExecutionControlRecord {
-            owner_kind: owner.kind,
-            owner_number: owner.number,
-            primary_session_id: session_id.to_string(),
-            entrypoint: "execution.repair".to_string(),
-            bundled_required_owners: Vec::new(),
-            status: ExecutionControlStatus::Active,
-            blocked_reason: None,
-            missing_verification: None,
-            launched_at: now,
-            settled_at: None,
-            transfers: Vec::new(),
-            recoveries: Vec::new(),
-            content_hash: String::new(),
-        };
-        let projection =
-            String::from_utf8(serialize_execution_control(&record)?).map_err(|error| {
-                invalid_generation_data(format!("repair projection is not UTF-8: {error}"))
-            })?;
-        record = serde_json::from_str(&projection).map_err(|error| {
-            invalid_generation_data(format!("repair projection is malformed: {error}"))
-        })?;
-        let generation_id = format!("gen-repair-{}", uuid::Uuid::new_v4().simple());
-        let mut generation = ExecutionGeneration {
-            identity: ExecutionGenerationIdentity {
-                owner,
-                generation_id: generation_id.clone(),
-                predecessor_generation_id: None,
-                predecessor_content_hash: None,
-                session_binding_id: format!("repair-{}", uuid::Uuid::new_v4().simple()),
-                initial_session_id: session_id.to_string(),
-                worktree_binding_hash: context.worktree_binding_hash.clone(),
-                entrypoint: record.entrypoint.clone(),
-                activated_at: now,
-            },
-            status: ExecutionControlStatus::Active,
-            execution_control_json: projection.clone(),
-            content_hash: String::new(),
-        };
-        generation.content_hash = compute_generation_hash(&generation);
-        let mut fresh = ExecutionGenerationLedger {
-            schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
-            owner,
-            generations: vec![generation],
-            continuation_attempts: Vec::new(),
-            takeover_attempts: Vec::new(),
-            takeovers: Vec::new(),
-            lifecycle_events: Vec::new(),
-            continuation_validations: Vec::new(),
-            current_generation_id: generation_id.clone(),
-            content_hash: String::new(),
-        };
-        stamp_generation_ledger(&mut fresh);
-        let repair_id = format!("repair-{}", uuid::Uuid::new_v4().simple());
-        let mut audit = ExecutionRepairAudit {
-            repair_id: repair_id.clone(),
-            actor_session_id: session_id.to_string(),
-            owner,
-            reason: reason.to_string(),
-            sources: quarantined.clone(),
-            new_generation_id: generation_id.clone(),
-            repaired_at: Utc::now(),
-            previous_audit_hash: audits
-                .last()
-                .map_or_else(String::new, |entry| entry.content_hash.clone()),
-            content_hash: String::new(),
-        };
-        audit.content_hash = repair_audit_hash(&audit);
-        audits.push(audit);
-        #[cfg(test)]
-        if let Err(error) = fail_repair_audit_write_if_requested() {
-            return Err(repair_error_after_audit_and_authority_restore(
-                error,
-                &authority_paths,
-                &quarantined,
-                &audit_dir,
-                previous_audit_bytes.as_deref(),
-            ));
-        }
-        if let Err(error) = save_repair_audits(&audit_dir, &audits) {
-            return Err(repair_error_after_audit_and_authority_restore(
-                error,
-                &authority_paths,
-                &quarantined,
-                &audit_dir,
-                previous_audit_bytes.as_deref(),
-            ));
-        }
-        let audited = match load_repair_audits(&audit_dir) {
-            Ok(audited) => audited,
-            Err(error) => {
-                return Err(repair_error_after_audit_and_authority_restore(
-                    error,
-                    &authority_paths,
-                    &quarantined,
-                    &audit_dir,
-                    previous_audit_bytes.as_deref(),
-                ));
-            }
-        };
-        if audited.last().map(|entry| entry.repair_id.as_str()) != Some(repair_id.as_str()) {
-            return Err(repair_error_after_audit_and_authority_restore(
-                invalid_generation_data(
-                    "execution_repair_audit_readback_failed: trusted repair audit is missing",
-                ),
-                &authority_paths,
-                &quarantined,
-                &audit_dir,
-                previous_audit_bytes.as_deref(),
-            ));
-        }
-
-        // Commit the independent audit before materializing authority. If
-        // the audit store is unavailable, the corrupt sources remain
-        // preserved in quarantine and no fresh authority can become
-        // active without its required audit trail.
-        if let Err(error) = write_activated_generation(context, &fresh, &projection) {
-            return Err(repair_error_after_audit_and_authority_restore(
-                error,
-                &authority_paths,
-                &quarantined,
-                &audit_dir,
-                previous_audit_bytes.as_deref(),
-            ));
-        }
-        let readback = match load_generation_ledger_from_context(context) {
-            Ok(Some(readback)) => readback,
-            Ok(None) => {
-                return Err(repair_error_after_audit_and_authority_restore(
-                    invalid_generation_data(
-                        "execution_repair_readback_failed: fresh authority disappeared",
-                    ),
-                    &authority_paths,
-                    &quarantined,
-                    &audit_dir,
-                    previous_audit_bytes.as_deref(),
-                ));
-            }
-            Err(error) => {
-                return Err(repair_error_after_audit_and_authority_restore(
-                    error,
-                    &authority_paths,
-                    &quarantined,
-                    &audit_dir,
-                    previous_audit_bytes.as_deref(),
-                ));
-            }
-        };
-        let loaded_record = match load(worktree) {
-            Ok(record) => record,
-            Err(error) => {
-                return Err(repair_error_after_audit_and_authority_restore(
-                    error,
-                    &authority_paths,
-                    &quarantined,
-                    &audit_dir,
-                    previous_audit_bytes.as_deref(),
-                ));
-            }
-        };
-        if readback != fresh
-            || loaded_record.as_ref() != Some(&record)
-            || readback.current_effective_status() != Some(ExecutionControlStatus::Active)
-        {
-            return Err(repair_error_after_audit_and_authority_restore(
-                invalid_generation_data(
-                    "execution_repair_readback_failed: owner ledger, ECR, and pointer disagree",
-                ),
-                &authority_paths,
-                &quarantined,
-                &audit_dir,
-                previous_audit_bytes.as_deref(),
-            ));
-        }
-        let binding = execution_binding_for_generation(
-            &readback,
-            readback
-                .current_generation()
-                .expect("validated current generation"),
-        );
-        Ok((
-            ExecutionRepairOutcome {
-                status: "repaired",
-                owner,
-                generation_id,
-                repair_id,
-                quarantined,
-                binding_repaired: false,
-                warnings: Vec::new(),
-            },
-            binding,
-        ))
-    })?;
-
-    match repair_session_binding(worktree, session_id, owner, binding) {
-        Ok(()) => outcome.binding_repaired = true,
-        Err(error) => outcome.warnings.push(format!(
-            "execution_repair_binding_warning: fresh authority is valid, but the Session projection was not updated: {error}"
-        )),
-    }
-    Ok(outcome)
+        context.validate_unchanged()?;
+        with_resolved_generation_owner_lease(&context, |context| {
+            repair_corrupt_execution_under_leases(context, owner, session_id, reason)
+        })
+    })
 }
 
 fn run_repair(
@@ -12468,6 +12777,54 @@ mod tests {
             run_collect(&mut env, CliCommand::Execution(command))
         }
 
+        fn repair_authority_paths(worktree: &Path, owner: ExecutionOwnerKey) -> Vec<PathBuf> {
+            let context = GenerationTransactionContext::resolve(worktree, owner).unwrap();
+            vec![
+                context.worktree_trusted_dir.join("execution-control.json"),
+                state_path(worktree),
+                context.worktree_trusted_dir.join(GENERATION_POINTER_FILE),
+                generation_pointer_path(worktree),
+                context.owner_dir.join(GENERATION_LEDGER_FILE),
+            ]
+        }
+
+        fn authority_bytes(paths: &[PathBuf]) -> Vec<Option<Vec<u8>>> {
+            paths
+                .iter()
+                .map(|path| match fs::read(path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == ErrorKind::NotFound => None,
+                    Err(error) => panic!("read {}: {error}", path.display()),
+                })
+                .collect()
+        }
+
+        fn normalized_test_path(path: &Path) -> String {
+            let rendered = path.to_string_lossy();
+            rendered
+                .strip_prefix("/private")
+                .unwrap_or(&rendered)
+                .to_string()
+        }
+
+        fn mirror_pointer_partial_authority(
+            worktree: &Path,
+            owner: ExecutionOwnerKey,
+        ) -> Vec<PathBuf> {
+            let mut active = active_record("repair-session");
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(worktree, &active).unwrap();
+            ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let paths = repair_authority_paths(worktree, owner);
+            fs::remove_file(&paths[2]).unwrap();
+            fs::remove_file(&paths[4]).unwrap();
+            assert!(paths[0].exists());
+            assert!(paths[1].exists());
+            assert!(paths[3].exists());
+            paths
+        }
+
         fn settle_blocked(repo: &Path, session: &str) -> ExecutionControlRecord {
             if load(repo).unwrap().is_none() {
                 save(repo, &active_record(session)).unwrap();
@@ -12989,6 +13346,522 @@ mod tests {
         }
 
         #[test]
+        fn repair_recovers_mirror_pointer_partial_authority_advertised_by_status() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_203,
+            };
+            let authority_paths = mirror_pointer_partial_authority(dir.path(), owner);
+
+            let before = diagnose(dir.path(), None);
+            assert_eq!(before.ecr_status, ExecutionDiagnosisState::Corrupt);
+            assert_eq!(
+                before.available_recoveries,
+                vec!["execution.repair".to_string()]
+            );
+            let expected_quarantined = [0_usize, 1, 3]
+                .into_iter()
+                .map(|index| normalized_test_path(&authority_paths[index]))
+                .collect::<std::collections::HashSet<_>>();
+
+            let outcome = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "recover mirror pointer partial authority",
+            )
+            .expect("an advertised mirror-partial repair must be executable");
+
+            assert_eq!(outcome.owner, owner);
+            let quarantined_paths = outcome
+                .quarantined
+                .iter()
+                .map(|source| normalized_test_path(Path::new(&source.source_path)))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                quarantined_paths, expected_quarantined,
+                "repair must preserve every authority source it overwrites"
+            );
+            let record = load(dir.path()).unwrap().unwrap();
+            assert!(integrity_ok(&record));
+            let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+            assert_eq!(ledger.current_generation_id, outcome.generation_id);
+        }
+
+        #[test]
+        fn repair_recovers_malformed_mirror_only_ecr() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_204,
+            };
+            let mut malformed = active_record("repair-session");
+            malformed.owner_kind = owner.kind;
+            malformed.owner_number = owner.number;
+            save(dir.path(), &malformed).unwrap();
+            let authority_paths = repair_authority_paths(dir.path(), owner);
+            malformed = load(dir.path()).unwrap().unwrap();
+            malformed.content_hash = "invalid-mirror-integrity".to_string();
+            fs::write(
+                &authority_paths[1],
+                serde_json::to_vec_pretty(&malformed).unwrap(),
+            )
+            .unwrap();
+            fs::remove_file(&authority_paths[0]).unwrap();
+
+            let diagnosis = diagnose(dir.path(), None);
+            assert_eq!(diagnosis.ecr_status, ExecutionDiagnosisState::Corrupt);
+            assert!(diagnosis
+                .available_recoveries
+                .contains(&"execution.repair".to_string()));
+            let malformed_bytes = fs::read(&authority_paths[1]).unwrap();
+            let malformed_path = normalized_test_path(&authority_paths[1]);
+
+            let outcome = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "recover malformed mirror-only execution control",
+            )
+            .expect("mirror-only corruption with an owner hint must be repairable");
+
+            let mirror_source = outcome
+                .quarantined
+                .iter()
+                .find(|source| {
+                    normalized_test_path(Path::new(&source.source_path)) == malformed_path
+                })
+                .expect("malformed mirror must be quarantined");
+            assert_eq!(
+                fs::read(&mirror_source.quarantine_path).unwrap(),
+                malformed_bytes
+            );
+            assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
+        }
+
+        #[test]
+        fn repair_prefers_trusted_owner_over_conflicting_mirror_owner() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let trusted_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_205,
+            };
+            let mirror_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_206,
+            };
+            let mut active = active_record("repair-session");
+            active.owner_kind = trusted_owner.kind;
+            active.owner_number = trusted_owner.number;
+            save(dir.path(), &active).unwrap();
+            ensure_generation_ledger(dir.path(), trusted_owner, LegacyActiveDisposition::Live)
+                .unwrap();
+            let paths = repair_authority_paths(dir.path(), trusted_owner);
+            let mut historical = load_generation_ledger(dir.path(), trusted_owner)
+                .unwrap()
+                .unwrap();
+            historical.owner = mirror_owner;
+            for generation in &mut historical.generations {
+                generation.identity.owner = mirror_owner;
+                let mut projection = serde_json::from_str::<ExecutionControlRecord>(
+                    &generation.execution_control_json,
+                )
+                .unwrap();
+                projection.owner_kind = mirror_owner.kind;
+                projection.owner_number = mirror_owner.number;
+                generation.execution_control_json =
+                    String::from_utf8(serialize_execution_control(&projection).unwrap()).unwrap();
+                generation.content_hash = compute_generation_hash(generation);
+            }
+            stamp_generation_ledger(&mut historical);
+            let historical_context =
+                GenerationTransactionContext::resolve(dir.path(), mirror_owner).unwrap();
+            crate::cli::trusted_store::write_to_resolved_dir(
+                &historical_context.owner_dir,
+                GENERATION_LEDGER_FILE,
+                &serde_json::to_vec_pretty(&historical).unwrap(),
+            )
+            .unwrap();
+            fs::remove_file(&paths[2]).unwrap();
+            fs::remove_file(&paths[4]).unwrap();
+            let mut pointer = ExecutionGenerationPointer {
+                schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
+                owner: mirror_owner,
+                current_generation_id: "foreign-generation".to_string(),
+                current_generation_content_hash: "foreign-generation-hash".to_string(),
+                projection_content_hash: "foreign-projection-hash".to_string(),
+                content_hash: String::new(),
+            };
+            pointer.content_hash = compute_generation_pointer_hash(&pointer);
+            fs::write(&paths[3], serde_json::to_vec_pretty(&pointer).unwrap()).unwrap();
+            let outcome = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "trusted owner must override stale mirror metadata",
+            )
+            .expect("an informational mirror and historical ledger must not block trusted repair");
+
+            assert_eq!(outcome.owner, trusted_owner);
+            assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
+            assert_eq!(
+                load_generation_ledger(dir.path(), trusted_owner)
+                    .unwrap()
+                    .unwrap()
+                    .current_generation_id,
+                outcome.generation_id
+            );
+        }
+
+        #[test]
+        fn repair_refuses_conflicting_trusted_owners_without_mutation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let ecr_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_211,
+            };
+            let pointer_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_212,
+            };
+            let mut active = active_record("repair-session");
+            active.owner_kind = ecr_owner.kind;
+            active.owner_number = ecr_owner.number;
+            save(dir.path(), &active).unwrap();
+            let paths = repair_authority_paths(dir.path(), ecr_owner);
+            let mut pointer = ExecutionGenerationPointer {
+                schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
+                owner: pointer_owner,
+                current_generation_id: "foreign-generation".to_string(),
+                current_generation_content_hash: "foreign-generation-hash".to_string(),
+                projection_content_hash: "foreign-projection-hash".to_string(),
+                content_hash: String::new(),
+            };
+            pointer.content_hash = compute_generation_pointer_hash(&pointer);
+            fs::write(&paths[2], serde_json::to_vec_pretty(&pointer).unwrap()).unwrap();
+            let before = authority_bytes(&paths);
+
+            let error = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "must not choose between conflicting trusted owners",
+            )
+            .expect_err("conflicting trusted owners must refuse repair");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("execution_repair_authority_mismatch"),
+                "{error}"
+            );
+            assert_eq!(authority_bytes(&paths), before);
+        }
+
+        #[test]
+        fn repair_discovers_owner_from_sole_surviving_generation_ledger() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_209,
+            };
+            let mut active = active_record("repair-session");
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(dir.path(), &active).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let paths = repair_authority_paths(dir.path(), owner);
+            for index in [0_usize, 1, 2, 3] {
+                fs::remove_file(&paths[index]).unwrap();
+            }
+
+            let diagnosis = diagnose(dir.path(), None);
+            assert_eq!(diagnosis.ecr_status, ExecutionDiagnosisState::Corrupt);
+            assert!(diagnosis
+                .available_recoveries
+                .contains(&"execution.repair".to_string()));
+
+            let outcome = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "recover sole surviving owner ledger",
+            )
+            .expect("a repair advertised from a valid owner ledger must be executable");
+
+            assert_eq!(outcome.owner, owner);
+            assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
+        }
+
+        #[test]
+        fn repair_ignores_corrupt_pointer_mirror_when_trusted_authority_is_strict() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_208,
+            };
+            let mut active = active_record("repair-session");
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(dir.path(), &active).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let paths = repair_authority_paths(dir.path(), owner);
+            fs::write(&paths[3], b"{corrupt-mirror").unwrap();
+            let before = authority_bytes(&paths);
+
+            let diagnosis = diagnose(dir.path(), None);
+            assert_ne!(diagnosis.ecr_status, ExecutionDiagnosisState::Corrupt);
+            assert!(!diagnosis
+                .available_recoveries
+                .contains(&"execution.repair".to_string()));
+            let error = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "healthy trusted authority must win",
+            )
+            .expect_err("an informational mirror must not trigger repair");
+
+            assert_eq!(error.kind(), ErrorKind::AlreadyExists, "{error}");
+            assert!(error.to_string().contains("execution_repair_not_corrupt"));
+            assert_eq!(authority_bytes(&paths), before);
+        }
+
+        #[test]
+        fn mirror_partial_repair_failure_restores_all_authority_bytes_for_retry() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_207,
+            };
+            let paths = mirror_pointer_partial_authority(dir.path(), owner);
+            let before = authority_bytes(&paths);
+            let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
+
+            set_generation_write_failure(GenerationWriteFailurePoint::AfterProjection);
+            let error = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "inject mirror rollback failure boundary",
+            )
+            .expect_err("injected activation failure must surface");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected generation write failure"),
+                "{error}"
+            );
+            assert_eq!(
+                authority_bytes(&paths),
+                before,
+                "rollback must restore presence and bytes for all five authority paths"
+            );
+            assert!(load_repair_audits(&repair_audit_dir(&context).unwrap())
+                .unwrap()
+                .is_empty());
+
+            let retry = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "retry mirror partial repair",
+            )
+            .expect("byte-exact rollback must leave one deterministic retry");
+            assert_eq!(retry.status, "repaired");
+        }
+
+        #[test]
+        fn quarantine_failure_restores_already_moved_authority_for_retry() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_210,
+            };
+            let paths = mirror_pointer_partial_authority(dir.path(), owner);
+            let before = authority_bytes(&paths);
+
+            set_repair_quarantine_failure_after(1);
+            let error = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "inject partial quarantine failure",
+            )
+            .expect_err("quarantine failure must abort repair");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected repair quarantine failure"),
+                "{error}"
+            );
+            assert_eq!(
+                authority_bytes(&paths),
+                before,
+                "a failed quarantine sequence must not leave partial authority"
+            );
+            let retry = repair_corrupt_execution(
+                dir.path(),
+                "repair-session",
+                "retry after partial quarantine rollback",
+            )
+            .expect("rollback must preserve a deterministic retry");
+            assert_eq!(retry.status, "repaired");
+        }
+
+        #[test]
+        fn repair_session_binding_refuses_concurrent_session_incarnation_change() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let canonical_worktree = dunce::canonicalize(dir.path()).unwrap();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 900_213,
+            };
+            let repo_hash = gwt_core::repo_hash::detect_repo_hash(dir.path())
+                .unwrap()
+                .to_string();
+            let mut session =
+                gwt_agent::Session::new(dir.path(), "work/issue-2359", gwt_agent::AgentId::Codex);
+            session.id = "repair-session".to_string();
+            session.repo_hash = Some(repo_hash.clone());
+            session.linked_issue_number = Some(owner.number);
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            let expected = RepairSessionSnapshot::from(&session);
+            let concurrent_binding = gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: repo_hash.clone(),
+                owner_kind: owner.kind.as_str().to_string(),
+                owner_number: owner.number,
+                identity: gwt_agent::ExecutionBindingIdentity {
+                    generation_id: "concurrent-generation".to_string(),
+                    binding_id: "concurrent-binding".to_string(),
+                    ledger_head_hash: "concurrent-head".to_string(),
+                },
+                capability_generation: 1,
+            };
+            gwt_agent::update_session(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &session.id,
+                |current| {
+                    current
+                        .set_execution_binding(Some(concurrent_binding.clone()))
+                        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+                },
+            )
+            .unwrap();
+
+            let error = repair_session_binding(
+                &canonical_worktree,
+                &session.id,
+                owner,
+                gwt_agent::ExecutionBindingIdentity {
+                    generation_id: "repair-generation".to_string(),
+                    binding_id: "repair-binding".to_string(),
+                    ledger_head_hash: "repair-head".to_string(),
+                },
+                &expected,
+            )
+            .expect_err("a concurrent Session incarnation must win over stale repair publication");
+
+            assert_eq!(error.kind(), ErrorKind::WouldBlock, "{error}");
+            assert_eq!(
+                gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join("repair-session.toml")
+                )
+                .unwrap()
+                .execution_binding,
+                Some(concurrent_binding)
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn repair_audit_source_preserves_exact_non_utf8_path_bytes() {
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+            let source_path = PathBuf::from(std::ffi::OsString::from_vec(vec![
+                b'/', b't', b'm', b'p', b'/', 0xff, b's',
+            ]));
+            let quarantine_path = PathBuf::from(std::ffi::OsString::from_vec(vec![
+                b'/', b't', b'm', b'p', b'/', 0xfe, b'q',
+            ]));
+            let source = QuarantinedExecutionAuthority {
+                source_path: source_path.clone(),
+                quarantine_path: quarantine_path.clone(),
+                source_hash: "hash".to_string(),
+            };
+
+            let audit = source.audit_source();
+
+            assert_eq!(
+                hex::decode(audit.source_path_os_bytes_hex).unwrap(),
+                source_path.as_os_str().as_bytes()
+            );
+            assert_eq!(
+                hex::decode(audit.quarantine_path_os_bytes_hex).unwrap(),
+                quarantine_path.as_os_str().as_bytes()
+            );
+        }
+
+        #[test]
         fn concurrent_repairs_serialize_to_one_fresh_generation() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -13041,7 +13914,8 @@ mod tests {
                     .filter_map(|result| result.as_ref().err())
                     .filter(|error| error.kind() == ErrorKind::AlreadyExists)
                     .count(),
-                1
+                1,
+                "{results:?}"
             );
             assert!(
                 load_generation_ledger(dir.path(), owner).unwrap().is_some(),
