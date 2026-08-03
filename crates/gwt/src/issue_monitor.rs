@@ -887,6 +887,19 @@ pub struct IssueMonitorStatusView {
     pub autonomous_issues: Vec<AutonomousIssueSummary>,
 }
 
+/// Atomic agent-facing projection of the live Issue Monitor driver state.
+/// Unlike [`IssueMonitorStatusView`], this includes the ordered queue itself so
+/// callers never have to reconstruct transient claim outcomes from cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorAgentStatus {
+    pub queue: Vec<u64>,
+    pub active_launches: Vec<u64>,
+    pub max_active: usize,
+    pub enabled: bool,
+    pub autonomous_mode: bool,
+    pub has_launch_profile: bool,
+}
+
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousIssueSummary {
@@ -2854,6 +2867,17 @@ impl IssueMonitorState {
         }
     }
 
+    pub fn agent_status(&self) -> IssueMonitorAgentStatus {
+        IssueMonitorAgentStatus {
+            queue: self.queued_issue_numbers(),
+            active_launches: self.active_issue_numbers(),
+            max_active: self.config.max_active.max(1),
+            enabled: self.config.enabled,
+            autonomous_mode: self.autonomous_mode,
+            has_launch_profile: self.has_launch_profile(),
+        }
+    }
+
     /// Project scan staleness onto the existing status error surface using a
     /// caller-supplied clock so daemon publication and tests stay deterministic.
     pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
@@ -4519,6 +4543,35 @@ mod tests {
 
         assert_eq!(monitor.queued_issue_numbers(), vec![2, 1]);
         assert_eq!(monitor.active_issue_numbers(), vec![9]);
+    }
+
+    #[test]
+    fn agent_status_projects_blocked_claim_from_one_live_state() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 3,
+            ..IssueMonitorConfig::default()
+        });
+        let mut candidate = issue(42);
+        candidate.labels.push("auto-improve".to_string());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&candidate),
+            "2026-08-03T00:00:00Z",
+        );
+        monitor.record_blocked_by_claim(candidate, "other-agent", "2026-08-03T00:05:00Z");
+
+        assert_eq!(
+            monitor.agent_status(),
+            IssueMonitorAgentStatus {
+                queue: Vec::new(),
+                active_launches: Vec::new(),
+                max_active: 3,
+                enabled: true,
+                autonomous_mode: false,
+                has_launch_profile: false,
+            }
+        );
     }
 
     fn pending_arm_effect(

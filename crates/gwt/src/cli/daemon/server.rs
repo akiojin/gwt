@@ -342,6 +342,10 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
     } else {
         hub.take_issue_monitor_control_receiver()
     };
+    hub.set_issue_monitor_status(
+        serde_json::to_value(loaded.monitor.agent_status())
+            .expect("Issue Monitor agent status serializes"),
+    );
     tokio::spawn(async move {
         let LoadedDaemonIssueMonitorState {
             mut monitor,
@@ -3068,6 +3072,10 @@ fn scan_issue_monitor_once_blocking(
 }
 
 fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
+    hub.set_issue_monitor_status(
+        serde_json::to_value(monitor.agent_status())
+            .expect("Issue Monitor agent status serializes"),
+    );
     let gui_connected = issue_monitor_gui_connected(hub);
     publish_issue_monitor_daemon_payloads(
         hub,
@@ -3079,6 +3087,10 @@ fn publish_issue_monitor_read_only_payloads(
     hub: &BroadcastHub,
     monitor: &crate::IssueMonitorState,
 ) {
+    hub.set_issue_monitor_status(
+        serde_json::to_value(monitor.agent_status())
+            .expect("Issue Monitor agent status serializes"),
+    );
     publish_issue_monitor_daemon_payloads(
         hub,
         crate::issue_monitor_worker::issue_monitor_read_only_daemon_payloads(monitor),
@@ -3266,6 +3278,7 @@ async fn handle_connection(
                     uptime_seconds: started_at.elapsed().as_secs(),
                     broadcast_channels: hub.channel_count(),
                     connections: connection_guard.snapshot(),
+                    issue_monitor: hub.issue_monitor_status(),
                 };
                 if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
                     break;
