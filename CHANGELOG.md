@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.72.1] - 2026-08-03
+
+### Bug Fixes
+
+- **issue-monitor:** RecoveryBlocked fixture の同期を決定化
+
 ## [9.72.0] - 2026-08-03
 
 ### Bug Fixes
