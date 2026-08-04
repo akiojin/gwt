@@ -25,6 +25,20 @@ use gwt_github::{
     IssueNumber, SpecListFilter,
 };
 
+fn write_executable_fixture(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write executable fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .expect("executable fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make fixture executable");
+    }
+}
+
 fn sample_pr_status() -> PrStatus {
     PrStatus {
         number: 128,
@@ -600,18 +614,7 @@ fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
     let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
     let stable_hook_bin = temp.path().join("stable-gwtd");
-    fs::write(&stable_hook_bin, "test binary").expect("stable hook bin");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&stable_hook_bin)
-            .expect("stable hook bin metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&stable_hook_bin, permissions)
-            .expect("make stable hook bin executable");
-    }
+    write_executable_fixture(&stable_hook_bin, "test binary");
     let _hook_bin =
         crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
     gwt_skills::generate_settings_local(temp.path()).expect("claude hooks");
@@ -672,6 +675,10 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    let stable_hook_bin = temp.path().join("stable-gwtd");
+    write_executable_fixture(&stable_hook_bin, "test binary");
+    let _hook_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
     fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = serde_json::json!({
@@ -713,17 +720,7 @@ fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
     assert!(git_status.success());
     let local_bin = temp.path().join("target/debug/gwtd");
     fs::create_dir_all(local_bin.parent().expect("bin parent")).expect("bin dir");
-    fs::write(&local_bin, "local").expect("local bin");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&local_bin)
-            .expect("local bin metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&local_bin, permissions).expect("make local bin executable");
-    }
+    write_executable_fixture(&local_bin, "local");
     fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     let joined = std::env::join_paths(
