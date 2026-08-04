@@ -19242,6 +19242,9 @@ fn app_runtime_active_work_projection_includes_managed_hook_health() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    let stable = temp.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&repo).expect("generate codex hooks");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
