@@ -24562,6 +24562,18 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
             chrono::Utc::now(),
         );
         event.title = Some(format!("Process-free work {index}"));
+        if index == 0 {
+            let session_id = "session-process-free-projection";
+            event.agent_session_id = Some(session_id.to_string());
+            event.agent_id = Some("codex".to_string());
+            let mut session =
+                gwt_agent::Session::new(&worktree_path, &branch, gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.project_state_root = Some(repo.clone());
+            session
+                .save(&gwt_core::paths::gwt_sessions_dir())
+                .expect("save projection Session fixture");
+        }
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some(branch),
@@ -24601,6 +24613,34 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
             .all(|work| work.cleanup_candidate.is_some()),
         "clean background caches keep every merged row cleanup-ready"
     );
+    let diagnoses = view
+        .active_works
+        .iter()
+        .flat_map(|workspace| workspace.works.iter())
+        .filter_map(|work| work.execution_diagnosis.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        !diagnoses.is_empty(),
+        "projection keeps durable diagnosis facts"
+    );
+    for diagnosis in diagnoses {
+        for protected in [
+            "execution.continue",
+            "execution.repair",
+            "execution.adopt",
+            "execution.reopen",
+            "workspace.update",
+            "workspace.ensure",
+        ] {
+            assert!(
+                !diagnosis
+                    .available_recoveries
+                    .iter()
+                    .any(|operation| operation == protected),
+                "projection must not advertise unvalidated protected recovery {protected}"
+            );
+        }
+    }
     let invocations = fs::read_to_string(&git_log).unwrap_or_default();
     assert!(
         invocations.trim().is_empty(),
@@ -36633,6 +36673,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
             settlement_severity: "warning".to_string(),
             settlement_obligation_open: true,
             open_obligations: vec!["user_verification".to_string()],
+            recovery_probes: Vec::new(),
             available_recoveries: vec!["verify.run".to_string(), "execution.reopen".to_string()],
             warnings: vec!["Host status is temporarily unavailable".to_string()],
         },
