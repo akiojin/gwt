@@ -556,6 +556,43 @@ test("a search-correlated legacy error is silent degradation without retry (T-95
   });
 });
 
+test("a typed non-semantic search error remains visible (T-951 guard)", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_error",
+      id: "win-1",
+      knowledge_kind: "issue",
+      request_id: requestId,
+      query: "alpha",
+      error_domain: "non_semantic",
+      message: "failed to read issue cache",
+    });
+
+    assert.equal(
+      state.error,
+      "failed to read issue cache",
+      "cache and window failures must keep the visible error channel",
+    );
+    assert.equal(state.searchInFlight, false, "in-flight ownership is released");
+    assert.equal(
+      timers.filter(
+        (timer) =>
+          !timer.cleared &&
+          !timer.fired &&
+          [5000, 10000, 20000, 30000].includes(timer.delay),
+      ).length,
+      0,
+      "non-semantic failures must not start the semantic retry ladder",
+    );
+  });
+});
+
 test("non-semantic knowledge errors remain visible (T-951 guard)", async () => {
   const mod = await importSurfaceModule();
   const sent = [];
@@ -665,6 +702,7 @@ test("SEARCH_UNAVAILABLE is the second exact typed transient code", async () => 
         semantic_retry: {
           error_code: "SEARCH_UNAVAILABLE",
           retryable: true,
+          retry_after_ms: 5000,
         },
       }),
     );
@@ -1002,11 +1040,44 @@ test("disconnect while a request is in flight restarts the same live query at 5s
   });
 });
 
+test("disconnect after a completed search does not create a semantic retry window", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
+    assert.equal(state.searchInFlight, false);
+    assert.equal(state.semanticRetryActive, false);
+
+    surface.handleKnowledgeTransportChange(false);
+    surface.handleKnowledgeTransportChange(true);
+
+    assert.equal(
+      timers.filter((timer) => !timer.cleared && !timer.fired && timer.delay === 5000).length,
+      0,
+      "a successful idle query must not become a reconnect retry owner",
+    );
+    assert.equal(sent.length, 1, "reconnect must not replay a completed query");
+  });
+});
+
 for (const semanticRetry of [
   { error_code: "SEARCH_FAILED", retryable: false },
   { error_code: "SEARCH_FAILED", retryable: true },
   { error_code: "INDEX_NOT_READY", retryable: false },
   { error_code: "FUTURE_CODE", retryable: true },
+  { error_code: "INDEX_NOT_READY", retryable: true },
+  { error_code: "INDEX_NOT_READY", retryable: true, retry_after_ms: 0 },
+  { error_code: "INDEX_NOT_READY", retryable: true, retry_after_ms: 30000 },
+  { error_code: "INDEX_NOT_READY", retryable: true, retry_after_ms: "5000" },
+  {
+    error_code: "INDEX_NOT_READY",
+    retryable: true,
+    retry_after_ms: 5000,
+    reason: "must stay backend-only",
+  },
   { retryable: true },
   "INDEX_NOT_READY",
 ]) {
@@ -1125,6 +1196,79 @@ test("PR selection retains the baseline full-render/full-view contract", async (
     } finally {
       globalThis.document = originalDocument;
     }
+  });
+});
+
+test("a newer PR refresh rejects a late selection full-view completion", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent, "pr", {
+      knowledgeKindForPreset: () => "pr",
+    });
+    const state = surface.ensureKnowledgeBridgeState("win-1", "pr");
+    state.entries = [ROW_A, ROW_B];
+    state.baseEntries = [ROW_A, ROW_B];
+    state.selectedNumber = ROW_A.number;
+    state.detail = detailFor(ROW_A, "Alpha PR body");
+    state.refreshEnabled = true;
+
+    surface.requestKnowledgeDetail("win-1", "pr", ROW_B.number);
+    const selectionRequestId = sent.at(-1).request_id;
+    surface.requestKnowledgeBridge("win-1", "pr", true);
+    const refreshRequestId = sent.at(-1).request_id;
+    assert.notEqual(refreshRequestId, selectionRequestId);
+
+    const refreshedRowB = { ...ROW_B, title: "Beta from newer refresh" };
+    const refreshedDetail = detailFor(refreshedRowB, "Fresh PR body");
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_entries",
+      id: "win-1",
+      knowledge_kind: "pr",
+      request_id: refreshRequestId,
+      entries: [ROW_A, refreshedRowB],
+      selected_number: ROW_B.number,
+      empty_message: "",
+      refresh_enabled: true,
+    });
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail",
+      id: "win-1",
+      knowledge_kind: "pr",
+      request_id: refreshRequestId,
+      detail: refreshedDetail,
+    });
+
+    const staleRowB = { ...ROW_B, title: "STALE selection snapshot" };
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_entries",
+      id: "win-1",
+      knowledge_kind: "pr",
+      request_id: selectionRequestId,
+      entries: [staleRowB],
+      selected_number: ROW_B.number,
+      empty_message: "",
+      refresh_enabled: true,
+    });
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail",
+      id: "win-1",
+      knowledge_kind: "pr",
+      request_id: selectionRequestId,
+      detail: detailFor(staleRowB, "STALE PR body"),
+    });
+
+    assert.deepEqual(
+      state.baseEntries.map((entry) => entry.title),
+      [ROW_A.title, refreshedRowB.title],
+      "the superseded PR selection must not overwrite the newer refresh list",
+    );
+    assert.equal(state.detail?.title, refreshedRowB.title);
+    assert.ok(
+      state.detail.sections.some((section) => section.body === "Fresh PR body"),
+      "the superseded PR detail must not overwrite the newer refresh detail",
+    );
+    surface.clearKnowledgeBridgeState("win-1");
   });
 });
 

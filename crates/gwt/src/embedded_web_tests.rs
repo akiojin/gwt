@@ -2468,10 +2468,19 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
                 .next()
         })
         .expect("knowledge load request block");
+    let pr_compatibility_block = load_request_block
+        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n        }").next())
+        .expect("PR compatibility reset block");
     assert!(
         load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
-            && !load_request_block.contains("state.detailRequestId = 0;"),
-        "expected cache refresh to preserve an independently correlated explicit detail request",
+            && load_request_block
+                .matches("state.detailRequestId = 0;")
+                .count()
+                == 1
+            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
+        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),

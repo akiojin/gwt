@@ -432,6 +432,12 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
+        if (normalizeKnowledgeKind(state.kind) === "pr") {
+          // PR selection still completes through the legacy full-view path.
+          // A newer PR load supersedes that selection owner just as it did
+          // before Issue/SPEC detail requests gained independent ownership.
+          state.detailRequestId = 0;
+        }
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -581,6 +587,23 @@ export function createKnowledgeKanbanSurface({
         return normalizeKnowledgeKind(kind) === "issue";
       }
 
+      function isKnowledgeSemanticRetryDirective(value) {
+        if (typeof value !== "object" || value === null) {
+          return false;
+        }
+        const fields = Object.keys(value);
+        return (
+          fields.length === 3 &&
+          Object.prototype.hasOwnProperty.call(value, "error_code") &&
+          Object.prototype.hasOwnProperty.call(value, "retryable") &&
+          Object.prototype.hasOwnProperty.call(value, "retry_after_ms") &&
+          value.retryable === true &&
+          value.retry_after_ms === 5000 &&
+          (value.error_code === "INDEX_NOT_READY" ||
+            value.error_code === "SEARCH_UNAVAILABLE")
+        );
+      }
+
       // SPEC #3170 FR-099: fixed silent retry ladder for typed transient
       // semantic failures — 5s, 10s, 20s, 30s, then 30s indefinitely.
       const KNOWLEDGE_SEMANTIC_RETRY_DELAYS = [5000, 10000, 20000, 30000];
@@ -705,7 +728,12 @@ export function createKnowledgeKanbanSurface({
           }
           if (!online) {
             const query = state.query.trim();
-            const wasActive = Boolean(query);
+            const wasActive = Boolean(query) && Boolean(
+              state.semanticRetryActive ||
+              state.searchInFlight ||
+              state.inFlightSearchIntent ||
+              state.pendingSearchTimer !== null
+            );
             const wasTyped = state.semanticRetryTyped === true;
             if (state.pendingSearchTimer !== null) {
               clearTimeout(state.pendingSearchTimer);
@@ -713,7 +741,7 @@ export function createKnowledgeKanbanSurface({
             }
             invalidateKnowledgeSemanticRetry(state);
             state.semanticRetryActive = wasActive;
-            state.semanticRetryTyped = wasTyped;
+            state.semanticRetryTyped = wasActive && wasTyped;
             state.searchGeneration = (state.searchGeneration || 0) + 1;
             state.searchIntentKind = normalizeKnowledgeKind(state.kind);
             state.searchIntentQuery = query;
@@ -2316,11 +2344,7 @@ export function createKnowledgeKanbanSurface({
             const directive = event.semantic_retry;
             const transientDirective =
               isSilentSemanticKind(activeIntent.kind) &&
-              typeof directive === "object" &&
-              directive !== null &&
-              directive.retryable === true &&
-              (directive.error_code === "INDEX_NOT_READY" ||
-                directive.error_code === "SEARCH_UNAVAILABLE");
+              isKnowledgeSemanticRetryDirective(directive);
             if (transientDirective) {
               state.semanticRetryTyped = true;
               scheduleKnowledgeSemanticRetry(
@@ -2466,10 +2490,13 @@ export function createKnowledgeKanbanSurface({
               state.queuedSearchIntent = null;
               state.queuedSearchQuery = "";
               state.searching = false;
-              if (isSilentSemanticKind(activeIntent.kind)) {
+              invalidateKnowledgeSemanticRetry(state);
+              if (
+                isSilentSemanticKind(activeIntent.kind) &&
+                event.error_domain !== "non_semantic"
+              ) {
                 // Legacy/untyped semantic failures are deliberately silent
                 // and never start the typed indefinite retry ladder.
-                invalidateKnowledgeSemanticRetry(state);
                 renderKnowledgeStatusOnly(event.id, state);
               } else {
                 state.error = event.message;
