@@ -6508,7 +6508,7 @@ exit 1
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
-        fs::create_dir_all(&home).expect("create gwt home");
+        fs::create_dir_all(&home).expect("create isolated gwt home");
         let _home = ScopedGwtHome::set(&home);
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -6533,6 +6533,14 @@ exit 1
             "2026-07-28T00:00:00Z",
         ));
         crate::save_issue_monitor_prefs(&prefs_path, &seeded.prefs()).expect("seed delivery");
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .expect("read seeded delivery")
+                .pending_launch_deliveries
+                .len(),
+            1,
+            "fixture must persist one durable launch delivery before either daemon starts",
+        );
         let authority_owner = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),

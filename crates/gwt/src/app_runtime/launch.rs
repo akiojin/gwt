@@ -4199,10 +4199,10 @@ mod agent_endpoint_env_tests {
         }
     }
 
-    fn init_execution_repo(repo: &Path) {
+    fn init_execution_repo(repo: &Path, branch: &str) {
         std::fs::create_dir_all(repo).expect("create execution repository");
         for args in [
-            vec!["init", "-q"],
+            vec!["init", "-q", "-b", branch],
             vec![
                 "remote",
                 "add",
@@ -4232,7 +4232,7 @@ mod agent_endpoint_env_tests {
 
     fn persisted_execution_launch(home: &Path) -> PersistedExecutionLaunch {
         let project = home.join("project");
-        init_execution_repo(&project);
+        init_execution_repo(&project, "work/issue-2359");
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let owner = gwt::cli::execution_state::ExecutionOwnerKey {
             kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
@@ -5047,7 +5047,7 @@ mod agent_endpoint_env_tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let project = home.path().join("project");
-        init_execution_repo(&project);
+        init_execution_repo(&project, "work/issue-1974");
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let owner = gwt::cli::execution_state::ExecutionOwnerKey {
             kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
