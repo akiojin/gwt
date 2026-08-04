@@ -1868,6 +1868,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         }
     }
 
@@ -2638,6 +2639,7 @@ mod tests {
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
+            pm_sessions: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),

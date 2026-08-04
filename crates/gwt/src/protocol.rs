@@ -221,6 +221,12 @@ pub enum FrontendEvent {
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
+    /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
+    /// resident PM pane if it is not running, then frames it in the viewport.
+    OpenPmAgent {
+        #[serde(default)]
+        bounds: Option<WindowGeometry>,
+    },
     OpenProjectDialog,
     SelectCloneProjectParent,
     GithubRepositorySearch {

@@ -372,6 +372,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let tabs = std::mem::take(&mut self.pending_startup_pm_tabs);
+        tracing::info!(tabs = tabs.len(), "PM ensure: canvas ready, draining queue");
         let mut events = Vec::new();
         for tab_id in tabs {
             events.extend(self.ensure_pm_agent_for_tab(&tab_id));

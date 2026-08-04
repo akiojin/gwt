@@ -38,14 +38,30 @@ impl AppRuntime {
     /// when the durable session is still materializable, and otherwise
     /// performs a fresh silent spawn. Never spawns implementation agents.
     pub(crate) fn ensure_pm_agent_for_tab(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        self.ensure_pm_agent_for_tab_with_bounds(tab_id, None)
+    }
+
+    /// [`Self::ensure_pm_agent_for_tab`] with the caller's visible canvas
+    /// bounds, so an existing PM is framed in the viewport (FR-019).
+    pub(crate) fn ensure_pm_agent_for_tab_with_bounds(
+        &mut self,
+        tab_id: &str,
+        canvas_bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
         #[cfg(test)]
         if !test_gate::PM_ENSURE_ENABLED.with(|cell| cell.get()) {
             return Vec::new();
         }
         let Some(tab) = self.tab(tab_id) else {
+            tracing::info!(tab_id, "PM ensure skipped: no such tab");
             return Vec::new();
         };
         if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
+            tracing::info!(
+                tab_id,
+                migration_pending = tab.migration_pending,
+                "PM ensure skipped: tab is not a migration-clear Git project"
+            );
             return Vec::new();
         }
         let project_root = tab.project_root.clone();
@@ -61,14 +77,25 @@ impl AppRuntime {
                 return Vec::new();
             }
         };
+        self.sync_pm_session_cache(&project_root, prefs.registration.as_ref());
         if !prefs.settings.auto_start {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM ensure skipped: auto_start is opted out for this project"
+            );
             return Vec::new();
         }
         let Some(registration) = prefs.registration else {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM ensure: no registration yet, spawning the resident PM"
+            );
             return self.spawn_pm_agent(tab_id, &project_root);
         };
         if let Some(window_id) = self.live_pm_window_id(&registration.session_id) {
-            return self.focus_existing_live_work_agent_events(&window_id, None);
+            // FR-019: the PM launcher must always land the user on the PM, so
+            // focusing frames it in the viewport rather than only raising it.
+            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
         }
         // FR-003 crash-loop damper: while the backoff floor is in the future
         // the ensure gate must not respawn; the next project open (or manual
@@ -153,9 +180,28 @@ impl AppRuntime {
                     "PM launch completed while another live PM is registered; keeping existing"
                 );
             }
-            Ok(_) => {}
+            Ok((prefs, _)) => {
+                self.sync_pm_session_cache(project_root, prefs.registration.as_ref());
+            }
             Err(error) => {
                 tracing::warn!(%error, "failed to write PM registration after launch");
+            }
+        }
+    }
+
+    /// Keep the per-broadcast PM marker in step with the durable record.
+    fn sync_pm_session_cache(
+        &mut self,
+        project_root: &Path,
+        registration: Option<&PmRegistration>,
+    ) {
+        match registration {
+            Some(registration) => {
+                self.pm_sessions
+                    .insert(project_root.to_path_buf(), registration.session_id.clone());
+            }
+            None => {
+                self.pm_sessions.remove(project_root);
             }
         }
     }
@@ -173,6 +219,7 @@ impl AppRuntime {
         match pm_registry::deregister_pm(&prefs_path, session_id) {
             Ok((_, true)) => {
                 tracing::info!(%session_id, "PM pane closed; registration cleared");
+                self.sync_pm_session_cache(project_root, None);
                 Self::cleanup_pm_worktree(project_root);
             }
             Ok((_, false)) => {}

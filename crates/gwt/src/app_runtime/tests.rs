@@ -1110,6 +1110,7 @@ fn sample_window(
         tab_group_id: None,
         tab_group_active: false,
         session_id: None,
+        is_pm: false,
     }
 }
 
@@ -3055,6 +3056,7 @@ fn sample_runtime_with_events(
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
         pending_pm_launches: HashMap::new(),
+        pm_sessions: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
@@ -40366,4 +40368,99 @@ fn pm_close_removes_clean_pm_worktree_and_keeps_dirty_one() {
         !pm_worktree.exists(),
         "a clean PM worktree is reaped when the PM deregisters"
     );
+}
+
+#[test]
+fn workspace_view_marks_only_the_registered_pm_window() {
+    // SPEC-3431 FR-020: the frontend needs to tell the PM window apart from
+    // ordinary agent windows, and the marker must follow the durable
+    // registration — never a stale persisted flag.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let mut persisted = empty_workspace_state();
+    let mut pm_window = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+    pm_window.session_id = Some("pm-session".to_string());
+    let mut other_window =
+        sample_window("agent-2", WindowPreset::Agent, WindowProcessStatus::Running);
+    other_window.session_id = Some("worker-session".to_string());
+    persisted.windows = vec![pm_window, other_window];
+
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let before = runtime.workspace_view_for_tab(runtime.tab("tab-1").expect("tab"));
+    assert!(
+        before.windows.iter().all(|window| !window.is_pm),
+        "no registration means no PM window"
+    );
+
+    runtime
+        .pm_sessions
+        .insert(repo.clone(), "pm-session".to_string());
+
+    let view = runtime.workspace_view_for_tab(runtime.tab("tab-1").expect("tab"));
+    let marked: Vec<&str> = view
+        .windows
+        .iter()
+        .filter(|window| window.is_pm)
+        .map(|window| window.id.as_str())
+        .collect();
+    assert_eq!(
+        marked,
+        vec!["tab-1::agent-1"],
+        "exactly the registered PM session's window is marked"
+    );
+}
+
+#[test]
+fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
+    // SPEC-3431 FR-018/FR-019: the launcher event must reach the ensure gate
+    // for the ACTIVE tab and carry the caller's canvas bounds so an existing
+    // PM gets framed rather than merely raised.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenPmAgent {
+            bounds: Some(canvas_bounds()),
+        },
+    );
+
+    assert!(!events.is_empty(), "the launcher must produce events");
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "the launcher started the PM pane");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert_eq!(runtime.pending_pm_launches.len(), 1);
 }

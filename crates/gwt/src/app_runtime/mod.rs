@@ -656,6 +656,11 @@ pub struct AppRuntime {
     /// entry is consumed by `handle_launch_complete`, which writes the PM
     /// registration once the session id exists.
     pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
+    /// SPEC-3431 FR-020/FR-021: project root -> registered PM session id.
+    /// A read-through cache of `pm.json` so the per-broadcast window view can
+    /// mark the PM window without touching disk on every render. Refreshed
+    /// wherever the registration is read or written.
+    pub(crate) pm_sessions: HashMap<PathBuf, String>,
     /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
     /// runs once the frontend reports canvas bounds (same deferral rule as
     /// startup auto-resume — agent panes never spawn before the canvas is
@@ -1269,6 +1274,7 @@ impl AppRuntime {
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
+            pm_sessions: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
@@ -3570,6 +3576,14 @@ impl AppRuntime {
             FrontendEvent::StartupAutoResumeReady { bounds } => {
                 self.startup_auto_resume_ready_events(bounds)
             }
+            // SPEC-3431 FR-018/FR-019: one click always lands the user on the
+            // PM — existing pane gets framed, a missing one is started first.
+            FrontendEvent::OpenPmAgent { bounds } => {
+                let Some(tab_id) = self.active_tab_id.clone() else {
+                    return Vec::new();
+                };
+                self.ensure_pm_agent_for_tab_with_bounds(&tab_id, bounds)
+            }
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
             FrontendEvent::SelectCloneProjectParent => {
                 self.select_clone_project_parent_events(&client_id)
@@ -4820,6 +4834,15 @@ impl AppRuntime {
                 .map(|mut window| {
                     let raw_id = window.id.clone();
                     window.id = combined_window_id(&tab.id, &raw_id);
+                    // SPEC-3431 FR-020: mark the resident PM window so the
+                    // frontend can give it distinct chrome and target it from
+                    // the PM launcher.
+                    window.is_pm =
+                        self.pm_sessions
+                            .get(&tab.project_root)
+                            .is_some_and(|pm_session| {
+                                window.session_id.as_deref() == Some(pm_session.as_str())
+                            });
                     window.lane_kind = self
                         .active_agent_sessions
                         .get(&window.id)

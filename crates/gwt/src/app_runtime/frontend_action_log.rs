@@ -701,6 +701,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::IssueMonitorConfigureProfile => {
             FrontendUserActionLog::new("issue_monitor_configure_profile", "issue_monitor")
         }
+        // SPEC-3431 FR-018: the PM launcher is a deliberate user action worth
+        // logging; its payload is only optional canvas bounds.
+        FrontendEvent::OpenPmAgent { .. } => FrontendUserActionLog::new("open_pm_agent", "pm"),
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
