@@ -423,11 +423,7 @@ hooks_auto_accept: true
 }
 
 fn hermes_hook_script_content(bin: &str, self_improvement_stop: bool) -> String {
-    let bin = bin
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`");
+    let bin = posix_shell_quote(bin);
     let self_improvement_block = if self_improvement_stop {
         r#"self_output=""
 if [ "$event" = "on_session_end" ]; then
@@ -444,7 +440,10 @@ fi
     r#"#!/bin/sh
 set -eu
 
-gwt_bin="${GWT_BIN_PATH:-__GWT_HOOK_BIN__}"
+gwt_bin="${GWT_BIN_PATH:-}"
+if [ -z "$gwt_bin" ]; then
+  gwt_bin=__GWT_HOOK_BIN__
+fi
 
 event="${1:-}"
 if [ -z "$event" ]; then
@@ -677,10 +676,10 @@ mod runtime_resolution_tests {
         let content = hermes_hook_script_content(FALLBACK, true);
 
         assert!(
-            content
-                .contains("gwt_bin=\"${GWT_BIN_PATH:-/Applications/GWT.app/Contents/MacOS/gwtd}\""),
+            content.contains("gwt_bin=\"${GWT_BIN_PATH:-}\""),
             "Hermes bridge must resolve GWT_BIN_PATH first: {content}"
         );
+        assert!(content.contains("gwt_bin='/Applications/GWT.app/Contents/MacOS/gwtd'"));
         assert!(content.contains("\"$gwt_bin\" hook provider-event"));
         assert!(content.contains("\"$gwt_bin\" hook gwt-self-improvement-stop"));
     }
@@ -705,6 +704,51 @@ mod runtime_resolution_tests {
             .unwrap();
 
         assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_bridge_invokes_brace_paths_for_runtime_and_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_hook_bin(path: &Path, marker: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_bin = dir.path().join("runtime}").join("gwtd");
+        let fallback_bin = dir.path().join("fallback}").join("gwtd");
+        write_hook_bin(&runtime_bin, "runtime");
+        write_hook_bin(&fallback_bin, "fallback");
+
+        let script = dir.path().join("gwt-hook.sh");
+        fs::write(
+            &script,
+            hermes_hook_script_content(&fallback_bin.to_string_lossy(), false),
+        )
+        .unwrap();
+
+        let runtime = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env("GWT_BIN_PATH", &runtime_bin)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run runtime-selected Hermes hook");
+        assert!(runtime.status.success());
+        assert_eq!(String::from_utf8_lossy(&runtime.stdout).trim(), "runtime");
+
+        let fallback = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env_remove("GWT_BIN_PATH")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run fallback-selected Hermes hook");
+        assert!(fallback.status.success());
+        assert_eq!(String::from_utf8_lossy(&fallback.stdout).trim(), "fallback");
     }
 
     #[test]

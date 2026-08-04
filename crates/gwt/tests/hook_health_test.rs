@@ -1,6 +1,6 @@
 //! SPEC #1935 Phase 22 — managed hook health read model tests.
 
-use std::fs;
+use std::{fs, path::Path};
 
 use gwt::cli::hook::{
     health::{
@@ -35,16 +35,42 @@ impl Drop for ScopedEnvVar {
     }
 }
 
+struct StableHookBinGuard {
+    _tempdir: tempfile::TempDir,
+    _env: ScopedEnvVar,
+    path: std::path::PathBuf,
+}
+
+impl StableHookBinGuard {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 fn env_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-fn stable_hook_bin_guard(worktree: &std::path::Path) -> ScopedEnvVar {
-    let stable = worktree.join("stable/gwtd");
-    fs::create_dir_all(stable.parent().expect("stable parent")).unwrap();
+fn stable_hook_bin_guard() -> StableHookBinGuard {
+    let tempdir = tempfile::tempdir().expect("stable hook bin root");
+    let stable = tempdir
+        .path()
+        .join(if cfg!(windows) { "gwtd.exe" } else { "gwtd" });
     fs::write(&stable, "stable").unwrap();
-    ScopedEnvVar::set("GWT_HOOK_BIN", stable)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&stable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stable, permissions).unwrap();
+    }
+    let env = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    StableHookBinGuard {
+        _tempdir: tempdir,
+        _env: env,
+        path: stable,
+    }
 }
 
 #[test]
@@ -53,7 +79,7 @@ fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let _hook_bin = stable_hook_bin_guard(worktree.path());
+    let _hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
     let runtime_path = worktree.path().join("runtime-state.json");
@@ -78,7 +104,7 @@ fn managed_hook_health_defaults_to_the_session_runtime_path() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let _hook_bin = stable_hook_bin_guard(worktree.path());
+    let _hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
     let runtime_path = worktree.path().join("runtime-state.json");
@@ -98,7 +124,7 @@ fn managed_hook_health_waits_for_first_event_when_session_start_is_delayed() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let _hook_bin = stable_hook_bin_guard(worktree.path());
+    let _hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
     let runtime_path = worktree.path().join("runtime-state.json");
@@ -121,7 +147,7 @@ fn managed_hook_health_tolerates_legacy_runtime_state_with_null_source_event() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let _hook_bin = stable_hook_bin_guard(worktree.path());
+    let _hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
     let runtime_path = worktree.path().join("runtime-state.json");
@@ -157,7 +183,7 @@ fn managed_hook_health_projects_pending_discussion_and_goal() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let _hook_bin = stable_hook_bin_guard(worktree.path());
+    let _hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
     let runtime_path = worktree.path().join("runtime-state.json");
@@ -236,6 +262,54 @@ fn managed_hook_health_detects_missing_managed_configs_and_repair_recreates_them
 
     assert!(outcome.repaired);
     assert!(worktree.path().join(".codex/hooks.json").exists());
+}
+
+#[test]
+fn managed_hook_health_detects_missing_provider_artifacts_and_repair_recreates_them() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let _hook_bin = stable_hook_bin_guard();
+    let providers = [
+        (".gwt/opencode", ".gwt/opencode/plugins/gwt-hooks.js"),
+        (
+            ".gwt/openclaw",
+            ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+        ),
+        (".gwt/hermes", ".gwt/hermes/agent-hooks/gwt-hook.sh"),
+    ];
+    for (root, _) in providers {
+        fs::create_dir_all(worktree.path().join(root)).expect("provider root");
+    }
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(worktree.path())
+            .with_runtime_state_path(worktree.path().join("missing-runtime-state.json")),
+    );
+
+    assert_eq!(health.status, ManagedHookHealthStatus::NeedsAttention);
+    for (_, artifact) in providers {
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config missing")
+                    && issue.contains(artifact)),
+            "missing {artifact} health evidence: {:?}",
+            health.issues
+        );
+    }
+
+    let outcome = repair_managed_hook_configs(worktree.path()).expect("repair");
+
+    assert!(outcome.repaired);
+    for (_, artifact) in providers {
+        assert!(
+            worktree.path().join(artifact).is_file(),
+            "repair did not recreate {artifact}"
+        );
+    }
 }
 
 #[test]
@@ -359,20 +433,95 @@ fn managed_hook_health_understands_runtime_indirect_fallbacks() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let stable = worktree.path().join("stable/gwtd");
-    fs::create_dir_all(stable.parent().expect("stable parent")).unwrap();
-    fs::write(&stable, "stable").unwrap();
-    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    let hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
 
+    for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+        let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
+        assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
+        assert!(
+            rendered.contains(&hook_bin.path().display().to_string()),
+            "{artifact}: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&worktree.path().display().to_string()),
+            "{artifact} persisted the tested worktree: {rendered}"
+        );
+    }
+
     let health = read_managed_hook_health(
         &ManagedHookHealthInput::new(worktree.path())
-            .with_expected_hook_bin(stable.display().to_string()),
+            .with_runtime_state_path(worktree.path().join("missing-runtime-state.json"))
+            .with_expected_hook_bin(hook_bin.path().display().to_string()),
     );
 
     assert_ne!(health.status, ManagedHookHealthStatus::Degraded);
     assert!(health.issues.is_empty(), "{:?}", health.issues);
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_hook_health_reports_non_executable_absolute_runtime_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let fallback_root = tempfile::tempdir().expect("fallback root");
+    let fallback = fallback_root.path().join("gwtd");
+    fs::write(&fallback, "not executable").unwrap();
+    let mut permissions = fs::metadata(&fallback).unwrap().permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(&fallback, permissions).unwrap();
+    let hooks_path = worktree.path().join(".codex/hooks.json");
+    fs::create_dir_all(hooks_path.parent().expect("hooks parent")).unwrap();
+    let hooks = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+    ]
+    .into_iter()
+    .map(|event| {
+        (
+            event.to_string(),
+            json!([{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!(
+                        "gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event {event}",
+                        fallback.display()
+                    )
+                }]
+            }]),
+        )
+    })
+    .collect::<serde_json::Map<_, _>>();
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&json!({ "hooks": hooks })).unwrap(),
+    )
+    .unwrap();
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(worktree.path())
+            .with_runtime_state_path(worktree.path().join("missing-runtime-state.json"))
+            .with_expected_hook_bin(fallback.display().to_string()),
+    );
+
+    assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+    assert!(
+        health.issues.iter().any(|issue| {
+            issue.contains("binary not executable")
+                && issue.contains(&fallback.display().to_string())
+        }),
+        "{:?}",
+        health.issues
+    );
 }
 
 #[test]
@@ -484,6 +633,44 @@ fn managed_hook_health_audits_all_provider_bridge_artifacts() {
 }
 
 #[test]
+fn managed_hook_health_understands_all_provider_runtime_indirect_fallbacks() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let hook_bin = stable_hook_bin_guard();
+    gwt_skills::generate_opencode_hooks(worktree.path()).expect("OpenCode hooks");
+    gwt_skills::generate_openclaw_hooks(worktree.path()).expect("OpenClaw hooks");
+    gwt_skills::generate_hermes_hooks(worktree.path()).expect("Hermes hooks");
+
+    for artifact in [
+        ".gwt/opencode/plugins/gwt-hooks.js",
+        ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+        ".gwt/hermes/agent-hooks/gwt-hook.sh",
+    ] {
+        let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
+        assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
+        assert!(
+            rendered.contains(&hook_bin.path().display().to_string()),
+            "{artifact}: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&worktree.path().display().to_string()),
+            "{artifact} persisted the tested worktree: {rendered}"
+        );
+    }
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(worktree.path())
+            .with_runtime_state_path(worktree.path().join("missing-runtime-state.json"))
+            .with_expected_hook_bin(hook_bin.path().display().to_string()),
+    );
+
+    assert_ne!(health.status, ManagedHookHealthStatus::Degraded);
+    assert!(health.issues.is_empty(), "{:?}", health.issues);
+}
+
+#[test]
 fn managed_hook_health_reports_incomplete_codex_managed_entries() {
     let _env_lock = env_test_lock()
         .lock()
@@ -539,7 +726,7 @@ fn managed_hook_health_projects_slow_profile_records_without_hook_stdout_noise()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let worktree = tempfile::tempdir().expect("worktree");
-    let _hook_bin = stable_hook_bin_guard(worktree.path());
+    let _hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
     let runtime_path = worktree.path().join("runtime-state.json");

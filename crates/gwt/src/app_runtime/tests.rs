@@ -756,6 +756,22 @@ fn env_test_lock() -> &'static Mutex<()> {
     crate::env_test_lock()
 }
 
+fn write_executable_test_file(path: &Path, contents: &str) {
+    fs::create_dir_all(path.parent().expect("test executable parent"))
+        .expect("create test executable parent");
+    fs::write(path, contents).expect("write test executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .expect("test executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make test executable runnable");
+    }
+}
+
 fn fake_gh_test_lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -19268,8 +19284,7 @@ fn managed_hook_health_for_saved_row_ignores_ambient_session_runtime_state() {
     let worktree = temp.path().join("saved-worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let stable = temp.path().join("stable/gwtd");
-    fs::create_dir_all(stable.parent().expect("stable parent")).unwrap();
-    fs::write(&stable, "stable").unwrap();
+    write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
     let foreign_runtime_path = temp.path().join("foreign-runtime-state.json");
@@ -19295,8 +19310,7 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
     let worktree = temp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
     let stable = temp.path().join("stable/gwtd");
-    fs::create_dir_all(stable.parent().expect("stable parent")).unwrap();
-    fs::write(&stable, "stable").unwrap();
+    write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
     let sessions_dir = temp.path().join("sessions");
@@ -19434,8 +19448,7 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     let stable = root.path().join("stable/gwtd");
-    fs::create_dir_all(stable.parent().unwrap()).unwrap();
-    fs::write(&stable, "stable").unwrap();
+    write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
     let config = worktree.join(".codex/hooks.json");

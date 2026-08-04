@@ -627,18 +627,10 @@ fn workflow_policy_hook_command_with_bin(bin: &str, shell: HookShell) -> String 
 /// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
 /// by a single `gwtd hook runtime-state <event>` dispatch.
 fn posix_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
-    let fallback = posix_double_quoted_parameter_default(bin);
+    let fallback = posix_shell_quote(bin);
     format!(
-        "gwt_bin=\"${{GWT_BIN_PATH:-{fallback}}}\"; if command -v \"$gwt_bin\" >/dev/null 2>&1; then \"$gwt_bin\" hook event {event}; else true; fi"
+        "gwt_bin=\"${{GWT_BIN_PATH:-}}\"; if [ -z \"$gwt_bin\" ]; then gwt_bin={fallback}; fi; if command -v \"$gwt_bin\" >/dev/null 2>&1; then \"$gwt_bin\" hook event {event}; else true; fi"
     )
-}
-
-fn posix_double_quoted_parameter_default(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
 }
 
 #[cfg(test)]
@@ -910,6 +902,45 @@ mod tests {
             .expect("run managed event command");
 
         assert_eq!(status.code(), Some(2), "{command}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_managed_event_command_invokes_brace_paths_for_runtime_and_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_hook_bin(path: &Path, marker: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_bin = dir.path().join("runtime}").join("gwtd");
+        let fallback_bin = dir.path().join("fallback}").join("gwtd");
+        write_hook_bin(&runtime_bin, "runtime");
+        write_hook_bin(&fallback_bin, "fallback");
+
+        let command = event_hook_command_with_bin(
+            &fallback_bin.to_string_lossy(),
+            "SessionStart",
+            HookShell::Posix,
+        );
+        let runtime = hidden_command("sh")
+            .args(["-c", &command])
+            .env("GWT_BIN_PATH", &runtime_bin)
+            .output()
+            .expect("run runtime-selected hook command");
+        assert!(runtime.status.success(), "{command}");
+        assert_eq!(String::from_utf8_lossy(&runtime.stdout), "runtime");
+
+        let fallback = hidden_command("sh")
+            .args(["-c", &command])
+            .env_remove("GWT_BIN_PATH")
+            .output()
+            .expect("run fallback-selected hook command");
+        assert!(fallback.status.success(), "{command}");
+        assert_eq!(String::from_utf8_lossy(&fallback.stdout), "fallback");
     }
 
     #[test]
