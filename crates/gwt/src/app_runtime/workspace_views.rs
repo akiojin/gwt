@@ -1397,7 +1397,7 @@ fn workspace_execution_container_view_from_ref(
         pr_url: container.pr_url.clone(),
         pr_state: container.pr_state.clone(),
         diagnosis: container.worktree_path.as_deref().map(|worktree| {
-            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose(
+            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose_for_projection(
                 worktree, session_id,
             ))
         }),
@@ -2240,7 +2240,7 @@ fn active_workspace_child_work(work: &gwt::ActiveWorkItemView) -> gwt::ActiveWor
         close_blocked_reason,
         agents: work.agents.clone(),
         execution_diagnosis: work.worktree_path.as_deref().map(|worktree| {
-            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose(
+            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose_for_projection(
                 Path::new(worktree),
                 work.agents.first().map(|agent| agent.session_id.as_str()),
             ))

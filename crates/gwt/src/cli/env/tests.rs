@@ -200,30 +200,56 @@ match args.as_slice() {
 }
 
 fn with_fake_gh<T>(test: impl FnOnce(&Path) -> T) -> T {
-    let _lock = crate::cli::test_support::fake_gh_test_lock()
+    let env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fake_gh_lock = crate::cli::test_support::fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
     compile_fake_gh(temp.path());
 
-    let old_path = env::var_os("PATH");
+    let existing_path = env::var_os("PATH");
     let joined_path = env::join_paths(
         std::iter::once(PathBuf::from(temp.path()))
-            .chain(old_path.iter().flat_map(env::split_paths)),
+            .chain(existing_path.iter().flat_map(env::split_paths)),
     )
     .expect("join PATH");
-    env::set_var("PATH", joined_path);
 
     let repo_path = temp.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo");
-    let result = test(&repo_path);
+    let outcome = {
+        let _path = crate::cli::test_support::ScopedEnvVar::set("PATH", joined_path);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&repo_path)))
+    };
+    assert_eq!(
+        env::var_os("PATH"),
+        existing_path,
+        "fake gh helper must restore PATH before releasing the environment lock",
+    );
 
-    match old_path {
-        Some(value) => env::set_var("PATH", value),
-        None => env::remove_var("PATH"),
+    // Resume a callback panic only after releasing process-wide test locks so
+    // one negative-path assertion cannot poison unrelated parallel tests.
+    drop(fake_gh_lock);
+    drop(env_lock);
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
+}
 
-    result
+#[test]
+fn fake_gh_helper_restores_path_when_callback_panics() {
+    let outcome = std::panic::catch_unwind(|| {
+        with_fake_gh(|_| std::panic::panic_any("intentional fake-gh callback panic"));
+    });
+
+    let payload = outcome.expect_err("callback panic must be resumed");
+    assert_eq!(
+        payload.downcast_ref::<&'static str>().copied(),
+        Some("intentional fake-gh callback panic"),
+        "the original callback panic must escape after PATH restoration",
+    );
 }
 
 fn failing_factory(counter: Arc<AtomicUsize>) -> Arc<IssueClientFactory> {
