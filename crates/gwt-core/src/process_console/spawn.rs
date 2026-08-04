@@ -1045,7 +1045,7 @@ mod tests {
             (
                 "powershell".to_string(),
                 vec!["-NoProfile".to_string(), "-Command".to_string(), script],
-                Duration::from_secs(2),
+                WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
                 Duration::from_millis(1_200),
             )
         };
@@ -1655,12 +1655,12 @@ mod tests {
             "powershell",
             &args,
             SpawnOptions::new("test deadline tree windows"),
-            started + Duration::from_millis(2_000),
+            started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
         )
         .await
         .expect_err("long-running windows process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(started.elapsed() < WINDOWS_PROCESS_TREE_FIXTURE_BOUND);
 
         let descendant = wait_for_pid_file_windows(&descendant_file);
         wait_for_process_exit_windows(descendant);
@@ -1685,13 +1685,13 @@ mod tests {
             "powershell",
             &args,
             SpawnOptions::new("windows root exits before pipe descendant").forward_output(false),
-            started + Duration::from_secs(2),
+            started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
         )
         .await
         .expect_err("descendant-held pipe must keep collection pending until deadline");
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(started.elapsed() < WINDOWS_PROCESS_TREE_FIXTURE_BOUND);
         let descendant = wait_for_pid_file_windows(&descendant_file);
         wait_for_process_exit_windows(descendant);
     }
@@ -1743,9 +1743,29 @@ mod tests {
         wait_for_process_exit_windows(descendant);
     }
 
+    /// Absolute budget for the Windows process-tree fixtures.
+    ///
+    /// These fixtures must let PowerShell reach the statement that records the
+    /// descendant pid before the deadline reaps the Job, otherwise the test
+    /// cannot observe the tree it asserts on. Warm `powershell -NoProfile`
+    /// plus one `Start-Process` measured 1.66s median / 2.05s p95 / 2.10s max
+    /// under 24-way parallelism on the reference machine, so the previous 2s
+    /// budget sat on the p95 and flaked whenever the whole crate ran at once.
+    /// 15s keeps roughly a 7x margin for slower CI hosts; the fixtures run
+    /// concurrently with the rest of the suite, so the wall-clock cost is paid
+    /// once rather than once per fixture.
+    #[cfg(windows)]
+    const WINDOWS_PROCESS_TREE_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
+
+    /// Upper bound proving the deadline fired instead of the fixture running to
+    /// completion. Kept well above the budget so it never turns into a second,
+    /// tighter timing assertion.
+    #[cfg(windows)]
+    const WINDOWS_PROCESS_TREE_FIXTURE_BOUND: Duration = Duration::from_secs(60);
+
     #[cfg(windows)]
     fn wait_for_pid_file_windows(path: &std::path::Path) -> u32 {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             if let Some(pid) = std::fs::read_to_string(path)
                 .ok()
@@ -1755,7 +1775,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("descendant pid file was not written at {}", path.display());
+        panic!(
+            "descendant pid file was not written at {} - the fixture process              never reached its pid-recording statement",
+            path.display()
+        );
     }
 
     #[cfg(windows)]
