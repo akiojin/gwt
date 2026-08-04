@@ -19371,7 +19371,9 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
         gwt_skills::generate_openclaw_hooks(worktree).unwrap();
         gwt_skills::generate_hermes_hooks(worktree).unwrap();
     }
-    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", "");
+    let stable = root.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
 
     super::startup::self_heal_managed_hooks_in_worktrees([first.as_path(), second.as_path()]);
 
