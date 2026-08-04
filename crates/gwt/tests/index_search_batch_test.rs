@@ -572,8 +572,17 @@ fn non_blocking_stale_scope_keeps_verified_results_and_refresh_contract() {
     );
 }
 
+fn assert_safe_public_unavailable(error: &IndexSearchError) {
+    assert_eq!(
+        error,
+        &IndexSearchError::Other("project index search is temporarily unavailable".to_string())
+    );
+    assert_eq!(error.error_code(), None);
+    assert!(!error.retryable());
+}
+
 #[test]
-fn spawn_failure_maps_to_typed_retryable_search_unavailable_without_repair() {
+fn spawn_failure_maps_to_safe_legacy_public_error_without_repair() {
     let _env_lock = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -597,17 +606,9 @@ fn spawn_failure_maps_to_typed_retryable_search_unavailable_without_repair() {
         IndexSearchMatchMode::Semantic,
         false,
     )
-    .expect_err("a spawn failure must surface as a typed error");
+    .expect_err("a spawn failure must surface through the legacy public error");
 
-    assert_eq!(
-        error.error_code(),
-        Some("SEARCH_UNAVAILABLE"),
-        "spawn failure must map to typed SEARCH_UNAVAILABLE (FR-097): {error:?}"
-    );
-    assert!(
-        error.retryable(),
-        "SEARCH_UNAVAILABLE is retryable: {error:?}"
-    );
+    assert_safe_public_unavailable(&error);
     std::thread::sleep(Duration::from_millis(500));
     assert!(
         rebuild_invocations(&fixture.runner_log, "--action index-").is_empty(),
@@ -617,7 +618,7 @@ fn spawn_failure_maps_to_typed_retryable_search_unavailable_without_repair() {
 }
 
 #[test]
-fn unstructured_runner_termination_maps_to_typed_retryable_search_unavailable() {
+fn unstructured_runner_termination_maps_to_safe_legacy_public_error() {
     let _env_lock = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -632,17 +633,9 @@ fn unstructured_runner_termination_maps_to_typed_retryable_search_unavailable() 
         IndexSearchMatchMode::Semantic,
         false,
     )
-    .expect_err("an unstructured runner termination must surface as a typed error");
+    .expect_err("an unstructured termination must surface through the public error");
 
-    assert_eq!(
-        error.error_code(),
-        Some("SEARCH_UNAVAILABLE"),
-        "unstructured termination must map to typed SEARCH_UNAVAILABLE: {error:?}"
-    );
-    assert!(
-        error.retryable(),
-        "transport faults are retryable: {error:?}"
-    );
+    assert_safe_public_unavailable(&error);
     std::thread::sleep(Duration::from_millis(500));
     assert!(
         rebuild_invocations(&fixture.runner_log, "--action index-").is_empty(),
@@ -718,7 +711,7 @@ fn runner_deadline_expiry_maps_to_search_unavailable_and_reaps_process_tree() {
         IndexSearchMatchMode::Semantic,
         false,
     )
-    .expect_err("a runner that outlives its deadline must surface as a typed error");
+    .expect_err("a runner that outlives its deadline must surface as a public error");
     let elapsed = started.elapsed();
 
     assert!(
@@ -726,12 +719,7 @@ fn runner_deadline_expiry_maps_to_search_unavailable_and_reaps_process_tree() {
         "the interactive attempt must stop at the deadline instead of \
          waiting for the runner (FR-103), took {elapsed:?}"
     );
-    assert_eq!(
-        error.error_code(),
-        Some("SEARCH_UNAVAILABLE"),
-        "deadline expiry must map to typed SEARCH_UNAVAILABLE: {error:?}"
-    );
-    assert!(error.retryable(), "deadline expiry is retryable: {error:?}");
+    assert_safe_public_unavailable(&error);
 
     // FR-103: the complete process tree — including the descendant the
     // runner backgrounded — must be terminated and reaped by the deadline.

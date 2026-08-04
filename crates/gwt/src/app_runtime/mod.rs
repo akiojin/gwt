@@ -282,9 +282,20 @@ pub enum DispatchTarget {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum KnowledgeWireMetadata {
+    SemanticRetry(gwt::KnowledgeSemanticRetry),
+    NonSemanticError,
+}
+
+#[derive(Debug, Clone)]
 pub struct OutboundEvent {
     pub(crate) target: DispatchTarget,
     pub(crate) event: BackendEvent,
+    /// SPEC #1939 FR-407 / SPEC #3170 FR-098: private wire-only metadata for
+    /// semantic retry directives and explicitly non-semantic search errors.
+    /// Keeping it outside the public `BackendEvent` preserves the baseline
+    /// Rust construction/destructuring shape.
+    pub(crate) knowledge_wire_metadata: Option<KnowledgeWireMetadata>,
 }
 
 pub(crate) enum AgentFrontendDispatchOutcome {
@@ -332,6 +343,7 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::Broadcast,
             event,
+            knowledge_wire_metadata: None,
         }
     }
 
@@ -339,6 +351,45 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::Client(client_id.into()),
             event,
+            knowledge_wire_metadata: None,
+        }
+    }
+
+    pub(crate) fn reply_with_knowledge_semantic_retry(
+        client_id: impl Into<ClientId>,
+        event: BackendEvent,
+        semantic_retry: Option<gwt::KnowledgeSemanticRetry>,
+    ) -> Self {
+        assert!(
+            matches!(event, BackendEvent::KnowledgeSearchResults { .. }),
+            "knowledge semantic retry metadata requires KnowledgeSearchResults"
+        );
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+            knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
+        }
+    }
+
+    pub(crate) fn reply_with_nonsemantic_knowledge_error(
+        client_id: impl Into<ClientId>,
+        event: BackendEvent,
+    ) -> Self {
+        assert!(
+            matches!(
+                event,
+                BackendEvent::KnowledgeError {
+                    request_id: Some(_),
+                    query: Some(_),
+                    ..
+                }
+            ),
+            "non-semantic knowledge error metadata requires a correlated KnowledgeError"
+        );
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+            knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
         }
     }
 }

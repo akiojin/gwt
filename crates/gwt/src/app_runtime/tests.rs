@@ -3175,6 +3175,7 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
                 window_id: Some(window_id),
                 error: Some(error),
             },
+            ..
         }] if client_id == "pane-client"
             && window_id == "tab-authenticated::agent-authenticated"
             && error.contains("no live runtime")
@@ -19159,6 +19160,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.active_agents == 2
             && projection.active_work_count == 2
             && projection.agents.len() == 2
@@ -21126,6 +21128,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::WindowCanvasState { .. },
+            ..
         }
     )));
 }
@@ -25151,6 +25154,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.active_agents == 0
             && projection.agents.is_empty()
             && projection.status_category == "idle"
@@ -26245,6 +26249,7 @@ fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && entries.len() == 1
@@ -26414,6 +26419,7 @@ fn app_runtime_load_board_history_replies_with_older_page() {
                 entries,
                 has_more_before,
             },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>() == vec!["entry-1", "entry-2"]
@@ -26573,6 +26579,7 @@ fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardError { id, message },
+            ..
         }] if client_id == "client-1"
             && id == &board_window_id
             && message.contains("missing-session")
@@ -27494,6 +27501,8 @@ fn app_runtime_knowledge_search_errors_for_wrong_surface() {
                 message,
                 ..
             },
+            knowledge_wire_metadata: Some(super::KnowledgeWireMetadata::NonSemanticError),
+            ..
         }] if client_id == "client-1"
             && *knowledge_kind == gwt::KnowledgeKind::Issue
             && message == "Window is not a knowledge bridge"
@@ -27728,15 +27737,16 @@ fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_direct
                 BackendEvent::KnowledgeSearchResults {
                     request_id,
                     entries,
-                    semantic_retry,
                     ..
                 } if *request_id == 9 => {
                     saw_results = true;
                     assert_eq!(entries.len(), 1, "cache-backed rows stay usable");
                     assert_eq!(entries[0].number, 42);
-                    let directive = semantic_retry
-                        .as_ref()
-                        .expect("typed transient failure carries the retry directive");
+                    let Some(super::KnowledgeWireMetadata::SemanticRetry(directive)) =
+                        outbound.knowledge_wire_metadata.as_ref()
+                    else {
+                        panic!("typed transient failure carries the retry directive");
+                    };
                     assert_eq!(directive.error_code, "INDEX_NOT_READY");
                     assert!(directive.retryable);
                     assert!(directive.retry_after_ms > 0);
@@ -28565,6 +28575,7 @@ fn app_runtime_load_profile_replies_with_config_backed_snapshot() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && snapshot.active_profile == "dev"
@@ -28629,6 +28640,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         }] if client_id == "client-1"
             && id == &current_window_id
             && snapshot.selected_profile == "dev"
@@ -28655,6 +28667,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         } if id == &current_window_id
             && snapshot.selected_profile == "review"
             && snapshot.active_profile == "default"
@@ -28670,6 +28683,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         } if id == &sibling_window_id
             && snapshot.selected_profile == "default"
             && snapshot.profiles.iter().any(|profile| profile.name == "review")
@@ -28856,6 +28870,7 @@ fn app_runtime_load_logs_replies_with_current_log_snapshot() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::LogEntries { id, entries },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && entries.len() == 1
@@ -28908,6 +28923,7 @@ fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::LogEntries { id, entries },
+            ..
         } if client_id == "client-1"
             && id == &window_id
             && entries.len() == 2
@@ -28924,6 +28940,7 @@ fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::LogEntryAppended { entry },
+            ..
         } if client_id == "client-1"
             && entry.severity == LogLevel::Warn
             && entry.source == "gwt_core::logging::reader"
@@ -28959,6 +28976,7 @@ fn app_runtime_save_ui_trace_replies_with_artifact_path() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::UiTraceSaved { path, entries },
+            ..
         }] if client_id == "client-1" && *entries == 1 && Path::new(path).exists()
     ));
 }
@@ -29026,6 +29044,7 @@ fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
         } if client_id == "client-1"
             && id == &window_id
             && entries.iter().any(|entry|
@@ -29127,6 +29146,7 @@ fn app_runtime_post_board_entry_accepts_reply_to_history_parent() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
         } if client_id == "client-1"
             && id == &window_id
             && entries.iter().any(|entry|
@@ -29190,6 +29210,7 @@ fn app_runtime_post_board_entry_without_origin_remains_board_only() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { .. },
+            ..
         } if client_id == "client-1"
     )));
 }
@@ -29555,6 +29576,7 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.status_category == "blocked"
             && projection.blocked_agents == 1
             && projection.agents.iter().any(|agent|
@@ -29696,6 +29718,7 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.status_category == "active"
             && projection.active_agents == 1
             && projection.blocked_agents == 0
@@ -29774,6 +29797,7 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.status_category == "blocked"
             && projection.active_agents == 0
             && projection.blocked_agents == 1
@@ -35303,6 +35327,7 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::BoardEntries { id, entries, .. },
+                ..
             } if *id == expected_id
                 && entries.len() == 1
                 && entries[0].body == "External update"
@@ -35384,6 +35409,7 @@ fn migration_detected_broadcasts_only_for_pending_tabs() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationDetected { tab_id, .. },
+            ..
         } if tab_id == "tab-1"
     ));
 }
@@ -35414,6 +35440,7 @@ fn handle_migration_done_repoints_tab_and_emits_broadcast() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationDone { tab_id, .. },
+            ..
         } if tab_id == "tab-1"
     )));
     assert!(runtime
@@ -35468,6 +35495,7 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationError { tab_id, recovery, phase, .. },
+            ..
         } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
     )));
 }
@@ -35540,6 +35568,7 @@ fn open_intake_session_refuses_while_migration_pending() {
             OutboundEvent {
                 target: DispatchTarget::Client(_),
                 event: BackendEvent::LaunchWizardOpenError { message, .. },
+                ..
             } if message == "Complete the project migration before starting an intake session"
         )),
         "Start Work on a migration_pending tab must surface a clear error: {events:?}"
@@ -35613,6 +35642,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
             event: BackendEvent::CloneProjectDone {
                 workspace_home: emitted_workspace_home,
             },
+            ..
         } if emitted_workspace_home == &workspace_home.display().to_string()
     )));
     assert!(events.iter().any(|event| matches!(
@@ -35620,6 +35650,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::WindowCanvasState { .. },
+            ..
         }
     )));
     let canonical_home = dunce::canonicalize(&workspace_home).unwrap();
@@ -35777,6 +35808,7 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::CloneProjectError { message },
+            ..
         } if client_id == "client-1" && message.contains("repository URL")
     )));
     assert!(!events.iter().any(|event| matches!(
@@ -35818,6 +35850,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationDetected { .. },
+            ..
         }
     )));
 
@@ -35840,6 +35873,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::MigrationDetected { .. },
+                ..
             }
         )),
         "skip is launch-local; the modal must be shown again next launch"
@@ -35894,6 +35928,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::MigrationDetected { .. },
+                ..
             }
         )),
         "Normal Git layout should still open a migration-pending tab"
@@ -35909,6 +35944,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
                     message,
                     ..
                 },
+                ..
             } if phase == "backup"
                 && recovery == "partial"
                 && message.contains(".gwt-migration-backup")

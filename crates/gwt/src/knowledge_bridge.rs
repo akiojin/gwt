@@ -299,7 +299,10 @@ trait CanonicalProjectIndexSearchRunner {
         scopes: &[crate::protocol::IndexSearchScope],
         match_mode: crate::protocol::IndexSearchMatchMode,
         auto_build: bool,
-    ) -> Result<crate::index_search::ProjectIndexSearchOutcome, crate::index_search::IndexSearchError>;
+    ) -> Result<
+        crate::index_search::ProjectIndexSearchOutcome,
+        crate::index_search::IndexSearchAttemptError,
+    >;
 }
 
 #[derive(Debug, Default)]
@@ -313,9 +316,11 @@ impl CanonicalProjectIndexSearchRunner for ProductionProjectIndexSearchRunner {
         scopes: &[crate::protocol::IndexSearchScope],
         match_mode: crate::protocol::IndexSearchMatchMode,
         auto_build: bool,
-    ) -> Result<crate::index_search::ProjectIndexSearchOutcome, crate::index_search::IndexSearchError>
-    {
-        crate::index_search::search_project_index(
+    ) -> Result<
+        crate::index_search::ProjectIndexSearchOutcome,
+        crate::index_search::IndexSearchAttemptError,
+    > {
+        crate::index_search::search_project_index_attempt(
             repo_path, query, scopes, None, match_mode, auto_build,
         )
     }
@@ -384,7 +389,7 @@ impl TypedSemanticSearchClient for CanonicalSemanticSearchClient {
 /// else — including healthy-store `SEARCH_FAILED` and untyped errors — is
 /// silent `Fatal` degradation.
 fn semantic_failure_from_index_error(
-    error: crate::index_search::IndexSearchError,
+    error: crate::index_search::IndexSearchAttemptError,
 ) -> SemanticSearchFailure {
     let reason = error.to_string();
     if error.retryable() {
@@ -1836,7 +1841,7 @@ Extra context.
             Option<
                 Result<
                     crate::index_search::ProjectIndexSearchOutcome,
-                    crate::index_search::IndexSearchError,
+                    crate::index_search::IndexSearchAttemptError,
                 >,
             >,
         >,
@@ -1847,7 +1852,7 @@ Extra context.
         fn new(
             outcome: Result<
                 crate::index_search::ProjectIndexSearchOutcome,
-                crate::index_search::IndexSearchError,
+                crate::index_search::IndexSearchAttemptError,
             >,
         ) -> Self {
             Self {
@@ -1867,7 +1872,7 @@ Extra context.
             auto_build: bool,
         ) -> Result<
             crate::index_search::ProjectIndexSearchOutcome,
-            crate::index_search::IndexSearchError,
+            crate::index_search::IndexSearchAttemptError,
         > {
             self.calls.borrow_mut().push(CanonicalSearchCall {
                 repo_path: repo_path.to_path_buf(),
@@ -1991,18 +1996,20 @@ Extra context.
         let repo = Path::new("canonical-repo");
         let cases = [
             (
-                crate::index_search::IndexSearchError::NotReady(
-                    crate::index_search::IndexSearchNotReady {
-                        reason: "missing".to_string(),
-                        affected_scopes: vec!["issues".to_string()],
-                        waited_ms: 0,
-                        retry_after_ms: 5_000,
-                    },
+                crate::index_search::IndexSearchAttemptError::Public(
+                    crate::index_search::IndexSearchError::NotReady(
+                        crate::index_search::IndexSearchNotReady {
+                            reason: "missing".to_string(),
+                            affected_scopes: vec!["issues".to_string()],
+                            waited_ms: 0,
+                            retry_after_ms: 5_000,
+                        },
+                    ),
                 ),
                 Some("INDEX_NOT_READY"),
             ),
             (
-                crate::index_search::IndexSearchError::Unavailable(
+                crate::index_search::IndexSearchAttemptError::Unavailable(
                     crate::index_search::IndexSearchUnavailable {
                         reason: "spawn".to_string(),
                         retry_after_ms: 5_000,
@@ -2011,16 +2018,20 @@ Extra context.
                 Some("SEARCH_UNAVAILABLE"),
             ),
             (
-                crate::index_search::IndexSearchError::SearchFailed(
-                    crate::index_search::IndexSearchFailed {
-                        reason: "query".to_string(),
-                        affected_scopes: vec!["issues".to_string()],
-                    },
+                crate::index_search::IndexSearchAttemptError::Public(
+                    crate::index_search::IndexSearchError::SearchFailed(
+                        crate::index_search::IndexSearchFailed {
+                            reason: "query".to_string(),
+                            affected_scopes: vec!["issues".to_string()],
+                        },
+                    ),
                 ),
                 None,
             ),
             (
-                crate::index_search::IndexSearchError::Other("malformed".to_string()),
+                crate::index_search::IndexSearchAttemptError::Public(
+                    crate::index_search::IndexSearchError::Other("malformed".to_string()),
+                ),
                 None,
             ),
         ];
@@ -2259,20 +2270,12 @@ exit 1\n",
         repo
     }
 
-    fn serialized_backend_search_event(outcome: KnowledgeSearchOutcome) -> String {
-        let view = outcome.view;
-        serde_json::to_string(&crate::protocol::BackendEvent::KnowledgeSearchResults {
-            id: "issue-window".to_string(),
-            knowledge_kind: KnowledgeKind::Issue,
-            query: "probe".to_string(),
-            request_id: 7,
-            entries: view.entries,
-            selected_number: view.selected_number,
-            empty_message: view.empty_message,
-            refresh_enabled: view.refresh_enabled,
-            semantic_retry: outcome.semantic_retry,
-        })
-        .expect("serialize final backend event")
+    fn serialized_search_outcome_contract(outcome: KnowledgeSearchOutcome) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "view": outcome.view,
+            "semantic_retry": outcome.semantic_retry,
+        }))
+        .expect("serialize search outcome contract")
     }
 
     #[test]
@@ -2300,7 +2303,7 @@ exit 1\n",
         )
         .expect("legacy error silently degrades");
         assert!(outcome.semantic_retry.is_none());
-        let serialized = serialized_backend_search_event(outcome);
+        let serialized = serialized_search_outcome_contract(outcome);
         assert!(!serialized.contains(sentinel), "{serialized}");
     }
 
@@ -2367,7 +2370,7 @@ exit 1\n",
                     .map(|directive| directive.error_code.as_str()),
                 expected_code,
             );
-            let serialized = serialized_backend_search_event(outcome);
+            let serialized = serialized_search_outcome_contract(outcome);
             assert!(!serialized.contains(sentinel), "{serialized}");
             assert!(!serialized.contains("reason"), "{serialized}");
         }
@@ -3112,15 +3115,18 @@ exit 1\n",
         // SPEC #3170 FR-097/FR-100: typed retryable canonical outcomes carry
         // the retry directive contract; SEARCH_FAILED and untyped errors are
         // silent fatal degradation.
-        let not_ready =
-            semantic_failure_from_index_error(crate::index_search::IndexSearchError::NotReady(
-                crate::index_search::IndexSearchNotReady {
-                    reason: "issues index is missing".to_string(),
-                    affected_scopes: vec!["issues".to_string()],
-                    waited_ms: 0,
-                    retry_after_ms: 5_000,
-                },
-            ));
+        let not_ready = semantic_failure_from_index_error(
+            crate::index_search::IndexSearchAttemptError::Public(
+                crate::index_search::IndexSearchError::NotReady(
+                    crate::index_search::IndexSearchNotReady {
+                        reason: "issues index is missing".to_string(),
+                        affected_scopes: vec!["issues".to_string()],
+                        waited_ms: 0,
+                        retry_after_ms: 5_000,
+                    },
+                ),
+            ),
+        );
         assert_eq!(
             not_ready,
             SemanticSearchFailure::Transient {
@@ -3132,30 +3138,36 @@ exit 1\n",
             }
         );
 
-        let unavailable =
-            semantic_failure_from_index_error(crate::index_search::IndexSearchError::Unavailable(
+        let unavailable = semantic_failure_from_index_error(
+            crate::index_search::IndexSearchAttemptError::Unavailable(
                 crate::index_search::IndexSearchUnavailable {
                     reason: "run project index search: spawn failed".to_string(),
                     retry_after_ms: 5_000,
                 },
-            ));
+            ),
+        );
         assert!(matches!(
             unavailable,
             SemanticSearchFailure::Transient { ref error_code, retry_after_ms: 5_000, .. }
                 if error_code == "SEARCH_UNAVAILABLE"
         ));
 
-        let failed =
-            semantic_failure_from_index_error(crate::index_search::IndexSearchError::SearchFailed(
-                crate::index_search::IndexSearchFailed {
-                    reason: "issues query failed: bad hnsw segment".to_string(),
-                    affected_scopes: vec!["issues".to_string()],
-                },
-            ));
+        let failed = semantic_failure_from_index_error(
+            crate::index_search::IndexSearchAttemptError::Public(
+                crate::index_search::IndexSearchError::SearchFailed(
+                    crate::index_search::IndexSearchFailed {
+                        reason: "issues query failed: bad hnsw segment".to_string(),
+                        affected_scopes: vec!["issues".to_string()],
+                    },
+                ),
+            ),
+        );
         assert!(matches!(failed, SemanticSearchFailure::Fatal { .. }));
 
         let other = semantic_failure_from_index_error(
-            crate::index_search::IndexSearchError::Other("legacy untyped".to_string()),
+            crate::index_search::IndexSearchAttemptError::Public(
+                crate::index_search::IndexSearchError::Other("legacy untyped".to_string()),
+            ),
         );
         assert!(matches!(other, SemanticSearchFailure::Fatal { .. }));
     }

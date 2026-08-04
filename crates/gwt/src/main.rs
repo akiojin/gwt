@@ -3025,6 +3025,7 @@ mod tests {
                     asset_url: Some(_),
                     ..
                 }),
+                ..
             }] if latest == "9.20.2"
         ));
     }

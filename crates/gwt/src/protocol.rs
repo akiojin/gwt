@@ -12,9 +12,7 @@ use crate::{
     file_content::{Encoding, Newline},
     file_tree::FileTreeEntry,
     issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView},
-    knowledge_bridge::{
-        KnowledgeDetailView, KnowledgeKind, KnowledgeListItem, KnowledgeSemanticRetry,
-    },
+    knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
@@ -1796,12 +1794,6 @@ pub enum BackendEvent {
         selected_number: Option<u64>,
         empty_message: Option<String>,
         refresh_enabled: bool,
-        /// SPEC #3170 FR-098 — additive typed semantic retry directive.
-        /// Present only for typed transient semantic failures; carries no
-        /// diagnostic text. Older frontends ignore it; its absence means no
-        /// automatic retry.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        semantic_retry: Option<KnowledgeSemanticRetry>,
     },
     ProjectIndexSearchResults {
         id: String,
@@ -2948,11 +2940,11 @@ mod tests {
     };
 
     #[test]
-    fn knowledge_search_results_semantic_retry_directive_is_additive() {
-        // SPEC #3170 FR-098 — the retry directive is additive and carries
-        // exactly error_code / retryable / retry_after_ms; when absent the
-        // field disappears from the wire so older frontends stay compatible.
-        let with_directive = BackendEvent::KnowledgeSearchResults {
+    fn knowledge_search_results_retains_the_baseline_rust_shape() {
+        // SPEC #1939 FR-407 — the public Rust event remains source-compatible
+        // with legacy clients. Optional retry metadata belongs to the private
+        // outbound wire envelope, not this public enum variant.
+        let event = BackendEvent::KnowledgeSearchResults {
             id: "tab-1::issue-1".to_string(),
             knowledge_kind: crate::knowledge_bridge::KnowledgeKind::Issue,
             query: "silent recovery".to_string(),
@@ -2961,49 +2953,11 @@ mod tests {
             selected_number: None,
             empty_message: None,
             refresh_enabled: true,
-            semantic_retry: Some(crate::knowledge_bridge::KnowledgeSemanticRetry {
-                error_code: "SEARCH_UNAVAILABLE".to_string(),
-                retryable: true,
-                retry_after_ms: 5_000,
-            }),
         };
-        let value = serde_json::to_value(&with_directive).expect("serialize with directive");
-        let directive = value
-            .get("semantic_retry")
-            .expect("directive present when set");
-        assert_eq!(
-            directive.get("error_code").and_then(Value::as_str),
-            Some("SEARCH_UNAVAILABLE")
-        );
-        assert_eq!(
-            directive.get("retryable").and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            directive.get("retry_after_ms").and_then(Value::as_u64),
-            Some(5_000)
-        );
-        assert_eq!(
-            directive.as_object().map(|fields| fields.len()),
-            Some(3),
-            "the directive carries no diagnostic payload: {directive}"
-        );
-
-        let without_directive = BackendEvent::KnowledgeSearchResults {
-            id: "tab-1::issue-1".to_string(),
-            knowledge_kind: crate::knowledge_bridge::KnowledgeKind::Issue,
-            query: "silent recovery".to_string(),
-            request_id: 8,
-            entries: Vec::new(),
-            selected_number: None,
-            empty_message: None,
-            refresh_enabled: true,
-            semantic_retry: None,
-        };
-        let value = serde_json::to_value(&without_directive).expect("serialize without directive");
+        let value = serde_json::to_value(&event).expect("serialize baseline event");
         assert!(
             value.get("semantic_retry").is_none(),
-            "absent directive must not appear on the wire: {value}"
+            "direct event serialization must retain the baseline wire shape: {value}"
         );
     }
 

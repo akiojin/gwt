@@ -122,7 +122,7 @@ pub fn run<E: CliEnv>(
     cmd: SearchCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let outcome = match crate::index_search::search_project_index(
+    let outcome = match crate::index_search::search_project_index_attempt(
         env.repo_path(),
         &cmd.query,
         &cmd.scopes,
@@ -133,22 +133,26 @@ pub fn run<E: CliEnv>(
         true,
     ) {
         Ok(outcome) => outcome,
-        Err(error @ crate::index_search::IndexSearchError::NotReady(_)) => {
+        Err(crate::index_search::IndexSearchAttemptError::Public(
+            error @ crate::index_search::IndexSearchError::NotReady(_),
+        )) => {
             // FR-388: typed retryable failure, never a silent empty success.
             render_not_ready(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
-        Err(error @ crate::index_search::IndexSearchError::SearchFailed(_)) => {
+        Err(crate::index_search::IndexSearchAttemptError::Public(
+            error @ crate::index_search::IndexSearchError::SearchFailed(_),
+        )) => {
             // Phase 70a FR-400: a query-contract failure against a healthy
             // scope is non-retryable and must never enter the repair wait.
             render_search_failed(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
-        Err(error @ crate::index_search::IndexSearchError::Unavailable(_)) => {
+        Err(error @ crate::index_search::IndexSearchAttemptError::Unavailable(_)) => {
             render_search_unavailable(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
-        Err(error) => {
+        Err(crate::index_search::IndexSearchAttemptError::Public(error)) => {
             return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
         }
     };
@@ -182,9 +186,9 @@ pub fn run<E: CliEnv>(
 fn render_search_unavailable(
     out: &mut String,
     json: bool,
-    error: &crate::index_search::IndexSearchError,
+    error: &crate::index_search::IndexSearchAttemptError,
 ) {
-    let crate::index_search::IndexSearchError::Unavailable(unavailable) = error else {
+    let crate::index_search::IndexSearchAttemptError::Unavailable(unavailable) = error else {
         return;
     };
     if json {
@@ -198,7 +202,7 @@ fn render_search_unavailable(
         out.push_str(&payload.to_string());
         out.push('\n');
     } else {
-        out.push_str(&format!("search unavailable: {error}\n"));
+        out.push_str(&format!("{error}\n"));
     }
 }
 
@@ -537,9 +541,9 @@ mod tests {
 
     #[test]
     fn render_search_unavailable_json_reports_retryable_error_contract() {
-        use crate::index_search::{IndexSearchError, IndexSearchUnavailable};
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchUnavailable};
         let mut out = String::new();
-        let error = IndexSearchError::Unavailable(IndexSearchUnavailable {
+        let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
             reason: "project index runner unavailable".to_string(),
             retry_after_ms: 5_000,
         });
@@ -551,6 +555,9 @@ mod tests {
         assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
         assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
         assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
+        assert!(error.retryable());
+        assert_eq!(error.retry_after_ms(), Some(5_000));
         assert_eq!(error.exit_code(), 1);
     }
 

@@ -1339,7 +1339,7 @@ impl AppRuntime {
         let id = request.id;
         let kind = request.kind;
         let Some(address) = self.window_lookup.get(id) else {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -1351,7 +1351,7 @@ impl AppRuntime {
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -1363,7 +1363,7 @@ impl AppRuntime {
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -1375,7 +1375,7 @@ impl AppRuntime {
             )];
         };
         if knowledge_kind_for_preset(window.preset) != Some(kind) {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -1416,7 +1416,7 @@ impl AppRuntime {
             // (cache rows + optional typed retry directive). Only
             // non-semantic failures (cache read, window lookup) still use the
             // visible KnowledgeError channel.
-            let event = match gwt::search_knowledge_bridge_outcome(
+            let outbound = match gwt::search_knowledge_bridge_outcome(
                 &project_root,
                 kind,
                 &query,
@@ -1429,23 +1429,27 @@ impl AppRuntime {
                         &mut view,
                         &related_snapshot,
                     );
-                    BackendEvent::KnowledgeSearchResults {
-                        id: id.clone(),
-                        knowledge_kind: kind,
-                        query: query.clone(),
-                        request_id,
-                        entries: view.entries,
-                        selected_number: view.selected_number,
-                        empty_message: view.empty_message,
-                        refresh_enabled: view.refresh_enabled,
-                        semantic_retry: outcome.semantic_retry,
-                    }
+                    OutboundEvent::reply_with_knowledge_semantic_retry(
+                        client_id,
+                        BackendEvent::KnowledgeSearchResults {
+                            id: id.clone(),
+                            knowledge_kind: kind,
+                            query: query.clone(),
+                            request_id,
+                            entries: view.entries,
+                            selected_number: view.selected_number,
+                            empty_message: view.empty_message,
+                            refresh_enabled: view.refresh_enabled,
+                        },
+                        outcome.semantic_retry,
+                    )
                 }
-                Err(error) => knowledge_error_event(id, kind, error, Some(request_id), Some(query)),
+                Err(error) => OutboundEvent::reply_with_nonsemantic_knowledge_error(
+                    client_id,
+                    knowledge_error_event(id, kind, error, Some(request_id), Some(query)),
+                ),
             };
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id, event,
-            )]));
+            proxy.send(UserEvent::Dispatch(vec![outbound]));
         });
     }
 

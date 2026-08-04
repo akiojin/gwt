@@ -35,6 +35,11 @@ use super::redact;
 const SUMMARY_TARGET: &str = "gwt.process.summary";
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(1);
 
+#[cfg(test)]
+thread_local! {
+    static TEST_POST_REAP_DELAY_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 static SPAWN_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Knobs that control how `spawn_logged` runs the child process.
@@ -293,7 +298,7 @@ async fn spawn_logged_inner(
     };
     if let Some(pid) = deadline.and_then(|_| child.id()) {
         if let Err(error) = process_tree.after_spawn(pid) {
-            let _ = cleanup_child_process_with_grace(&mut process_tree, &mut child).await;
+            let _ = cleanup_child_process(&mut process_tree, &mut child, deadline).await;
             finish_failed_launch(
                 hub,
                 kind,
@@ -309,6 +314,7 @@ async fn spawn_logged_inner(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
+    let collection_deadline = deadline.map(deadline_before_cleanup_reserve);
     let collected = {
         let collect = async {
             let stdout_future = async move {
@@ -346,7 +352,7 @@ async fn spawn_logged_inner(
             tokio::try_join!(child.wait(), stdout_future, stderr_future)
         };
         tokio::pin!(collect);
-        match deadline {
+        match collection_deadline {
             Some(deadline) => tokio::time::timeout_at(deadline.into(), &mut collect)
                 .await
                 .ok(),
@@ -355,7 +361,7 @@ async fn spawn_logged_inner(
     };
 
     let Some(collected) = collected else {
-        if !cleanup_child_process_with_grace(&mut process_tree, &mut child).await {
+        if !cleanup_child_process(&mut process_tree, &mut child, deadline).await {
             trace_cleanup_grace_exceeded(spawn_id, options.forward_output);
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -378,7 +384,7 @@ async fn spawn_logged_inner(
     let (status, (stdout, stdout_lines), (stderr, stderr_lines)) = match collected {
         Ok(collected) => collected,
         Err(error) => {
-            if !cleanup_child_process_with_grace(&mut process_tree, &mut child).await {
+            if !cleanup_child_process(&mut process_tree, &mut child, deadline).await {
                 trace_cleanup_grace_exceeded(spawn_id, options.forward_output);
             }
             finish_failed_launch(
@@ -615,16 +621,39 @@ fn deadline_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "process deadline expired")
 }
 
-async fn cleanup_child_process_with_grace(
+fn deadline_before_cleanup_reserve(deadline: Instant) -> Instant {
+    let now = Instant::now();
+    let remaining = deadline.saturating_duration_since(now);
+    let reserve = remaining.mul_f32(0.25).min(PROCESS_CLEANUP_GRACE);
+    deadline
+        .checked_sub(reserve)
+        .map(|candidate| candidate.max(now))
+        .unwrap_or(now)
+}
+
+async fn cleanup_child_process(
     process_tree: &mut ChildProcessTree,
     child: &mut tokio::process::Child,
+    deadline: Option<Instant>,
 ) -> bool {
-    cleanup_child_process_after_tree_termination(
-        PROCESS_CLEANUP_GRACE,
-        process_tree.terminate(),
-        child,
-    )
-    .await
+    match deadline {
+        Some(deadline) => {
+            cleanup_child_process_after_tree_termination_until(
+                deadline,
+                process_tree.terminate(),
+                child,
+            )
+            .await
+        }
+        None => {
+            cleanup_child_process_after_tree_termination(
+                PROCESS_CLEANUP_GRACE,
+                process_tree.terminate(),
+                child,
+            )
+            .await
+        }
+    }
 }
 
 async fn cleanup_child_process_after_tree_termination<F>(
@@ -639,15 +668,53 @@ where
         tree_termination.await;
         let _ = child.start_kill();
         let _ = child.wait().await;
+        test_post_reap_delay().await;
     })
     .await
 }
+
+async fn cleanup_child_process_after_tree_termination_until<F>(
+    deadline: Instant,
+    tree_termination: F,
+    child: &mut tokio::process::Child,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
+    run_cleanup_until(deadline, async {
+        tree_termination.await;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        test_post_reap_delay().await;
+    })
+    .await
+}
+
+#[cfg(test)]
+async fn test_post_reap_delay() {
+    let delay_ms = TEST_POST_REAP_DELAY_MS.with(std::cell::Cell::get);
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+}
+
+#[cfg(not(test))]
+async fn test_post_reap_delay() {}
 
 async fn run_cleanup_with_grace<F>(grace: Duration, cleanup: F) -> bool
 where
     F: Future<Output = ()>,
 {
     tokio::time::timeout(grace, cleanup).await.is_ok()
+}
+
+async fn run_cleanup_until<F>(deadline: Instant, cleanup: F) -> bool
+where
+    F: Future<Output = ()>,
+{
+    tokio::time::timeout_at(deadline.into(), cleanup)
+        .await
+        .is_ok()
 }
 
 struct ChildProcessTree {
@@ -847,6 +914,25 @@ mod tests {
 
     use super::*;
 
+    struct PostReapDelayGuard(u64);
+
+    impl PostReapDelayGuard {
+        fn set(delay: Duration) -> Self {
+            let previous = TEST_POST_REAP_DELAY_MS.with(|slot| {
+                let previous = slot.get();
+                slot.set(delay.as_millis() as u64);
+                previous
+            });
+            Self(previous)
+        }
+    }
+
+    impl Drop for PostReapDelayGuard {
+        fn drop(&mut self) {
+            TEST_POST_REAP_DELAY_MS.with(|slot| slot.set(self.0));
+        }
+    }
+
     #[derive(Clone, Default)]
     struct CapturedTrace(Arc<Mutex<Vec<u8>>>);
 
@@ -937,6 +1023,83 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(150));
         let _ = child.start_kill();
         let _ = child.wait().await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn deadline_cleanup_does_not_extend_the_absolute_hard_cap() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let parent_file = directory.path().join("hard-cap-parent.pid");
+        let descendant_file = directory.path().join("hard-cap-descendant.pid");
+        #[cfg(windows)]
+        let (program, args, budget, delay) = {
+            let script = format!(
+                "Set-Content -Path '{}' -Value $PID -Encoding ascii; \
+                 $child = Start-Process ping -ArgumentList '-n','60','127.0.0.1' \
+                 -PassThru -WindowStyle Hidden; \
+                 Set-Content -Path '{}' -Value $child.Id -Encoding ascii; \
+                 Start-Sleep -Seconds 60",
+                parent_file.display(),
+                descendant_file.display(),
+            );
+            (
+                "powershell".to_string(),
+                vec!["-NoProfile".to_string(), "-Command".to_string(), script],
+                Duration::from_secs(2),
+                Duration::from_millis(1_200),
+            )
+        };
+        #[cfg(unix)]
+        let (program, args, budget, delay) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "echo $$ > \"$1\"; sleep 60 & echo $! > \"$2\"; wait".to_string(),
+                "gwt-hard-cap".to_string(),
+                parent_file.to_string_lossy().into_owned(),
+                descendant_file.to_string_lossy().into_owned(),
+            ],
+            Duration::from_millis(700),
+            Duration::from_millis(600),
+        );
+        let _delay = PostReapDelayGuard::set(delay);
+        let started = Instant::now();
+        let deadline = started + budget;
+
+        let error = spawn_logged_with_deadline(
+            &ProcessConsoleHub::new(),
+            ProcessKind::IndexRunner,
+            program,
+            &args,
+            SpawnOptions::new("absolute deadline cleanup").forward_output(false),
+            deadline,
+        )
+        .await
+        .expect_err("fixture tree must time out");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() <= budget + Duration::from_millis(250),
+            "cleanup extended the absolute deadline: budget={budget:?} elapsed={:?}",
+            started.elapsed()
+        );
+        #[cfg(windows)]
+        {
+            let parent = wait_for_pid_file_windows(&parent_file);
+            let descendant = wait_for_pid_file_windows(&descendant_file);
+            assert!(!process_is_alive_windows(parent), "root survived cleanup");
+            assert!(
+                !process_is_alive_windows(descendant),
+                "descendant survived cleanup"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let parent = read_pid(&parent_file);
+            let descendant = read_pid(&descendant_file);
+            assert!(!process_is_alive(parent), "root survived cleanup");
+            assert!(!process_is_alive(descendant), "descendant survived cleanup");
+        }
     }
 
     fn echo_command() -> (String, Vec<String>) {
@@ -1630,6 +1793,17 @@ mod tests {
             .trim()
             .parse()
             .expect("numeric pid")
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        crate::process::hidden_command("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     #[cfg(unix)]
