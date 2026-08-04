@@ -682,7 +682,48 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
-    assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+    assert_eq!(doctor["health"]["status"].as_str(), Some("self_healed"));
+}
+
+#[test]
+fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let git_status = gwt_core::process::hidden_command("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git init");
+    assert!(git_status.success());
+    let local_bin = temp.path().join("target/debug/gwtd");
+    fs::create_dir_all(local_bin.parent().expect("bin parent")).expect("bin dir");
+    fs::write(&local_bin, "local").expect("local bin");
+    fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let joined = std::env::join_paths(
+        std::iter::once(local_bin.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&old_path)),
+    )
+    .expect("PATH");
+    let _path = crate::cli::test_support::ScopedEnvVar::set("PATH", joined);
+    let _hook_bin = crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", "");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.doctor",
+        "params": { "repair": true }
+    })
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stderr));
+    let rendered = fs::read_to_string(temp.path().join(".codex/hooks.json")).unwrap();
+    assert!(rendered.contains("GWT_BIN_PATH"), "{rendered}");
+    assert!(
+        !rendered.contains(&local_bin.display().to_string()),
+        "doctor persisted a worktree-local binary: {rendered}"
+    );
 }
 
 #[test]

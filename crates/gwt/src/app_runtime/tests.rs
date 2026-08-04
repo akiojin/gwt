@@ -19251,6 +19251,225 @@ fn app_runtime_active_work_projection_includes_managed_hook_health() {
     assert_eq!(health.status, "ready");
     assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
     assert!(health.issues.is_empty(), "{:?}", health.issues);
+    let row_health = view.active_works[0]
+        .managed_hook_health
+        .as_ref()
+        .expect("row managed hook health");
+    assert_eq!(row_health.status, "ready");
+    assert_eq!(row_health.last_event.as_deref(), Some("PreToolUse"));
+}
+
+#[test]
+fn managed_hook_health_for_saved_row_ignores_ambient_session_runtime_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("saved-worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let stable = temp.path().join("stable/gwtd");
+    fs::create_dir_all(stable.parent().expect("stable parent")).unwrap();
+    fs::write(&stable, "stable").unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let foreign_runtime_path = temp.path().join("foreign-runtime-state.json");
+    gwt::cli::hook::runtime_state::write_for_event(&foreign_runtime_path, "PreToolUse")
+        .expect("runtime state");
+    let _runtime_path = ScopedEnvVar::set(
+        gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+        &foreign_runtime_path,
+    );
+
+    let health =
+        super::workspace_views::managed_hook_health_view_for_worktree(&worktree, temp.path(), &[]);
+
+    assert!(health.is_none(), "{health:?}");
+}
+
+#[test]
+fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let stable = temp.path().join("stable/gwtd");
+    fs::create_dir_all(stable.parent().expect("stable parent")).unwrap();
+    fs::write(&stable, "stable").unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    for (session_id, updated_at, event) in [
+        ("session-z", "2026-08-03T10:00:00Z", "PreToolUse"),
+        ("session-a", "2026-08-03T11:00:00Z", "UserPromptSubmit"),
+    ] {
+        let path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "status": "Running",
+                "updated_at": updated_at,
+                "last_activity_at": updated_at,
+                "source_event": event,
+                "pending_discussion": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let mut first = sample_active_agent_session("tab-1", "tab-1::agent-z");
+    first.session_id = "session-z".to_string();
+    first.worktree_path = worktree.clone();
+    let mut second = sample_active_agent_session("tab-1", "tab-1::agent-a");
+    second.session_id = "session-a".to_string();
+    second.worktree_path = worktree.clone();
+
+    let health = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        &sessions_dir,
+        &[&first, &second],
+    )
+    .expect("managed hook health");
+
+    assert_eq!(health.last_event.as_deref(), Some("UserPromptSubmit"));
+}
+
+#[test]
+fn startup_self_heals_managed_hooks_in_every_known_worktree() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    for worktree in [&first, &second] {
+        let local = worktree.join("target/debug/gwtd");
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        fs::write(&local, "local").unwrap();
+        let _local_hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &local);
+        gwt_skills::generate_settings_local(worktree).unwrap();
+        gwt_skills::generate_codex_hooks(worktree).unwrap();
+        gwt_skills::generate_opencode_hooks(worktree).unwrap();
+        gwt_skills::generate_openclaw_hooks(worktree).unwrap();
+        gwt_skills::generate_hermes_hooks(worktree).unwrap();
+    }
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", "");
+
+    super::startup::self_heal_managed_hooks_in_worktrees([first.as_path(), second.as_path()]);
+
+    for worktree in [&first, &second] {
+        let local = worktree.join("target/debug/gwtd");
+        for relative in [
+            ".claude/settings.local.json",
+            ".codex/hooks.json",
+            ".gwt/opencode/plugins/gwt-hooks.js",
+            ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+            ".gwt/hermes/agent-hooks/gwt-hook.sh",
+        ] {
+            let rendered = fs::read_to_string(worktree.join(relative)).unwrap();
+            assert!(rendered.contains("GWT_BIN_PATH"), "{relative}: {rendered}");
+            assert!(
+                !rendered.contains(&local.display().to_string()),
+                "{relative}: {rendered}"
+            );
+        }
+        let health = gwt::cli::hook::health::read_managed_hook_health(
+            &gwt::cli::hook::health::ManagedHookHealthInput::new(worktree),
+        );
+        assert_eq!(
+            health.status,
+            gwt::cli::hook::health::ManagedHookHealthStatus::SelfHealed
+        );
+    }
+}
+
+#[test]
+fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let config = worktree.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        r#"{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"/repo/target/debug/gwtd hook event SessionStart"}]}]}}"#,
+    )
+    .unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+
+    super::startup::self_heal_managed_hooks_in_worktrees([worktree.as_path()]);
+
+    let rendered = fs::read_to_string(&config).unwrap();
+    assert!(rendered.contains("GWT_BIN_PATH"), "{rendered}");
+    assert!(
+        rendered.contains(&missing_pin.display().to_string()),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("/repo/target/debug/gwtd"), "{rendered}");
+    assert!(worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+#[test]
+fn startup_self_heal_does_not_rewrite_canonical_config_for_missing_explicit_pin() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let config = worktree.join(".codex/hooks.json");
+    let before = fs::read(&config).unwrap();
+
+    super::startup::self_heal_managed_hooks_in_worktrees([worktree.as_path()]);
+
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+#[test]
+fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let stable = root.path().join("stable/gwtd");
+    fs::create_dir_all(stable.parent().unwrap()).unwrap();
+    fs::write(&stable, "stable").unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let config = worktree.join(".codex/hooks.json");
+    let before = fs::read(&config).unwrap();
+    let runtime_path = root.path().join("runtime-state.json");
+    fs::write(&runtime_path, "not-json").unwrap();
+    let _runtime_path = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+    super::startup::self_heal_managed_hooks_in_worktrees([worktree.as_path()]);
+
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+#[test]
+fn startup_self_heal_does_not_loop_on_missing_current_literal_fallback() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    {
+        let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+        gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    }
+    let config = worktree.join(".codex/hooks.json");
+    let before = fs::read(&config).unwrap();
+    let _path = ScopedEnvVar::set("PATH", "");
+
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some("gwtd"),
+    );
+
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
 }
 
 /// SPEC-2359 Phase W-12 Slice 2 (FR-348): "1 agent session : 1 Work". When
@@ -36377,6 +36596,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         blocked_agents: 0,
         branch: Some("develop".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -36466,6 +36686,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         blocked_agents: 0,
         branch: Some("develop".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -36683,6 +36904,7 @@ fn workspace_test_work(
         blocked_agents: 0,
         branch: Some("work/shared".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37065,6 +37287,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         blocked_agents: 99,
         branch: Some("develop".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37160,6 +37383,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         blocked_agents: 0,
         branch: Some("work/x".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37284,6 +37508,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         blocked_agents: 0,
         branch: Some("work/x".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37419,6 +37644,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         blocked_agents: 0,
         branch: Some("work/issue-206".to_string()),
         worktree_path: Some(issue_worktree.display().to_string()),
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37595,6 +37821,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         blocked_agents: 0,
         branch: Some(branch.to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37672,6 +37899,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         blocked_agents: 0,
         branch: branch.map(str::to_string),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: pr_state.map(str::to_string),
@@ -37740,6 +37968,7 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         blocked_agents: 0,
         branch: Some("work/dirty".to_string()),
         worktree_path: Some(repo.display().to_string()),
+        managed_hook_health: None,
         pr_number: Some(123),
         pr_url: None,
         pr_state: Some("MERGED".to_string()),
@@ -38687,6 +38916,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             blocked_agents: 0,
             branch: branch.map(str::to_string),
             worktree_path: None,
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: None,
@@ -38893,6 +39123,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             blocked_agents: 0,
             branch: branch.map(str::to_string),
             worktree_path: worktree.map(str::to_string),
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: None,
@@ -38974,6 +39205,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             blocked_agents: 0,
             branch: branch.map(str::to_string),
             worktree_path: None,
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: pr_state.map(str::to_string),
@@ -39050,6 +39282,7 @@ fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
         blocked_agents: 0,
         branch: Some("work/no-changes".to_string()),
         worktree_path: Some("/tmp/gwt-no-changes".to_string()),
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -39129,6 +39362,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             blocked_agents: 0,
             branch: Some("work/live-agent".to_string()),
             worktree_path: Some("/tmp/gwt-live-agent".to_string()),
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: Some("MERGED".to_string()),
@@ -39160,6 +39394,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             blocked_agents: 0,
             branch: Some("work/live-process".to_string()),
             worktree_path: Some(live_process_worktree.display().to_string()),
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: None,
@@ -39337,6 +39572,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         blocked_agents: 0,
         branch: Some(branch.to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
