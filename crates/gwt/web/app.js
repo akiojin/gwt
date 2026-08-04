@@ -205,6 +205,14 @@
       const alignButton = document.getElementById("align-button");
       const worldGrid = document.getElementById("canvas-world-grid");
       const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
+      // SPEC-3431 FR-018: both PM launchers share one handler so the rail and
+      // the canvas CTA can never drift apart.
+      for (const id of ["op-pm-entry", "canvas-pm-launcher"]) {
+        document.getElementById(id)?.addEventListener("click", (event) => {
+          event.preventDefault();
+          openPmAgent();
+        });
+      }
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -3071,6 +3079,66 @@
         }
       }
 
+      // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
+      // the backend marked `is_pm`; null while no PM pane exists.
+      let pmWindowId = null;
+
+      function updatePmLauncher(workspace) {
+        const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
+        const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
+        pmWindowId = pmWindow?.id ?? null;
+
+        const railEntry = document.getElementById("op-pm-entry");
+        if (railEntry) {
+          // FR-021: absent (never started / closed) vs stopped (pane present
+          // but its runtime exited) vs running.
+          const state = !pmWindow
+            ? "absent"
+            : pmWindow.status === "stopped" || pmWindow.status === "error"
+              ? "stopped"
+              : "running";
+          railEntry.dataset.pmState = state;
+          railEntry.title =
+            state === "running"
+              ? "Project Manager"
+              : state === "stopped"
+                ? "Project Manager (stopped) — click to resume"
+                : "Project Manager — click to start";
+        }
+
+        const floating = document.getElementById("canvas-pm-launcher");
+        if (floating) {
+          // FR-018: only surface the floating launcher when the PM is not
+          // reachable on screen, so a visible PM never gets a duplicate CTA.
+          floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
+        }
+      }
+
+      // True when the window's rectangle intersects the visible canvas area.
+      function isWindowWithinViewport(windowData) {
+        const geometry = windowData?.geometry;
+        if (!geometry) return false;
+        const bounds = visibleBounds();
+        if (!bounds) return true;
+        return (
+          geometry.x < bounds.x + bounds.width &&
+          geometry.x + geometry.width > bounds.x &&
+          geometry.y < bounds.y + bounds.height &&
+          geometry.y + geometry.height > bounds.y
+        );
+      }
+
+      // FR-019: one click always lands the user on the PM. An existing pane is
+      // focused and framed; a missing one is started by the backend, which
+      // frames it once the launch completes.
+      function openPmAgent() {
+        if (pmWindowId && windowMap.has(pmWindowId)) {
+          focusWindowRemotely(pmWindowId, { center: true });
+          return;
+        }
+        send({ kind: "open_pm_agent", bounds: visibleBounds() });
+      }
+
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
         // SPEC-2008 camera-focus / FR-094: rebuild the Fleet Minimap cells from
@@ -3485,6 +3553,8 @@
             : presetRoleLabel(windowData.preset),
           runtimeLabel: isAgentWindow ? windowRuntimeLabel(runtimeState) : "",
           running: isAgentWindow && runtimeState === "running",
+          // SPEC-3431 FR-022: closing the PM means "stop it until next open".
+          isPm: Boolean(windowData.is_pm),
         };
         renderWindowCloseConfirm();
       }
@@ -5141,6 +5211,13 @@
         applyWindowLaneData(element, windowData);
         renderWindowLaneBadge(element.querySelector(".window-lane-badge"), windowData);
         setWindowRoleBadge(element.querySelector(".window-role-badge"), windowData);
+        // SPEC-3431 FR-020: the resident PM gets its own chrome (left accent
+        // bar + filled role badge) so it never reads as just another agent.
+        if (windowData.is_pm) {
+          element.dataset.pm = "true";
+        } else {
+          delete element.dataset.pm;
+        }
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
@@ -5501,6 +5578,9 @@
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
+            // floating CTA in step with every canvas render.
+            updatePmLauncher(activeWorkspace());
             sendStartupAutoResumeReady();
             break;
           }

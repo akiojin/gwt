@@ -6342,3 +6342,113 @@ button.workspace-board-ref:focus-visible {
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   SPEC-3431 — Project Manager surfaces.
+
+   The PM is the user's single conversational window, so it gets one identity
+   colour (--color-role-pm) reused by all three surfaces: the rail launcher,
+   the canvas launcher, and the PM window chrome. The colour is a ROLE, not a
+   runtime state, so it never replaces the status chip or the agent colour.
+   --------------------------------------------------------------------------- */
+
+/* Rail launcher (FR-018). Rests like any rail item; the role colour only
+   appears on hover/focus and in the state dot, so an idle rail stays calm. */
+.op-rail__item--pm:hover,
+.op-rail__item--pm:focus-visible {
+  color: var(--color-role-pm);
+}
+
+.op-rail__item--pm[data-pm-state="running"] .op-rail__icon {
+  color: var(--color-role-pm);
+}
+
+/* FR-021: running / stopped / not started. Light mode cannot lean on a
+   surface tint alone (near-white on near-white), so every state that is not
+   "absent" carries a filled dot in an accent colour. */
+.op-rail__pm-dot {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  pointer-events: none;
+}
+
+.op-rail__item--pm[data-pm-state="running"] .op-rail__pm-dot {
+  background: var(--color-role-pm);
+}
+
+.op-rail__item--pm[data-pm-state="stopped"] .op-rail__pm-dot {
+  background: var(--color-state-idle);
+}
+
+/* Canvas launcher (FR-018). Bottom-LEFT: .fleet-minimap owns bottom-right. */
+.canvas-pm-launcher {
+  position: absolute;
+  left: var(--space-4, 16px);
+  bottom: var(--space-4, 16px);
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  padding: var(--space-2, 8px) var(--space-4, 16px);
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--color-surface-elevated) 92%, transparent);
+  color: var(--color-role-pm);
+  box-shadow: var(--shadow-2);
+  transition: background var(--motion-fast) var(--motion-curve),
+              transform var(--motion-fast) var(--motion-curve);
+}
+
+.canvas-pm-launcher:hover {
+  background: color-mix(in oklab, var(--color-role-pm) 16%, var(--color-surface-elevated));
+}
+
+.canvas-pm-launcher:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.canvas-pm-launcher[hidden] {
+  display: none;
+}
+
+.canvas-pm-launcher__icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.canvas-pm-launcher__label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* PM window chrome (FR-020). A left accent bar plus a filled role badge —
+   form first, colour second — so the PM reads as distinct even for users who
+   cannot separate the hue from the agent ramp. */
+.workspace-window[data-pm="true"] {
+  border-left: 3px solid var(--color-role-pm);
+}
+
+.workspace-window[data-pm="true"] .titlebar {
+  background: color-mix(in oklab, var(--color-role-pm) 10%, transparent);
+}
+
+.workspace-window[data-pm="true"] .window-role-badge {
+  border-color: var(--color-role-pm);
+  background: var(--color-role-pm);
+  color: var(--color-canvas);
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-pm-launcher {
+    transition: none;
+  }
+}
