@@ -34,8 +34,12 @@ use gwt_core::{
 };
 use gwt_github::client::{
     fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation},
-    ApiError, IssueNumber, IssueState, ResolutionDeadline, UpdatedAt,
+    ApiError, ResolutionDeadline,
 };
+// Only the `#[cfg(unix)]` owner-status test builds these fixtures, so importing
+// them unconditionally trips `-D warnings` on Windows.
+#[cfg(unix)]
+use gwt_github::client::{IssueNumber, IssueState, UpdatedAt};
 use serde_json::json;
 use tempfile::TempDir;
 
