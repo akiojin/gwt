@@ -6501,7 +6501,11 @@ exit 1
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // global GWT home must stay isolated for the worker lifetime
     async fn recovery_blocked_worker_never_publishes_or_drains_launch_delivery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().expect("tempdir");
         let home = temp.path().join("home");
         fs::create_dir_all(&home).expect("create isolated gwt home");
@@ -6548,26 +6552,53 @@ exit 1
         let shutdown = Arc::new(DaemonShutdown::new());
         let worker = super::spawn_issue_monitor_worker_with_config(
             scope,
-            hub,
+            hub.clone(),
             Arc::clone(&shutdown),
             crate::IssueMonitorConfig::default(),
         );
 
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
-        let mut published_events = Vec::new();
-        while let Ok(Ok(DaemonFrame::Event { payload, .. })) =
-            tokio::time::timeout_at(deadline, events.recv()).await
-        {
-            if let Some(event) = payload.get("event").and_then(serde_json::Value::as_str) {
-                published_events.push(event.to_string());
-            }
-        }
+        assert_eq!(
+            hub.publish_issue_monitor_control(DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
+                payload: serde_json::json!({"enabled": false}),
+            })
+            .await,
+            Err(super::IssueMonitorControlQueueError::RecoveryBlocked),
+            "overlapping authority exposes a stable recovery-blocked control state",
+        );
 
         shutdown.request();
         tokio::time::timeout(Duration::from_secs(2), worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
+        let mut published_events = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(DaemonFrame::Event { channel, payload }) => {
+                    assert_eq!(
+                        channel,
+                        crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+                        "recovery-blocked worker published on an unexpected channel",
+                    );
+                    let event = payload
+                        .get("event")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!("recovery-blocked worker published a malformed event: {payload}")
+                        });
+                    published_events.push(event.to_string());
+                }
+                Ok(frame) => {
+                    panic!("recovery-blocked worker published a non-event frame: {frame:?}")
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    panic!("recovery-blocked event buffer lagged by {skipped} frames")
+                }
+            }
+        }
         assert!(
             published_events
                 .iter()
@@ -6575,14 +6606,17 @@ exit 1
             "recovery-blocked worker published delivery events: {published_events:?}",
         );
         assert!(published_events.iter().any(|event| event == "status"));
+        assert!(published_events.iter().any(|event| event == "inbox"));
+        let reloaded = crate::load_issue_monitor_prefs(&prefs_path).expect("reload delivery");
         assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path)
-                .expect("reload delivery")
-                .pending_launch_deliveries
-                .len(),
+            reloaded.pending_launch_deliveries.len(),
             1,
             "read-only recovery projection must not drain the durable outbox",
         );
+        let delivery = &reloaded.pending_launch_deliveries[0];
+        assert_eq!(delivery.delivery_id, "launch:effect-42");
+        assert_eq!(delivery.issue_number, 42);
+        assert_eq!(delivery.claim_id, "claim-42");
         drop(authority_owner);
     }
 
