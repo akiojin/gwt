@@ -2601,6 +2601,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// True once the buffer holds a full HTTP request: headers terminated and,
+    /// when `Content-Length` is declared, the whole body received.
+    fn request_is_complete(buffer: &[u8]) -> bool {
+        let Some(header_end) = buffer
+            .windows(4)
+            .position(|window| {
+                window
+                    == b"
+
+"
+            })
+            .map(|index| index + 4)
+        else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        buffer.len() - header_end >= content_length
+    }
+
     struct WorkspaceUpdateSuccessProbe {
         forward_url: String,
         requested: mpsc::Receiver<()>,
@@ -2629,9 +2653,29 @@ pub(crate) mod tests {
                 while !thread_stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                            let mut request = [0_u8; 8192];
-                            let _ = stream.read(&mut request);
+                            // The listener polls non-blocking, and on Windows
+                            // the accepted socket inherits that mode. Reading
+                            // non-blocking returns WouldBlock immediately, so
+                            // the probe would answer and close before the
+                            // client finished writing its request and the
+                            // client would see a transport failure instead of
+                            // the 200. Read the request to completion first.
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                            let mut request = Vec::new();
+                            let mut chunk = [0_u8; 8192];
+                            loop {
+                                match stream.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(read) => {
+                                        request.extend_from_slice(&chunk[..read]);
+                                        if request_is_complete(&request) {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
                             requested_tx.send(()).expect("record update probe request");
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
