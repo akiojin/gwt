@@ -869,11 +869,41 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     .as_ref()
                     .map(|identity| identity.generation_id.clone())
                     .unwrap_or_default();
+                // Genesis publishes the Active generation before it persists
+                // the producing Session, so during that window the liveness
+                // classifier reports a perfectly healthy launch as Stale
+                // ("durable Session is missing"). The durable launch-recovery
+                // receipt is written before materialization and cleared on
+                // both success and rollback, so it is the one artifact that
+                // spans the window; a live handshake must never be settled.
+                if super::continuation::durable_launch_recovery_exists(
+                    sessions_dir,
+                    &bound_session_id,
+                ) {
+                    return Err(format!(
+                        "an Active execution generation ({generation_id}) for {owner_text} is \
+                         still completing its launch handshake on Session \
+                         {bound_session_id}; retry shortly, or use Continue work if that \
+                         launch was interrupted and never reconciled"
+                    ));
+                }
                 match super::continuation::classify_nonlocal_active_owner_liveness_at(
                     sessions_dir,
                     &bound_session_id,
                 ) {
                     super::continuation::ActiveOwnerLiveness::Stale(evidence) => {
+                        let still_defunct = || {
+                            !super::continuation::durable_launch_recovery_exists(
+                                sessions_dir,
+                                &bound_session_id,
+                            ) && matches!(
+                                super::continuation::classify_nonlocal_active_owner_liveness_at(
+                                    sessions_dir,
+                                    &bound_session_id,
+                                ),
+                                super::continuation::ActiveOwnerLiveness::Stale(_)
+                            )
+                        };
                         gwt::cli::execution_state::block_defunct_active_generation(
                             worktree,
                             owner,
@@ -882,6 +912,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                                 "fresh launch self-recovery: producing Session \
                                  {bound_session_id} is defunct ({evidence})"
                             ),
+                            &still_defunct,
                         )
                         .map_err(|error| {
                             format!(
@@ -5285,6 +5316,13 @@ mod agent_endpoint_env_tests {
             gwt_agent::AgentStatus::Stopped,
         )
         .expect("mark predecessor Session durably stopped");
+        // Production clears the genesis recovery receipt at PTY handoff, well
+        // before authenticated SessionStart, so a provider that spawned and
+        // then died leaves no receipt. Model that completed handshake — while
+        // the receipt exists the launch is still in flight and must not be
+        // treated as defunct.
+        clear_durable_launch_recovery(&predecessor.sessions_dir, &predecessor.session.id)
+            .expect("clear the predecessor genesis handshake receipt");
         let predecessor_binding = gwt::cli::execution_state::current_execution_binding(
             &predecessor.project,
             predecessor.owner,
@@ -5371,6 +5409,101 @@ mod agent_endpoint_env_tests {
         );
     }
 
+    // #3426: genesis publishes the Active generation before it persists the
+    // producing Session, so mid-handshake the liveness classifier reports a
+    // perfectly healthy launch as Stale("durable Session is missing"). Without
+    // the in-flight gate a concurrent fresh launch would settle a LIVE
+    // generation and install itself as successor — two live agents on one
+    // owner.
+    #[test]
+    fn explicit_linked_owner_launch_refuses_self_recovery_while_launch_handshake_is_in_flight() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        // Deliberately do NOT clear the genesis recovery receipt and do NOT
+        // persist a durable Session: this is exactly the mid-handshake window.
+        assert!(
+            super::super::continuation::durable_launch_recovery_exists(
+                &predecessor.sessions_dir,
+                &predecessor.session.id,
+            ),
+            "the fixture must model an in-flight genesis handshake"
+        );
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
+        persist_finalized_launch_session(
+            &predecessor.sessions_dir,
+            &runtime_path,
+            &mut successor,
+            None,
+        )
+        .expect("persist fresh launch Session before authority");
+
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect_err("an in-flight launch handshake must never be self-recovered");
+
+        assert!(
+            error.contains("launch handshake"),
+            "the refusal must name the in-flight handshake: {error}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(
+                &predecessor.project,
+                predecessor.owner,
+            )
+            .expect("read ledger")
+            .expect("ledger")
+            .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+            "a live in-flight generation must stay Active"
+        );
+    }
+
     // #3426: an Active generation whose producing Session cannot be proven
     // defunct keeps the guard, but the refusal must carry actionable
     // diagnostics instead of only advertising Continue work.
@@ -5411,6 +5544,8 @@ mod agent_endpoint_env_tests {
                 &predecessor.session.id,
             ))
             .expect("persist live predecessor runtime sidecar");
+        clear_durable_launch_recovery(&predecessor.sessions_dir, &predecessor.session.id)
+            .expect("clear the predecessor genesis handshake receipt");
 
         let mut successor = gwt_agent::Session::new(
             &predecessor.project,

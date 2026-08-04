@@ -5914,11 +5914,19 @@ fn defunct_recovery_operation_id(generation_id: &str) -> String {
 /// erases history, and a response-loss retry with the same evidence is
 /// idempotent. Callers must present the exact bound primary Session id — any
 /// drift refuses without mutation.
+///
+/// `still_defunct` is re-evaluated *inside* the owner lease, immediately before
+/// the transition is appended. The caller's liveness classification is taken
+/// outside the lease, and the CAS below only re-checks owner/status/session
+/// identity — none of which a `ReboundCurrent` resume changes — so without this
+/// fencing callback a Session that revives between classification and settle
+/// would have its live generation Blocked.
 pub fn block_defunct_active_generation(
     worktree: &Path,
     owner: ExecutionOwnerKey,
     expected_primary_session_id: &str,
     reason: &str,
+    still_defunct: &dyn Fn() -> bool,
 ) -> io::Result<ExecutionControlRecord> {
     validate_owner(owner)?;
     gwt_agent::validate_session_id_path_component(expected_primary_session_id)
@@ -5941,10 +5949,21 @@ pub fn block_defunct_active_generation(
                 invalid_generation_data("execution generation ledger current id is missing")
             })?
             .clone();
-        if ledger.continuation_attempts.iter().any(|attempt| {
-            attempt.predecessor.generation_id == current.identity.generation_id
-                && attempt.status == ContinuationAttemptStatus::Prepared
-        }) {
+        // The attempt log is append-only: aborting a successor appends an
+        // Aborted entry and leaves its Prepared entry in place. Fold to the
+        // latest entry per operation before testing, or every owner that ever
+        // had a rescue attempt aborted would be barred from recovery forever.
+        let mut seen_operations = std::collections::HashSet::new();
+        if ledger
+            .continuation_attempts
+            .iter()
+            .rev()
+            .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
+            .any(|attempt| {
+                attempt.predecessor.generation_id == current.identity.generation_id
+                    && attempt.status == ContinuationAttemptStatus::Prepared
+            })
+        {
             return Err(generation_conflict(
                 "defunct recovery refuses while a Prepared successor still targets the current generation",
             ));
@@ -6004,6 +6023,11 @@ pub fn block_defunct_active_generation(
         {
             return Err(generation_conflict(
                 "defunct recovery lost the exact Active generation authority",
+            ));
+        }
+        if !still_defunct() {
+            return Err(generation_conflict(
+                "the bound Session is no longer defunct; defunct recovery refuses without mutation",
             ));
         }
         let recorded_at = Utc::now();
@@ -12697,14 +12721,29 @@ mod tests {
             Some(ExecutionControlStatus::Active)
         );
 
+        let defunct = || true;
         // An empty reason and a non-bound session are both refused without
         // authority mutation.
-        assert!(block_defunct_active_generation(dir.path(), owner, "dead-session", "  ").is_err());
+        assert!(
+            block_defunct_active_generation(dir.path(), owner, "dead-session", "  ", &defunct)
+                .is_err()
+        );
         assert!(block_defunct_active_generation(
             dir.path(),
             owner,
             "other-session",
-            "wrong session"
+            "wrong session",
+            &defunct
+        )
+        .is_err());
+        // A Session that revived after the caller's out-of-lease liveness
+        // classification refuses inside the lease, without mutation.
+        assert!(block_defunct_active_generation(
+            dir.path(),
+            owner,
+            "dead-session",
+            "revived before settle",
+            &|| false
         )
         .is_err());
         assert_eq!(
@@ -12718,7 +12757,8 @@ mod tests {
         let reason = "fresh launch self-recovery: producing Session dead-session is defunct \
                       (durable Session is stopped)";
         let record =
-            block_defunct_active_generation(dir.path(), owner, "dead-session", reason).unwrap();
+            block_defunct_active_generation(dir.path(), owner, "dead-session", reason, &defunct)
+                .unwrap();
         assert_eq!(record.status, ExecutionControlStatus::Blocked);
         assert_eq!(record.blocked_reason.as_deref(), Some(reason));
         let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
@@ -12734,7 +12774,8 @@ mod tests {
 
         // A response-loss retry with the same evidence stays idempotent.
         let retried =
-            block_defunct_active_generation(dir.path(), owner, "dead-session", reason).unwrap();
+            block_defunct_active_generation(dir.path(), owner, "dead-session", reason, &defunct)
+                .unwrap();
         assert_eq!(retried.status, ExecutionControlStatus::Blocked);
 
         // The ordinary Blocked-successor preparation now proceeds.
@@ -12750,6 +12791,78 @@ mod tests {
         };
         prepare_fresh_linked_owner_launch_successor(dir.path(), owner, &request)
             .expect("Blocked-successor preparation after defunct recovery");
+    }
+
+    // #3426: the continuation attempt log is append-only — aborting a successor
+    // appends an Aborted entry and leaves its Prepared entry behind. A naive
+    // scan therefore bars every owner that ever had a rescue attempt aborted,
+    // which is exactly the stranded population this recovery exists for.
+    #[test]
+    fn block_defunct_active_generation_ignores_superseded_prepared_attempts() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3427,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "dead-session",
+            "$gwt-execute #3427",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish generation ledger");
+
+        // A Continue work rescue was attempted against this Active generation
+        // while it looked stale, and it did not survive.
+        let request = SuccessorRequest {
+            operation_id: "earlier-rescue".to_string(),
+            principal_id: "gwt-host-continue".to_string(),
+            work_id: Some("work-3427".to_string()),
+            source: "continue-work:resume".to_string(),
+            session_binding_id: "earlier-rescue-binding".to_string(),
+            initial_session_id: "rescue-session".to_string(),
+            entrypoint: "$gwt-execute #3427".to_string(),
+            requested_at: Utc::now(),
+        };
+        prepare_active_continuation_successor(dir.path(), owner, &request)
+            .expect("prepare Active-predecessor rescue");
+        let defunct = || true;
+        // While that rescue is still Prepared the recovery must stand down:
+        // two writers would otherwise target the same generation.
+        assert!(block_defunct_active_generation(
+            dir.path(),
+            owner,
+            "dead-session",
+            "prepared rescue still outstanding",
+            &defunct
+        )
+        .is_err());
+
+        abort_successor(dir.path(), owner, &request, "rescue abandoned")
+            .expect("abort the earlier rescue");
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Active),
+            "aborting a successor must leave the predecessor Active"
+        );
+
+        let reason = "fresh launch self-recovery: producing Session dead-session is defunct \
+                      (durable Session is stopped)";
+        let record =
+            block_defunct_active_generation(dir.path(), owner, "dead-session", reason, &defunct)
+                .expect("an aborted rescue must not bar defunct recovery forever");
+        assert_eq!(record.status, ExecutionControlStatus::Blocked);
     }
 
     // ------------------------------------------------------------------

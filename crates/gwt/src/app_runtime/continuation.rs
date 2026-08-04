@@ -1085,6 +1085,15 @@ fn work_agent_ref_authenticates_session(
     agent.session_id == session.id && work_agent_ref_authenticates_agent(agent, &session.agent_id)
 }
 
+/// `require_exact_owner_kind` must be `false` for a pre-transition read and
+/// `true` for a post-commit readback (#3426). `canonical_continue_work_owner`
+/// deliberately heals a same-number kind-only disagreement toward the trusted
+/// authority, but the correction is only written *inside* the activation
+/// transaction. Demanding the exact kind of the pre-transition snapshot would
+/// therefore re-reject precisely the set the heal exists to admit, and the
+/// corrected owner could never land. The readbacks still see the healed label
+/// and keep enforcing the strict check.
+#[allow(clippy::too_many_arguments)]
 fn projection_continue_authority_matches(
     item: &gwt_core::workspace_projection::WorkItem,
     project_root: &Path,
@@ -1093,14 +1102,16 @@ fn projection_continue_authority_matches(
     branch: &str,
     agent_id: &gwt_agent::AgentId,
     agent_session_id: Option<&str>,
+    require_exact_owner_kind: bool,
 ) -> bool {
     let Ok(projected_owner) = projection_only_continue_owner(item) else {
         return false;
     };
     if projected_owner.number != owner.number
-        || projected_owner
-            .declared_kind
-            .is_some_and(|kind| kind != owner.kind)
+        || (require_exact_owner_kind
+            && projected_owner
+                .declared_kind
+                .is_some_and(|kind| kind != owner.kind))
     {
         return false;
     }
@@ -2230,6 +2241,7 @@ fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool 
                     &pending.work_branch,
                     &pending.work_agent_id,
                     Some(&pending.binding.session_id),
+                    true,
                 )
         })
 }
@@ -2263,6 +2275,7 @@ fn transact_pending_continue_work_with_activation(
                 &pending.work_branch,
                 &pending.work_agent_id,
                 pending.work_agent_session_id.as_deref(),
+                false,
             ) {
                 return Err(gwt_core::error::GwtError::Other(
                     "Continue work authority changed before activation".to_string(),
@@ -4877,6 +4890,7 @@ impl AppRuntime {
                                 &exact_candidate.branch,
                                 &exact_candidate.agent_id,
                                 Some(&candidate_session_id),
+                                true,
                             )
                     });
                     if !projection_matches || !work_matches {

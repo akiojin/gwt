@@ -13565,6 +13565,281 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     );
 }
 
+/// #3426: drive an owner-kind-healed Continue work all the way through
+/// authenticated SessionStart. `work_owner_text` is what the Work projection
+/// declares; the trusted execution authority is always `spec/2359`.
+fn continue_work_heal_session_start_events(
+    temp_root: &Path,
+    case: &str,
+    work_owner_text: &str,
+) -> (AppRuntime, PathBuf, Vec<OutboundEvent>, String) {
+    let repo = temp_root.join(format!("repo-{case}"));
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(
+        &repo,
+        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
+    );
+
+    let predecessor_session_id = "heal-predecessor-session";
+    let candidate_session_id = "heal-candidate-session";
+    let selected_work_id = "work-healed";
+    let operation_id = "continue-op-heal";
+    let readiness_nonce = "continue-ready-heal";
+    // The trusted authority is a SPEC owner (the gwt-spec labeled Issue).
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        number: 2359,
+    };
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        predecessor_session_id,
+        "gwt-execute",
+        false,
+    )
+    .expect("materialize predecessor execution");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            predecessor_session_id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+    )
+    .expect("import completed predecessor");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read predecessor binding")
+        .expect("predecessor binding");
+
+    let now = chrono::Utc::now();
+    let request = gwt::cli::execution_state::SuccessorRequest {
+        operation_id: operation_id.to_string(),
+        principal_id: "gwt-host-continuation".to_string(),
+        work_id: Some(selected_work_id.to_string()),
+        source: "continue-work:resume".to_string(),
+        session_binding_id: "binding-heal-candidate".to_string(),
+        initial_session_id: candidate_session_id.to_string(),
+        entrypoint: "gwt-execute".to_string(),
+        requested_at: now,
+    };
+    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
+        .expect("prepare successor");
+    let planned_identity =
+        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
+            .expect("derive Prepared binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: candidate_session_id.to_string(),
+        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity: planned_identity,
+        capability_generation: 1,
+    };
+
+    // The Work projection still carries the presentation-derived owner that
+    // diverged from the trusted authority — the #3426 (A) stuck state.
+    let mut start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        selected_work_id,
+        now,
+    );
+    start.title = Some("Healed Work".to_string());
+    start.owner = Some(work_owner_text.to_string());
+    start.agent_session_id = Some(predecessor_session_id.to_string());
+    start.agent_id = Some("Codex".to_string());
+    start.display_name = Some("Codex".to_string());
+    start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+        .expect("record selected Work");
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &repo,
+        gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            selected_work_id,
+            now + chrono::Duration::seconds(1),
+        ),
+    )
+    .expect("complete selected Work");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    // The Prepared-binding probe reads the canonical sessions directory under
+    // the scoped gwt home, so the runtime root must be that same `.gwt`.
+    let mut runtime = sample_runtime(&temp_root.join(".gwt"), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = candidate_session_id.to_string();
+    active.branch_name = "work/issue-2359".to_string();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+
+    let mut candidate_session =
+        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
+    candidate_session.id = candidate_session_id.to_string();
+    candidate_session.project_state_root = Some(repo.clone());
+    candidate_session.linked_issue_number = Some(owner.number);
+    candidate_session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind candidate Session");
+    candidate_session
+        .save(&runtime.sessions_dir)
+        .expect("save candidate Session");
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43323/internal/hook-live",
+        "ws://127.0.0.1:43324/ws",
+        "ws://127.0.0.1:43323/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue_prepared(&repo, candidate_session_id, binding.clone())
+        .expect("issue Prepared capability");
+    runtime.agent_capability_issuer = Some(issuer);
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), capability.token);
+    runtime.pending_continue_work.insert(
+        window_id.clone(),
+        PendingContinueWork {
+            client_id: "client-heal".to_string(),
+            operation_id: operation_id.to_string(),
+            work_id: selected_work_id.to_string(),
+            project_root: repo.clone(),
+            worktree_path: repo.clone(),
+            owner,
+            work_branch: "work/issue-2359".to_string(),
+            work_agent_id: gwt_agent::AgentId::Codex,
+            work_agent_session_id: Some(predecessor_session_id.to_string()),
+            execution: PendingContinueWorkExecution::Successor(request),
+            binding,
+            readiness_nonce: readiness_nonce.to_string(),
+            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+            resume_context: WorkspaceResumeContext {
+                title: Some("Healed Work".to_string()),
+                owner: Some(work_owner_text.to_string()),
+                summary: None,
+                next_action: None,
+            },
+            predecessor_session_id: predecessor_session_id.to_string(),
+            predecessor_binding,
+        },
+    );
+
+    let events = runtime.finalize_continue_work_session_start(&window_id, Some(readiness_nonce));
+    (runtime, repo, events, selected_work_id.to_string())
+}
+
+// #3426 (A): the Work projection says `Issue #2359` while the trusted ledger
+// says spec/2359. The heal must survive the activation transaction and rewrite
+// the Work owner. Before the fix the pre-transition precondition re-applied the
+// exact-kind check that canonical_continue_work_owner had deliberately relaxed,
+// so the continuation spawned a PTY and then died at authenticated SessionStart.
+#[test]
+fn continue_work_authenticated_session_start_commits_healed_spec_owner() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+
+    let (_runtime, repo, events, work_id) =
+        continue_work_heal_session_start_events(temp.path(), "heal-commit", "Issue #2359");
+
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                ..
+            }
+        )),
+        "a healed owner kind must not fail at activation: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                ..
+            }
+        )),
+        "authenticated readiness must emit one correlated success: {events:?}"
+    );
+    let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work projection")
+        .expect("Work projection")
+        .work_items
+        .into_iter()
+        .find(|item| item.id == work_id)
+        .expect("healed Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("SPEC-2359"),
+        "the activation transaction must persist the corrected canonical owner"
+    );
+}
+
+// The relaxation is kind-only: a genuine owner NUMBER disagreement must stay
+// fail-closed at the same precondition.
+#[test]
+fn continue_work_session_start_still_refuses_owner_number_mismatch() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+
+    let (_runtime, repo, events, work_id) =
+        continue_work_heal_session_start_events(temp.path(), "heal-number", "Issue #2360");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ContinueWorkOutcome {
+                outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                ..
+            }
+        )),
+        "an owner number mismatch must still be rejected: {events:?}"
+    );
+    let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work projection")
+        .expect("Work projection")
+        .work_items
+        .into_iter()
+        .find(|item| item.id == work_id)
+        .expect("unhealed Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("Issue #2360"),
+        "a refused activation must not rewrite the Work owner"
+    );
+}
+
 #[test]
 fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preserves_blocked_history(
 ) {
@@ -19183,6 +19458,21 @@ fn app_runtime_issue_launch_wizard_prefers_cached_spec_label_over_preset_kind() 
         Some("SPEC #1921"),
         "cached gwt-spec label evidence must override the collapsed preset kind"
     );
+    // #3426: the re-canonicalization is scoped to the owner label. The wizard's
+    // own linked-issue kind still comes from the caller, because it also drives
+    // the read-only "Linked issue" section and the manual branch suffix, and a
+    // gwt-spec label must not hide the section or seed `spec-1921`.
+    let view = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .wizard
+        .view();
+    assert!(
+        view.show_linked_issue,
+        "a cached gwt-spec Issue opened from the unified surface must keep its Linked issue section"
+    );
+    assert_eq!(view.branch_name, "work/issue-1921");
 }
 
 #[test]
