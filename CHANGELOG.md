@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.72.1] - 2026-08-03
+
+### Bug Fixes
+
+- **issue-monitor:** RecoveryBlocked fixture の同期を決定化
+
+## [9.72.0] - 2026-08-03
+
+### Bug Fixes
+
+- **issue-monitor:** Use authority daemon state
+- **issue-monitor:** Preserve agent status authority boundaries
+- **execution:** Repair の authority 判定を統一
+- **workspace:** Recovery authority 判定を統一
+- **workspace:** Commit時の履歴判定を統一
+
+### Features
+
+- **issue-monitor:** Add agent queue operations
+- **hooks:** Workflow-policy から owner guard と intake code-edit guard を撤去 (SPEC #3245 T-101..T-103)
+- **hooks:** Intake completion Stop gate を撤去し capture 配線を単純化 (SPEC #3245 T-104)
+- **skills:** Reduced skill set と lane 別 guidance/reminder 分岐を撤去 (SPEC #3245 T-105/T-106)
+- **skills:** 登録テンプレートを autonomous 適格既定へ (SPEC #3245 Stage B T-121..T-124)
+- **lane:** Lane 機構本体を撤去し worktree 形態判定へ一本化 (SPEC #3245 Stage C T-131..T-137)
+
+### Miscellaneous Tasks
+
+- **work:** Record resumed work events
+- **work:** Record issue 3357 verification
+- **work:** SPEC #3245 delivery settlement の Work event bookkeeping
+- **work:** PR handoff 中の Work event bookkeeping
+- **work:** Finalize issue 3357 handoff
+- **work:** Issue #2359 の実行イベントを記録
+- **work:** SPEC 2359 の完了状態を記録
+- **work:** Record resumed release session work event
+
+### Testing
+
+- **hooks:** Intake シグナルが hook dispatch 挙動を変えないことを統合固定 (SPEC #3245 T-107)
+- **cli:** Action_obligation revival テストを scoped HOME + env lock で隔離
+- **policy:** Align monitor ops with unified execution
+- **issue-monitor:** Remove redundant projection borrow
+
 ## [9.71.2] - 2026-08-03
 
 ### Bug Fixes

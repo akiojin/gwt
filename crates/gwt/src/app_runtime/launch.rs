@@ -631,6 +631,45 @@ enum AgentCapabilityLaunchAuthority<'a> {
     Active(&'a gwt_agent::SessionExecutionBinding),
 }
 
+/// Issue #3426: explain a refused genesis launch instead of stating the bare
+/// single-writer rule.
+///
+/// A launch can only mint genesis authority when the owner has no live
+/// generation. When a holder Session dies without settling, every later fresh
+/// launch (Issue Monitor retries included) collides here, so the refusal names
+/// the blocking generation, its holder and durable state, and both recovery
+/// routes. Diagnostics are best effort: an unreadable holder Session degrades
+/// the detail, never the refusal.
+fn existing_generation_conflict_detail(
+    sessions_dir: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
+) -> String {
+    let status = ledger
+        .current_effective_status()
+        .map_or("unknown", |status| match status {
+            gwt::cli::execution_state::ExecutionControlStatus::Active => "active",
+            gwt::cli::execution_state::ExecutionControlStatus::Completed => "completed",
+            gwt::cli::execution_state::ExecutionControlStatus::Blocked => "blocked",
+        });
+    let holder = ledger.current_generation().map(|generation| {
+        let session_id = generation.identity.initial_session_id.clone();
+        let session_state =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).map_or_else(
+                |_| "durable Session unreadable".to_string(),
+                |session| format!("{:?}", session.status),
+            );
+        format!(" held by Session {session_id} ({session_state})")
+    });
+    format!(
+        "an execution generation already exists for {} #{} ({} generation{}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        owner.kind.as_str(),
+        owner.number,
+        status,
+        holder.unwrap_or_default(),
+    )
+}
+
 struct FinalizedAgentCapabilityLaunch<'a> {
     issuer: Option<&'a AgentCapabilityIssuer>,
     sessions_dir: &'a Path,
@@ -838,16 +877,14 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 // #3426: a stranded Active generation whose producing Session
                 // is durably defunct self-recovers here — settle it Blocked
                 // with audited evidence and fall through to the ordinary
-                // Blocked-successor preparation below. Anything else keeps
-                // the guard, with diagnostics naming the exact next action.
-                let owner_text = format!("{} #{}", owner.kind.as_str(), owner.number);
+                // Blocked-successor preparation below. Every refusal keeps the
+                // canonical holder/recovery-route diagnostic.
+                let conflict_detail =
+                    || existing_generation_conflict_detail(sessions_dir, owner, &ledger);
                 if effective_status
                     != Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
                 {
-                    return Err(format!(
-                        "an execution generation for {owner_text} already exists \
-                         (status: {effective_status:?}); use Continue work to create a successor"
-                    ));
+                    return Err(conflict_detail());
                 }
                 let record = gwt::cli::execution_state::load(worktree)
                     .map_err(|error| error.to_string())?
@@ -857,34 +894,23 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                             && record.status
                                 == gwt::cli::execution_state::ExecutionControlStatus::Active
                     })
-                    .ok_or_else(|| {
-                        format!(
-                            "an Active execution generation for {owner_text} already exists but \
-                             its projection could not be read; use Continue work to create a \
-                             successor"
-                        )
-                    })?;
+                    .ok_or_else(conflict_detail)?;
                 let bound_session_id = record.primary_session_id.clone();
-                let generation_id = current_binding
-                    .as_ref()
-                    .map(|identity| identity.generation_id.clone())
-                    .unwrap_or_default();
                 // Genesis publishes the Active generation before it persists
                 // the producing Session, so during that window the liveness
-                // classifier reports a perfectly healthy launch as Stale
-                // ("durable Session is missing"). The durable launch-recovery
-                // receipt is written before materialization and cleared on
-                // both success and rollback, so it is the one artifact that
-                // spans the window; a live handshake must never be settled.
+                // classifier reports a perfectly healthy launch as defunct.
+                // The durable launch-recovery receipt is written before
+                // materialization and cleared at PTY handoff, so it is the one
+                // artifact that spans the window; a live handshake must never
+                // be settled.
                 if super::continuation::durable_launch_recovery_exists(
                     sessions_dir,
                     &bound_session_id,
                 ) {
                     return Err(format!(
-                        "an Active execution generation ({generation_id}) for {owner_text} is \
-                         still completing its launch handshake on Session \
-                         {bound_session_id}; retry shortly, or use Continue work if that \
-                         launch was interrupted and never reconciled"
+                        "{} (that generation is still completing its launch handshake; \
+                         retry shortly)",
+                        conflict_detail()
                     ));
                 }
                 match super::continuation::classify_nonlocal_active_owner_liveness_at(
@@ -915,20 +941,11 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                             &still_defunct,
                         )
                         .map_err(|error| {
-                            format!(
-                                "the stranded Active generation {generation_id} for \
-                                 {owner_text} (bound Session {bound_session_id}, {evidence}) \
-                                 could not self-recover: {error}"
-                            )
+                            format!("{} — self-recovery failed: {error}", conflict_detail())
                         })?;
                     }
                     super::continuation::ActiveOwnerLiveness::Unknown => {
-                        return Err(format!(
-                            "an Active execution generation ({generation_id}) for {owner_text} \
-                             is still bound to Session {bound_session_id} and may be live; use \
-                             Continue work to create a successor, or settle the stalled \
-                             execution from its owning session with execution.blocked"
-                        ));
+                        return Err(conflict_detail());
                     }
                 }
             }
@@ -3278,26 +3295,11 @@ impl AppRuntime {
             }
             let codex_hook_discovery_mode =
                 codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
-            // SPEC-3247 FR-002: select lane-specific coordination guidance from
-            // the launch's ephemeral intake flag (same source as the
-            // GWT_SESSION_KIND env export in prepare.rs), so an intake session
-            // materializes curation-framed guidance without Work-state
-            // instructions.
-            let session_kind = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral);
-            // SPEC-3248 (hooks v2 P0): materialize the lane file — the
-            // deterministic source of truth hooks read via the lane registry —
-            // from the authoritative launch-time lane (is_ephemeral). Best
-            // effort: a write failure must not block the launch, and hooks fall
-            // back to the execution default when the file is absent.
-            let _ = gwt_skills::write_lane_file(
-                &worktree_path,
-                gwt_skills::LaneRegistry::for_session_kind(session_kind),
-            );
             refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
                 &worktree_path,
                 &config.agent_id,
                 codex_hook_discovery_mode,
-                session_kind,
+                config.is_ephemeral,
             )
             .map_err(|error| {
                 // Attribute managed-asset failures to the worktree so the
@@ -3429,20 +3431,6 @@ impl AppRuntime {
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 session_id.clone(),
-            );
-            // SPEC-3247 FR-001: export the session-kind signal into the spawned
-            // agent's env HERE, in the production spawn path (the `prepare.rs`
-            // helper is an alternate path with no production callers). Derived
-            // from the same `config.is_ephemeral` as the materialization
-            // guidance kind above, so the runtime signal and the materialized
-            // guidance never disagree. Absent/unknown decodes to Execution
-            // downstream (FR-004).
-            let session_kind_env = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral)
-                .as_env_str()
-                .to_string();
-            config.env_vars.insert(
-                gwt_skills::GWT_SESSION_KIND_ENV.to_string(),
-                session_kind_env,
             );
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
@@ -4596,6 +4584,102 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
+    fn fresh_launch_conflict_names_the_generation_holder_and_recovery_route() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut genesis_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut genesis_env)
+        .expect("materialize the first producing generation");
+
+        // Issue #3426: the holder Session dies without settling its
+        // generation. Every later fresh launch hits the single-writer guard,
+        // so the refusal must name the holder, its durable state, and the
+        // exact recovery route instead of a bare "already exists".
+        let holder_id = launch.session.id.clone();
+        let mut holder =
+            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+                .expect("reload holder Session");
+        holder.update_status(gwt_agent::AgentStatus::Stopped);
+        holder
+            .save(&launch.sessions_dir)
+            .expect("persist stopped holder");
+
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.update_status(gwt_agent::AgentStatus::Running);
+
+        let mut env = HashMap::new();
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut relaunch,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("a second genesis launch must be refused");
+
+        assert!(
+            error.contains("spec #2359"),
+            "the refusal must name the owner it collides with: {error}"
+        );
+        assert!(
+            error.contains("active"),
+            "the refusal must name the blocking generation status: {error}"
+        );
+        assert!(
+            error.contains(&holder_id),
+            "the refusal must name the Session holding the generation: {error}"
+        );
+        assert!(
+            error.contains("Stopped"),
+            "the refusal must expose that the holder is no longer running: {error}"
+        );
+        assert!(
+            error.contains("Continue work") && error.contains("execution.status"),
+            "the refusal must route to both recovery entrypoints: {error}"
+        );
+        assert!(
+            !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "a refused genesis launch must not issue a capability"
+        );
+    }
+
+    #[test]
     fn rebound_current_resume_installs_active_authority_for_predecessor_session() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -5585,7 +5669,7 @@ mod agent_endpoint_env_tests {
             "diagnostics must name the bound Session: {error}"
         );
         assert!(
-            error.contains("Active"),
+            error.contains("active generation"),
             "diagnostics must state the generation status: {error}"
         );
         assert!(

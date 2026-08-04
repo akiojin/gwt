@@ -28,6 +28,7 @@ use std::{
 };
 
 use gwt_core::daemon::DaemonFrame;
+use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 
 /// Default per-channel capacity. 64 is enough headroom for a burst of
@@ -144,6 +145,7 @@ impl IssueMonitorControlRequest {
 pub struct BroadcastHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<DaemonFrame>>>>,
     issue_monitor_controls: Arc<IssueMonitorControlQueue>,
+    issue_monitor_status: Arc<Mutex<Option<Value>>>,
 }
 
 impl Default for BroadcastHub {
@@ -151,6 +153,7 @@ impl Default for BroadcastHub {
         Self {
             channels: Arc::new(Mutex::new(HashMap::new())),
             issue_monitor_controls: Arc::new(IssueMonitorControlQueue::new()),
+            issue_monitor_status: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -206,6 +209,36 @@ impl BroadcastHub {
         self.issue_monitor_controls
             .state
             .send_replace(IssueMonitorControlState::Closed);
+        *self
+            .issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned") = None;
+    }
+
+    /// Replace the daemon-owned atomic projection consumed by agent status
+    /// requests. The worker calls this from the same immutable monitor borrow
+    /// used for frontend status/inbox publication.
+    pub(crate) fn set_issue_monitor_status(&self, status: Value) {
+        *self
+            .issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned") = Some(status);
+    }
+
+    /// Read the latest projection only while the Issue Monitor worker is the
+    /// live control authority. Recovery-blocked workers retain their GUI
+    /// diagnostics, but must fail closed for agent status requests.
+    pub(crate) fn issue_monitor_status(&self) -> Option<Value> {
+        if !matches!(
+            *self.issue_monitor_controls.state.borrow(),
+            IssueMonitorControlState::Ready
+        ) {
+            return None;
+        }
+        self.issue_monitor_status
+            .lock()
+            .expect("Issue Monitor status mutex poisoned")
+            .clone()
     }
 
     /// Admit one command and await its durable completion receipt. Successful
@@ -621,6 +654,7 @@ mod tests {
     #[tokio::test]
     async fn issue_monitor_control_starting_resolves_to_recovery_blocked_or_closed() {
         let recovery_hub = BroadcastHub::new();
+        recovery_hub.set_issue_monitor_status(json!({"queue": []}));
         let recovery_publish = tokio::spawn({
             let hub = recovery_hub.clone();
             async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
@@ -634,6 +668,10 @@ mod tests {
         assert_eq!(
             recovery_error.message(),
             crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+        );
+        assert!(
+            recovery_hub.issue_monitor_status().is_none(),
+            "recovery-blocked worker must not expose a normal agent status projection"
         );
         assert_eq!(
             recovery_hub

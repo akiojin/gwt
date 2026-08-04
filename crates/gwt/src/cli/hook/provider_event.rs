@@ -28,25 +28,6 @@ pub fn handle_with_input(
     event_dispatcher::handle_with_input(&normalized.event, &payload, worktree_root, current_session)
 }
 
-pub(crate) fn handle_with_input_and_managed_capture(
-    provider: &str,
-    native_event: &str,
-    input: &str,
-    worktree_root: &Path,
-    current_session: Option<&str>,
-    managed_hook_capture: &mut super::intake_completion_stop_check::ManagedHookCapture<'_>,
-) -> Result<HookOutput, HookError> {
-    let normalized = normalize_provider_payload(provider, native_event, input)?;
-    let payload = serde_json::to_string(&normalized.payload)?;
-    event_dispatcher::handle_with_input_and_managed_capture(
-        &normalized.event,
-        &payload,
-        worktree_root,
-        current_session,
-        managed_hook_capture,
-    )
-}
-
 pub fn normalize_provider_payload(
     provider: &str,
     native_event: &str,

@@ -14,19 +14,14 @@
 
 use std::path::Path;
 
-use super::{context::HookContext, envelope::stop_hook_active_from, HookOutput};
+use super::{envelope::stop_hook_active_from, HookOutput};
 use crate::cli::action_obligation;
 
-/// UserPromptSubmit entry: arm typed obligations for producing prompts in
-/// execution lanes (intake lanes have their own artifact gate). A missing
-/// or unparsable prompt arms nothing — unclassifiable input must not
-/// over-block (conservative bias, opposite of the intake dirty marker).
+/// UserPromptSubmit entry: arm typed obligations for producing prompts. A
+/// missing or unparsable prompt arms nothing — unclassifiable input must not
+/// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
-        return;
-    }
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -59,10 +54,6 @@ pub fn handle_with_input(
         return HookOutput::Silent;
     }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    let lane = HookContext::for_worktree(&resolved).lane;
-    if lane.policy_flags.completion_gate {
-        return HookOutput::Silent;
-    }
     let Some(session) = current_session else {
         return HookOutput::Silent;
     };
@@ -89,12 +80,10 @@ pub fn handle_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
 
-    fn mk_worktree(profile: &gwt_skills::LaneProfile) -> tempfile::TempDir {
+    fn mk_worktree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-        write_lane_file(dir.path(), profile).unwrap();
         dir
     }
 
@@ -102,7 +91,7 @@ mod tests {
     // the block routes to canonical operations and the deferral path.
     #[test]
     fn open_obligations_block_until_settled() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
 
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
@@ -133,7 +122,7 @@ mod tests {
     // open, even when they contain completion keywords.
     #[test]
     fn completion_prose_does_not_create_an_obligation() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
         action_obligation::settle_kinds_best_effort(
             dir.path(),
@@ -161,7 +150,7 @@ mod tests {
     // stop_hook_active, and intake lanes stay silent.
     #[test]
     fn fail_open_contracts_hold() {
-        let dir = mk_worktree(&EXECUTION_PROFILE);
+        let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
             HookOutput::Silent
@@ -180,15 +169,16 @@ mod tests {
             HookOutput::Silent
         );
 
-        let intake = mk_worktree(&INTAKE_PROFILE);
-        action_obligation::mark_from_prompt(intake.path(), "sess-1", "実装して").unwrap();
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _kind = gwt_core::test_support::ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
-        assert_eq!(
-            handle_with_input(intake.path(), "{}", Some("sess-1")),
-            HookOutput::Silent
+        // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
+        // armed obligation blocks Stop in every worktree the same way.
+        let former_intake = mk_worktree();
+        action_obligation::mark_from_prompt(former_intake.path(), "sess-1", "実装して").unwrap();
+        assert!(
+            matches!(
+                handle_with_input(former_intake.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "obligations gate uniformly after the lane removal"
         );
     }
 }

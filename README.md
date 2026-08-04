@@ -301,6 +301,17 @@ inbox, and you press `Launch` per issue: gwt then creates the
 `gwt-execute #N`. Failed launches stay visible in the inbox with the error, and
 `Launch now` retries explicitly.
 
+Agents and automation can inspect and reprioritize the project queue through
+the `gwtd` JSON operations `issue.monitor.status`,
+`issue.monitor.priority.move`, and `issue.monitor.priority.set`. The
+`issue.monitor.config.set` operation can stop processing, disable autonomous
+mode, or set a positive `max_active` limit. For safety, it rejects
+`enabled=true` and `autonomous_mode=true`; enabling either capability requires
+an explicit action in the GUI. All operations accept an optional
+`project_root` and otherwise target the current worktree. Priority and
+daemon-absent configuration changes become visible to running instances on the
+next scan/rebase.
+
 ### Autonomous mode (opt-in)
 
 Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →
