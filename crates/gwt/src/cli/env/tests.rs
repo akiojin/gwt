@@ -597,7 +597,12 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 
 #[test]
 fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
+    let stable_hook_bin = temp.path().join("stable-gwtd");
+    fs::write(&stable_hook_bin, "test binary").expect("stable hook bin");
+    let _hook_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
     gwt_skills::generate_settings_local(temp.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(temp.path()).expect("codex hooks");
     let runtime_path = temp.path().join("runtime-state.json");
