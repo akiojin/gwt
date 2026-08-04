@@ -15,20 +15,15 @@ mod windows_job {
     use windows::{
         core::{Error as WindowsError, HRESULT},
         Win32::{
-            Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE},
+            Foundation::{CloseHandle, HANDLE},
             System::{
-                Diagnostics::ToolHelp::{
-                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
-                    THREADENTRY32,
-                },
                 JobObjects::{
                     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
                     QueryInformationJobObject, SetInformationJobObject,
                     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
-                    OpenProcess, OpenThread, ResumeThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-                    THREAD_SUSPEND_RESUME,
+                    OpenProcess, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
                 },
             },
         },
@@ -36,17 +31,19 @@ mod windows_job {
 
     use super::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS;
 
+    // Resumes every thread of a process from a process handle alone. Not part
+    // of the Win32 metadata the `windows` crate is generated from, so it is
+    // declared here; ntdll exports it on every supported Windows release.
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtResumeProcess(process: HANDLE) -> i32;
+    }
+
     #[derive(Debug)]
     pub enum WindowsJobError {
         Operation {
             operation: &'static str,
             source: WindowsError,
-        },
-        PrimaryThreadCount {
-            process_id: u32,
-        },
-        PrimaryThreadNotSuspended {
-            process_id: u32,
         },
     }
 
@@ -54,14 +51,6 @@ mod windows_job {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::Operation { operation, .. } => write!(formatter, "{operation} failed"),
-                Self::PrimaryThreadCount { process_id } => write!(
-                    formatter,
-                    "suspended process {process_id} did not expose exactly one primary thread"
-                ),
-                Self::PrimaryThreadNotSuspended { process_id } => write!(
-                    formatter,
-                    "primary thread for suspended process {process_id} was not suspended"
-                ),
             }
         }
     }
@@ -70,7 +59,6 @@ mod windows_job {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
             match self {
                 Self::Operation { source, .. } => Some(source),
-                Self::PrimaryThreadCount { .. } | Self::PrimaryThreadNotSuspended { .. } => None,
             }
         }
     }
@@ -244,49 +232,28 @@ mod windows_job {
         }
     }
 
+    /// Resume a process created with `CREATE_SUSPENDED`.
+    ///
+    /// Cost here is on the critical path of every deadline-bounded spawn, so
+    /// the work must be scoped to the target process. `NtResumeProcess` takes
+    /// a process handle and needs no thread lookup. The ToolHelp alternative
+    /// cannot be scoped — `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, ..)`
+    /// ignores its process-id argument and always snapshots every thread on
+    /// the machine, so its cost tracks total system thread count (~100ms at
+    /// ~8800 threads) and is paid once per spawn.
     fn resume_suspended_process_threads(process_id: u32) -> Result<(), WindowsJobError> {
-        // SAFETY: the returned snapshot handle is owned by this function.
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
+        // SAFETY: OpenProcess returns a new owned handle for the exact PID.
+        let process = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, false, process_id) }
             .map(ScopedHandle)
-            .map_err(|source| operation_error("CreateToolhelp32Snapshot", source))?;
-        let mut entry = THREADENTRY32 {
-            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-            ..THREADENTRY32::default()
-        };
-        // SAFETY: `entry` has the required size and remains valid throughout
-        // enumeration.
-        unsafe { Thread32First(snapshot.0, &mut entry) }
-            .map_err(|source| operation_error("Thread32First", source))?;
-        let mut primary_threads = Vec::new();
-        loop {
-            if entry.th32OwnerProcessID == process_id {
-                // SAFETY: OpenThread returns a new owned handle for this
-                // snapshot entry.
-                let thread =
-                    unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) }
-                        .map(ScopedHandle)
-                        .map_err(|source| operation_error("OpenThread", source))?;
-                primary_threads.push(thread);
-            }
-            // SAFETY: the snapshot and entry remain live and correctly sized.
-            if let Err(source) = unsafe { Thread32Next(snapshot.0, &mut entry) } {
-                if source.code() == HRESULT::from_win32(ERROR_NO_MORE_FILES.0) {
-                    break;
-                }
-                return Err(operation_error("Thread32Next", source));
-            }
-        }
-        if primary_threads.len() != 1 {
-            return Err(WindowsJobError::PrimaryThreadCount { process_id });
-        }
-        // SAFETY: CREATE_SUSPENDED guarantees this sole primary thread has a
-        // positive suspend count until this call.
-        let previous_count = unsafe { ResumeThread(primary_threads[0].0) };
-        if previous_count == u32::MAX {
-            return Err(operation_error("ResumeThread", WindowsError::from_thread()));
-        }
-        if previous_count == 0 {
-            return Err(WindowsJobError::PrimaryThreadNotSuspended { process_id });
+            .map_err(|source| operation_error("OpenProcess", source))?;
+        // SAFETY: `process` is live for this call and was opened with the
+        // PROCESS_SUSPEND_RESUME access NtResumeProcess requires.
+        let status = unsafe { NtResumeProcess(process.0) };
+        if status < 0 {
+            return Err(operation_error(
+                "NtResumeProcess",
+                WindowsError::from_hresult(HRESULT(status)),
+            ));
         }
         Ok(())
     }
@@ -332,6 +299,22 @@ mod tests {
 
         assert!(assign < resume, "Job assignment must precede thread resume");
         assert!(!source.contains(concat!("task", "kill")));
+    }
+
+    #[test]
+    fn windows_job_resume_stays_scoped_to_the_target_process() {
+        let source = include_str!("process_tree.rs");
+        let resume = source
+            .split("fn resume_suspended_process_threads")
+            .nth(1)
+            .and_then(|tail| tail.split("fn operation_error").next())
+            .expect("resume_suspended_process_threads body");
+
+        assert!(resume.contains("NtResumeProcess"));
+        // A system-wide thread snapshot costs ~100ms per spawn and pushes
+        // short deadline-bounded commands past their budget.
+        assert!(!resume.contains(concat!("CreateToolhelp32", "Snapshot")));
+        assert!(!resume.contains(concat!("Thread32", "First")));
     }
 
     #[test]
