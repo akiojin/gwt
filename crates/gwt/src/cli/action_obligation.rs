@@ -333,6 +333,24 @@ fn prompt_digest(prompt: &str) -> String {
     format!("{:x}", Sha256::digest(prompt.trim().as_bytes()))[..16].to_string()
 }
 
+/// A bare continuation request after an integrity-valid Completed execution
+/// means "finish the handoff" rather than "start more implementation". Keep
+/// this exact and contextual so explicit new implementation requests retain
+/// their ordinary Implementation obligation.
+fn classify_prompt_for_worktree(
+    worktree: &Path,
+    prompt: &str,
+    kind: ObligationKind,
+) -> ObligationKind {
+    if kind == ObligationKind::Implementation
+        && prompt.trim() == "進めて"
+        && crate::cli::execution_state::is_completed(worktree)
+    {
+        return ObligationKind::Pr;
+    }
+    kind
+}
+
 fn mark_locked(
     worktree: &Path,
     session_id: &str,
@@ -351,11 +369,15 @@ fn mark_locked(
     };
     // Re-submitting the same prompt refreshes the open obligation instead
     // of stacking duplicates.
-    if state
+    if let Some(entry) = state
         .obligations
-        .iter()
-        .any(|entry| entry.prompt_digest == digest && entry.settled.is_none())
+        .iter_mut()
+        .find(|entry| entry.prompt_digest == digest && entry.settled.is_none())
     {
+        if entry.kind == ObligationKind::Implementation && kind == ObligationKind::Pr {
+            entry.kind = ObligationKind::Pr;
+            save(worktree, &state)?;
+        }
         return Ok(());
     }
     state.obligations.push(ActionObligation {
@@ -371,15 +393,22 @@ fn mark_locked(
 /// posture as the intake marker — short bounded wait, unleased fallback,
 /// because a dropped arming fails OPEN (T-149 review convention).
 pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::Result<bool> {
-    let Some(kind) = classify_prompt(prompt) else {
+    let Some(base_kind) = classify_prompt(prompt) else {
         return Ok(false);
     };
     match crate::cli::trusted_store::with_write_lease_wait(
         worktree,
         std::time::Duration::from_millis(300),
-        || mark_locked(worktree, session_id, prompt, kind),
+        || {
+            let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
+            mark_locked(worktree, session_id, prompt, kind)
+        },
     ) {
         Err(err) if err.kind() == ErrorKind::WouldBlock => {
+            // This fail-open path cannot share the lease with execution state,
+            // but it must still avoid reusing a classification sampled before
+            // the bounded wait.
+            let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
             mark_locked(worktree, session_id, prompt, kind)?;
             Ok(true)
         }
@@ -629,6 +658,200 @@ mod tests {
         assert_eq!(
             classify_prompt("調査の進捗はどうですか？よろしくお願いします"),
             None
+        );
+    }
+
+    fn materialize_execution(
+        worktree: &Path,
+        owner_number: u64,
+        session_id: &str,
+        completed: bool,
+    ) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: owner_number,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            worktree,
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize action-obligation execution");
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize action-obligation generation ledger");
+        if completed {
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    worktree,
+                    session_id,
+                    crate::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("complete action-obligation execution"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn prompt_classification_respects_completed_handoff_context() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let active = tempfile::tempdir().expect("Active obligation repository");
+        materialize_execution(active.path(), 3442, "session-active-handoff", false);
+        mark_from_prompt(active.path(), "session-active-handoff", "進めて").unwrap();
+        assert_eq!(
+            open_kinds(active.path(), "session-active-handoff"),
+            vec![ObligationKind::Implementation],
+        );
+
+        let completed = tempfile::tempdir().expect("Completed obligation repository");
+        materialize_execution(completed.path(), 3443, "session-completed-handoff", true);
+        mark_from_prompt(completed.path(), "session-completed-handoff", "進めて").unwrap();
+        assert_eq!(
+            open_kinds(completed.path(), "session-completed-handoff"),
+            vec![ObligationKind::Pr],
+            "an ambiguous continuation in Completed is PR handoff work",
+        );
+
+        mark_from_prompt(
+            completed.path(),
+            "session-completed-handoff",
+            "バグを修正して",
+        )
+        .unwrap();
+        assert_eq!(
+            open_kinds(completed.path(), "session-completed-handoff"),
+            vec![ObligationKind::Pr, ObligationKind::Implementation],
+            "an explicit new implementation request must not be consumed by PR handoff",
+        );
+
+        let unmanaged = tempfile::tempdir().expect("unmanaged obligation directory");
+        mark_from_prompt(unmanaged.path(), "session-unmanaged", "進めて").unwrap();
+        assert_eq!(
+            open_kinds(unmanaged.path(), "session-unmanaged"),
+            vec![ObligationKind::Implementation],
+        );
+    }
+
+    #[test]
+    fn completed_handoff_classification_is_rechecked_under_the_write_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("transitioning obligation repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let session_id = "session-transitioning-handoff";
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            3442,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize Active execution before prompt classification");
+
+        let transitioning_worktree = worktree.path().to_path_buf();
+        crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+            let mut execution = crate::cli::execution_state::load(&transitioning_worktree)
+                .expect("load execution during classification race")
+                .expect("execution exists during classification race");
+            execution.status = crate::cli::execution_state::ExecutionControlStatus::Completed;
+            execution.settled_at = Some(Utc::now());
+            crate::cli::execution_state::save(&transitioning_worktree, &execution)
+                .expect("complete flat execution while the prompt writer owns the lease");
+        });
+
+        mark_from_prompt(worktree.path(), session_id, "進めて")
+            .expect("classify prompt after acquiring the write lease");
+        assert_eq!(
+            open_kinds(worktree.path(), session_id),
+            vec![ObligationKind::Pr],
+            "classification must use the execution state protected by the write lease",
+        );
+    }
+
+    #[test]
+    fn ambiguous_handoff_does_not_trust_tampered_completed_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("tampered Completed obligation repository");
+        let session_id = "session-tampered-completed-handoff";
+        materialize_execution(worktree.path(), 3442, session_id, true);
+
+        let mut tampered = crate::cli::execution_state::load(worktree.path())
+            .expect("load Completed execution before tampering")
+            .expect("Completed execution exists");
+        tampered.content_hash = "tampered-completed-authority".to_string();
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path())
+            .expect("trusted worktree directory")
+            .join("execution-control.json");
+        std::fs::write(
+            trusted,
+            serde_json::to_vec_pretty(&tampered).expect("serialize tampered authority"),
+        )
+        .expect("tamper Completed authority fixture");
+
+        mark_from_prompt(worktree.path(), session_id, "進めて")
+            .expect("classify prompt with tampered Completed authority");
+        assert_eq!(
+            open_kinds(worktree.path(), session_id),
+            vec![ObligationKind::Implementation],
+            "only integrity-valid Completed authority may reclassify an ambiguous prompt",
+        );
+    }
+
+    #[test]
+    fn completed_handoff_reclassifies_same_digest_open_implementation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let completed = tempfile::tempdir().expect("Completed obligation repository");
+        let session_id = "session-completed-retry";
+        materialize_execution(completed.path(), 3442, session_id, true);
+
+        mark_locked(
+            completed.path(),
+            session_id,
+            "進めて",
+            ObligationKind::Implementation,
+        )
+        .expect("seed pre-fix open Implementation obligation");
+        mark_from_prompt(completed.path(), session_id, "進めて")
+            .expect("retry Completed handoff prompt");
+
+        let state = load(completed.path()).unwrap().unwrap();
+        assert_eq!(
+            state.obligations.len(),
+            1,
+            "retry must not stack a duplicate"
+        );
+        assert_eq!(
+            open_kinds(completed.path(), session_id),
+            vec![ObligationKind::Pr]
         );
     }
 
