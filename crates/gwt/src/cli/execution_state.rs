@@ -2885,11 +2885,12 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
 
 /// Whether the execution for `worktree` has settled as `Completed`.
 ///
-/// A completed execution means the Work's final commit / push / PR handoff is
-/// done, so a coordination-only `workspace.update` (the kind a post-merge stale
-/// reminder triggers) must stop appending to the git-tracked `events.jsonl`
-/// (Issue #3278). A missing or unreadable record is treated as *not* completed
-/// so unlinked / standalone launches keep their existing append behavior.
+/// A completed execution means its implementation and verification lifecycle
+/// has settled; a PR handoff may still follow. Coordination-only
+/// `workspace.update` calls (such as a post-merge stale reminder) must stop
+/// appending to the git-tracked `events.jsonl` after this boundary (Issue
+/// #3278). A missing or unreadable record is treated as *not* completed so
+/// unlinked / standalone launches keep their existing append behavior.
 #[must_use]
 pub fn is_completed(worktree: &Path) -> bool {
     matches!(
@@ -7028,10 +7029,17 @@ pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosis
                 .execution_binding
                 .as_ref()
                 .map(|binding| binding.generation_id.clone());
-            snapshot.work_event_receipt_matches_current_generation = snapshot
-                .work_event_receipt_generation_id
-                .as_ref()
-                .map(|generation_id| snapshot.generation_id.as_ref() == Some(generation_id));
+            match crate::cli::verification_record::work_event_receipt_authorizes_current_generation(
+                worktree,
+                &settlement,
+            ) {
+                Ok(matches) => {
+                    snapshot.work_event_receipt_matches_current_generation = Some(matches);
+                }
+                Err(error) => snapshot.warnings.push(format!(
+                    "work event settlement receipt authority is unreadable: {error}"
+                )),
+            }
             snapshot.settlement_obligation_open = settlement.obligation_open;
             snapshot.settlement_severity = match settlement.status.severity() {
                 crate::cli::verification_record::WorkEventSettlementSeverity::Clear => "clear",
@@ -13004,6 +13012,59 @@ mod tests {
                 before.work_event_receipt_matches_current_generation,
                 Some(true)
             );
+
+            let mut unbound_receipt = predecessor_receipt.clone();
+            unbound_receipt.execution_binding = None;
+            crate::cli::verification_record::persist_work_event_settlement_record(
+                dir.path(),
+                &unbound_receipt,
+            )
+            .unwrap();
+            assert_eq!(
+                diagnose(dir.path(), None).work_event_receipt_matches_current_generation,
+                Some(false),
+                "diagnosis must reject an unbound receipt in a generation-aware worktree",
+            );
+            assert!(
+                crate::cli::verification_record::work_event_settlement_refusal(dir.path())
+                    .is_some(),
+                "the status projection and mutation gate must share the same authority decision",
+            );
+
+            let mut foreign_receipt = predecessor_receipt.clone();
+            foreign_receipt.session_id = "session-foreign".to_string();
+            crate::cli::verification_record::persist_work_event_settlement_record(
+                dir.path(),
+                &foreign_receipt,
+            )
+            .unwrap();
+            assert_eq!(
+                diagnose(dir.path(), None).work_event_receipt_matches_current_generation,
+                Some(false),
+                "diagnosis must reject foreign receipt provenance like the mutation gate",
+            );
+
+            let mut tampered_receipt = predecessor_receipt.clone();
+            tampered_receipt
+                .execution_binding
+                .as_mut()
+                .expect("receipt is generation-bound")
+                .ledger_head_hash = "arbitrary-ledger-head".to_string();
+            crate::cli::verification_record::persist_work_event_settlement_record(
+                dir.path(),
+                &tampered_receipt,
+            )
+            .unwrap();
+            assert_eq!(
+                diagnose(dir.path(), None).work_event_receipt_matches_current_generation,
+                Some(false),
+                "diagnosis must reject an arbitrary same-generation head",
+            );
+            crate::cli::verification_record::persist_work_event_settlement_record(
+                dir.path(),
+                &predecessor_receipt,
+            )
+            .unwrap();
 
             let request = successor_request(
                 "operation-status-receipt-successor",
