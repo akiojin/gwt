@@ -1071,7 +1071,15 @@ mod tests {
             ProcessKind::IndexRunner,
             program,
             &args,
-            SpawnOptions::new("absolute deadline cleanup").forward_output(false),
+            SpawnOptions::new("absolute deadline cleanup")
+                .forward_output(false)
+                // Fixtures run PowerShell while other tests in the same binary
+                // redirect HOME / LOCALAPPDATA process-wide. Without a usable
+                // cache location PowerShell falls back to writing its module
+                // analysis cache relative to the CWD, which would litter the
+                // crate directory. Pin the child to the fixture temp directory
+                // so any such fallback is cleaned up with it.
+                .current_dir(directory.path()),
             deadline,
         )
         .await
@@ -1654,7 +1662,7 @@ mod tests {
             ProcessKind::Gh,
             "powershell",
             &args,
-            SpawnOptions::new("test deadline tree windows"),
+            SpawnOptions::new("test deadline tree windows").current_dir(directory.path()),
             started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
         )
         .await
@@ -1684,7 +1692,9 @@ mod tests {
             ProcessKind::IndexRunner,
             "powershell",
             &args,
-            SpawnOptions::new("windows root exits before pipe descendant").forward_output(false),
+            SpawnOptions::new("windows root exits before pipe descendant")
+                .forward_output(false)
+                .current_dir(directory.path()),
             started + WINDOWS_PROCESS_TREE_FIXTURE_BUDGET,
         )
         .await
@@ -1721,7 +1731,8 @@ mod tests {
             &args,
             SpawnOptions::new("windows detached success")
                 .capture(false, false)
-                .forward_output(false),
+                .forward_output(false)
+                .current_dir(directory.path()),
             Instant::now() + Duration::from_secs(10),
         )
         .await

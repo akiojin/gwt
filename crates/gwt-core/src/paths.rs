@@ -1137,6 +1137,12 @@ mod tests {
     #[test]
     fn work_notes_paths_are_shared_across_worktrees_of_the_same_repo() {
         let tmp = tempfile::tempdir().unwrap();
+        // Without a thread-local home override these lookups fall through to
+        // the process-wide HOME / USERPROFILE variables, which sibling tests
+        // set and restore while this one runs. The two path calls could then
+        // straddle another test's guard and resolve against different homes.
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(home.path());
         let repo = tmp.path().join("gwt");
         init_git_repo(&repo);
         git_commit_allow_empty(&repo, "initial commit");
