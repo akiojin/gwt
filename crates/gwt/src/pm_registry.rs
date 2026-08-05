@@ -41,6 +41,45 @@ fn default_auto_start() -> bool {
     true
 }
 
+/// SPEC-3431 FR-026: the agent the PM runs as, chosen per project.
+///
+/// Deliberately narrower than the Issue Monitor's launch profile. The PM is a
+/// conversational role on the host: it never needs a Docker runtime, a resume
+/// mode, or `--dangerously-skip-permissions`, and offering those knobs would
+/// only let a user misconfigure the one agent that must always come up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PmLaunchProfile {
+    /// Agent command name, e.g. `claude` or `codex`.
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The agent a project falls back to when nothing is configured.
+///
+/// A fresh project has no profile, and the PM must still start — this is the
+/// bootstrap trap the Issue Monitor hits when it refuses to launch without
+/// one. The PM never inherits a profile from unrelated launches for the same
+/// reason: a stale Docker target or exotic model from some other work would
+/// silently become the PM's.
+pub const PM_DEFAULT_AGENT: &str = "claude";
+
+/// Agents that can resolve the `$gwt-pm` bootstrap prompt.
+///
+/// Managed assets only reach agents with a skills mirror, and `pm_guidance`
+/// writes the `.claude` and `.codex` mirrors. Launching the PM as any other
+/// agent would hand it a prompt that resolves to nothing — the exact failure
+/// the T-052 materialization fix removed, reintroduced through configuration.
+pub const PM_SUPPORTED_AGENTS: &[&str] = &["claude", "codex"];
+
+pub fn pm_agent_is_supported(agent_id: &str) -> bool {
+    PM_SUPPORTED_AGENTS.contains(&agent_id)
+}
+
 /// Project-scoped PM settings that survive deregistration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmSettings {
@@ -48,11 +87,46 @@ pub struct PmSettings {
     /// written before this field existed keep auto-starting.
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
+    /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_profile: Option<PmLaunchProfile>,
+}
+
+impl PmSettings {
+    /// The profile to launch with: the configured one when it names an agent
+    /// that can resolve `$gwt-pm`, the built-in default otherwise. Falling back
+    /// rather than refusing keeps FR-002's "opening a project starts the PM"
+    /// true even for prefs written by a newer or misconfigured build.
+    pub fn launch_profile_or_default(&self) -> PmLaunchProfile {
+        match self.launch_profile.as_ref() {
+            Some(profile) if pm_agent_is_supported(&profile.agent_id) => profile.clone(),
+            Some(profile) => {
+                tracing::warn!(
+                    agent_id = %profile.agent_id,
+                    "configured PM agent cannot resolve the gwt-pm skill; using the default"
+                );
+                PmLaunchProfile::default_profile()
+            }
+            None => PmLaunchProfile::default_profile(),
+        }
+    }
+}
+
+impl PmLaunchProfile {
+    pub fn default_profile() -> Self {
+        Self {
+            agent_id: PM_DEFAULT_AGENT.to_string(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for PmSettings {
     fn default() -> Self {
-        Self { auto_start: true }
+        Self {
+            auto_start: true,
+            launch_profile: None,
+        }
     }
 }
 
@@ -481,7 +555,10 @@ mod tests {
         let (_dir, path) = temp_prefs_path();
         let prefs = PmPrefs {
             registration: Some(registration("session-a")),
-            settings: PmSettings { auto_start: false },
+            settings: PmSettings {
+                auto_start: false,
+                ..PmSettings::default()
+            },
         };
         save_pm_prefs(&path, &prefs).expect("save");
         let loaded = load_pm_prefs(&path).expect("load");
@@ -597,6 +674,71 @@ mod tests {
         );
     }
 
+    /// SPEC-3431 FR-026: the profile is optional and additive, so prefs
+    /// written before it existed keep working, and a project that never
+    /// configures one still launches.
+    #[test]
+    fn launch_profile_defaults_to_none_and_round_trips() {
+        let (_dir, path) = temp_prefs_path();
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, r#"{"settings":{"auto_start":true}}"#).expect("legacy prefs");
+
+        let prefs = load_pm_prefs(&path).expect("load legacy prefs");
+        assert_eq!(prefs.settings.launch_profile, None);
+        assert_eq!(
+            prefs.settings.launch_profile_or_default(),
+            PmLaunchProfile {
+                agent_id: PM_DEFAULT_AGENT.to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+            }
+        );
+
+        let configured = PmLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.1-codex-max".to_string()),
+            reasoning: Some("high".to_string()),
+            version: None,
+        };
+        let mut prefs = prefs;
+        prefs.settings.launch_profile = Some(configured.clone());
+        save_pm_prefs(&path, &prefs).expect("save");
+        let reloaded = load_pm_prefs(&path).expect("reload");
+        assert_eq!(reloaded.settings.launch_profile, Some(configured.clone()));
+        assert_eq!(reloaded.settings.launch_profile_or_default(), configured);
+    }
+
+    /// A profile naming an agent with no skills mirror would hand the PM a
+    /// `$gwt-pm` prompt that resolves to nothing — the T-052 failure,
+    /// reachable through configuration. Fall back instead of refusing: the PM
+    /// must always come up (FR-002).
+    #[test]
+    fn launch_profile_falls_back_when_the_agent_cannot_resolve_the_pm_skill() {
+        for agent_id in ["gemini", "opencode", "hermes", "copilot", ""] {
+            let settings = PmSettings {
+                auto_start: true,
+                launch_profile: Some(PmLaunchProfile {
+                    agent_id: agent_id.to_string(),
+                    model: Some("some-model".to_string()),
+                    ..PmLaunchProfile::default()
+                }),
+            };
+            let resolved = settings.launch_profile_or_default();
+            assert_eq!(
+                resolved.agent_id, PM_DEFAULT_AGENT,
+                "{agent_id} has no gwt-pm mirror and must not be launched as the PM"
+            );
+            assert_eq!(
+                resolved.model, None,
+                "falling back must not keep the rejected profile's model"
+            );
+        }
+        assert!(PM_SUPPORTED_AGENTS
+            .iter()
+            .all(|id| pm_agent_is_supported(id)));
+    }
+
     /// SPEC-3431 T-052: `is_pm_worktree` gates who receives the PM operating
     /// contract, so it must match the canonical location and nothing else.
     #[test]
@@ -641,7 +783,10 @@ mod tests {
     fn status_report_without_registration_omits_liveness_fields() {
         let prefs = PmPrefs {
             registration: None,
-            settings: PmSettings { auto_start: false },
+            settings: PmSettings {
+                auto_start: false,
+                ..PmSettings::default()
+            },
         };
         let report = pm_status_report(&prefs, |_| panic!("probe must not run unregistered"));
         assert_eq!(report.schema_version, 1);

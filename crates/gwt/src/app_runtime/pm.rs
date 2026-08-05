@@ -329,6 +329,10 @@ impl AppRuntime {
     }
 
     fn spawn_pm_agent(&mut self, tab_id: &str, project_root: &Path) -> Vec<OutboundEvent> {
+        let profile = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let profile = pm_registry::load_pm_prefs(&profile)
+            .map(|prefs| prefs.settings.launch_profile_or_default())
+            .unwrap_or_else(|_| pm_registry::PmLaunchProfile::default_profile());
         let worktree = match Self::ensure_pm_worktree(project_root) {
             Ok(path) => path,
             Err(error) => {
@@ -344,11 +348,7 @@ impl AppRuntime {
         // skill that managed-asset materialization writes into this worktree.
         // Writing it here instead would be futile — the launch's own asset
         // refresh prunes unbundled `gwt-*` skills right after.
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
-            .working_dir(worktree)
-            .extra_arg(PM_BOOTSTRAP_PROMPT)
-            .build();
-        config.suppress_execution_control = true;
+        let config = Self::pm_launch_config(&worktree, &profile);
         let before = self.pm_window_ids(tab_id);
         match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None) {
             Ok(events) => {
@@ -360,6 +360,38 @@ impl AppRuntime {
                 Vec::new()
             }
         }
+    }
+
+    /// SPEC-3431 FR-026: the launch config for a fresh PM spawn.
+    ///
+    /// Pure so the resolved agent/model can be asserted without spawning.
+    /// `suppress_execution_control` is set because the PM is a conversational
+    /// role, not an execution-controlled implementation session.
+    pub(crate) fn pm_launch_config(
+        worktree: &Path,
+        profile: &pm_registry::PmLaunchProfile,
+    ) -> gwt_agent::LaunchConfig {
+        let agent_id = gwt_agent::resolve_agent_id(&profile.agent_id)
+            .unwrap_or(gwt_agent::AgentId::ClaudeCode);
+        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
+            .working_dir(worktree.to_path_buf())
+            .extra_arg(PM_BOOTSTRAP_PROMPT);
+        if let Some(model) = profile.model.as_deref().filter(|value| !value.is_empty()) {
+            builder = builder.model(model);
+        }
+        if let Some(reasoning) = profile
+            .reasoning
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            builder = builder.reasoning_level(reasoning);
+        }
+        if let Some(version) = profile.version.as_deref().filter(|value| !value.is_empty()) {
+            builder = builder.version(version);
+        }
+        let mut config = builder.build();
+        config.suppress_execution_control = true;
+        config
     }
 
     /// Dedicated detached worktree for the PM session (research R-10). Its

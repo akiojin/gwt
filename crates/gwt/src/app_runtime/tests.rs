@@ -40033,6 +40033,36 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     );
 }
 
+/// SPEC-3431 FR-026: a fresh project has no profile and must still start, and
+/// a configured one must actually reach the launch.
+#[test]
+fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_project() {
+    let worktree = std::path::Path::new("/tmp/pm-worktree");
+
+    let default_config = AppRuntime::pm_launch_config(
+        worktree,
+        &gwt::pm_registry::PmLaunchProfile::default_profile(),
+    );
+    assert_eq!(default_config.agent_id, gwt_agent::AgentId::ClaudeCode);
+    assert_eq!(default_config.model, None);
+    assert!(default_config.suppress_execution_control);
+    assert!(default_config.args.iter().any(|arg| arg == "$gwt-pm"));
+
+    let configured = AppRuntime::pm_launch_config(
+        worktree,
+        &gwt::pm_registry::PmLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.1-codex-max".to_string()),
+            reasoning: Some("high".to_string()),
+            version: None,
+        },
+    );
+    assert_eq!(configured.agent_id, gwt_agent::AgentId::Codex);
+    assert_eq!(configured.model.as_deref(), Some("gpt-5.1-codex-max"));
+    assert_eq!(configured.reasoning_level.as_deref(), Some("high"));
+    assert!(configured.suppress_execution_control);
+}
+
 #[test]
 fn pm_ensure_resumes_stale_registration_conversation() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
