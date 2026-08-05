@@ -6,11 +6,19 @@
 use std::{io::Read, path::Path};
 
 use super::{
-    block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, HookError,
-    HookEvent, HookOutput,
+    block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override,
+    effect_classifier, HookError, HookEvent, HookOutput,
 };
 
 pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<HookOutput> {
+    effect_classifier::observe_bash_command(command, worktree_root, worktree_root);
+    evaluate_bash_command_without_observation(command, worktree_root)
+}
+
+fn evaluate_bash_command_without_observation(
+    command: &str,
+    worktree_root: &Path,
+) -> Option<HookOutput> {
     block_git_branch_ops::evaluate_bash_command(command)
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
@@ -21,13 +29,24 @@ pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<Hook
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
+    effect_classifier::observe_event(event, worktree_root);
+    evaluate_without_observation(event, worktree_root)
+}
+
+pub(crate) fn evaluate_without_observation(
+    event: &HookEvent,
+    worktree_root: &Path,
+) -> Result<HookOutput, HookError> {
     if event.tool_name.as_deref() != Some("Bash") {
         return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
         return Ok(HookOutput::Silent);
     };
-    Ok(evaluate_bash_command(command, worktree_root).unwrap_or(HookOutput::Silent))
+    Ok(
+        evaluate_bash_command_without_observation(command, worktree_root)
+            .unwrap_or(HookOutput::Silent),
+    )
 }
 
 pub fn handle() -> Result<HookOutput, HookError> {
@@ -256,6 +275,15 @@ fn evaluate_github_mutation_sinks(command: &str) -> Option<HookOutput> {
     None
 }
 
+pub(crate) fn is_github_remote_mutation(command: &str) -> bool {
+    evaluate_github_mutation_sinks(command).is_some()
+}
+
+pub(crate) fn targets_github_api(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    lowered.contains("api.github.com") || lowered.contains("uploads.github.com")
+}
+
 /// Normalize a method value for comparison (agents habitually quote it).
 fn normalize_method(value: &str) -> String {
     value
@@ -387,9 +415,18 @@ fn is_mutating_github_curl(tokens: &[&str]) -> bool {
         let lowered = token.to_ascii_lowercase();
         lowered.contains("api.github.com") || lowered.contains("uploads.github.com")
     });
-    if !targets_github_api {
-        return false;
-    }
+    targets_github_api && is_mutating_curl(tokens)
+}
+
+pub(crate) fn curl_remote_mutation(segment: &str) -> Option<bool> {
+    let tokens = command_tokens(segment);
+    tokens
+        .first()
+        .is_some_and(|command| normalize_command_name(command) == "curl")
+        .then(|| is_mutating_curl(&tokens))
+}
+
+fn is_mutating_curl(tokens: &[&str]) -> bool {
     let mut method: Option<String> = None;
     let mut has_body = false;
     let mut forces_get = false;

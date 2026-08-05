@@ -865,7 +865,7 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     let gwt_bin = match runtime_target {
         gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWTD_BIN_PATH.to_string(),
         gwt_agent::LaunchRuntimeTarget::Host => {
-            gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+            gwt_agent::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
                 .to_string_lossy()
                 .into_owned()
         }

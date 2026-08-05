@@ -756,6 +756,22 @@ fn env_test_lock() -> &'static Mutex<()> {
     crate::env_test_lock()
 }
 
+fn write_executable_test_file(path: &Path, contents: &str) {
+    fs::create_dir_all(path.parent().expect("test executable parent"))
+        .expect("create test executable parent");
+    fs::write(path, contents).expect("write test executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .expect("test executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make test executable runnable");
+    }
+}
+
 fn fake_gh_test_lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -914,12 +930,24 @@ case "$*" in
   *"--action probe"*)
     exit 0
     ;;
+  *"--action search-multi"*"--scopes issues"*)
+    printf '%s\n' '{"ok":true,"scope_results":{"issues":{"issueResults":[{"number":42,"distance":0.25}]}}}'
+    exit 0
+    ;;
+  *"--action search-multi"*)
+    printf '%s\n' '{"ok":true,"scope_results":{"specs":{"specResults":[{"spec_id":1930,"distance":0.4}]}}}'
+    exit 0
+    ;;
   *"--action search-issues"*)
     printf '%s\n' '{"ok":true,"issueResults":[{"number":42,"distance":0.25}]}'
     exit 0
     ;;
   *"--action search-specs"*)
     printf '%s\n' '{"ok":true,"specResults":[{"spec_id":1930,"distance":0.4}]}'
+    exit 0
+    ;;
+  *"--action index-"*)
+    printf '%s\n' '{"ok":true}'
     exit 0
     ;;
 esac
@@ -3087,6 +3115,7 @@ fn sample_runtime_with_events(
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
         issue_link_cache_dir: gwt_cache_dir(),
+        knowledge_related_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
         pty_writers,
@@ -3162,6 +3191,7 @@ fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() 
                 window_id: Some(window_id),
                 error: Some(error),
             },
+            ..
         }] if client_id == "pane-client"
             && window_id == "tab-authenticated::agent-authenticated"
             && error.contains("no live runtime")
@@ -19142,6 +19172,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.active_agents == 2
             && projection.active_work_count == 2
             && projection.agents.len() == 2
@@ -19226,6 +19257,9 @@ fn app_runtime_active_work_projection_includes_managed_hook_health() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    let stable = temp.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&repo).expect("generate codex hooks");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -19251,6 +19285,224 @@ fn app_runtime_active_work_projection_includes_managed_hook_health() {
     assert_eq!(health.status, "ready");
     assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
     assert!(health.issues.is_empty(), "{:?}", health.issues);
+    let row_health = view.active_works[0]
+        .managed_hook_health
+        .as_ref()
+        .expect("row managed hook health");
+    assert_eq!(row_health.status, "ready");
+    assert_eq!(row_health.last_event.as_deref(), Some("PreToolUse"));
+}
+
+#[test]
+fn managed_hook_health_for_saved_row_ignores_ambient_session_runtime_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("saved-worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let stable = temp.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let foreign_runtime_path = temp.path().join("foreign-runtime-state.json");
+    gwt::cli::hook::runtime_state::write_for_event(&foreign_runtime_path, "PreToolUse")
+        .expect("runtime state");
+    let _runtime_path = ScopedEnvVar::set(
+        gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+        &foreign_runtime_path,
+    );
+
+    let health =
+        super::workspace_views::managed_hook_health_view_for_worktree(&worktree, temp.path(), &[]);
+
+    assert!(health.is_none(), "{health:?}");
+}
+
+#[test]
+fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let stable = temp.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    for (session_id, updated_at, event) in [
+        ("session-z", "2026-08-03T10:00:00Z", "PreToolUse"),
+        ("session-a", "2026-08-03T11:00:00Z", "UserPromptSubmit"),
+    ] {
+        let path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "status": "Running",
+                "updated_at": updated_at,
+                "last_activity_at": updated_at,
+                "source_event": event,
+                "pending_discussion": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let mut first = sample_active_agent_session("tab-1", "tab-1::agent-z");
+    first.session_id = "session-z".to_string();
+    first.worktree_path = worktree.clone();
+    let mut second = sample_active_agent_session("tab-1", "tab-1::agent-a");
+    second.session_id = "session-a".to_string();
+    second.worktree_path = worktree.clone();
+
+    let health = super::workspace_views::managed_hook_health_view_for_worktree(
+        &worktree,
+        &sessions_dir,
+        &[&first, &second],
+    )
+    .expect("managed hook health");
+
+    assert_eq!(health.last_event.as_deref(), Some("UserPromptSubmit"));
+}
+
+#[test]
+fn startup_self_heals_managed_hooks_in_every_known_worktree() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    for worktree in [&first, &second] {
+        let local = worktree.join("target/debug/gwtd");
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        fs::write(&local, "local").unwrap();
+        let _local_hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &local);
+        gwt_skills::generate_settings_local(worktree).unwrap();
+        gwt_skills::generate_codex_hooks(worktree).unwrap();
+        gwt_skills::generate_opencode_hooks(worktree).unwrap();
+        gwt_skills::generate_openclaw_hooks(worktree).unwrap();
+        gwt_skills::generate_hermes_hooks(worktree).unwrap();
+    }
+    let stable = root.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+
+    super::startup::self_heal_managed_hooks_in_worktrees([first.as_path(), second.as_path()]);
+
+    for worktree in [&first, &second] {
+        let local = worktree.join("target/debug/gwtd");
+        for relative in [
+            ".claude/settings.local.json",
+            ".codex/hooks.json",
+            ".gwt/opencode/plugins/gwt-hooks.js",
+            ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+            ".gwt/hermes/agent-hooks/gwt-hook.sh",
+        ] {
+            let rendered = fs::read_to_string(worktree.join(relative)).unwrap();
+            assert!(rendered.contains("GWT_BIN_PATH"), "{relative}: {rendered}");
+            assert!(
+                !rendered.contains(&local.display().to_string()),
+                "{relative}: {rendered}"
+            );
+        }
+        let health = gwt::cli::hook::health::read_managed_hook_health(
+            &gwt::cli::hook::health::ManagedHookHealthInput::new(worktree),
+        );
+        assert_eq!(
+            health.status,
+            gwt::cli::hook::health::ManagedHookHealthStatus::SelfHealed
+        );
+    }
+}
+
+#[test]
+fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let config = worktree.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        r#"{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"/repo/target/debug/gwtd hook event SessionStart"}]}]}}"#,
+    )
+    .unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+
+    super::startup::self_heal_managed_hooks_in_worktrees([worktree.as_path()]);
+
+    let rendered = fs::read_to_string(&config).unwrap();
+    assert!(rendered.contains("GWT_BIN_PATH"), "{rendered}");
+    assert!(
+        rendered.contains(&missing_pin.display().to_string()),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("/repo/target/debug/gwtd"), "{rendered}");
+    assert!(worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+#[test]
+fn startup_self_heal_does_not_rewrite_canonical_config_for_missing_explicit_pin() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let config = worktree.join(".codex/hooks.json");
+    let before = fs::read(&config).unwrap();
+
+    super::startup::self_heal_managed_hooks_in_worktrees([worktree.as_path()]);
+
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+#[test]
+fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let stable = root.path().join("stable/gwtd");
+    write_executable_test_file(&stable, "stable");
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
+    gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    let config = worktree.join(".codex/hooks.json");
+    let before = fs::read(&config).unwrap();
+    let runtime_path = root.path().join("runtime-state.json");
+    fs::write(&runtime_path, "not-json").unwrap();
+    let _runtime_path = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+    super::startup::self_heal_managed_hooks_in_worktrees([worktree.as_path()]);
+
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+#[test]
+fn startup_self_heal_does_not_loop_on_missing_current_literal_fallback() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    {
+        let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+        gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
+    }
+    let config = worktree.join(".codex/hooks.json");
+    let before = fs::read(&config).unwrap();
+    let _path = ScopedEnvVar::set("PATH", "");
+
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some("gwtd"),
+    );
+
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
 }
 
 /// SPEC-2359 Phase W-12 Slice 2 (FR-348): "1 agent session : 1 Work". When
@@ -21109,6 +21361,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::WindowCanvasState { .. },
+            ..
         }
     )));
 }
@@ -24562,6 +24815,18 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
             chrono::Utc::now(),
         );
         event.title = Some(format!("Process-free work {index}"));
+        if index == 0 {
+            let session_id = "session-process-free-projection";
+            event.agent_session_id = Some(session_id.to_string());
+            event.agent_id = Some("codex".to_string());
+            let mut session =
+                gwt_agent::Session::new(&worktree_path, &branch, gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.project_state_root = Some(repo.clone());
+            session
+                .save(&gwt_core::paths::gwt_sessions_dir())
+                .expect("save projection Session fixture");
+        }
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some(branch),
@@ -24601,6 +24866,34 @@ fn active_work_projection_many_workspaces_does_not_probe_dirty_worktrees() {
             .all(|work| work.cleanup_candidate.is_some()),
         "clean background caches keep every merged row cleanup-ready"
     );
+    let diagnoses = view
+        .active_works
+        .iter()
+        .flat_map(|workspace| workspace.works.iter())
+        .filter_map(|work| work.execution_diagnosis.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        !diagnoses.is_empty(),
+        "projection keeps durable diagnosis facts"
+    );
+    for diagnosis in diagnoses {
+        for protected in [
+            "execution.continue",
+            "execution.repair",
+            "execution.adopt",
+            "execution.reopen",
+            "workspace.update",
+            "workspace.ensure",
+        ] {
+            assert!(
+                !diagnosis
+                    .available_recoveries
+                    .iter()
+                    .any(|operation| operation == protected),
+                "projection must not advertise unvalidated protected recovery {protected}"
+            );
+        }
+    }
     let invocations = fs::read_to_string(&git_log).unwrap_or_default();
     assert!(
         invocations.trim().is_empty(),
@@ -25134,6 +25427,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.active_agents == 0
             && projection.agents.is_empty()
             && projection.status_category == "idle"
@@ -26228,6 +26522,7 @@ fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && entries.len() == 1
@@ -26397,6 +26692,7 @@ fn app_runtime_load_board_history_replies_with_older_page() {
                 entries,
                 has_more_before,
             },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>() == vec!["entry-1", "entry-2"]
@@ -26556,6 +26852,7 @@ fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardError { id, message },
+            ..
         }] if client_id == "client-1"
             && id == &board_window_id
             && message.contains("missing-session")
@@ -27477,6 +27774,8 @@ fn app_runtime_knowledge_search_errors_for_wrong_surface() {
                 message,
                 ..
             },
+            knowledge_wire_metadata: Some(super::KnowledgeWireMetadata::NonSemanticError),
+            ..
         }] if client_id == "client-1"
             && *knowledge_kind == gwt::KnowledgeKind::Issue
             && message == "Window is not a knowledge bridge"
@@ -27563,6 +27862,594 @@ fn app_runtime_knowledge_search_replies_through_async_dispatch() {
             )
         })
     });
+}
+
+/// Fake index python for the transient-semantic-failure runtime contract
+/// (SPEC #3170 T-944): canonical `search-multi` classifies the issues scope
+/// as missing, the legacy per-kind semantic actions fail hard, and repair
+/// (`index-*`) succeeds instantly.
+#[cfg(unix)]
+fn write_fake_project_index_runtime_with_missing_issues_scope(home: &Path) {
+    let script = r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-c" ]; then
+    exit 0
+  fi
+done
+case "$*" in
+  *"-m pip"*)
+    exit 0
+    ;;
+  *"--action probe"*)
+    exit 0
+    ;;
+  *"--action search-multi"*)
+    printf '%s\n' '{"ok":true,"scopes":{"issues":{"state":"missing"}}}'
+    exit 0
+    ;;
+  *"--action search-issues"*|*"--action search-specs"*)
+    printf '%s\n' '{"ok":false,"error":"legacy semantic action used"}'
+    exit 1
+    ;;
+  *"--action index-"*)
+    printf '%s\n' '{"ok":true}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{"ok":false,"error":"unexpected fake python invocation"}'
+exit 1
+"#;
+    let legacy_python = home
+        .join(".gwt")
+        .join("runtime")
+        .join("chroma-venv")
+        .join("bin")
+        .join("python3");
+    for python in [
+        legacy_python,
+        gwt_core::runtime::project_index_python_path(),
+    ] {
+        fs::create_dir_all(python.parent().expect("fake python parent"))
+            .expect("create fake python dir");
+        fs::write(&python, script).expect("write fake python");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod fake python");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_directive() {
+    // SPEC #3170 AS-17.1 / FR-098: a typed transient semantic failure must
+    // complete as KnowledgeSearchResults — cache-backed rows plus the typed
+    // retry directive — and must NOT surface a correlated KnowledgeError.
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    write_fake_project_index_runtime_with_missing_issues_scope(temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Silent recovery issue",
+            &["bug"],
+            "Cache-backed body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SearchKnowledgeBridge {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            query: "#42".to_string(),
+            request_id: 9,
+            selected_number: None,
+        },
+    );
+    assert!(immediate_events.is_empty());
+
+    // Wait for whichever completion the backend dispatches for request 9,
+    // then require it to be the silent typed completion.
+    wait_for_recorded_event("knowledge search completion", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeSearchResults { request_id, .. }
+                                if *request_id == 9
+                        ) || matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeError { request_id, .. }
+                                if *request_id == Some(9)
+                        )
+                    })
+            )
+        })
+    });
+    let recorded = events.lock().expect("events lock");
+    let mut saw_results = false;
+    for event in recorded.iter() {
+        let UserEvent::Dispatch(dispatched) = event else {
+            continue;
+        };
+        for outbound in dispatched {
+            match &outbound.event {
+                BackendEvent::KnowledgeError {
+                    request_id,
+                    message,
+                    ..
+                } if *request_id == Some(9) => {
+                    panic!(
+                        "transient semantic failure must stay silent, got \
+                         KnowledgeError: {message}"
+                    );
+                }
+                BackendEvent::KnowledgeSearchResults {
+                    request_id,
+                    entries,
+                    ..
+                } if *request_id == 9 => {
+                    saw_results = true;
+                    assert_eq!(entries.len(), 1, "cache-backed rows stay usable");
+                    assert_eq!(entries[0].number, 42);
+                    let Some(super::KnowledgeWireMetadata::SemanticRetry(directive)) =
+                        outbound.knowledge_wire_metadata.as_ref()
+                    else {
+                        panic!("typed transient failure carries the retry directive");
+                    };
+                    assert_eq!(directive.error_code, "INDEX_NOT_READY");
+                    assert!(directive.retryable);
+                    assert!(directive.retry_after_ms > 0);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_results, "KnowledgeSearchResults for request 9 expected");
+}
+
+#[test]
+fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
+    // SPEC #3170 AS-17.4 / FR-102 (T-946): an explicit selection carrying a
+    // real request ID must be a background cache-backed DETAIL-ONLY path —
+    // no remote refresh, no full list rebuild, and the latest related-work
+    // snapshot is reused instead of a per-click full Session/Work scan.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let gh_marker = temp.path().join("gh-selection-marker.txt");
+    let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
+
+    let repo = temp.path().join("repo");
+    let issue_worktree = temp.path().join("repo-work-issue-42");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&issue_worktree).expect("create issue worktree");
+    init_repo(&repo);
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Selected issue",
+            &["bug"],
+            "Detail body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            43,
+            "Other issue",
+            &["bug"],
+            "Other body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    write_issue_link_store(&repo, HashMap::from([("work/issue-42".to_string(), 42)]));
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let seeded_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-42"),
+        Some(&issue_worktree),
+    )
+    .expect("work id");
+    let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        seeded_at,
+    );
+    work_event.title = Some("Issue #42 first related work".to_string());
+    work_event.owner = Some("Issue #42".to_string());
+    work_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-42".to_string()),
+            worktree_path: Some(issue_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, work_event)
+        .expect("record work event");
+
+    // Initial load captures the latest related-work snapshot for issue 42.
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(42),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    let scans_after_full_load = runtime
+        .knowledge_related_snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .full_scan_count();
+    assert_eq!(scans_after_full_load, 1, "the full load publishes once");
+
+    // Mutate the projection AFTER the snapshot: a detail-only selection must
+    // reuse the snapshot rather than rescanning the Work projection.
+    let second_worktree = temp.path().join("repo-work-issue-42-second");
+    fs::create_dir_all(&second_worktree).expect("create second worktree");
+    let second_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-42-second"),
+        Some(&second_worktree),
+    )
+    .expect("second work id");
+    let mut second_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        second_id,
+        Utc.with_ymd_and_hms(2026, 6, 20, 9, 30, 0).unwrap(),
+    );
+    second_event.title = Some("Issue #42 second related work".to_string());
+    second_event.owner = Some("Issue #42".to_string());
+    second_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-42-second".to_string()),
+            worktree_path: Some(second_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, second_event)
+        .expect("record second work event");
+    write_issue_link_store(
+        &repo,
+        HashMap::from([
+            ("work/issue-42".to_string(), 42),
+            ("work/issue-42-second".to_string(), 42),
+        ]),
+    );
+    let events_before_selection = recorded_events.lock().expect("events lock").len();
+    fs::write(&gh_marker, b"").ok();
+    let _ = fs::remove_file(&gh_marker);
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(5),
+            number: 42,
+        },
+    );
+    assert!(
+        immediate.is_empty(),
+        "selection must reply off the GUI event loop"
+    );
+    wait_for_recorded_event("selection detail dispatch", &recorded_events, |events| {
+        events[events_before_selection..].iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail { request_id: Some(5), .. }
+                            | BackendEvent::KnowledgeError { request_id: Some(5), .. }
+                    ))
+            )
+        })
+    });
+    // Give any (incorrect) trailing refresh work a moment to surface.
+    std::thread::sleep(Duration::from_millis(400));
+
+    let recorded = recorded_events.lock().expect("events lock");
+    let mut detail_events = 0usize;
+    for event in recorded[events_before_selection..].iter() {
+        let UserEvent::Dispatch(dispatched) = event else {
+            continue;
+        };
+        for outbound in dispatched {
+            match &outbound.event {
+                BackendEvent::KnowledgeEntries { .. } => {
+                    panic!(
+                        "a detail-only selection must not rebuild the full \
+                         list (FR-102)"
+                    );
+                }
+                BackendEvent::KnowledgeError { message, .. } => {
+                    panic!("selection must resolve from cache, got error: {message}");
+                }
+                BackendEvent::KnowledgeDetail {
+                    request_id, detail, ..
+                } => {
+                    assert_eq!(*request_id, Some(5));
+                    detail_events += 1;
+                    assert_eq!(detail.number, Some(42));
+                    assert_eq!(detail.launch_issue_number, Some(42));
+                    assert_eq!(
+                        detail.related_works.len(),
+                        1,
+                        "selection must reuse the latest related-work \
+                         snapshot instead of rescanning: {:?}",
+                        detail.related_works
+                    );
+                    assert_eq!(
+                        detail.related_works[0].title,
+                        "Issue #42 first related work"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(detail_events, 1, "exactly one detail completion expected");
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count(),
+        scans_after_full_load,
+        "explicit selection must not scan Session/Work again",
+    );
+    assert!(
+        !gh_marker.exists(),
+        "an explicit selection must never start a remote refresh (FR-102)"
+    );
+}
+
+#[test]
+fn select_knowledge_bridge_entry_snapshot_miss_stays_empty_without_full_scan() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Cache-only selected issue",
+            &["bug"],
+            "Detail body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id,
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(17),
+            number: 42,
+        },
+    );
+    assert!(immediate.is_empty(), "selection remains off the GUI loop");
+    wait_for_recorded_event("selection cache-miss detail", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail {
+                            request_id: Some(17),
+                            detail,
+                            ..
+                        } if detail.number == Some(42) && detail.related_works.is_empty()
+                    ))
+            )
+        })
+    });
+    let recorded = recorded_events.lock().expect("events lock");
+    assert!(recorded.iter().all(|event| {
+        !matches!(
+            event,
+            UserEvent::Dispatch(dispatched)
+                if dispatched.iter().any(|outbound| matches!(
+                    &outbound.event,
+                    BackendEvent::KnowledgeEntries { .. }
+                ))
+        )
+    }));
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count(),
+        0,
+        "snapshot miss must not fall back to a Session/Work scan",
+    );
+}
+
+#[test]
+fn select_pr_knowledge_bridge_entry_preserves_the_legacy_full_view_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "pr-1",
+        repo,
+        WindowPreset::Pr,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "pr-1");
+
+    let immediate = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Pr,
+            request_id: Some(91),
+            number: 77,
+        },
+    );
+    assert!(immediate.is_empty(), "PR selection stays off the GUI loop");
+    wait_for_recorded_event("PR selection full view", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeEntries {
+                            request_id: Some(91),
+                            ..
+                        } | BackendEvent::KnowledgeError {
+                            request_id: Some(91),
+                            ..
+                        }
+                    ))
+            )
+        })
+    });
+
+    let recorded = recorded_events.lock().expect("events lock");
+    let dispatch = recorded
+        .iter()
+        .filter_map(|event| match event {
+            UserEvent::Dispatch(dispatched) => Some(dispatched),
+            _ => None,
+        })
+        .find(|dispatched| {
+            dispatched.iter().any(|outbound| {
+                matches!(
+                    &outbound.event,
+                    BackendEvent::KnowledgeEntries {
+                        request_id: Some(91),
+                        ..
+                    } | BackendEvent::KnowledgeError {
+                        request_id: Some(91),
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("PR selection completion");
+    assert_eq!(
+        dispatch.len(),
+        2,
+        "legacy PR selection returns the full entries + detail view"
+    );
+    assert!(matches!(
+        &dispatch[0].event,
+        BackendEvent::KnowledgeEntries {
+            knowledge_kind: gwt::KnowledgeKind::Pr,
+            request_id: Some(91),
+            entries,
+            refresh_enabled: false,
+            ..
+        } if entries.is_empty()
+    ));
+    assert!(matches!(
+        &dispatch[1].event,
+        BackendEvent::KnowledgeDetail {
+            knowledge_kind: gwt::KnowledgeKind::Pr,
+            request_id: Some(91),
+            detail,
+            ..
+        } if detail.sections.iter().any(|section| {
+            section.body.contains("cache-backed PR list support")
+        })
+    ));
+    assert!(dispatch
+        .iter()
+        .all(|outbound| !matches!(outbound.event, BackendEvent::KnowledgeError { .. })));
+    assert_eq!(
+        runtime
+            .knowledge_related_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count(),
+        1,
+        "PR selection retains the existing full-load augmentation pass",
+    );
 }
 
 #[test]
@@ -27961,6 +28848,7 @@ fn app_runtime_load_profile_replies_with_config_backed_snapshot() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && snapshot.active_profile == "dev"
@@ -28025,6 +28913,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         }] if client_id == "client-1"
             && id == &current_window_id
             && snapshot.selected_profile == "dev"
@@ -28051,6 +28940,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         } if id == &current_window_id
             && snapshot.selected_profile == "review"
             && snapshot.active_profile == "default"
@@ -28066,6 +28956,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ProfileSnapshot { id, snapshot },
+            ..
         } if id == &sibling_window_id
             && snapshot.selected_profile == "default"
             && snapshot.profiles.iter().any(|profile| profile.name == "review")
@@ -28252,6 +29143,7 @@ fn app_runtime_load_logs_replies_with_current_log_snapshot() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::LogEntries { id, entries },
+            ..
         }] if client_id == "client-1"
             && id == &window_id
             && entries.len() == 1
@@ -28304,6 +29196,7 @@ fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::LogEntries { id, entries },
+            ..
         } if client_id == "client-1"
             && id == &window_id
             && entries.len() == 2
@@ -28320,6 +29213,7 @@ fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::LogEntryAppended { entry },
+            ..
         } if client_id == "client-1"
             && entry.severity == LogLevel::Warn
             && entry.source == "gwt_core::logging::reader"
@@ -28355,6 +29249,7 @@ fn app_runtime_save_ui_trace_replies_with_artifact_path() {
         [OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::UiTraceSaved { path, entries },
+            ..
         }] if client_id == "client-1" && *entries == 1 && Path::new(path).exists()
     ));
 }
@@ -28422,6 +29317,7 @@ fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
         } if client_id == "client-1"
             && id == &window_id
             && entries.iter().any(|entry|
@@ -28523,6 +29419,7 @@ fn app_runtime_post_board_entry_accepts_reply_to_history_parent() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
         } if client_id == "client-1"
             && id == &window_id
             && entries.iter().any(|entry|
@@ -28586,6 +29483,7 @@ fn app_runtime_post_board_entry_without_origin_remains_board_only() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::BoardEntries { .. },
+            ..
         } if client_id == "client-1"
     )));
 }
@@ -28951,6 +29849,7 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.status_category == "blocked"
             && projection.blocked_agents == 1
             && projection.agents.iter().any(|agent|
@@ -29092,6 +29991,7 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.status_category == "active"
             && projection.active_agents == 1
             && projection.blocked_agents == 0
@@ -29170,6 +30070,7 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::ActiveWorkProjection { projection },
+            ..
         } if projection.status_category == "blocked"
             && projection.active_agents == 0
             && projection.blocked_agents == 1
@@ -34699,6 +35600,7 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::BoardEntries { id, entries, .. },
+                ..
             } if *id == expected_id
                 && entries.len() == 1
                 && entries[0].body == "External update"
@@ -34780,6 +35682,7 @@ fn migration_detected_broadcasts_only_for_pending_tabs() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationDetected { tab_id, .. },
+            ..
         } if tab_id == "tab-1"
     ));
 }
@@ -34810,6 +35713,7 @@ fn handle_migration_done_repoints_tab_and_emits_broadcast() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationDone { tab_id, .. },
+            ..
         } if tab_id == "tab-1"
     )));
     assert!(runtime
@@ -34864,6 +35768,7 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationError { tab_id, recovery, phase, .. },
+            ..
         } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
     )));
 }
@@ -34936,6 +35841,7 @@ fn open_intake_session_refuses_while_migration_pending() {
             OutboundEvent {
                 target: DispatchTarget::Client(_),
                 event: BackendEvent::LaunchWizardOpenError { message, .. },
+                ..
             } if message == "Complete the project migration before starting an intake session"
         )),
         "Start Work on a migration_pending tab must surface a clear error: {events:?}"
@@ -35009,6 +35915,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
             event: BackendEvent::CloneProjectDone {
                 workspace_home: emitted_workspace_home,
             },
+            ..
         } if emitted_workspace_home == &workspace_home.display().to_string()
     )));
     assert!(events.iter().any(|event| matches!(
@@ -35016,6 +35923,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::WindowCanvasState { .. },
+            ..
         }
     )));
     let canonical_home = dunce::canonicalize(&workspace_home).unwrap();
@@ -35173,6 +36081,7 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
             event: BackendEvent::CloneProjectError { message },
+            ..
         } if client_id == "client-1" && message.contains("repository URL")
     )));
     assert!(!events.iter().any(|event| matches!(
@@ -35214,6 +36123,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
         OutboundEvent {
             target: DispatchTarget::Broadcast,
             event: BackendEvent::MigrationDetected { .. },
+            ..
         }
     )));
 
@@ -35236,6 +36146,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::MigrationDetected { .. },
+                ..
             }
         )),
         "skip is launch-local; the modal must be shown again next launch"
@@ -35290,6 +36201,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::MigrationDetected { .. },
+                ..
             }
         )),
         "Normal Git layout should still open a migration-pending tab"
@@ -35305,6 +36217,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
                     message,
                     ..
                 },
+                ..
             } if phase == "backup"
                 && recovery == "partial"
                 && message.contains(".gwt-migration-backup")
@@ -36377,6 +37290,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         blocked_agents: 0,
         branch: Some("develop".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -36466,6 +37380,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         blocked_agents: 0,
         branch: Some("develop".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -36633,6 +37548,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
             settlement_severity: "warning".to_string(),
             settlement_obligation_open: true,
             open_obligations: vec!["user_verification".to_string()],
+            recovery_probes: Vec::new(),
             available_recoveries: vec!["verify.run".to_string(), "execution.reopen".to_string()],
             warnings: vec!["Host status is temporarily unavailable".to_string()],
         },
@@ -36683,6 +37599,7 @@ fn workspace_test_work(
         blocked_agents: 0,
         branch: Some("work/shared".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37065,6 +37982,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         blocked_agents: 99,
         branch: Some("develop".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37160,6 +38078,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         blocked_agents: 0,
         branch: Some("work/x".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37284,6 +38203,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         blocked_agents: 0,
         branch: Some("work/x".to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37419,6 +38339,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         blocked_agents: 0,
         branch: Some("work/issue-206".to_string()),
         worktree_path: Some(issue_worktree.display().to_string()),
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37595,6 +38516,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         blocked_agents: 0,
         branch: Some(branch.to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -37672,6 +38594,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         blocked_agents: 0,
         branch: branch.map(str::to_string),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: pr_state.map(str::to_string),
@@ -37740,6 +38663,7 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         blocked_agents: 0,
         branch: Some("work/dirty".to_string()),
         worktree_path: Some(repo.display().to_string()),
+        managed_hook_health: None,
         pr_number: Some(123),
         pr_url: None,
         pr_state: Some("MERGED".to_string()),
@@ -38687,6 +39611,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             blocked_agents: 0,
             branch: branch.map(str::to_string),
             worktree_path: None,
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: None,
@@ -38893,6 +39818,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             blocked_agents: 0,
             branch: branch.map(str::to_string),
             worktree_path: worktree.map(str::to_string),
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: None,
@@ -38974,6 +39900,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             blocked_agents: 0,
             branch: branch.map(str::to_string),
             worktree_path: None,
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: pr_state.map(str::to_string),
@@ -39050,6 +39977,7 @@ fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
         blocked_agents: 0,
         branch: Some("work/no-changes".to_string()),
         worktree_path: Some("/tmp/gwt-no-changes".to_string()),
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -39129,6 +40057,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             blocked_agents: 0,
             branch: Some("work/live-agent".to_string()),
             worktree_path: Some("/tmp/gwt-live-agent".to_string()),
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: Some("MERGED".to_string()),
@@ -39160,6 +40089,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             blocked_agents: 0,
             branch: Some("work/live-process".to_string()),
             worktree_path: Some(live_process_worktree.display().to_string()),
+            managed_hook_health: None,
             pr_number: None,
             pr_url: None,
             pr_state: None,
@@ -39337,6 +40267,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         blocked_agents: 0,
         branch: Some(branch.to_string()),
         worktree_path: None,
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
