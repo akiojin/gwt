@@ -394,6 +394,7 @@ fn private_docker_exec_env_key(key: &str) -> bool {
     matches!(
         key,
         gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
+            | gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV
             | gwt_agent::GWT_SESSION_ID_ENV
             | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
     )
@@ -959,14 +960,20 @@ fi
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 "session-private".to_string(),
             ),
+            (
+                gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV.to_string(),
+                "424242".to_string(),
+            ),
             ("VISIBLE_SETTING".to_string(), "visible".to_string()),
         ]);
 
         let args = docker_compose_exec_env_args(&env);
         assert!(!format!("{args:?}").contains(secret));
         assert!(!format!("{args:?}").contains("session-private"));
+        assert!(!format!("{args:?}").contains("424242"));
         assert!(args.contains(&gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string()));
         assert!(args.contains(&gwt_agent::GWT_SESSION_ID_ENV.to_string()));
+        assert!(args.contains(&gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV.to_string()));
         assert!(args.contains(&"VISIBLE_SETTING=visible".to_string()));
     }
 }

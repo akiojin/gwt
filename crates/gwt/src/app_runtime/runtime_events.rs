@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use super::{
     close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
-    OutboundEvent, WindowPreset, WindowProcessStatus,
+    OutboundEvent, RuntimeIncarnationId, WindowPreset, WindowProcessStatus,
 };
 
 /// Issue #3274: how many trailing non-empty screen lines survive into the
@@ -149,6 +149,22 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
+        self.handle_runtime_status_inner(id, status, detail, true)
+    }
+
+    /// Accept status only from the PTY instance currently registered for the
+    /// window. This check intentionally precedes every durable, projection,
+    /// capability, and runtime side effect in `handle_runtime_status_inner`.
+    pub(crate) fn handle_pty_runtime_status(
+        &mut self,
+        id: String,
+        incarnation_id: RuntimeIncarnationId,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        if self.runtimes.get(&id).map(|runtime| runtime.incarnation_id) != Some(incarnation_id) {
+            return Vec::new();
+        }
         self.handle_runtime_status_inner(id, status, detail, true)
     }
 

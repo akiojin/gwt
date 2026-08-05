@@ -74,6 +74,10 @@ pub const GWT_CONTINUE_WORK_READY_NONCE_ENV: &str = "GWT_CONTINUE_WORK_READY_TOK
 /// Environment variable injected into agent PTYs so hooks can write the
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
+/// Immutable producing capability epoch assigned to one launched agent
+/// process. Runtime hooks and Host shutdown paths use it as a compare-and-swap
+/// fence; they must never recover a newer value from mutable Session state.
+pub const GWT_EXECUTION_CAPABILITY_GENERATION_ENV: &str = "GWT_EXECUTION_CAPABILITY_GENERATION";
 /// Environment variable injected into agent PTYs so skills can locate the
 /// gwt binary for calling gwtd CLI (GitHub operations, etc.).
 pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
@@ -328,10 +332,310 @@ pub struct SessionRuntimeState {
     pub status: AgentStatus,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
+    /// Producing capability epoch that authored this sidecar. Legacy hook
+    /// sidecars omit it; launch-authored sidecars use it to fence stale
+    /// relaunch rollback writes from a newer durable Session incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_generation: Option<u64>,
     #[serde(default)]
     pub source_event: Option<String>,
     #[serde(default)]
     pub pending_discussion: Option<PendingDiscussionResume>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CapabilityClaimFailureReceipt {
+    schema_version: u32,
+    session_id: String,
+    execution_binding: SessionExecutionBinding,
+    #[serde(default)]
+    host_pid: u32,
+    #[serde(default)]
+    phase: CapabilityClaimReceiptPhase,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+enum CapabilityClaimReceiptPhase {
+    Preparing,
+    #[default]
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityClaimReceiptState {
+    Absent,
+    Preparing { host_pid: u32 },
+    Failed,
+}
+
+#[cfg(test)]
+type CapabilityClaimPostSessionWriteHook = Box<dyn FnOnce() -> io::Result<()> + 'static>;
+
+#[cfg(test)]
+thread_local! {
+    static CAPABILITY_CLAIM_POST_SESSION_WRITE_HOOK:
+        std::cell::RefCell<Option<CapabilityClaimPostSessionWriteHook>> =
+        const { std::cell::RefCell::new(None) };
+    static ATOMIC_STATE_POST_REPLACE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static PAIRED_RUNTIME_BEFORE_SESSION_WRITE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static CAPABILITY_RECEIPT_POST_UNLINK_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn set_atomic_state_post_replace_failure_for_test() {
+    ATOMIC_STATE_POST_REPLACE_FAILURE.with(|slot| assert!(!slot.replace(true)));
+}
+
+#[cfg(test)]
+fn fail_atomic_state_post_replace_if_requested() -> io::Result<()> {
+    ATOMIC_STATE_POST_REPLACE_FAILURE.with(|slot| {
+        if slot.replace(false) {
+            Err(io::Error::other("injected post-replace sync failure"))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn fail_atomic_state_post_replace_if_requested() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn set_paired_runtime_before_session_write_failure_for_test() {
+    PAIRED_RUNTIME_BEFORE_SESSION_WRITE_FAILURE.with(|slot| assert!(!slot.replace(true)));
+}
+
+#[cfg(test)]
+fn fail_paired_runtime_before_session_write_if_requested() -> io::Result<()> {
+    PAIRED_RUNTIME_BEFORE_SESSION_WRITE_FAILURE.with(|slot| {
+        if slot.replace(false) {
+            Err(io::Error::other(
+                "injected Session write failure after runtime proof",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+#[cfg(test)]
+fn set_capability_receipt_post_unlink_failure_for_test() {
+    CAPABILITY_RECEIPT_POST_UNLINK_FAILURE.with(|slot| assert!(!slot.replace(true)));
+}
+
+#[cfg(test)]
+fn fail_capability_receipt_post_unlink_if_requested() -> io::Result<()> {
+    CAPABILITY_RECEIPT_POST_UNLINK_FAILURE.with(|slot| {
+        if slot.replace(false) {
+            Err(io::Error::other("injected receipt directory sync failure"))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn fail_capability_receipt_post_unlink_if_requested() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn fail_paired_runtime_before_session_write_if_requested() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn set_capability_claim_post_session_write_hook_for_test(
+    hook: CapabilityClaimPostSessionWriteHook,
+) {
+    CAPABILITY_CLAIM_POST_SESSION_WRITE_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+fn invoke_capability_claim_post_session_write_hook() -> io::Result<()> {
+    CAPABILITY_CLAIM_POST_SESSION_WRITE_HOOK
+        .with(|slot| slot.borrow_mut().take().map_or(Ok(()), |hook| hook()))
+}
+
+#[cfg(not(test))]
+fn invoke_capability_claim_post_session_write_hook() -> io::Result<()> {
+    Ok(())
+}
+
+fn capability_claim_failure_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir
+        .join("capability-claim-failures")
+        .join(format!("{session_id}.json"))
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic state path must have a parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let prefix = format!(
+        ".{}.tmp-",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state")
+    );
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    fail_atomic_state_post_replace_if_requested()?;
+    sync_parent_dir(parent)
+}
+
+fn load_capability_claim_receipt(
+    sessions_dir: &Path,
+    binding: &SessionExecutionBinding,
+) -> io::Result<Option<CapabilityClaimFailureReceipt>> {
+    let path = capability_claim_failure_path(sessions_dir, &binding.session_id);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let receipt: CapabilityClaimFailureReceipt = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok((receipt.schema_version == 1
+        && receipt.session_id == binding.session_id
+        && receipt.execution_binding == *binding)
+        .then_some(receipt))
+}
+
+fn persist_capability_claim_receipt(
+    sessions_dir: &Path,
+    binding: &SessionExecutionBinding,
+    phase: CapabilityClaimReceiptPhase,
+) -> io::Result<()> {
+    let receipt = CapabilityClaimFailureReceipt {
+        schema_version: 1,
+        session_id: binding.session_id.clone(),
+        execution_binding: binding.clone(),
+        host_pid: std::process::id(),
+        phase,
+        recorded_at: Utc::now(),
+    };
+    let mut bytes = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    bytes.push(b'\n');
+    let path = capability_claim_failure_path(sessions_dir, &binding.session_id);
+    match write_atomic_bytes(&path, &bytes) {
+        Ok(()) => Ok(()),
+        Err(error) => match load_capability_claim_receipt(sessions_dir, binding) {
+            Ok(Some(durable)) if durable == receipt => Ok(()),
+            Ok(Some(_) | None) | Err(_) => Err(error),
+        },
+    }
+}
+
+fn claimed_capability_failure_error(
+    sessions_dir: &Path,
+    binding: &SessionExecutionBinding,
+    context: &str,
+    error: io::Error,
+) -> io::Error {
+    match persist_capability_claim_receipt(
+        sessions_dir,
+        binding,
+        CapabilityClaimReceiptPhase::Failed,
+    ) {
+        Ok(()) => io::Error::new(
+            error.kind(),
+            format!("{context}; durable pre-issuance failure receipt recorded: {error}"),
+        ),
+        Err(receipt_error) => io::Error::new(
+            error.kind(),
+            format!(
+                "{context}; pre-issuance failure receipt requires reconciliation: {error}; {receipt_error}"
+            ),
+        ),
+    }
+}
+
+fn clear_capability_claim_failure(
+    sessions_dir: &Path,
+    binding: &SessionExecutionBinding,
+) -> io::Result<()> {
+    let path = capability_claim_failure_path(sessions_dir, &binding.session_id);
+    if load_capability_claim_receipt(sessions_dir, binding)?.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "capability claim failure receipt no longer matches the claimed epoch",
+        ));
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(_) if !path.exists() => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    fail_capability_receipt_post_unlink_if_requested()?;
+    sync_parent_dir(path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capability claim failure path has no parent directory",
+        )
+    })?)
+}
+
+fn save_runtime_state_with_exact_readback(
+    runtime_state: &SessionRuntimeState,
+    runtime_path: &Path,
+) -> io::Result<()> {
+    match runtime_state.save(runtime_path) {
+        Ok(()) => Ok(()),
+        Err(error) => match SessionRuntimeState::load(runtime_path) {
+            Ok(durable) if durable == *runtime_state => Ok(()),
+            Ok(_) | Err(_) => Err(error),
+        },
+    }
+}
+
+pub fn capability_claim_receipt_state(
+    sessions_dir: &Path,
+    binding: &SessionExecutionBinding,
+) -> io::Result<CapabilityClaimReceiptState> {
+    validate_session_id_path_component(&binding.session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    Ok(
+        match load_capability_claim_receipt(sessions_dir, binding)? {
+            None => CapabilityClaimReceiptState::Absent,
+            Some(receipt) => match receipt.phase {
+                CapabilityClaimReceiptPhase::Preparing => CapabilityClaimReceiptState::Preparing {
+                    host_pid: receipt.host_pid,
+                },
+                CapabilityClaimReceiptPhase::Failed => CapabilityClaimReceiptState::Failed,
+            },
+        },
+    )
+}
+
+/// Whether a durable receipt proves that one exact claimed epoch failed
+/// before its capability operation ran. The exact durable binding is the
+/// authority; the Session may still be Running when failure occurred directly
+/// after its claim commit.
+pub fn capability_claim_failure_matches(
+    sessions_dir: &Path,
+    binding: &SessionExecutionBinding,
+) -> io::Result<bool> {
+    Ok(matches!(
+        capability_claim_receipt_state(sessions_dir, binding)?,
+        CapabilityClaimReceiptState::Failed
+    ))
 }
 
 impl Session {
@@ -1311,8 +1615,17 @@ impl SessionRuntimeState {
             status,
             updated_at: now,
             last_activity_at: now,
+            capability_generation: None,
             source_event: None,
             pending_discussion: None,
+        }
+    }
+
+    /// Create a runtime snapshot fenced to one producing capability epoch.
+    pub fn new_for_execution_capability(status: AgentStatus, capability_generation: u64) -> Self {
+        Self {
+            capability_generation: Some(capability_generation),
+            ..Self::new(status)
         }
     }
 
@@ -1327,31 +1640,11 @@ impl SessionRuntimeState {
 
     /// Save the runtime state to a JSON sidecar file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let tmp_path = dir.join(format!(
-            ".{}.tmp-{}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("runtime.json"),
-            std::process::id()
-        ));
-
-        {
-            let mut tmp = std::fs::File::create(&tmp_path)?;
-            tmp.write_all(content.as_bytes())?;
-            tmp.write_all(b"\n")?;
-            tmp.sync_all()?;
-        }
-
-        if cfg!(windows) && path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        std::fs::rename(tmp_path, path)
+        let mut bytes = content.into_bytes();
+        bytes.push(b'\n');
+        write_atomic_bytes(path, &bytes)
     }
 
     /// Load the runtime state from a JSON sidecar file.
@@ -1417,6 +1710,185 @@ pub fn persist_session_status(
     SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
 }
 
+fn session_capability_generation_matches(
+    session: &Session,
+    expected_capability_generation: Option<u64>,
+) -> bool {
+    let durable_capability_generation = session
+        .execution_binding
+        .as_ref()
+        .map(|binding| binding.capability_generation);
+    match (
+        expected_capability_generation,
+        durable_capability_generation,
+    ) {
+        (Some(expected), Some(durable)) => expected != 0 && expected == durable,
+        // Old launchers did not export an epoch. Keep their unbound and first
+        // capability generation writable, but never let them mutate a rotated
+        // Session whose current generation they cannot prove.
+        (None, None | Some(1)) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+fn update_session_if_capability_generation_matches<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_capability_generation: Option<u64>,
+    mutate: F,
+) -> io::Result<bool>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_and_migrate(&path)?;
+        if !session_capability_generation_matches(&session, expected_capability_generation) {
+            return Ok(false);
+        }
+        mutate(&mut session)?;
+        write_session_toml_atomic(&path, &serialize_session_toml(&session)?)?;
+        Ok(true)
+    })
+}
+
+fn persist_runtime_state_if_capability_generation_matches<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_capability_generation: Option<u64>,
+    runtime_path: &Path,
+    mut runtime_state: SessionRuntimeState,
+    mutate: F,
+) -> io::Result<bool>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let expected_file_name = format!("{session_id}.json");
+    if sessions_dir_from_runtime_path(runtime_path).as_deref() != Some(sessions_dir)
+        || runtime_path.file_name().and_then(|name| name.to_str())
+            != Some(expected_file_name.as_str())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime state path does not match its Session namespace",
+        ));
+    }
+    runtime_state.capability_generation = expected_capability_generation;
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_and_migrate(&path)?;
+        if !session_capability_generation_matches(&session, expected_capability_generation) {
+            return Ok(false);
+        }
+        // Publish the epoch-stamped sidecar before the Session commit marker.
+        // If atomic replacement reached disk but parent fsync reported an
+        // error, exact readback proves the intended state is nevertheless
+        // durable enough to continue. A genuinely failed sidecar leaves the
+        // Session byte-identical.
+        save_runtime_state_with_exact_readback(&runtime_state, runtime_path)?;
+        mutate(&mut session)?;
+        fail_paired_runtime_before_session_write_if_requested()?;
+        write_session_toml_atomic(&path, &serialize_session_toml(&session)?)?;
+        Ok(true)
+    })
+}
+
+/// Persist a Host terminal status only when the immutable launch epoch still
+/// identifies the durable Session. The sidecar carries the same epoch so
+/// liveness recovery can distinguish a current stop from a late old window.
+pub fn persist_session_status_if_capability_generation_matches(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_capability_generation: Option<u64>,
+    status: AgentStatus,
+) -> io::Result<bool> {
+    persist_session_status_at_runtime_path_if_capability_generation_matches(
+        sessions_dir,
+        session_id,
+        expected_capability_generation,
+        &runtime_state_path(sessions_dir, session_id),
+        status,
+        None,
+        None,
+    )
+}
+
+/// Variant for managed hook subprocesses whose immutable runtime path points
+/// at the owning Host PID namespace rather than the hook process PID.
+pub fn persist_session_status_at_runtime_path_if_capability_generation_matches(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_capability_generation: Option<u64>,
+    runtime_path: &Path,
+    status: AgentStatus,
+    source_event: Option<&str>,
+    pending_discussion: Option<PendingDiscussionResume>,
+) -> io::Result<bool> {
+    let mut runtime_state = SessionRuntimeState::new(status);
+    runtime_state.source_event = source_event.map(str::to_string);
+    runtime_state.pending_discussion = pending_discussion;
+    persist_runtime_state_if_capability_generation_matches(
+        sessions_dir,
+        session_id,
+        expected_capability_generation,
+        runtime_path,
+        runtime_state,
+        |session| {
+            session.update_status(status);
+            Ok(())
+        },
+    )
+}
+
+/// Persist one managed hook lifecycle event and its runtime sidecar under the
+/// same expected-epoch Session lease.
+pub fn persist_session_hook_state_if_capability_generation_matches(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_capability_generation: Option<u64>,
+    runtime_path: &Path,
+    runtime_state: SessionRuntimeState,
+    event: &str,
+    agent_session_id: Option<&str>,
+) -> io::Result<bool> {
+    persist_runtime_state_if_capability_generation_matches(
+        sessions_dir,
+        session_id,
+        expected_capability_generation,
+        runtime_path,
+        runtime_state,
+        |session| {
+            if let Some(agent_session_id) = agent_session_id {
+                persist_agent_session_id_in_memory(session, agent_session_id);
+            }
+            session.record_hook_event(event);
+            Ok(())
+        },
+    )
+}
+
+/// Record the clean Stop boundary only for the process that owns the durable
+/// capability epoch.
+pub fn persist_session_completed_stop_if_capability_generation_matches(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_capability_generation: Option<u64>,
+) -> io::Result<bool> {
+    update_session_if_capability_generation_matches(
+        sessions_dir,
+        session_id,
+        expected_capability_generation,
+        |session| {
+            session.record_completed_stop();
+            Ok(())
+        },
+    )
+}
+
 pub fn persist_session_hook_event(
     sessions_dir: &Path,
     session_id: &str,
@@ -1448,33 +1920,38 @@ pub fn persist_agent_session_id(
     session_id: &str,
     agent_session_id: &str,
 ) -> std::io::Result<()> {
-    let agent_session_id = agent_session_id.trim();
-    if agent_session_id.is_empty() {
+    if agent_session_id.trim().is_empty() {
         return Ok(());
     }
 
     update_session(sessions_dir, session_id, |session| {
-        if session.agent_session_id.as_deref() == Some(agent_session_id) {
-            return Ok(());
-        }
-        // Forward-only Session history: record each distinct conversation UUID the
-        // first time we see it, before promoting it to the latest. Splits already
-        // arrive via the SessionStart hook, so appending here (instead of
-        // overwriting) is enough to reconstruct the full Session list under a Work.
-        if !session
-            .session_history
-            .iter()
-            .any(|entry| entry.agent_session_id == agent_session_id)
-        {
-            session.session_history.push(AgentSessionHistoryEntry {
-                agent_session_id: agent_session_id.to_string(),
-                started_at: Utc::now(),
-            });
-        }
-        session.agent_session_id = Some(agent_session_id.to_string());
+        persist_agent_session_id_in_memory(session, agent_session_id);
         Ok(())
     })
     .map(|_| ())
+}
+
+fn persist_agent_session_id_in_memory(session: &mut Session, agent_session_id: &str) {
+    let agent_session_id = agent_session_id.trim();
+    if agent_session_id.is_empty() || session.agent_session_id.as_deref() == Some(agent_session_id)
+    {
+        return;
+    }
+    // Forward-only Session history: record each distinct conversation UUID the
+    // first time we see it, before promoting it to the latest. Splits already
+    // arrive via the SessionStart hook, so appending here is enough to
+    // reconstruct the full Session list under a Work.
+    if !session
+        .session_history
+        .iter()
+        .any(|entry| entry.agent_session_id == agent_session_id)
+    {
+        session.session_history.push(AgentSessionHistoryEntry {
+            agent_session_id: agent_session_id.to_string(),
+            started_at: Utc::now(),
+        });
+    }
+    session.agent_session_id = Some(agent_session_id.to_string());
 }
 
 /// Persist or clear a Session's Execution generation projection under the
@@ -1528,6 +2005,132 @@ pub fn rotate_session_execution_capability(
             io::ErrorKind::InvalidData,
             "capability rotation lost the producing execution binding",
         )
+    })
+}
+
+/// Claim one exact Running Session capability epoch, publish the matching
+/// runtime sidecar, and run an already-authorized operation before releasing
+/// the per-Session lease.
+///
+/// The expected binding is a single-use compare-and-swap token: concurrent
+/// relaunches that present the same epoch have exactly one winner. Callers
+/// combining this with generation authority must acquire the owner lease
+/// before entering this function.
+pub fn claim_running_session_execution_capability_if_unchanged_with<T>(
+    sessions_dir: &Path,
+    expected: &SessionExecutionBinding,
+    runtime_path: &Path,
+    operation: impl FnOnce(&SessionExecutionBinding) -> T,
+) -> io::Result<Option<(SessionExecutionBinding, T)>> {
+    validate_session_id_path_component(&expected.session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if runtime_path != runtime_state_path(sessions_dir, &expected.session_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capability claim runtime path does not match its Session namespace",
+        ));
+    }
+    with_session_path_lease(sessions_dir, &expected.session_id, |state| {
+        let mut session = match state {
+            SessionPathState::Present(session) => session,
+            SessionPathState::Missing => return Ok(None),
+            SessionPathState::Error(error) => return Err(error),
+        };
+        if session.status != AgentStatus::Running
+            || session.execution_binding.as_ref() != Some(expected)
+        {
+            return Ok(None);
+        }
+        if !matches!(
+            capability_claim_receipt_state(sessions_dir, expected)?,
+            CapabilityClaimReceiptState::Absent
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the current capability epoch has an unreconciled pre-issuance receipt",
+            ));
+        }
+        let mut claimed = expected.clone();
+        claimed.capability_generation =
+            claimed
+                .capability_generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "execution binding capability generation overflow",
+                    )
+                })?;
+        // Write-ahead proof closes the crash window between exposing the
+        // claimed epoch and publishing its runtime capability. It is removed
+        // only after both durable records agree and immediately before the
+        // already-authorized operation runs.
+        persist_capability_claim_receipt(
+            sessions_dir,
+            &claimed,
+            CapabilityClaimReceiptPhase::Preparing,
+        )?;
+        session
+            .set_execution_binding(Some(claimed.clone()))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let session_path = session_file_path(sessions_dir, &session.id);
+        let claimed_content = serialize_session_toml(&session)?;
+        if let Err(claim_error) = write_session_toml_atomic(&session_path, &claimed_content) {
+            let exact_claim_visible = matches!(
+                inspect_session_path(&session_path),
+                SessionPathState::Present(durable)
+                    if serialize_session_toml(&durable)? == claimed_content
+            );
+            if exact_claim_visible {
+                return Err(claimed_capability_failure_error(
+                    sessions_dir,
+                    &claimed,
+                    "capability claim persistence had an unknown outcome and the exact claimed Session is visible",
+                    claim_error,
+                ));
+            }
+            return match clear_capability_claim_failure(sessions_dir, &claimed) {
+                Ok(()) => Err(claim_error),
+                Err(cleanup_error) => Err(io::Error::new(
+                    claim_error.kind(),
+                    format!(
+                        "capability claim persistence failed and its unmatched write-ahead receipt could not be removed: {claim_error}; {cleanup_error}"
+                    ),
+                )),
+            };
+        }
+        if let Err(boundary_error) = invoke_capability_claim_post_session_write_hook() {
+            return Err(claimed_capability_failure_error(
+                sessions_dir,
+                &claimed,
+                "capability claim stopped after Session persistence",
+                boundary_error,
+            ));
+        }
+        let runtime_state = SessionRuntimeState::new_for_execution_capability(
+            AgentStatus::Running,
+            claimed.capability_generation,
+        );
+        if let Err(runtime_error) =
+            save_runtime_state_with_exact_readback(&runtime_state, runtime_path)
+        {
+            return Err(claimed_capability_failure_error(
+                sessions_dir,
+                &claimed,
+                "failed to publish claimed capability runtime state",
+                runtime_error,
+            ));
+        }
+        if let Err(cleanup_error) = clear_capability_claim_failure(sessions_dir, &claimed) {
+            return Err(claimed_capability_failure_error(
+                sessions_dir,
+                &claimed,
+                "claimed capability is durable but its Preparing receipt could not be cleared, so capability issuance was aborted",
+                cleanup_error,
+            ));
+        }
+        let result = operation(&claimed);
+        Ok(Some((claimed, result)))
     })
 }
 
@@ -3554,6 +4157,476 @@ display_name = "Claude Code"
 
         let loaded = SessionRuntimeState::load(&path).unwrap();
         assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
+    }
+
+    #[test]
+    fn concurrent_runtime_state_writers_use_unique_atomic_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime").join("session-123.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let writers = (1..=8)
+            .map(|generation| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let state = SessionRuntimeState::new_for_execution_capability(
+                        AgentStatus::Running,
+                        generation,
+                    );
+                    barrier.wait();
+                    state.save(&path)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for writer in writers {
+            writer.join().expect("join runtime writer").unwrap();
+        }
+        let loaded = SessionRuntimeState::load(&path).expect("load one complete replacement");
+        assert!(matches!(loaded.capability_generation, Some(1..=8)));
+        let temporary_siblings = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(temporary_siblings, 0);
+    }
+
+    #[test]
+    fn runtime_state_deserializes_legacy_sidecar_without_capability_epoch() {
+        let runtime: SessionRuntimeState = serde_json::from_value(serde_json::json!({
+            "status": "Running",
+            "updated_at": "2026-08-05T00:00:00Z",
+            "last_activity_at": "2026-08-05T00:00:00Z",
+            "source_event": "SessionStart"
+        }))
+        .expect("deserialize legacy runtime sidecar");
+
+        assert_eq!(runtime.status, AgentStatus::Running);
+        assert_eq!(runtime.capability_generation, None);
+        assert_eq!(runtime.source_event.as_deref(), Some("SessionStart"));
+    }
+
+    #[test]
+    fn exact_running_capability_claim_has_one_winner_and_stamps_runtime_epoch() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session.save(dir.path()).expect("save Session");
+        persist_session_execution_binding(dir.path(), &session_id, Some(initial.clone()))
+            .expect("persist initial binding");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+
+        let (claim_entered_tx, claim_entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_claim_tx, release_claim_rx) = std::sync::mpsc::sync_channel(0);
+        let first_dir = dir.path().to_path_buf();
+        let first_runtime = runtime_path.clone();
+        let first_expected = initial.clone();
+        let first = std::thread::spawn(move || {
+            claim_running_session_execution_capability_if_unchanged_with(
+                &first_dir,
+                &first_expected,
+                &first_runtime,
+                |binding| {
+                    claim_entered_tx
+                        .send(binding.capability_generation)
+                        .expect("report first claim");
+                    release_claim_rx.recv().expect("release first claim");
+                    "first"
+                },
+            )
+            .expect("first claim")
+        });
+        let first_generation = claim_entered_rx.recv().expect("first claim entered");
+
+        let second_operation_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_operation_flag = std::sync::Arc::clone(&second_operation_ran);
+        let second_dir = dir.path().to_path_buf();
+        let second_runtime = runtime_path.clone();
+        let second_expected = initial.clone();
+        let second = std::thread::spawn(move || {
+            claim_running_session_execution_capability_if_unchanged_with(
+                &second_dir,
+                &second_expected,
+                &second_runtime,
+                |_| {
+                    second_operation_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    "second"
+                },
+            )
+            .expect("second claim")
+        });
+        release_claim_tx.send(()).expect("release first claim");
+
+        let first = first.join().expect("join first claim");
+        let second = second.join().expect("join second claim");
+        assert_eq!(first.as_ref().map(|(_, value)| *value), Some("first"));
+        assert!(second.is_none(), "the stale exact claim must lose");
+        assert!(!second_operation_ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(first_generation, initial.capability_generation + 1);
+
+        let durable = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("load claimed Session");
+        let claimed = durable.execution_binding.expect("claimed binding");
+        assert_eq!(claimed.capability_generation, first_generation);
+        assert_eq!(
+            SessionRuntimeState::load(&runtime_path)
+                .expect("load claimed runtime")
+                .capability_generation,
+            Some(first_generation),
+            "the runtime sidecar must identify the same capability epoch"
+        );
+        assert!(
+            !capability_claim_failure_matches(dir.path(), &claimed)
+                .expect("successful claim receipt readback"),
+            "a successful claim must clear its write-ahead failure receipt before issuance"
+        );
+    }
+
+    #[test]
+    fn failed_capability_runtime_publish_records_preissuance_recovery_proof() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(initial.clone()))
+            .expect("bind initial capability");
+        session.save(dir.path()).expect("save Session");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+        std::fs::create_dir_all(&runtime_path)
+            .expect("block runtime file replacement with a directory");
+        let operation_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_flag = std::sync::Arc::clone(&operation_ran);
+
+        let error = claim_running_session_execution_capability_if_unchanged_with(
+            dir.path(),
+            &initial,
+            &runtime_path,
+            |_| operation_flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect_err("runtime publication failure must abort before issuance");
+
+        assert!(error
+            .to_string()
+            .contains("durable pre-issuance failure receipt"));
+        assert!(!operation_ran.load(std::sync::atomic::Ordering::SeqCst));
+        let durable = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("reload failed claim");
+        assert_eq!(durable.status, AgentStatus::Running);
+        let claimed = durable.execution_binding.expect("retain claimed binding");
+        assert_eq!(
+            claimed.capability_generation,
+            initial.capability_generation + 1
+        );
+        assert!(
+            capability_claim_failure_matches(dir.path(), &claimed).expect("read recovery proof"),
+            "the exact failed epoch must be durably distinguishable from a late old stop"
+        );
+    }
+
+    #[test]
+    fn retry_cannot_overwrite_current_epoch_failure_receipt() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(initial.clone()))
+            .expect("bind initial capability");
+        session.save(dir.path()).expect("save Session");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+        fs::create_dir_all(&runtime_path).expect("block runtime publication");
+
+        claim_running_session_execution_capability_if_unchanged_with(
+            dir.path(),
+            &initial,
+            &runtime_path,
+            |_| panic!("failed claim must not issue capability"),
+        )
+        .expect_err("first claim must fail");
+        let session_path = dir.path().join(format!("{session_id}.toml"));
+        let durable_before = fs::read(&session_path).expect("read failed claim Session");
+        let claimed = Session::load(&session_path)
+            .expect("load failed claim Session")
+            .execution_binding
+            .expect("claimed binding");
+        let receipt_path = capability_claim_failure_path(dir.path(), &session_id);
+        let receipt_before = fs::read(&receipt_path).expect("read failed claim receipt");
+
+        let retry_error = claim_running_session_execution_capability_if_unchanged_with(
+            dir.path(),
+            &claimed,
+            &runtime_path,
+            |_| panic!("unreconciled retry must not issue capability"),
+        )
+        .expect_err("unreconciled current epoch must refuse retry");
+
+        assert!(retry_error.to_string().contains("unreconciled"));
+        assert_eq!(
+            fs::read(&session_path).expect("Session readback"),
+            durable_before
+        );
+        assert_eq!(
+            fs::read(&receipt_path).expect("receipt readback"),
+            receipt_before,
+            "a retry must preserve the current epoch's only failure proof"
+        );
+    }
+
+    #[test]
+    fn claimed_epoch_has_write_ahead_recovery_proof_before_followup_work() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(initial.clone()))
+            .expect("bind initial capability");
+        session.save(dir.path()).expect("save Session");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+        let operation_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_flag = std::sync::Arc::clone(&operation_ran);
+        set_capability_claim_post_session_write_hook_for_test(Box::new(|| {
+            Err(io::Error::other("simulated crash boundary"))
+        }));
+
+        claim_running_session_execution_capability_if_unchanged_with(
+            dir.path(),
+            &initial,
+            &runtime_path,
+            |_| operation_flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect_err("the injected post-claim boundary must abort issuance");
+
+        assert!(!operation_ran.load(std::sync::atomic::Ordering::SeqCst));
+        let durable = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("reload claimed Session");
+        let claimed = durable.execution_binding.expect("retain claimed binding");
+        assert_eq!(
+            claimed.capability_generation,
+            initial.capability_generation + 1
+        );
+        assert!(
+            capability_claim_failure_matches(dir.path(), &claimed)
+                .expect("read write-ahead recovery proof"),
+            "the exact receipt must predate every post-claim failure boundary"
+        );
+    }
+
+    #[test]
+    fn receipt_unlink_unknown_outcome_restores_failed_phase_before_abort() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let initial = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(initial.clone()))
+            .expect("bind initial capability");
+        session.save(dir.path()).expect("save Session");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+        let operation_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_flag = std::sync::Arc::clone(&operation_ran);
+        set_capability_receipt_post_unlink_failure_for_test();
+
+        claim_running_session_execution_capability_if_unchanged_with(
+            dir.path(),
+            &initial,
+            &runtime_path,
+            |_| operation_flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect_err("unknown receipt unlink outcome must abort issuance");
+
+        assert!(!operation_ran.load(std::sync::atomic::Ordering::SeqCst));
+        let claimed = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("reload claimed Session")
+            .execution_binding
+            .expect("claimed binding");
+        assert!(matches!(
+            capability_claim_receipt_state(dir.path(), &claimed).expect("read restored receipt"),
+            CapabilityClaimReceiptState::Failed
+        ));
+    }
+
+    #[test]
+    fn stale_or_legacy_status_writer_cannot_stop_a_newer_capability_epoch() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind producing Session");
+        session.save(dir.path()).expect("save bound Session");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+        SessionRuntimeState::new_for_execution_capability(
+            AgentStatus::Running,
+            binding.capability_generation,
+        )
+        .save(&runtime_path)
+        .expect("save current runtime state");
+
+        assert!(
+            !persist_session_status_if_capability_generation_matches(
+                dir.path(),
+                &session_id,
+                Some(binding.capability_generation - 1),
+                AgentStatus::Stopped,
+            )
+            .expect("reject stale status writer"),
+            "a stale window must not update the current Session"
+        );
+        assert!(
+            !persist_session_status_if_capability_generation_matches(
+                dir.path(),
+                &session_id,
+                None,
+                AgentStatus::Stopped,
+            )
+            .expect("reject legacy status writer"),
+            "an untagged legacy window must not update capability epoch 2+"
+        );
+
+        let retained = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("reload retained Session");
+        assert_eq!(retained.status, AgentStatus::Running);
+        let retained_runtime =
+            SessionRuntimeState::load(&runtime_path).expect("reload retained runtime");
+        assert_eq!(retained_runtime.status, AgentStatus::Running);
+        assert_eq!(
+            retained_runtime.capability_generation,
+            Some(binding.capability_generation)
+        );
+
+        assert!(
+            persist_session_status_if_capability_generation_matches(
+                dir.path(),
+                &session_id,
+                Some(binding.capability_generation),
+                AgentStatus::Stopped,
+            )
+            .expect("persist current status writer"),
+            "the current window must retain a working terminal path"
+        );
+        let stopped = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("reload stopped Session");
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+        let stopped_runtime =
+            SessionRuntimeState::load(&runtime_path).expect("reload stopped runtime");
+        assert_eq!(stopped_runtime.status, AgentStatus::Stopped);
+        assert_eq!(
+            stopped_runtime.capability_generation,
+            Some(binding.capability_generation)
+        );
+    }
+
+    #[test]
+    fn current_epoch_status_writer_leaves_session_unchanged_when_sidecar_cannot_publish() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind producing Session");
+        session.save(dir.path()).expect("save bound Session");
+        let session_path = dir.path().join(format!("{session_id}.toml"));
+        let session_before = fs::read(&session_path).expect("read Session before failed write");
+        let runtime_path = runtime_state_path(dir.path(), &session_id);
+        fs::create_dir_all(&runtime_path).expect("block sidecar replacement with directory");
+
+        persist_session_status_if_capability_generation_matches(
+            dir.path(),
+            &session_id,
+            Some(binding.capability_generation),
+            AgentStatus::Stopped,
+        )
+        .expect_err("sidecar publication failure must abort the paired Session write");
+
+        assert_eq!(
+            fs::read(&session_path).expect("read Session after failed write"),
+            session_before,
+            "a failed exact-epoch sidecar write must leave Session byte-identical"
+        );
+    }
+
+    #[test]
+    fn sidecar_post_replace_error_uses_exact_readback_and_commits_session() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind producing Session");
+        session.save(dir.path()).expect("save bound Session");
+        set_atomic_state_post_replace_failure_for_test();
+
+        assert!(persist_session_status_if_capability_generation_matches(
+            dir.path(),
+            &session_id,
+            Some(binding.capability_generation),
+            AgentStatus::Stopped,
+        )
+        .expect("exact sidecar readback must resolve post-replace error"));
+
+        let durable = Session::load(&dir.path().join(format!("{session_id}.toml")))
+            .expect("reload stopped Session");
+        assert_eq!(durable.status, AgentStatus::Stopped);
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
+            .expect("reload terminal proof");
+        assert_eq!(runtime.status, AgentStatus::Stopped);
+        assert_eq!(
+            runtime.capability_generation,
+            Some(binding.capability_generation)
+        );
+    }
+
+    #[test]
+    fn session_write_failure_after_terminal_sidecar_keeps_exact_recovery_proof() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let mut session = session_with_execution_owner();
+        session.update_status(AgentStatus::Running);
+        let session_id = session.id.clone();
+        let binding = test_session_execution_binding(&session);
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind producing Session");
+        session.save(dir.path()).expect("save bound Session");
+        let session_path = dir.path().join(format!("{session_id}.toml"));
+        let session_before = fs::read(&session_path).expect("read Session before failure");
+        set_paired_runtime_before_session_write_failure_for_test();
+
+        persist_session_status_if_capability_generation_matches(
+            dir.path(),
+            &session_id,
+            Some(binding.capability_generation),
+            AgentStatus::Stopped,
+        )
+        .expect_err("injected Session metadata failure");
+
+        assert_eq!(
+            fs::read(&session_path).expect("read Session after failure"),
+            session_before,
+            "Session commit marker must remain byte-identical"
+        );
+        let runtime = SessionRuntimeState::load(&runtime_state_path(dir.path(), &session_id))
+            .expect("reload terminal proof");
+        assert_eq!(runtime.status, AgentStatus::Stopped);
+        assert_eq!(
+            runtime.capability_generation,
+            Some(binding.capability_generation)
+        );
     }
 
     #[test]

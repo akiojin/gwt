@@ -12,9 +12,9 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
-use gwt_agent::{
-    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume, Session,
-};
+#[cfg(test)]
+use gwt_agent::persist_agent_session_id;
+use gwt_agent::{AgentStatus, PendingDiscussionResume, Session};
 use serde::Serialize;
 
 use super::{
@@ -127,6 +127,7 @@ fn current_session_for_id(sessions_dir: &Path, gwt_session_id: &GwtSessionId) ->
     }
 }
 
+#[cfg(test)]
 fn sync_agent_session_id(
     sessions_dir: &Path,
     gwt_session_id: &GwtSessionId,
@@ -218,6 +219,7 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
+    let capability_generation = capability_generation_from_env()?;
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     let agent_session_id = validated_hook_agent_session_id(
         event,
@@ -225,26 +227,63 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
         session.as_ref(),
         hook_event.as_ref(),
     )?;
-    if let Some(agent_session_id) = agent_session_id.as_ref() {
-        if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
-        {
-            log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
-        }
-    }
-    if session.is_some() {
-        if let Err(error) =
-            gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)
-        {
-            log_session_metadata_error("record hook event for", &gwt_session_id, &error);
-        }
-    }
-
     let pending_discussion = session.as_ref().and_then(|session| {
         pending_discussion_for_session(&sessions_dir, &session.id)
             .ok()
             .flatten()
     });
-    write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+    let mut runtime_state = gwt_agent::SessionRuntimeState::from_hook_event(event)
+        .ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
+    runtime_state.capability_generation = capability_generation;
+    runtime_state.pending_discussion = pending_discussion;
+    if session.is_some() {
+        match gwt_agent::persist_session_hook_state_if_capability_generation_matches(
+            &sessions_dir,
+            gwt_session_id.as_str(),
+            capability_generation,
+            &runtime_path,
+            runtime_state,
+            event,
+            agent_session_id.as_ref().map(HookSessionId::as_str),
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // Managed hooks must never break the agent process. Do not
+                // fall back to an unfenced write: a lease or persistence error
+                // can race a newer capability epoch.
+                log_session_metadata_error(
+                    "persist fenced hook state for",
+                    &gwt_session_id,
+                    &error,
+                );
+                Ok(())
+            }
+        }
+    } else {
+        // Preserve legacy fail-open behavior for missing/corrupt metadata.
+        // A stamped sidecar remains safe: any later durable binding mismatch
+        // is ignored by the liveness classifier.
+        runtime_state.save(&runtime_path)?;
+        Ok(())
+    }
+}
+
+fn capability_generation_from_env() -> Result<Option<u64>, HookError> {
+    let Some(raw) = std::env::var_os(gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV) else {
+        return Ok(None);
+    };
+    let value = raw.to_str().ok_or_else(|| {
+        HookError::InvalidEvent("invalid non-UTF-8 execution capability generation".to_string())
+    })?;
+    let generation = value.parse::<u64>().map_err(|_| {
+        HookError::InvalidEvent(format!("invalid execution capability generation: {value}"))
+    })?;
+    if generation == 0 {
+        return Err(HookError::InvalidEvent(
+            "execution capability generation must be positive".to_string(),
+        ));
+    }
+    Ok(Some(generation))
 }
 
 pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {
@@ -306,9 +345,12 @@ pub fn record_completed_stop_from_env() -> Result<(), HookError> {
         .map(PathBuf::from)
         .map(|path| sessions_dir_for_runtime_path(&path))
         .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
-    if let Err(error) =
-        gwt_agent::persist_session_completed_stop(&sessions_dir, gwt_session_id.as_str())
-    {
+    let capability_generation = capability_generation_from_env()?;
+    if let Err(error) = gwt_agent::persist_session_completed_stop_if_capability_generation_matches(
+        &sessions_dir,
+        gwt_session_id.as_str(),
+        capability_generation,
+    ) {
         log_session_metadata_error("record completed Stop for", &gwt_session_id, &error);
     }
     Ok(())
@@ -323,20 +365,35 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
     };
     let runtime_path = PathBuf::from(runtime_path);
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
+    let capability_generation = capability_generation_from_env()?;
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
-    if session.is_some() {
-        if let Err(error) =
-            persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)
-        {
-            log_session_metadata_error("restore blocked Stop status for", &gwt_session_id, &error);
-        }
-    }
     let pending_discussion = session.as_ref().and_then(|session| {
         pending_discussion_for_session(&sessions_dir, &session.id)
             .ok()
             .flatten()
     });
-    write_state_with_status(&runtime_path, "Stop", "Running", pending_discussion)
+    if session.is_some() {
+        if let Err(error) =
+            gwt_agent::persist_session_status_at_runtime_path_if_capability_generation_matches(
+                &sessions_dir,
+                gwt_session_id.as_str(),
+                capability_generation,
+                &runtime_path,
+                AgentStatus::Running,
+                Some("Stop"),
+                pending_discussion,
+            )
+        {
+            log_session_metadata_error("restore blocked Stop status for", &gwt_session_id, &error);
+        }
+        return Ok(());
+    }
+    let mut runtime_state = gwt_agent::SessionRuntimeState::new(AgentStatus::Running);
+    runtime_state.capability_generation = capability_generation;
+    runtime_state.source_event = Some("Stop".to_string());
+    runtime_state.pending_discussion = pending_discussion;
+    runtime_state.save(&runtime_path)?;
+    Ok(())
 }
 
 fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
@@ -825,6 +882,84 @@ mod tests {
         assert!(loaded.last_completed_stop_at.is_none());
         assert_eq!(loaded.status, gwt_agent::AgentStatus::Running);
         assert!(loaded.should_mark_interrupted_from_lifecycle());
+    }
+
+    #[test]
+    fn late_hook_cannot_downgrade_a_newer_capability_runtime_epoch() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let mut session = Session::new(&worktree, "work/issue-3426", AgentId::Codex);
+        session.repo_hash = Some("repo-hash-3426".to_string());
+        session.linked_issue_number = Some(3426);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: "repo-hash-3426".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3426,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-current".to_string(),
+                binding_id: "binding-current".to_string(),
+                ledger_head_hash: "ledger-current".to_string(),
+            },
+            capability_generation: 3,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .expect("bind current capability epoch");
+        session.update_status(gwt_agent::AgentStatus::Running);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        gwt_agent::SessionRuntimeState::new_for_execution_capability(
+            gwt_agent::AgentStatus::Running,
+            binding.capability_generation,
+        )
+        .save(&runtime_path)
+        .unwrap();
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+        env.set(
+            gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV,
+            (binding.capability_generation - 1).to_string(),
+        );
+
+        handle_with_input("PostToolUse", r#"{"tool_name":"Bash"}"#)
+            .expect("a stale hook fails open for the agent process");
+
+        let retained = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(retained.last_hook_event, None);
+        assert_eq!(retained.status, gwt_agent::AgentStatus::Running);
+        let retained_runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        assert_eq!(retained_runtime.source_event, None);
+        assert_eq!(
+            retained_runtime.capability_generation,
+            Some(binding.capability_generation),
+            "the stale hook must not erase or replace the current epoch"
+        );
+
+        env.set(
+            gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV,
+            binding.capability_generation.to_string(),
+        );
+        handle_with_input("PostToolUse", r#"{"tool_name":"Bash"}"#)
+            .expect("the current hook remains writable");
+        let current = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(current.last_hook_event.as_deref(), Some("PostToolUse"));
+        let current_runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        assert_eq!(current_runtime.source_event.as_deref(), Some("PostToolUse"));
+        assert_eq!(
+            current_runtime.capability_generation,
+            Some(binding.capability_generation)
+        );
     }
 
     #[test]

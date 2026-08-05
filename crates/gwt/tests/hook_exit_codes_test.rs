@@ -240,6 +240,22 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     let sessions_dir = tmp.path().join(".gwt").join("sessions");
+    let discussion_path = gwt_core::paths::gwt_repo_local_discussions_path(tmp.path());
+    std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        discussion_path,
+        r#"## Discussion TODO
+
+### Proposal A - Preserve blocked resume [active]
+- Summary:
+- Open Questions:
+- Dependency Checks:
+- Deferred Decisions:
+- Next Question: Continue the blocked discussion?
+- Promotable Changes:
+"#,
+    )
+    .unwrap();
     let mut session = Session::new(tmp.path(), "feature/demo", AgentId::Codex);
     session.agent_session_id = Some("agent-123".to_string());
     let session_id = session.id.clone();
@@ -275,6 +291,14 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
     let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
     assert_eq!(runtime_state.status, "Running");
     assert_eq!(runtime_state.source_event, "Stop");
+    assert_eq!(
+        runtime_state
+            .pending_discussion
+            .as_ref()
+            .map(|pending| pending.proposal_label.as_str()),
+        Some("Proposal A"),
+        "a blocked Stop must preserve the active discussion resume candidate"
+    );
 
     let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
     assert_eq!(

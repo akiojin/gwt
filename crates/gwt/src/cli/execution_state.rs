@@ -76,6 +76,9 @@ enum RecoverySessionRace {
 type RepairOwnerActivationRace = Box<dyn FnOnce(&Path)>;
 
 #[cfg(test)]
+type DefunctCoordinatorAfterSettlementPlanHook = Box<dyn FnOnce() + 'static>;
+
+#[cfg(test)]
 std::thread_local! {
     static RECOVERY_SESSION_RACE:
         std::cell::RefCell<Option<RecoverySessionRace>> = const { std::cell::RefCell::new(None) };
@@ -85,7 +88,34 @@ std::thread_local! {
         std::cell::RefCell<Option<RepairOwnerActivationRace>> = const { std::cell::RefCell::new(None) };
     static REPAIR_BINDING_AUTHORITY_RACE:
         std::cell::RefCell<Option<ExecutionOwnerKey>> = const { std::cell::RefCell::new(None) };
+    static DEFUNCT_COORDINATOR_AFTER_SETTLEMENT_PLAN_HOOK:
+        std::cell::RefCell<Option<DefunctCoordinatorAfterSettlementPlanHook>> =
+        const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(test)]
+fn set_defunct_coordinator_after_settlement_plan_hook_for_test(
+    hook: DefunctCoordinatorAfterSettlementPlanHook,
+) {
+    DEFUNCT_COORDINATOR_AFTER_SETTLEMENT_PLAN_HOOK.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(hook).is_none(),
+            "defunct coordinator settlement hook must not be nested"
+        );
+    });
+}
+
+#[cfg(test)]
+fn invoke_defunct_coordinator_after_settlement_plan_hook() {
+    DEFUNCT_COORDINATOR_AFTER_SETTLEMENT_PLAN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn invoke_defunct_coordinator_after_settlement_plan_hook() {}
 
 #[cfg(test)]
 fn set_recovery_session_race(race: RecoverySessionRace) {
@@ -2756,6 +2786,71 @@ pub fn with_current_active_execution_binding_lease<T>(
     )
 }
 
+/// Execute one relaunch capability operation only while the exact current
+/// generation is Active and its durable Session is already Running.
+///
+/// A ReboundCurrent relaunch persists Running before entering this lease. The
+/// owner → Session acquisition order then serializes capability issuance with
+/// defunct-generation settlement: whichever operation wins makes the other
+/// observe either a Running Session or a non-Active generation.
+pub fn with_current_running_active_execution_binding_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionBinding,
+    runtime_path: &Path,
+    operation: impl FnOnce(&gwt_agent::SessionExecutionBinding) -> T,
+) -> io::Result<Option<(gwt_agent::SessionExecutionBinding, T)>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "owner lease must be acquired before the Session lease; retry outside the nested Session operation",
+        ));
+    }
+    if gwt_agent::validate_session_id_path_component(&expected.session_id).is_err() {
+        return Ok(None);
+    }
+    let owner = match expected.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: expected.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: expected.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let session_path = sessions_dir.join(format!("{}.toml", expected.session_id));
+    let route_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => session,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if route_session.execution_binding.as_ref() != Some(expected) {
+        return Ok(None);
+    }
+    let context = match GenerationTransactionContext::resolve(&route_session.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    with_resolved_generation_owner_lease(&context, |context| {
+        if !current_execution_binding_matches_context(
+            context,
+            &expected.session_id,
+            &expected.identity,
+            CurrentExecutionBindingAuthority::ActiveMutation,
+        )? {
+            return Ok(None);
+        }
+        gwt_agent::claim_running_session_execution_capability_if_unchanged_with(
+            sessions_dir,
+            expected,
+            runtime_path,
+            operation,
+        )
+    })
+}
+
 /// [`with_current_active_execution_binding_lease`] with a bounded Session
 /// wait for retry-aware callers and deterministic contention tests.
 pub fn with_current_active_execution_binding_lease_wait<T>(
@@ -2769,6 +2864,7 @@ pub fn with_current_active_execution_binding_lease_wait<T>(
         expected,
         session_wait,
         CurrentExecutionBindingAuthority::ActiveMutation,
+        false,
         operation,
     )
 }
@@ -2788,6 +2884,7 @@ pub(crate) fn with_current_pr_mutation_execution_binding_lease<T>(
         expected,
         ACTIVE_BINDING_LEASE_WAIT,
         CurrentExecutionBindingAuthority::PrMutation,
+        false,
         operation,
     )
 }
@@ -2797,6 +2894,7 @@ fn with_current_execution_binding_lease_wait<T>(
     expected: &gwt_agent::SessionExecutionBinding,
     session_wait: Duration,
     authority: CurrentExecutionBindingAuthority,
+    require_running_session: bool,
     operation: impl FnOnce() -> T,
 ) -> io::Result<Option<T>> {
     if gwt_agent::current_thread_holds_session_lease() {
@@ -2848,6 +2946,8 @@ fn with_current_execution_binding_lease_wait<T>(
                     || session.execution_binding.as_ref() != Some(expected)
                     || session.repo_hash.as_deref() != Some(expected.repo_hash.as_str())
                     || session.linked_issue_number != Some(expected.owner_number)
+                    || (require_running_session
+                        && session.status != gwt_agent::AgentStatus::Running)
                     || canonical_worktree != context.worktree
                     || !current_execution_binding_matches_context(
                         context,
@@ -5095,6 +5195,80 @@ pub fn prepare_fresh_linked_owner_launch_successor(
     )
 }
 
+/// Shared continuation-coordinator entrypoint for a fresh linked-owner launch
+/// whose current Active predecessor is provably defunct.
+///
+/// The launch adapter supplies evidence but never writes authority itself. The
+/// coordinator validates the complete request before settlement, records the
+/// audited Active -> Blocked transition, and prepares the ordinary Blocked
+/// successor in one owner transaction. No Blocked-only authority can become
+/// visible between those two planned records.
+pub fn prepare_fresh_linked_owner_launch_successor_from_defunct_active(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+    expected_primary_session_id: &str,
+    expected_current_binding: &gwt_agent::ExecutionBindingIdentity,
+    reason: &str,
+    still_defunct: &dyn Fn() -> bool,
+) -> io::Result<ContinuationAttempt> {
+    validate_successor_request(request)?;
+    if request.source != FRESH_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
+        return Err(invalid_generation_data(
+            "fresh linked-owner launch successor must use the canonical source without a Continue Work identity",
+        ));
+    }
+    validate_owner(owner)?;
+    gwt_agent::validate_session_id_path_component(expected_primary_session_id)
+        .map_err(|error| invalid_generation_data(format!("invalid Session id: {error}")))?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "settling a defunct Active generation requires a non-empty reason",
+        ));
+    }
+    with_generation_owner_lease(worktree, owner, |context| {
+        let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let (_, projection) = plan_defunct_active_generation(
+            context,
+            &mut ledger,
+            expected_primary_session_id,
+            Some(expected_current_binding),
+            reason,
+            still_defunct,
+        )?;
+        invoke_defunct_coordinator_after_settlement_plan_hook();
+        let attempt = plan_successor_for_status(
+            context,
+            &mut ledger,
+            request,
+            SuccessorPredecessorStatus::Blocked,
+        )?;
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(context, &ledger, &projection)?;
+        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("defunct coordinator lost generation authority")
+        })?;
+        if readback.current_effective_status() != Some(ExecutionControlStatus::Blocked)
+            || latest_operation_attempt(&readback, request, &context.worktree_binding_hash)?
+                .is_none_or(|readback_attempt| {
+                    readback_attempt.status != ContinuationAttemptStatus::Prepared
+                        || readback_attempt.candidate_generation_id
+                            != attempt.candidate_generation_id
+                })
+        {
+            return Err(invalid_generation_data(
+                "defunct coordinator readback lost its atomic Blocked + Prepared outcome",
+            ));
+        }
+        Ok(attempt)
+    })
+}
+
 fn successor_predecessor_execution_status(
     status: SuccessorPredecessorStatus,
 ) -> ExecutionControlStatus {
@@ -5165,6 +5339,23 @@ fn plan_successor_for_status(
                 "a fresh linked-owner launch successor can only be prepared from a Blocked generation"
             }
         }));
+    }
+    if predecessor_status == SuccessorPredecessorStatus::Blocked {
+        let mut seen_operations = std::collections::HashSet::new();
+        if ledger
+            .continuation_attempts
+            .iter()
+            .rev()
+            .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
+            .any(|attempt| {
+                attempt.predecessor == predecessor.identity
+                    && attempt.status == ContinuationAttemptStatus::Prepared
+            })
+        {
+            return Err(generation_conflict(
+                "a fresh linked-owner successor is already Prepared for the current Blocked generation",
+            ));
+        }
     }
     let predecessor_head = effective_generation_head_hash(ledger, &predecessor);
     let attempt = ContinuationAttempt {
@@ -6574,6 +6765,71 @@ fn defunct_recovery_operation_id(generation_id: &str) -> String {
     format!("defunct-predecessor-recovery-{generation_id}")
 }
 
+/// Re-publish an already committed defunct-settlement projection after a
+/// ledger-first response loss. Only the exact audited Active → Blocked event
+/// produced by [`block_defunct_active_generation`] is eligible.
+pub fn repair_defunct_generation_projection(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<bool> {
+    validate_owner(owner)?;
+    with_generation_activation_leases(worktree, owner, |context| {
+        let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+            return Ok(false);
+        };
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        if ledger.effective_status_for(current) != ExecutionControlStatus::Blocked {
+            return Ok(false);
+        }
+        let operation_id = defunct_recovery_operation_id(&current.identity.generation_id);
+        let Some(latest) = ledger
+            .lifecycle_events_for(&current.identity.generation_id)
+            .max_by_key(|event| event.sequence)
+        else {
+            return Ok(false);
+        };
+        if latest.from_status != ExecutionControlStatus::Active
+            || latest.to_status != ExecutionControlStatus::Blocked
+            || latest.operation_id.as_deref() != Some(operation_id.as_str())
+        {
+            return Ok(false);
+        }
+        let projection = ledger.effective_projection_for(current).to_string();
+        let record = serde_json::from_str::<ExecutionControlRecord>(&projection)
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "defunct-recovery Blocked projection is malformed: {error}"
+                ))
+            })?;
+        if !integrity_ok(&record)
+            || record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.status != ExecutionControlStatus::Blocked
+            || record.primary_session_id != latest.session_id
+            || record.blocked_reason.as_deref() != Some(latest.reason.as_str())
+        {
+            return Err(invalid_generation_data(
+                "defunct-recovery Blocked projection lost its exact audit identity",
+            ));
+        }
+        validate_generation_activation_owner(context, true)?;
+        write_activated_generation(context, &ledger, &projection)?;
+        let repaired = load_generation_ledger_from_context(context)?.is_some_and(|readback| {
+            readback.current_generation_id == ledger.current_generation_id
+                && readback.current_effective_status() == Some(ExecutionControlStatus::Blocked)
+        });
+        if !repaired {
+            return Err(invalid_generation_data(
+                "defunct-recovery projection repair failed strict readback",
+            ));
+        }
+        Ok(true)
+    })
+}
+
 /// #3426: settle a stranded Active generation whose producing Session is
 /// durably defunct (Stopped/dead per the owner-liveness classification) so the
 /// ordinary Blocked-successor fresh launch can proceed. The transition is an
@@ -6588,6 +6844,148 @@ fn defunct_recovery_operation_id(generation_id: &str) -> String {
 /// identity — none of which a `ReboundCurrent` resume changes — so without this
 /// fencing callback a Session that revives between classification and settle
 /// would have its live generation Blocked.
+fn plan_defunct_active_generation(
+    context: &GenerationTransactionContext,
+    ledger: &mut ExecutionGenerationLedger,
+    expected_primary_session_id: &str,
+    expected_current_binding: Option<&gwt_agent::ExecutionBindingIdentity>,
+    reason: &str,
+    still_defunct: &dyn Fn() -> bool,
+) -> io::Result<(ExecutionControlRecord, String)> {
+    let current = ledger
+        .current_generation()
+        .ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?
+        .clone();
+    if expected_current_binding
+        .is_some_and(|expected| execution_binding_for_generation(ledger, &current) != *expected)
+    {
+        return Err(generation_conflict(
+            "defunct recovery lost the exact current generation binding",
+        ));
+    }
+    let operation_id = defunct_recovery_operation_id(&current.identity.generation_id);
+    let effective_status = ledger.effective_status_for(&current);
+    if effective_status == ExecutionControlStatus::Blocked {
+        let latest = ledger
+            .lifecycle_events_for(&current.identity.generation_id)
+            .max_by_key(|event| event.sequence)
+            .ok_or_else(|| {
+                invalid_generation_data("Blocked generation has no lifecycle transition")
+            })?;
+        if latest.from_status != ExecutionControlStatus::Active
+            || latest.to_status != ExecutionControlStatus::Blocked
+            || latest.session_id != expected_primary_session_id
+            || latest.reason != reason
+            || latest.operation_id.as_deref() != Some(operation_id.as_str())
+        {
+            return Err(generation_conflict(
+                "the current generation was already settled by another outcome",
+            ));
+        }
+        let projection = ledger.effective_projection_for(&current).to_string();
+        let record = serde_json::from_str::<ExecutionControlRecord>(&projection)
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "defunct-recovery Blocked projection is malformed: {error}"
+                ))
+            })?;
+        return Ok((record, projection));
+    }
+    if effective_status != ExecutionControlStatus::Active {
+        return Err(generation_conflict(
+            "defunct recovery requires a current Active generation",
+        ));
+    }
+
+    // The attempt logs are append-only. Fold each operation to its latest
+    // entry before deciding whether a live candidate already fences recovery.
+    let mut seen_operations = std::collections::HashSet::new();
+    if ledger
+        .continuation_attempts
+        .iter()
+        .rev()
+        .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
+        .any(|attempt| {
+            attempt.predecessor.generation_id == current.identity.generation_id
+                && attempt.status == ContinuationAttemptStatus::Prepared
+        })
+    {
+        return Err(generation_conflict(
+            "defunct recovery refuses while a Prepared successor still targets the current generation",
+        ));
+    }
+    let mut seen_takeovers = std::collections::HashSet::new();
+    if ledger
+        .takeover_attempts
+        .iter()
+        .rev()
+        .filter(|attempt| seen_takeovers.insert(attempt.request.operation_id.as_str()))
+        .any(|attempt| {
+            attempt.generation_id == current.identity.generation_id
+                && attempt.status == GenerationTakeoverAttemptStatus::Prepared
+        })
+    {
+        return Err(generation_conflict(
+            "defunct recovery refuses while a Prepared takeover still targets the current generation",
+        ));
+    }
+    let mut record =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(&current))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!("Active generation snapshot is malformed: {error}"))
+            })?;
+    if !integrity_ok(&record)
+        || record.owner_kind != context.owner.kind
+        || record.owner_number != context.owner.number
+        || record.status != ExecutionControlStatus::Active
+        || record.settled_at.is_some()
+        || record.primary_session_id != expected_primary_session_id
+    {
+        return Err(generation_conflict(
+            "defunct recovery lost the exact Active generation authority",
+        ));
+    }
+    if !still_defunct() {
+        return Err(generation_conflict(
+            "the bound Session is no longer defunct; defunct recovery refuses without mutation",
+        ));
+    }
+    let recorded_at = Utc::now();
+    record.status = ExecutionControlStatus::Blocked;
+    record.blocked_reason = Some(reason.to_string());
+    record.missing_verification = Some("authenticated SessionStart readiness".to_string());
+    record.settled_at = Some(recorded_at);
+    let projection = serialized_execution_projection(&record)?;
+    let record = serde_json::from_str::<ExecutionControlRecord>(&projection)
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "serialized defunct-recovery projection is malformed: {error}"
+            ))
+        })?;
+    append_lifecycle_event(
+        ledger,
+        GenerationLifecycleEvent {
+            sequence: 0,
+            generation_id: current.identity.generation_id,
+            from_status: ExecutionControlStatus::Active,
+            to_status: ExecutionControlStatus::Blocked,
+            session_id: expected_primary_session_id.to_string(),
+            reason: reason.to_string(),
+            operation_id: Some(operation_id),
+            recorded_at,
+            execution_control_json: projection.clone(),
+            previous_event_hash: String::new(),
+            content_hash: String::new(),
+        },
+    );
+    Ok((record, projection))
+}
+
 pub fn block_defunct_active_generation(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -6610,115 +7008,14 @@ pub fn block_defunct_active_generation(
                 "owner generation ledger is not initialized",
             )
         })?;
-        let current = ledger
-            .current_generation()
-            .ok_or_else(|| {
-                invalid_generation_data("execution generation ledger current id is missing")
-            })?
-            .clone();
-        // The attempt log is append-only: aborting a successor appends an
-        // Aborted entry and leaves its Prepared entry in place. Fold to the
-        // latest entry per operation before testing, or every owner that ever
-        // had a rescue attempt aborted would be barred from recovery forever.
-        let mut seen_operations = std::collections::HashSet::new();
-        if ledger
-            .continuation_attempts
-            .iter()
-            .rev()
-            .filter(|attempt| seen_operations.insert(attempt.request.operation_id.as_str()))
-            .any(|attempt| {
-                attempt.predecessor.generation_id == current.identity.generation_id
-                    && attempt.status == ContinuationAttemptStatus::Prepared
-            })
-        {
-            return Err(generation_conflict(
-                "defunct recovery refuses while a Prepared successor still targets the current generation",
-            ));
-        }
-        let operation_id = defunct_recovery_operation_id(&current.identity.generation_id);
-        let effective_status = ledger.effective_status_for(&current);
-        if effective_status == ExecutionControlStatus::Blocked {
-            let latest = ledger
-                .lifecycle_events_for(&current.identity.generation_id)
-                .max_by_key(|event| event.sequence)
-                .ok_or_else(|| {
-                    invalid_generation_data("Blocked generation has no lifecycle transition")
-                })?;
-            if latest.from_status != ExecutionControlStatus::Active
-                || latest.to_status != ExecutionControlStatus::Blocked
-                || latest.session_id != expected_primary_session_id
-                || latest.reason != reason
-                || latest.operation_id.as_deref() != Some(operation_id.as_str())
-            {
-                return Err(generation_conflict(
-                    "the current generation was already settled by another outcome",
-                ));
-            }
-            let record = serde_json::from_str::<ExecutionControlRecord>(
-                ledger.effective_projection_for(&current),
-            )
-            .map(hydrate_recovery_envelopes)
-            .map_err(|error| {
-                invalid_generation_data(format!(
-                    "defunct-recovery Blocked projection is malformed: {error}"
-                ))
-            })?;
-            // A response-loss retry also repairs a ledger-first partial
-            // settle before reporting success.
-            let projection = ledger.effective_projection_for(&current).to_string();
-            write_activated_generation(context, &ledger, &projection)?;
-            return Ok(record);
-        }
-        if effective_status != ExecutionControlStatus::Active {
-            return Err(generation_conflict(
-                "defunct recovery requires a current Active generation",
-            ));
-        }
-        let mut record = serde_json::from_str::<ExecutionControlRecord>(
-            ledger.effective_projection_for(&current),
-        )
-        .map(hydrate_recovery_envelopes)
-        .map_err(|error| {
-            invalid_generation_data(format!("Active generation snapshot is malformed: {error}"))
-        })?;
-        if !integrity_ok(&record)
-            || record.owner_kind != owner.kind
-            || record.owner_number != owner.number
-            || record.status != ExecutionControlStatus::Active
-            || record.settled_at.is_some()
-            || record.primary_session_id != expected_primary_session_id
-        {
-            return Err(generation_conflict(
-                "defunct recovery lost the exact Active generation authority",
-            ));
-        }
-        if !still_defunct() {
-            return Err(generation_conflict(
-                "the bound Session is no longer defunct; defunct recovery refuses without mutation",
-            ));
-        }
-        let recorded_at = Utc::now();
-        record.status = ExecutionControlStatus::Blocked;
-        record.blocked_reason = Some(reason.to_string());
-        record.missing_verification = Some("authenticated SessionStart readiness".to_string());
-        record.settled_at = Some(recorded_at);
-        let projection = serialized_execution_projection(&record)?;
-        append_lifecycle_event(
+        let (record, projection) = plan_defunct_active_generation(
+            context,
             &mut ledger,
-            GenerationLifecycleEvent {
-                sequence: 0,
-                generation_id: current.identity.generation_id.clone(),
-                from_status: ExecutionControlStatus::Active,
-                to_status: ExecutionControlStatus::Blocked,
-                session_id: expected_primary_session_id.to_string(),
-                reason: reason.to_string(),
-                operation_id: Some(operation_id),
-                recorded_at,
-                execution_control_json: projection.clone(),
-                previous_event_hash: String::new(),
-                content_hash: String::new(),
-            },
-        );
+            expected_primary_session_id,
+            None,
+            reason,
+            still_defunct,
+        )?;
         stamp_generation_ledger(&mut ledger);
         write_activated_generation(context, &ledger, &projection)?;
         let readback = load_generation_ledger_from_context(context)?
@@ -6728,8 +7025,14 @@ pub fn block_defunct_active_generation(
                 "defunct recovery readback is not Blocked",
             ));
         }
-        load(worktree)?
-            .ok_or_else(|| invalid_generation_data("defunct recovery lost its ECR projection"))
+        let projection_readback = load(worktree)?
+            .ok_or_else(|| invalid_generation_data("defunct recovery lost its ECR projection"))?;
+        if projection_readback != record {
+            return Err(invalid_generation_data(
+                "defunct recovery ECR projection readback changed",
+            ));
+        }
+        Ok(record)
     })
 }
 
@@ -6761,6 +7064,42 @@ pub fn detect_owner_kind_evidence(repo_path: &Path, number: u64) -> Option<Execu
     } else {
         ExecutionOwnerKind::Issue
     })
+}
+
+/// Resolve a launch owner without forking already trusted generation
+/// authority when issue-cache evidence is unavailable or stale.
+pub fn resolve_launch_owner_kind(repo_path: &Path, number: u64) -> io::Result<ExecutionOwnerKind> {
+    let mut authority_error = None;
+    match current_generation_owner(repo_path) {
+        Ok(Some(owner)) if owner.number == number => return Ok(owner.kind),
+        Ok(_) => {}
+        Err(error) => authority_error = Some(error),
+    }
+    match recovery_generation_owner(repo_path) {
+        Ok(Some(owner)) if owner.number == number => return Ok(owner.kind),
+        Ok(_) => {}
+        Err(error) => authority_error = Some(error),
+    }
+    match recovery_projection_owner_hint(repo_path) {
+        Ok(Some(owner)) if owner.number == number => return Ok(owner.kind),
+        Ok(_) => {}
+        Err(error) => authority_error = Some(error),
+    }
+    if let Some(error) = authority_error {
+        return Err(error);
+    }
+    if let Some(kind) = detect_owner_kind_evidence(repo_path, number) {
+        return Ok(kind);
+    }
+    if let Some(record) = load(repo_path)?.filter(|record| record.owner_number == number) {
+        if integrity_ok(&record) {
+            return Ok(record.owner_kind);
+        }
+        return Err(invalid_generation_data(
+            "existing launch owner projection failed integrity validation",
+        ));
+    }
+    Ok(ExecutionOwnerKind::Issue)
 }
 
 /// Derive the launch entrypoint for the record: the `$gwt-*` skill token from
@@ -14835,6 +15174,76 @@ mod tests {
         assert_eq!(detect_owner_kind_evidence(dir.path(), 78), None);
     }
 
+    #[test]
+    fn resolve_launch_owner_kind_prefers_existing_trusted_generation_over_stale_cache() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: 1921,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "spec-session",
+            "$gwt-execute #1921",
+            false,
+        )
+        .expect("materialize trusted SPEC owner");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish trusted SPEC generation");
+        write_issue_cache_meta(dir.path(), owner.number, serde_json::json!(["bug"]));
+        assert_eq!(
+            detect_owner_kind_evidence(dir.path(), owner.number),
+            Some(ExecutionOwnerKind::Issue)
+        );
+
+        assert_eq!(
+            resolve_launch_owner_kind(dir.path(), owner.number)
+                .expect("resolve existing generation authority"),
+            ExecutionOwnerKind::Spec,
+            "stale cache evidence must not fork an existing SPEC generation into Issue authority"
+        );
+    }
+
+    #[test]
+    fn resolve_launch_owner_kind_refuses_cache_fallback_after_authority_error() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write_issue_cache_meta(dir.path(), 3426, serde_json::json!(["bug"]));
+        let context = GenerationTransactionContext::resolve(
+            dir.path(),
+            ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Issue,
+                number: 3426,
+            },
+        )
+        .expect("resolve trusted authority paths");
+        fs::create_dir_all(&context.worktree_trusted_dir)
+            .expect("create trusted worktree authority directory");
+        fs::write(
+            context.worktree_trusted_dir.join(GENERATION_POINTER_FILE),
+            b"{ malformed authority",
+        )
+        .expect("corrupt trusted generation pointer");
+
+        let error = resolve_launch_owner_kind(dir.path(), 3426)
+            .expect_err("cache evidence must not mask unreadable trusted authority");
+        assert!(
+            error
+                .to_string()
+                .contains("malformed execution generation pointer"),
+            "{error}"
+        );
+    }
+
     // #3426: a fresh launch may settle a stranded Active generation whose
     // producing Session is durably defunct, so the ordinary Blocked-successor
     // path can proceed without hand-editing the ledger.
@@ -14940,6 +15349,274 @@ mod tests {
             .expect("Blocked-successor preparation after defunct recovery");
     }
 
+    #[test]
+    fn fresh_launch_delegates_defunct_recovery_to_the_continuation_coordinator() {
+        let launch_source = include_str!("../app_runtime/launch.rs");
+        let production_source = launch_source
+            .split("\n#[cfg(test)]\n#[path = \"agent_launch_stage_tests.rs\"]")
+            .next()
+            .expect("production launch source");
+
+        assert!(
+            !production_source.contains("execution_state::block_defunct_active_generation("),
+            "FR-607 forbids the launch adapter from settling Active authority directly"
+        );
+        assert!(
+            production_source.contains(
+                "execution_state::prepare_fresh_linked_owner_launch_successor_from_defunct_active("
+            ),
+            "fresh launch must consume the shared coordinator's defunct-successor outcome"
+        );
+    }
+
+    #[test]
+    fn defunct_fresh_launch_route_prepares_then_activates_one_successor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("temp home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("temp repo");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3426,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "defunct-route-predecessor",
+            "$gwt-execute #3426",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish predecessor ledger");
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .expect("read predecessor")
+            .expect("Active predecessor");
+        let request = SuccessorRequest {
+            operation_id: "fresh-launch-route-candidate".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "fresh-launch-route-binding".to_string(),
+            initial_session_id: "fresh-launch-route-session".to_string(),
+            entrypoint: "$gwt-execute #3426".to_string(),
+            requested_at: Utc::now(),
+        };
+
+        prepare_fresh_linked_owner_launch_successor_from_defunct_active(
+            dir.path(),
+            owner,
+            &request,
+            "defunct-route-predecessor",
+            &predecessor,
+            "fresh launch route found the predecessor durably defunct",
+            &|| true,
+        )
+        .expect("coordinator must settle and prepare the fresh successor");
+        let prepared_ledger = load_generation_ledger(dir.path(), owner)
+            .expect("read Prepared ledger")
+            .expect("Prepared ledger");
+        assert_eq!(prepared_ledger.generations.len(), 1);
+        assert_eq!(
+            prepared_ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+        assert_eq!(
+            continuation_attempt_for_operation(dir.path(), owner, &request.operation_id)
+                .expect("read Prepared attempt")
+                .expect("Prepared attempt")
+                .status,
+            ContinuationAttemptStatus::Prepared
+        );
+
+        let activated = activate_successor(dir.path(), owner, &request)
+            .expect("authenticated readiness activation");
+        let ledger = load_generation_ledger(dir.path(), owner)
+            .expect("read Active ledger")
+            .expect("Active ledger");
+        assert_eq!(ledger.generations.len(), 2);
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+        assert_eq!(ledger.current_generation_id, activated.generation_id);
+        assert_ne!(activated.generation_id, predecessor.generation_id);
+        assert_eq!(
+            continuation_attempt_for_operation(dir.path(), owner, &request.operation_id)
+                .expect("read Activated attempt")
+                .expect("Activated attempt")
+                .status,
+            ContinuationAttemptStatus::Activated
+        );
+    }
+
+    #[test]
+    fn defunct_settlement_and_successor_prepare_hold_one_owner_lease() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("temp home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("temp repo");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3426,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "atomic-defunct-predecessor",
+            "$gwt-execute #3426",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish predecessor ledger");
+        let predecessor = current_execution_binding(dir.path(), owner)
+            .expect("read predecessor")
+            .expect("Active predecessor");
+        let winner = SuccessorRequest {
+            operation_id: "atomic-defunct-winner".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "atomic-defunct-winner-binding".to_string(),
+            initial_session_id: "atomic-defunct-winner-session".to_string(),
+            entrypoint: "$gwt-execute #3426".to_string(),
+            requested_at: Utc::now(),
+        };
+        let competitor = SuccessorRequest {
+            operation_id: "atomic-defunct-competitor".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "atomic-defunct-competitor-binding".to_string(),
+            initial_session_id: "atomic-defunct-competitor-session".to_string(),
+            entrypoint: "$gwt-execute #3426".to_string(),
+            requested_at: Utc::now(),
+        };
+        let (planned_tx, planned_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let winner_dir = dir.path().to_path_buf();
+        let winner_request = winner.clone();
+        let winner_predecessor = predecessor.clone();
+        let winner_thread = std::thread::spawn(move || {
+            set_defunct_coordinator_after_settlement_plan_hook_for_test(Box::new(move || {
+                planned_tx.send(()).expect("report settlement plan");
+                release_rx.recv().expect("release coordinator");
+            }));
+            prepare_fresh_linked_owner_launch_successor_from_defunct_active(
+                &winner_dir,
+                owner,
+                &winner_request,
+                "atomic-defunct-predecessor",
+                &winner_predecessor,
+                "atomic defunct settlement",
+                &|| true,
+            )
+        });
+        planned_rx
+            .recv()
+            .expect("coordinator reached in-lease boundary");
+
+        let competitor_dir = dir.path().to_path_buf();
+        let (competitor_started_tx, competitor_started_rx) = std::sync::mpsc::sync_channel(0);
+        let competitor_thread = std::thread::spawn(move || {
+            competitor_started_tx.send(()).expect("report competitor");
+            prepare_fresh_linked_owner_launch_successor(&competitor_dir, owner, &competitor)
+        });
+        competitor_started_rx.recv().expect("competitor started");
+        release_tx.send(()).expect("release coordinator");
+
+        winner_thread
+            .join()
+            .expect("join coordinator")
+            .expect("coordinator must commit both records");
+        assert!(
+            competitor_thread.join().expect("join competitor").is_err(),
+            "a competitor must observe the winner's Prepared attempt after the single lease"
+        );
+        let ledger = load_generation_ledger(dir.path(), owner)
+            .expect("read ledger")
+            .expect("ledger");
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+        assert_eq!(
+            continuation_attempt_for_operation(dir.path(), owner, &winner.operation_id)
+                .expect("read winner")
+                .expect("winner")
+                .status,
+            ContinuationAttemptStatus::Prepared
+        );
+    }
+
+    #[test]
+    fn defunct_coordinator_refuses_foreign_binding_without_authority_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("temp repo");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3436,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "binding-fenced-predecessor",
+            "$gwt-execute #3436",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish predecessor ledger");
+        let mut foreign = current_execution_binding(dir.path(), owner)
+            .expect("read predecessor")
+            .expect("Active predecessor");
+        foreign.binding_id = "foreign-replacement-binding".to_string();
+        let request = SuccessorRequest {
+            operation_id: "binding-fenced-fresh-launch".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "binding-fenced-candidate".to_string(),
+            initial_session_id: "binding-fenced-successor".to_string(),
+            entrypoint: "$gwt-execute #3436".to_string(),
+            requested_at: Utc::now(),
+        };
+        let ledger_path = generation_ledger_path(dir.path(), owner).expect("ledger path");
+        let ledger_before = fs::read(&ledger_path).expect("read authority before refusal");
+
+        prepare_fresh_linked_owner_launch_successor_from_defunct_active(
+            dir.path(),
+            owner,
+            &request,
+            "binding-fenced-predecessor",
+            &foreign,
+            "foreign binding must not settle predecessor",
+            &|| true,
+        )
+        .expect_err("foreign binding must be fenced");
+
+        assert_eq!(
+            fs::read(&ledger_path).expect("read authority after refusal"),
+            ledger_before,
+            "an exact-binding refusal must not append settlement or successor records"
+        );
+    }
+
     // #3426: the continuation attempt log is append-only — aborting a successor
     // appends an Aborted entry and leaves its Prepared entry behind. A naive
     // scan therefore bars every owner that ever had a rescue attempt aborted,
@@ -15010,6 +15687,186 @@ mod tests {
             block_defunct_active_generation(dir.path(), owner, "dead-session", reason, &defunct)
                 .expect("an aborted rescue must not bar defunct recovery forever");
         assert_eq!(record.status, ExecutionControlStatus::Blocked);
+    }
+
+    #[test]
+    fn block_defunct_active_generation_fences_prepared_takeover_attempts() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3428,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "dead-session",
+            "$gwt-execute #3428",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish generation ledger");
+        let request = GenerationTakeoverRequest {
+            operation_id: "prepared-takeover-before-defunct-settle".to_string(),
+            principal_id: "gwt-host-continuation".to_string(),
+            work_id: Some("work-3428".to_string()),
+            source: Some("continue-work:resume".to_string()),
+            from_session_id: "dead-session".to_string(),
+            to_session_id: "takeover-session".to_string(),
+            reason: "verified dead pane".to_string(),
+            requested_at: Utc::now(),
+        };
+        prepare_generation_takeover(dir.path(), owner, &request)
+            .expect("prepare same-generation takeover");
+
+        assert!(
+            block_defunct_active_generation(
+                dir.path(),
+                owner,
+                "dead-session",
+                "takeover still prepared",
+                &|| true,
+            )
+            .is_err(),
+            "defunct settlement must not race a Prepared same-generation takeover"
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
+
+        abort_generation_takeover(dir.path(), owner, &request, "takeover abandoned")
+            .expect("abort takeover");
+        let record = block_defunct_active_generation(
+            dir.path(),
+            owner,
+            "dead-session",
+            "takeover was aborted",
+            &|| true,
+        )
+        .expect("an Aborted takeover must not fence settlement forever");
+        assert_eq!(record.status, ExecutionControlStatus::Blocked);
+    }
+
+    #[test]
+    fn repair_defunct_generation_projection_completes_ledger_first_settlement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3429,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "dead-session",
+            "$gwt-execute #3429",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish generation ledger");
+
+        set_generation_write_failure_after_ledger();
+        block_defunct_active_generation(
+            dir.path(),
+            owner,
+            "dead-session",
+            "ledger-first defunct settlement",
+            &|| true,
+        )
+        .expect_err("lose acknowledgement after authoritative ledger commit");
+        assert_eq!(
+            load_owner_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+        assert!(
+            current_execution_binding(dir.path(), owner).is_err(),
+            "strict reads must reject the incomplete worktree projection"
+        );
+
+        assert!(
+            repair_defunct_generation_projection(dir.path(), owner)
+                .expect("repair committed defunct settlement"),
+            "the exact audited defunct transition must be repairable"
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+    }
+
+    #[test]
+    fn repair_defunct_generation_projection_ignores_other_blocked_transitions() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 3430,
+        };
+        materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            "blocked-session",
+            "$gwt-execute #3430",
+            false,
+        )
+        .expect("materialize Active predecessor");
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live)
+            .expect("publish generation ledger");
+        assert!(matches!(
+            settle(
+                dir.path(),
+                "blocked-session",
+                ExecutionSettlement::Blocked {
+                    reason: "ordinary verified blocker".to_string(),
+                    missing_verification: Some("browser confirmation".to_string()),
+                },
+            )
+            .expect("settle ordinary blocker"),
+            SettleResult::Settled(_)
+        ));
+        let paths = [state_path(dir.path()), generation_pointer_path(dir.path())];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).expect("read authority mirror"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            !repair_defunct_generation_projection(dir.path(), owner)
+                .expect("classify ordinary Blocked transition"),
+            "only the exact defunct-settlement audit may enter projection repair"
+        );
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| fs::read(path).expect("read unchanged authority mirror"))
+                .collect::<Vec<_>>(),
+            before,
+            "an ineligible repair probe must be zero-mutation"
+        );
     }
 
     // ------------------------------------------------------------------

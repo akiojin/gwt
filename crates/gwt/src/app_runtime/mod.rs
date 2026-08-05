@@ -76,7 +76,20 @@ impl BlockingTaskSpawner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeIncarnationId(Uuid);
+
+impl RuntimeIncarnationId {
+    pub(crate) fn fresh() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
 pub struct WindowRuntime {
+    /// Process-local identity for one PTY instance. A combined window id may
+    /// be reused while status threads from the previous process are still
+    /// draining, so event acceptance must compare this value first.
+    incarnation_id: RuntimeIncarnationId,
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
@@ -774,6 +787,10 @@ pub struct AppRuntime {
     /// Kept separately from [`ActiveAgentSession`] so stop/failure cleanup
     /// never needs to reconstruct authority from a mutable filesystem path.
     pub(crate) agent_capability_tokens: HashMap<String, String>,
+    /// Immutable producing epoch captured from each successful launch. This is
+    /// deliberately process-local and keyed by window so a late old window
+    /// cannot recover and overwrite a newer Session epoch from disk.
+    pub(crate) agent_capability_generations: HashMap<String, u64>,
     /// Accepted correlated self-closes waiting for the origin WebSocket task
     /// to finish its bounded direct ACK attempt. Entries are keyed by an
     /// unguessable process-local ticket, never by wire correlation data.
@@ -1343,6 +1360,7 @@ impl AppRuntime {
             recoverable_agent_error_windows: HashSet::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
+            agent_capability_generations: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             knowledge_related_snapshot: Default::default(),

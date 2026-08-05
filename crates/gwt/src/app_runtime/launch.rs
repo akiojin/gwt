@@ -48,8 +48,8 @@ use super::{
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
     AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
-    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    PendingContinueWork, PendingFreshExecutionLaunch, RuntimeIncarnationId, UserEvent,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 #[cfg(test)]
@@ -78,6 +78,68 @@ fn invoke_finalized_session_post_save_hook() -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+type ReboundInstallBeforeOwnerLeaseHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static REBOUND_INSTALL_BEFORE_OWNER_LEASE_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<ReboundInstallBeforeOwnerLeaseHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn set_rebound_install_before_owner_lease_hook(hook: impl FnOnce() + Send + 'static) {
+    let mut slot = REBOUND_INSTALL_BEFORE_OWNER_LEASE_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        slot.replace(Box::new(hook)).is_none(),
+        "Rebound owner-lease hook must not be nested"
+    );
+}
+
+#[cfg(test)]
+fn invoke_rebound_install_before_owner_lease_hook() {
+    let hook = REBOUND_INSTALL_BEFORE_OWNER_LEASE_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn invoke_rebound_install_before_owner_lease_hook() {}
+
+#[cfg(test)]
+thread_local! {
+    static FINALIZED_RUNTIME_FAILURE_BEFORE_ROLLBACK_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_finalized_runtime_failure_before_rollback_hook(hook: impl FnOnce() + 'static) {
+    FINALIZED_RUNTIME_FAILURE_BEFORE_ROLLBACK_HOOK.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(Box::new(hook)).is_none(),
+            "runtime rollback hook must not be nested"
+        );
+    });
+}
+
+#[cfg(test)]
+fn invoke_finalized_runtime_failure_before_rollback_hook() {
+    FINALIZED_RUNTIME_FAILURE_BEFORE_ROLLBACK_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn invoke_finalized_runtime_failure_before_rollback_hook() {}
+
 #[derive(Clone)]
 pub struct ProcessLaunch {
     pub(crate) command: String,
@@ -92,6 +154,7 @@ fn private_launch_env_key(key: &str) -> bool {
         key,
         gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
             | gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV
+            | gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV
             | gwt_agent::GWT_SESSION_ID_ENV
             | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
     )
@@ -600,6 +663,11 @@ fn issue_preflighted_agent_capability_env(
     execution_authority: AgentCapabilityLaunchAuthority<'_>,
     endpoints: PreflightedAgentCapabilityEndpoints,
 ) -> Result<(), String> {
+    let capability_generation = match execution_authority {
+        AgentCapabilityLaunchAuthority::Unbound => None,
+        AgentCapabilityLaunchAuthority::Prepared(binding)
+        | AgentCapabilityLaunchAuthority::Active(binding) => Some(binding.capability_generation),
+    };
     let target = match execution_authority {
         AgentCapabilityLaunchAuthority::Unbound => issuer.issue(project_root, session_id)?,
         AgentCapabilityLaunchAuthority::Prepared(binding) => {
@@ -621,6 +689,14 @@ fn issue_preflighted_agent_capability_env(
         gwt_agent::GWT_PANE_WS_URL_ENV.to_string(),
         endpoints.pane_websocket_url,
     );
+    if let Some(capability_generation) = capability_generation {
+        env.insert(
+            gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV.to_string(),
+            capability_generation.to_string(),
+        );
+    } else {
+        env.remove(gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV);
+    }
     Ok(())
 }
 
@@ -782,40 +858,61 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                         .to_string(),
                 );
             }
-            let owner_kind = match binding.owner_kind.as_str() {
-                "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
-                "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-                _ => return Err("Rebound continuation owner kind is not canonical".to_string()),
-            };
-            let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-                kind: owner_kind,
-                number: binding.owner_number,
-            };
-            if gwt::cli::execution_state::current_execution_binding(worktree, owner)
-                .map_err(|error| error.to_string())?
-                .as_ref()
-                != Some(&binding.identity)
-            {
-                return Err(
-                    "Rebound continuation no longer matches the current execution generation"
-                        .to_string(),
-                );
-            }
             if session.execution_binding.as_ref() != Some(binding) {
                 return Err(
                     "Rebound continuation Session binding changed before capability issuance"
                         .to_string(),
                 );
             }
-            return install_agent_capability_env_with_binding(
-                env,
+            let issuer = issuer.ok_or_else(|| {
+                "Rebound continuation is missing its Host capability issuer".to_string()
+            })?;
+            let endpoints = preflight_agent_capability_endpoints(
                 issuer,
                 project_root,
                 &session.id,
-                Some(binding),
                 runtime_target,
                 container_runtime,
-            );
+            )?;
+            invoke_rebound_install_before_owner_lease_hook();
+            return match gwt::cli::execution_state::with_current_running_active_execution_binding_lease(
+                sessions_dir,
+                binding,
+                &gwt_agent::runtime_state_path(sessions_dir, &session.id),
+                |claimed_binding| {
+                    issue_preflighted_agent_capability_env(
+                        env,
+                        issuer,
+                        project_root,
+                        &session.id,
+                        AgentCapabilityLaunchAuthority::Active(claimed_binding),
+                        endpoints,
+                    )
+                },
+            ) {
+                Ok(Some((claimed_binding, result))) => {
+                    session.set_execution_binding(Some(claimed_binding))?;
+                    if let Err(error) = result {
+                        let claimed_running_snapshot = session.clone();
+                        return Err(interrupt_exact_running_session_after_persistence_error(
+                            sessions_dir,
+                            session,
+                            &claimed_running_snapshot,
+                            Some(&gwt_agent::runtime_state_path(sessions_dir, &session.id)),
+                            "Rebound continuation capability issuance failed",
+                            error,
+                        ));
+                    }
+                    Ok(())
+                }
+                Ok(None) => Err(
+                    "Rebound continuation requires its current Active execution generation and durable Running Session"
+                        .to_string(),
+                ),
+                Err(error) => Err(format!(
+                    "Rebound continuation could not lease its current Active execution generation and durable Running Session: {error}"
+                )),
+            };
         }
         let Some(owner) = producing_owner else {
             return install_agent_capability_env(
@@ -839,9 +936,27 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             container_runtime,
         )?;
 
-        let mut current_binding =
-            gwt::cli::execution_state::current_execution_binding(worktree, owner)
-                .map_err(|error| error.to_string())?;
+        let mut current_binding = match gwt::cli::execution_state::current_execution_binding(
+            worktree, owner,
+        ) {
+            Ok(binding) => binding,
+            Err(read_error) => {
+                let repaired =
+                        gwt::cli::execution_state::repair_defunct_generation_projection(
+                            worktree, owner,
+                        )
+                        .map_err(|repair_error| {
+                            format!(
+                                "execution generation is unreadable ({read_error}); exact defunct-settlement repair failed: {repair_error}"
+                            )
+                        })?;
+                if !repaired {
+                    return Err(read_error.to_string());
+                }
+                gwt::cli::execution_state::current_execution_binding(worktree, owner)
+                    .map_err(|error| error.to_string())?
+            }
+        };
         if current_binding.is_none()
             && gwt::cli::execution_state::load(worktree)
                 .map_err(|error| error.to_string())?
@@ -865,6 +980,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             current_binding = gwt::cli::execution_state::current_execution_binding(worktree, owner)
                 .map_err(|error| error.to_string())?;
         }
+        let mut defunct_recovery = None;
         if current_binding.is_some() {
             let ledger = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
                 .map_err(|error| error.to_string())?
@@ -874,11 +990,9 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             let effective_status = ledger.current_effective_status();
             if effective_status != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
             {
-                // #3426: a stranded Active generation whose producing Session
-                // is durably defunct self-recovers here — settle it Blocked
-                // with audited evidence and fall through to the ordinary
-                // Blocked-successor preparation below. Every refusal keeps the
-                // canonical holder/recovery-route diagnostic.
+                // #3426 / SPEC #2359 FR-623: launch classifies candidate
+                // evidence, but the shared continuation coordinator owns the
+                // audited settlement and successor preparation below.
                 let conflict_detail =
                     || existing_generation_conflict_detail(sessions_dir, owner, &ledger);
                 if effective_status
@@ -896,6 +1010,10 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     })
                     .ok_or_else(conflict_detail)?;
                 let bound_session_id = record.primary_session_id.clone();
+                let expected_current_binding = current_binding
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(conflict_detail)?;
                 // Genesis publishes the Active generation before it persists
                 // the producing Session, so during that window the liveness
                 // classifier reports a perfectly healthy launch as defunct.
@@ -913,36 +1031,21 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                         conflict_detail()
                     ));
                 }
-                match super::continuation::classify_nonlocal_active_owner_liveness_at(
+                match super::continuation::classify_nonlocal_active_owner_liveness_for_binding_at(
                     sessions_dir,
                     &bound_session_id,
+                    owner,
+                    &expected_current_binding,
                 ) {
                     super::continuation::ActiveOwnerLiveness::Stale(evidence) => {
-                        let still_defunct = || {
-                            !super::continuation::durable_launch_recovery_exists(
-                                sessions_dir,
-                                &bound_session_id,
-                            ) && matches!(
-                                super::continuation::classify_nonlocal_active_owner_liveness_at(
-                                    sessions_dir,
-                                    &bound_session_id,
-                                ),
-                                super::continuation::ActiveOwnerLiveness::Stale(_)
-                            )
-                        };
-                        gwt::cli::execution_state::block_defunct_active_generation(
-                            worktree,
-                            owner,
-                            &bound_session_id,
-                            &format!(
+                        defunct_recovery = Some((
+                            bound_session_id.clone(),
+                            expected_current_binding,
+                            format!(
                                 "fresh launch self-recovery: producing Session \
                                  {bound_session_id} is defunct ({evidence})"
                             ),
-                            &still_defunct,
-                        )
-                        .map_err(|error| {
-                            format!("{} — self-recovery failed: {error}", conflict_detail())
-                        })?;
+                        ));
                     }
                     super::continuation::ActiveOwnerLiveness::Unknown => {
                         return Err(conflict_detail());
@@ -958,14 +1061,14 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     "producing Session is missing its canonical repository hash".to_string()
                 })?;
             let request = gwt::cli::execution_state::SuccessorRequest {
-                operation_id: format!("fresh-launch-{}", uuid::Uuid::new_v4()),
+                operation_id: format!("fresh-launch-{}", session.id),
                 principal_id: "gwt-host-launch".to_string(),
                 work_id: None,
                 source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
-                session_binding_id: uuid::Uuid::new_v4().to_string(),
+                session_binding_id: format!("fresh-launch-binding-{}", session.id),
                 initial_session_id: session.id.clone(),
                 entrypoint: execution_entrypoint.to_string(),
-                requested_at: chrono::Utc::now(),
+                requested_at: session.created_at,
             };
             persist_durable_launch_recovery(
                 sessions_dir,
@@ -979,11 +1082,38 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 None,
                 None,
             )?;
-            if let Err(error) =
+            let prepare_result = if let Some((bound_session_id, expected_current_binding, reason)) =
+                defunct_recovery.as_ref()
+            {
+                let still_defunct = || {
+                    !super::continuation::durable_launch_recovery_exists(
+                        sessions_dir,
+                        bound_session_id,
+                    ) && matches!(
+                        super::continuation::classify_nonlocal_active_owner_liveness_for_binding_at(
+                            sessions_dir,
+                            bound_session_id,
+                            owner,
+                            expected_current_binding,
+                        ),
+                        super::continuation::ActiveOwnerLiveness::Stale(_)
+                    )
+                };
+                gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor_from_defunct_active(
+                        worktree,
+                        owner,
+                        &request,
+                        bound_session_id,
+                        expected_current_binding,
+                        reason,
+                        &still_defunct,
+                    )
+            } else {
                 gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
                     worktree, owner, &request,
                 )
-            {
+            };
+            if let Err(error) = prepare_result {
                 if gwt::cli::execution_state::continuation_attempt_for_operation(
                     worktree,
                     owner,
@@ -1291,12 +1421,31 @@ fn interrupt_exact_running_session_after_persistence_error(
     sessions_dir: &Path,
     session: &mut gwt_agent::Session,
     running_snapshot: &gwt_agent::Session,
+    runtime_path: Option<&Path>,
     context: &str,
     error: impl std::fmt::Display,
 ) -> String {
     session.update_status(gwt_agent::AgentStatus::Interrupted);
     match session.save_if_unchanged(sessions_dir, running_snapshot) {
-        Ok(true) => format!("{context}; Session was marked Interrupted: {error}"),
+        Ok(true) => {
+            if let Some(runtime_path) = runtime_path {
+                let runtime = session.execution_binding.as_ref().map_or_else(
+                    || gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Interrupted),
+                    |binding| {
+                        gwt_agent::SessionRuntimeState::new_for_execution_capability(
+                            gwt_agent::AgentStatus::Interrupted,
+                            binding.capability_generation,
+                        )
+                    },
+                );
+                if let Err(runtime_error) = runtime.save(runtime_path) {
+                    return format!(
+                        "{context}; Session was marked Interrupted but runtime state update failed: {error}; {runtime_error}"
+                    );
+                }
+            }
+            format!("{context}; Session was marked Interrupted: {error}")
+        }
         Ok(false) => {
             format!("{context} and no exact Running Session remained: {error}")
         }
@@ -1339,6 +1488,7 @@ fn persist_finalized_launch_session(
                     sessions_dir,
                     session,
                     &running_snapshot,
+                    None,
                     "failed to durably confirm launch Session",
                     error,
                 ));
@@ -1362,21 +1512,26 @@ fn persist_finalized_launch_session(
                 sessions_dir,
                 session,
                 &running_snapshot,
+                None,
                 "failed to durably persist launch Session",
                 error,
             ));
         }
     }
-    if let Err(error) =
-        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running).save(runtime_path)
-    {
+    let runtime = session.execution_binding.as_ref().map_or_else(
+        || gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running),
+        |binding| {
+            gwt_agent::SessionRuntimeState::new_for_execution_capability(
+                gwt_agent::AgentStatus::Running,
+                binding.capability_generation,
+            )
+        },
+    );
+    if let Err(error) = runtime.save(runtime_path) {
         let running_snapshot = session.clone();
+        invoke_finalized_runtime_failure_before_rollback_hook();
         session.update_status(gwt_agent::AgentStatus::Interrupted);
-        let rollback = if let Some(expected) = saved_identity.as_ref() {
-            session.save_if_execution_identity_matches(sessions_dir, expected)
-        } else {
-            session.save_if_unchanged(sessions_dir, &running_snapshot)
-        };
+        let rollback = session.save_if_unchanged(sessions_dir, &running_snapshot);
         return Err(match rollback {
             Ok(true) => format!(
                 "failed to persist launch runtime state; Session was marked Interrupted: {error}"
@@ -1669,6 +1824,11 @@ impl LaunchWizardMemoryCache {
         } else {
             self.sessions.push(session);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_session_for_test(&mut self, session: gwt_agent::Session) {
+        self.record_session(session);
     }
 
     pub(super) fn mark_stopped(&mut self, session_id: &str) {
@@ -2104,6 +2264,26 @@ impl AppRuntime {
                     .env
                     .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                     .cloned();
+                let issued_capability_generation = match process_launch
+                    .env
+                    .get(gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV)
+                {
+                    Some(value) => match value.parse::<u64>() {
+                        Ok(generation) if generation > 0 => Some(generation),
+                        _ => {
+                            self.revoke_unbound_agent_capability(
+                                issued_capability_token.as_deref(),
+                            );
+                            return self.launch_error_events(
+                                window_id,
+                                "launch returned an invalid execution capability generation"
+                                    .to_string(),
+                                launch_feedback_context,
+                            );
+                        }
+                    },
+                    None => None,
+                };
                 let fresh_readiness_nonce = process_launch
                     .env
                     .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
@@ -2273,6 +2453,12 @@ impl AppRuntime {
                             self.revoke_unbound_agent_capability(Some(&previous));
                         }
                     }
+                }
+                if let Some(generation) = issued_capability_generation {
+                    self.agent_capability_generations
+                        .insert(window_id.clone(), generation);
+                } else {
+                    self.agent_capability_generations.remove(&window_id);
                 }
                 self.active_agent_sessions.insert(
                     window_id.clone(),
@@ -2581,7 +2767,7 @@ impl AppRuntime {
                                 ),
                             }
                         } else {
-                            self.revoke_agent_capability_for_window(&window_id);
+                            let _ = self.revoke_agent_capability_for_window(&window_id);
                             error
                         };
                         self.launch_error_events_with_continue_work(
@@ -2838,9 +3024,11 @@ impl AppRuntime {
         )
         .map_err(|error| error.to_string())?;
         let pane = Arc::new(Mutex::new(pane));
+        let incarnation_id = RuntimeIncarnationId::fresh();
 
-        let output_thread = self.spawn_output_thread(id.to_string(), pane.clone(), console_kind);
-        let status_thread = self.spawn_status_thread(id.to_string(), pane.clone());
+        let output_thread =
+            self.spawn_output_thread(id.to_string(), incarnation_id, pane.clone(), console_kind);
+        let status_thread = self.spawn_status_thread(id.to_string(), incarnation_id, pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.window_pty_statuses
                 .insert(id.to_string(), WindowProcessStatus::Running);
@@ -2861,6 +3049,7 @@ impl AppRuntime {
         self.runtimes.insert(
             id.to_string(),
             WindowRuntime {
+                incarnation_id,
                 pane,
                 output_thread: Some(output_thread),
                 status_thread: Some(status_thread),
@@ -3400,6 +3589,7 @@ impl AppRuntime {
                     if let Some((receipt, binding)) = gwt::prepare_resume_producing_authority(
                         Path::new(&project_root),
                         &predecessor,
+                        &window_id,
                     ) {
                         match receipt.outcome {
                             gwt::AgentExecutionContinuationOutcome::SuccessorCreated => {
@@ -3475,22 +3665,39 @@ impl AppRuntime {
             // falling through this genesis-only launch path.
             let session_mode = config.session_mode;
             let had_prepared_execution = prepared_continuation.is_some();
-            let producing_owner = (!config.is_ephemeral
+            let producing_owner = if !config.is_ephemeral
                 && !config.suppress_execution_control
                 && prepared_continuation.is_none()
-                && session_mode == gwt_agent::SessionMode::Normal)
-                .then(|| {
-                    config.linked_issue_number.map(|owner_number| {
-                        gwt::cli::execution_state::ExecutionOwnerKey {
-                            kind: gwt::cli::execution_state::detect_owner_kind(
+                && session_mode == gwt_agent::SessionMode::Normal
+            {
+                config
+                    .linked_issue_number
+                    .map(|owner_number| -> Result<_, String> {
+                        Ok(gwt::cli::execution_state::ExecutionOwnerKey {
+                            kind: gwt::cli::execution_state::resolve_launch_owner_kind(
                                 &worktree_path,
                                 owner_number,
-                            ),
+                            )
+                            .map_err(|error| error.to_string())?,
                             number: owner_number,
-                        }
+                        })
                     })
-                })
-                .flatten();
+                    .transpose()?
+            } else {
+                None
+            };
+            // A ReboundCurrent relaunch reuses a Session whose durable status
+            // may still be Stopped. Publish the exact Running snapshot before
+            // capability issuance so defunct settlement observes liveness;
+            // the capability path then leases owner → Session and proves both
+            // that the generation is still Active and this snapshot remains
+            // Running. Either the settle or the relaunch wins, never both.
+            let rebound_running_snapshot = if rebound_continuation.is_some() {
+                persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)?;
+                Some(session.clone())
+            } else {
+                None
+            };
             let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,
@@ -3509,7 +3716,19 @@ impl AppRuntime {
                 .env_vars
                 .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                 .cloned();
-            capability_install?;
+            if let Err(error) = capability_install {
+                if let Some(running_snapshot) = rebound_running_snapshot.as_ref() {
+                    return Err(interrupt_exact_running_session_after_persistence_error(
+                        &sessions_dir,
+                        &mut session,
+                        running_snapshot,
+                        Some(&runtime_path),
+                        "Rebound continuation capability issuance failed",
+                        error,
+                    ));
+                }
+                return Err(error);
+            }
             let is_fresh_execution_install = producing_owner.is_some()
                 && prepared_continuation.is_none()
                 && config
@@ -3530,32 +3749,37 @@ impl AppRuntime {
                     })
                 })
                 .transpose()?;
-            if let Err(error) =
-                persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut session, None)
-            {
-                let rollback = if is_fresh_execution_install {
-                    Some(rollback_materialized_fresh_execution_launch(
-                        &sessions_dir,
-                        &session_id,
-                        &worktree_path,
-                        "fresh launch final Session persistence failed",
-                        &session.agent_id,
-                    ))
-                } else {
-                    materialized_genesis_install.as_ref().map(|genesis| {
-                        terminalize_materialized_genesis_launch(
+            if rebound_running_snapshot.is_none() {
+                if let Err(error) = persist_finalized_launch_session(
+                    &sessions_dir,
+                    &runtime_path,
+                    &mut session,
+                    None,
+                ) {
+                    let rollback = if is_fresh_execution_install {
+                        Some(rollback_materialized_fresh_execution_launch(
                             &sessions_dir,
-                            Some(genesis),
-                            "genesis final Session persistence failed",
-                        )
-                    })
-                };
-                return Err(match rollback {
-                    None | Some(Ok(())) => error,
-                    Some(Err(rollback_error)) => format!(
-                        "{error}; candidate rollback requires reconciliation: {rollback_error}"
-                    ),
-                });
+                            &session_id,
+                            &worktree_path,
+                            "fresh launch final Session persistence failed",
+                            &session.agent_id,
+                        ))
+                    } else {
+                        materialized_genesis_install.as_ref().map(|genesis| {
+                            terminalize_materialized_genesis_launch(
+                                &sessions_dir,
+                                Some(genesis),
+                                "genesis final Session persistence failed",
+                            )
+                        })
+                    };
+                    return Err(match rollback {
+                        None | Some(Ok(())) => error,
+                        Some(Err(rollback_error)) => format!(
+                            "{error}; candidate rollback requires reconciliation: {rollback_error}"
+                        ),
+                    });
+                }
             }
 
             let process_launch = ProcessLaunch {
@@ -3741,11 +3965,59 @@ impl AppRuntime {
     }
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {
-        let Some(session) = self.active_agent_sessions.remove(window_id) else {
-            self.revoke_agent_capability_for_window(window_id);
+        let Some(session) = self.active_agent_sessions.get(window_id).cloned() else {
             return;
         };
-        self.revoke_agent_capability_for_window(window_id);
+        let capability_generation = self.agent_capability_generations.get(window_id).copied();
+        let capability_token = self.agent_capability_tokens.get(window_id).cloned();
+        match gwt_agent::persist_session_status_if_capability_generation_matches(
+            &self.sessions_dir,
+            &session.session_id,
+            capability_generation,
+            gwt_agent::AgentStatus::Stopped,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    session_id = %session.session_id,
+                    window_id = %window_id,
+                    capability_generation = ?capability_generation,
+                    "ignored late stop from a stale agent capability epoch"
+                );
+                return;
+            }
+            Err(error) if capability_generation.is_some() => {
+                tracing::warn!(
+                    session_id = %session.session_id,
+                    window_id = %window_id,
+                    capability_generation = ?capability_generation,
+                    error = %error,
+                    "failed to prove current agent capability epoch during stop"
+                );
+                return;
+            }
+            // Legacy/unbound windows have no newer epoch that this cleanup
+            // could destroy. Preserve their token-revocation behavior even
+            // when the historical Session file is already absent.
+            Err(_) => {}
+        }
+        let local_authority_unchanged = self
+            .active_agent_sessions
+            .get(window_id)
+            .is_some_and(|current| current.session_id == session.session_id)
+            && self.agent_capability_generations.get(window_id).copied() == capability_generation
+            && self.agent_capability_tokens.get(window_id) == capability_token.as_ref();
+        if !local_authority_unchanged {
+            tracing::warn!(
+                session_id = %session.session_id,
+                window_id = %window_id,
+                capability_generation = ?capability_generation,
+                "agent stop durable CAS succeeded but local authority changed; preserving the newer local runtime"
+            );
+            return;
+        }
+        self.active_agent_sessions.remove(window_id);
+        let _ = self.revoke_agent_capability_for_window(window_id);
         // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
@@ -3753,11 +4025,6 @@ impl AppRuntime {
         // projection persistence entirely.
         if self.is_ephemeral_intake_session(&session) {
             self.finalize_ephemeral_intake_worktree(&session);
-            let _ = gwt_agent::persist_session_status(
-                &self.sessions_dir,
-                &session.session_id,
-                gwt_agent::AgentStatus::Stopped,
-            );
             self.launch_wizard_cache.mark_stopped(&session.session_id);
             return;
         }
@@ -3783,11 +4050,6 @@ impl AppRuntime {
                 );
             }
         }
-        let _ = gwt_agent::persist_session_status(
-            &self.sessions_dir,
-            &session.session_id,
-            gwt_agent::AgentStatus::Stopped,
-        );
         self.launch_wizard_cache.mark_stopped(&session.session_id);
     }
 
@@ -3855,11 +4117,12 @@ impl AppRuntime {
         self.recoverable_agent_error_windows.remove(window_id);
         self.window_hook_states.remove(window_id);
         let session = self.active_agent_sessions.remove(window_id);
-        self.revoke_agent_capability_for_window(window_id);
+        let capability_generation = self.revoke_agent_capability_for_window(window_id);
         if let Some(session) = session.as_ref() {
-            let _ = gwt_agent::persist_session_status(
+            let _ = gwt_agent::persist_session_status_if_capability_generation_matches(
                 &self.sessions_dir,
                 &session.session_id,
+                capability_generation,
                 gwt_agent::AgentStatus::Stopped,
             );
             self.launch_wizard_cache.mark_stopped(&session.session_id);
@@ -3906,9 +4169,10 @@ impl AppRuntime {
         }
     }
 
-    pub(super) fn revoke_agent_capability_for_window(&mut self, window_id: &str) {
+    pub(super) fn revoke_agent_capability_for_window(&mut self, window_id: &str) -> Option<u64> {
         let token = self.agent_capability_tokens.remove(window_id);
         self.revoke_unbound_agent_capability(token.as_deref());
+        self.agent_capability_generations.remove(window_id)
     }
 
     /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
@@ -4448,6 +4712,87 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
+    fn finalized_session_sidecar_failure_retains_newer_same_identity_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create Sessions directory");
+        let runtime_root = sessions_dir.join("runtime");
+        std::fs::write(&runtime_root, b"not-a-directory").expect("block runtime directory");
+        let mut candidate = gwt_agent::Session::new(
+            temp.path().join("worktree"),
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        candidate.id = "sidecar-race-candidate".to_string();
+        candidate.project_state_root = Some(temp.path().join("project"));
+        candidate.repo_hash = Some("repo-hash".to_string());
+        candidate.linked_issue_number = Some(2359);
+        candidate.update_status(gwt_agent::AgentStatus::Running);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: candidate.id.clone(),
+            repo_hash: "repo-hash".to_string(),
+            owner_kind: "spec".to_string(),
+            owner_number: 2359,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation".to_string(),
+                binding_id: "binding".to_string(),
+                ledger_head_hash: "ledger-head".to_string(),
+            },
+            capability_generation: 1,
+        };
+        candidate
+            .set_execution_binding(Some(binding))
+            .expect("bind candidate");
+        candidate
+            .save(&sessions_dir)
+            .expect("save exact Running candidate before finalized persistence");
+        let runtime_path = runtime_root.join(format!("{}.json", candidate.id));
+        let replacement_path = sessions_dir.join(format!("{}.toml", candidate.id));
+        let mut replacement = candidate.clone();
+        replacement.display_name = "newer same-identity Session".to_string();
+        let replacement_for_hook = replacement.clone();
+        let sessions_for_hook = sessions_dir.clone();
+        let replacement_bytes = Arc::new(Mutex::new(None));
+        let replacement_bytes_for_hook = Arc::clone(&replacement_bytes);
+        set_finalized_runtime_failure_before_rollback_hook(move || {
+            replacement_for_hook
+                .save(&sessions_for_hook)
+                .expect("persist concurrent same-identity replacement");
+            *replacement_bytes_for_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                std::fs::read(sessions_for_hook.join("sidecar-race-candidate.toml"))
+                    .expect("read replacement bytes"),
+            );
+        });
+
+        let error =
+            persist_finalized_launch_session(&sessions_dir, &runtime_path, &mut candidate, None)
+                .expect_err("blocked runtime sidecar must fail final persistence");
+
+        assert!(
+            error.contains("Session changed before interruption"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&replacement_path).expect("read retained replacement"),
+            replacement_bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .expect("captured replacement bytes"),
+            "runtime rollback must not overwrite a newer same-identity Session"
+        );
+        assert_eq!(
+            gwt_agent::Session::load(&replacement_path)
+                .expect("load retained replacement")
+                .display_name,
+            "newer same-identity Session"
+        );
+    }
+
+    #[test]
     fn finalized_session_unknown_save_outcome_marks_visible_running_session_interrupted() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join("sessions");
@@ -4527,6 +4872,12 @@ mod agent_endpoint_env_tests {
             .expect("producing Session binding");
         assert_eq!(binding.capability_generation, 1);
         assert_eq!(
+            env.get(gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV)
+                .map(String::as_str),
+            Some("1"),
+            "the immutable launch environment must carry the bound epoch"
+        );
+        assert_eq!(
             gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
                 .expect("read current generation")
                 .expect("current generation binding"),
@@ -4571,9 +4922,12 @@ mod agent_endpoint_env_tests {
         }
         .install(&mut env)
         .expect("materialize predecessor generation");
-        let (receipt, binding) =
-            gwt::prepare_resume_producing_authority(&launch.project, &launch.session.id)
-                .expect("recover producing authority for the relaunch");
+        let (receipt, binding) = gwt::prepare_resume_producing_authority(
+            &launch.project,
+            &launch.session.id,
+            "rebound-fixture-window",
+        )
+        .expect("recover producing authority for the relaunch");
         assert_eq!(
             receipt.outcome,
             gwt::AgentExecutionContinuationOutcome::ReboundCurrent,
@@ -4715,6 +5069,20 @@ mod agent_endpoint_env_tests {
             .expect("carry rebound binding on the resumed Session");
         resumed.update_status(gwt_agent::AgentStatus::Running);
 
+        let mut stopped = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("load durable predecessor before relaunch");
+        stopped.update_status(gwt_agent::AgentStatus::Stopped);
+        stopped
+            .save(&launch.sessions_dir)
+            .expect("persist stopped predecessor");
+        let runtime_path = gwt_agent::runtime_state_path(&launch.sessions_dir, &resumed.id);
+        persist_finalized_launch_session(&launch.sessions_dir, &runtime_path, &mut resumed, None)
+            .expect("publish the real relaunch Running snapshot before capability claim");
+
         let mut env = HashMap::new();
         FinalizedAgentCapabilityLaunch {
             issuer: Some(&issuer),
@@ -4738,11 +5106,362 @@ mod agent_endpoint_env_tests {
         let grant = issuer
             .grant_for_test(token)
             .expect("authenticate issued capability");
+        let claimed = resumed
+            .execution_binding
+            .clone()
+            .expect("rebound install must retain its claimed capability epoch");
+        assert_eq!(claimed.identity, binding.identity);
+        assert_eq!(
+            claimed.capability_generation,
+            binding.capability_generation + 1
+        );
+        assert_eq!(
+            env.get(gwt_agent::GWT_EXECUTION_CAPABILITY_GENERATION_ENV)
+                .and_then(|value| value.parse::<u64>().ok()),
+            Some(claimed.capability_generation),
+            "the Rebound hook environment must carry the claimed epoch"
+        );
         assert!(
             grant.principal().authorizes_producing_mutation(),
             "a rebound relaunch must recover producing authority"
         );
-        assert_eq!(grant.principal().execution_binding(), Some(&binding));
+        assert_eq!(grant.principal().execution_binding(), Some(&claimed));
+        assert_eq!(
+            gwt_agent::Session::load(
+                &launch
+                    .sessions_dir
+                    .join(format!("{}.toml", launch.session.id)),
+            )
+            .expect("reload claimed rebound Session")
+            .execution_binding
+            .as_ref(),
+            Some(&claimed)
+        );
+        assert_eq!(
+            gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+                &launch.sessions_dir,
+                &launch.session.id,
+            ))
+            .expect("reload claimed rebound runtime")
+            .capability_generation,
+            Some(claimed.capability_generation)
+        );
+        let ledger_before_late_settlement =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read rebound winner ledger")
+                .expect("rebound winner ledger");
+        assert!(
+            gwt::cli::execution_state::block_defunct_active_generation(
+                &launch.project,
+                launch.owner,
+                &launch.session.id,
+                "late stale classification",
+                &|| {
+                    gwt_agent::Session::load(
+                        &launch
+                            .sessions_dir
+                            .join(format!("{}.toml", launch.session.id)),
+                    )
+                    .is_ok_and(|session| session.status != gwt_agent::AgentStatus::Running)
+                },
+            )
+            .is_err(),
+            "the rebound winner's durable Running state must fence later defunct settlement"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read ledger after rejected late settlement")
+                .expect("ledger after rejected late settlement"),
+            ledger_before_late_settlement,
+            "a losing settlement must not append lifecycle or mutate generation state"
+        );
+    }
+
+    #[test]
+    fn rebound_current_resume_refuses_a_blocked_generation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, binding) = rebound_relaunch_fixture(home.path());
+
+        gwt::cli::execution_state::block_defunct_active_generation(
+            &launch.project,
+            launch.owner,
+            &launch.session.id,
+            "test settle after rebound validation",
+            &|| true,
+        )
+        .expect("settle the generation before capability issuance");
+
+        let mut resumed = launch.session.clone();
+        resumed.update_status(gwt_agent::AgentStatus::Running);
+        resumed
+            .set_execution_binding(Some(binding.clone()))
+            .expect("carry rebound binding");
+        let mut env = HashMap::new();
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut resumed,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: None,
+            prepared_continuation: None,
+            rebound_continuation: Some(&binding),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("Blocked authority must never issue a rebound capability");
+
+        assert!(
+            error.contains("current Active execution generation"),
+            "{error}"
+        );
+        assert!(
+            !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "a Blocked generation must not receive a producing token"
+        );
+    }
+
+    #[test]
+    fn rebound_current_resume_requires_a_durable_running_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, binding) = rebound_relaunch_fixture(home.path());
+
+        let mut stopped = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("load rebound Session");
+        stopped.update_status(gwt_agent::AgentStatus::Stopped);
+        stopped
+            .save(&launch.sessions_dir)
+            .expect("persist stopped rebound Session");
+
+        let mut resumed = stopped.clone();
+        resumed.update_status(gwt_agent::AgentStatus::Running);
+        let mut env = HashMap::new();
+        let error = FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut resumed,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: None,
+            prepared_continuation: None,
+            rebound_continuation: Some(&binding),
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("Stopped durable Session must be persisted Running before authority issuance");
+
+        assert!(error.contains("durable Running Session"), "{error}");
+        assert!(
+            !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            "a Stopped durable Session must not receive a producing token"
+        );
+    }
+
+    #[test]
+    fn rebound_current_resume_cannot_race_defunct_generation_settlement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, binding) = rebound_relaunch_fixture(home.path());
+        let session_path = launch
+            .sessions_dir
+            .join(format!("{}.toml", launch.session.id));
+        let runtime_path = gwt_agent::runtime_state_path(&launch.sessions_dir, &launch.session.id);
+        let session_before_race = std::fs::read(&session_path).expect("read Session before race");
+        let runtime_before_race = std::fs::read(&runtime_path).ok();
+
+        let install_outcome = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let install_thread = std::sync::Mutex::new(None);
+        let started = std::sync::atomic::AtomicBool::new(false);
+        let still_defunct = || {
+            if !started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let (at_owner_lease_tx, at_owner_lease_rx) = std::sync::mpsc::sync_channel(0);
+                let (release_owner_lease_tx, release_owner_lease_rx) =
+                    std::sync::mpsc::sync_channel(0);
+                set_rebound_install_before_owner_lease_hook(move || {
+                    at_owner_lease_tx
+                        .send(())
+                        .expect("report Rebound owner-lease boundary");
+                    release_owner_lease_rx
+                        .recv()
+                        .expect("release Rebound owner-lease boundary");
+                });
+                let outcome = std::sync::Arc::clone(&install_outcome);
+                let sessions_dir = launch.sessions_dir.clone();
+                let project = launch.project.clone();
+                let issuer = issuer.clone();
+                let binding = binding.clone();
+                let mut resumed = launch.session.clone();
+                resumed.update_status(gwt_agent::AgentStatus::Running);
+                let handle = std::thread::spawn(move || {
+                    let mut env = HashMap::new();
+                    let result = FinalizedAgentCapabilityLaunch {
+                        issuer: Some(&issuer),
+                        sessions_dir: &sessions_dir,
+                        session: &mut resumed,
+                        project_root: &project,
+                        worktree: &project,
+                        producing_owner: None,
+                        prepared_continuation: None,
+                        rebound_continuation: Some(&binding),
+                        execution_entrypoint: "$gwt-execute #2359",
+                        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                        container_runtime: None,
+                    }
+                    .install(&mut env);
+                    *outcome
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                        result,
+                        env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+                    ));
+                });
+                *install_thread
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+                at_owner_lease_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("Rebound install must reach the owner-lease boundary");
+                release_owner_lease_tx
+                    .send(())
+                    .expect("release competing Rebound install");
+            }
+            true
+        };
+
+        gwt::cli::execution_state::block_defunct_active_generation(
+            &launch.project,
+            launch.owner,
+            &launch.session.id,
+            "test settle while rebound install is pending",
+            &still_defunct,
+        )
+        .expect("settle the generation under the owner lease");
+        install_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("rebound install thread")
+            .join()
+            .expect("join rebound install thread");
+
+        let outcome = install_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("rebound install outcome");
+        assert!(
+            outcome.0.is_err(),
+            "the owner that commits Blocked must fence the competing rebound install"
+        );
+        assert!(
+            !outcome.1,
+            "the losing rebound install must not issue a producing token"
+        );
+        assert_eq!(
+            std::fs::read(&session_path).expect("read Session after losing rebound"),
+            session_before_race,
+            "a losing rebound must not advance the capability epoch or status"
+        );
+        assert_eq!(
+            std::fs::read(&runtime_path).ok(),
+            runtime_before_race,
+            "a losing rebound must not publish or replace runtime state"
+        );
+    }
+
+    #[test]
+    fn duplicate_rebound_installs_issue_exactly_one_token_and_one_epoch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, binding) = rebound_relaunch_fixture(home.path());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let issuer = issuer.clone();
+            let sessions_dir = launch.sessions_dir.clone();
+            let project = launch.project.clone();
+            let binding = binding.clone();
+            let mut resumed = launch.session.clone();
+            resumed.update_status(gwt_agent::AgentStatus::Running);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut env = HashMap::new();
+                let result = FinalizedAgentCapabilityLaunch {
+                    issuer: Some(&issuer),
+                    sessions_dir: &sessions_dir,
+                    session: &mut resumed,
+                    project_root: &project,
+                    worktree: &project,
+                    producing_owner: None,
+                    prepared_continuation: None,
+                    rebound_continuation: Some(&binding),
+                    execution_entrypoint: "$gwt-execute #2359",
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                    container_runtime: None,
+                }
+                .install(&mut env);
+                (result, env)
+            }));
+        }
+        barrier.wait();
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join duplicate rebound"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes.iter().filter(|(result, _)| result.is_ok()).count(),
+            1,
+            "the same exact rebound binding has one install winner"
+        );
+        let tokens = outcomes
+            .iter()
+            .filter_map(|(_, env)| env.get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV))
+            .collect::<Vec<_>>();
+        assert_eq!(tokens.len(), 1, "only the winner receives a token");
+        assert!(issuer.authenticates_token(tokens[0]));
+        let durable = gwt_agent::Session::load(
+            &launch
+                .sessions_dir
+                .join(format!("{}.toml", launch.session.id)),
+        )
+        .expect("reload single-winner Session");
+        assert_eq!(
+            durable
+                .execution_binding
+                .as_ref()
+                .expect("claimed durable binding")
+                .capability_generation,
+            binding.capability_generation + 1,
+            "duplicate installs advance the epoch exactly once"
+        );
     }
 
     #[test]
@@ -4786,9 +5505,8 @@ mod agent_endpoint_env_tests {
         .install(&mut env)
         .expect_err("a stale rebound binding must fail closed");
         assert!(
-            error.contains(
-                "Rebound continuation no longer matches the current execution generation"
-            ),
+            error.contains("current Active execution generation")
+                && error.contains("durable Running Session"),
             "{error}"
         );
         assert!(
@@ -5490,6 +6208,357 @@ mod agent_endpoint_env_tests {
         assert_eq!(
             grant.principal().execution_authority_kind(),
             crate::embedded_server::AgentExecutionAuthorityKind::Prepared,
+        );
+    }
+
+    #[test]
+    fn explicit_launch_does_not_auto_repair_nondefunct_blocked_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        gwt::cli::execution_state::settle(
+            &predecessor.project,
+            &predecessor.session.id,
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "ordinary verified blocker".to_string(),
+                missing_verification: Some("browser confirmation".to_string()),
+            },
+        )
+        .expect("settle ordinary Blocked predecessor");
+
+        let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&predecessor.project)
+            .expect("trusted authority dir");
+        let trusted_pointer = trusted_dir.join("execution-generation-pointer.json");
+        let mirror_pointer = predecessor
+            .project
+            .join(".gwt/skill-state/execution-generation-pointer.json");
+        let ledger_before = gwt::cli::execution_state::load_generation_ledger(
+            &predecessor.project,
+            predecessor.owner,
+        )
+        .expect("read ordinary Blocked ledger")
+        .expect("ordinary Blocked ledger");
+        let trusted_projection = trusted_dir.join("execution-control.json");
+        let mirror_projection = predecessor
+            .project
+            .join(gwt::cli::execution_state::EXECUTION_CONTROL_STATE_RELATIVE);
+        let trusted_projection_before = std::fs::read(&trusted_projection).unwrap();
+        let mirror_projection_before = std::fs::read(&mirror_projection).unwrap();
+        std::fs::write(&trusted_pointer, b"{malformed-pointer")
+            .expect("create unreadable nondefunct authority");
+        let trusted_pointer_before = std::fs::read(&trusted_pointer).unwrap();
+        let mirror_pointer_before = std::fs::read(&mirror_pointer).unwrap();
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let successor_id = successor.id.clone();
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect_err("ordinary Blocked authority must not enter defunct auto-repair");
+
+        assert!(!env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV));
+        assert!(!predecessor
+            .sessions_dir
+            .join(format!("{successor_id}.toml"))
+            .exists());
+        assert_eq!(
+            std::fs::read(&trusted_pointer).unwrap(),
+            trusted_pointer_before
+        );
+        assert_eq!(
+            std::fs::read(&mirror_pointer).unwrap(),
+            mirror_pointer_before
+        );
+        let owner_ledger = trusted_dir
+            .parent()
+            .expect("repository trusted root")
+            .join("execution-owners")
+            .join(format!("owner-{}", predecessor.owner.number))
+            .join("generation-ledger.json");
+        assert_eq!(
+            serde_json::from_slice::<gwt::cli::execution_state::ExecutionGenerationLedger>(
+                &std::fs::read(owner_ledger).expect("read retained owner ledger")
+            )
+            .expect("parse retained owner ledger"),
+            ledger_before
+        );
+        assert_eq!(
+            std::fs::read(&trusted_projection).unwrap(),
+            trusted_projection_before
+        );
+        assert_eq!(
+            std::fs::read(&mirror_projection).unwrap(),
+            mirror_projection_before
+        );
+    }
+
+    #[test]
+    fn explicit_linked_owner_launch_self_recovers_dead_host_runtime() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        clear_durable_launch_recovery(&predecessor.sessions_dir, &predecessor.session.id)
+            .expect("clear predecessor launch receipt");
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &predecessor.sessions_dir,
+            &predecessor.session.id,
+        ))
+        .expect("remove live Host sidecar");
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &predecessor.sessions_dir,
+                i32::MAX as u32,
+                &predecessor.session.id,
+            ))
+            .expect("persist dead Host sidecar");
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
+        persist_finalized_launch_session(
+            &predecessor.sessions_dir,
+            &runtime_path,
+            &mut successor,
+            None,
+        )
+        .expect("persist successor Session");
+
+        let mut successor_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut successor_env)
+        .expect("fresh launch must recover a dead Host holder");
+
+        let ledger = gwt::cli::execution_state::load_generation_ledger(
+            &predecessor.project,
+            predecessor.owner,
+        )
+        .expect("read recovered ledger")
+        .expect("recovered ledger");
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+        );
+        assert!(ledger.lifecycle_events.iter().any(|event| {
+            event.session_id == predecessor.session.id
+                && event.reason.contains("all owning Host runtimes are dead")
+        }));
+        let persisted_successor = gwt_agent::Session::load(
+            &predecessor
+                .sessions_dir
+                .join(format!("{}.toml", successor.id)),
+        )
+        .expect("reload recovered successor Session");
+        let prepared_binding = persisted_successor
+            .execution_binding
+            .expect("dead Host recovery must prepare the successor");
+        let token = successor_env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("dead Host recovery Prepared token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate dead Host recovery token");
+        assert_eq!(
+            grant.principal().execution_authority_kind(),
+            crate::embedded_server::AgentExecutionAuthorityKind::Prepared
+        );
+        assert_eq!(
+            grant.principal().execution_binding(),
+            Some(&prepared_binding)
+        );
+    }
+
+    #[test]
+    fn explicit_linked_owner_launch_repairs_ledger_first_defunct_settlement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut predecessor = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut predecessor.session,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        clear_durable_launch_recovery(&predecessor.sessions_dir, &predecessor.session.id)
+            .expect("clear predecessor launch receipt");
+        gwt_agent::persist_session_status(
+            &predecessor.sessions_dir,
+            &predecessor.session.id,
+            gwt_agent::AgentStatus::Stopped,
+        )
+        .expect("mark predecessor stopped");
+        gwt::cli::execution_state::block_defunct_active_generation(
+            &predecessor.project,
+            predecessor.owner,
+            &predecessor.session.id,
+            "fresh launch self-recovery: durable Session is stopped",
+            &|| true,
+        )
+        .expect("commit audited defunct settlement");
+
+        let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&predecessor.project)
+            .expect("trusted worktree directory");
+        std::fs::remove_file(trusted_dir.join("execution-generation-pointer.json"))
+            .expect("remove trusted pointer after ledger commit");
+        std::fs::remove_file(
+            predecessor
+                .project
+                .join(gwt::cli::execution_state::EXECUTION_GENERATION_POINTER_STATE_RELATIVE),
+        )
+        .expect("remove pointer mirror after ledger commit");
+        assert!(
+            gwt::cli::execution_state::current_execution_binding(
+                &predecessor.project,
+                predecessor.owner,
+            )
+            .is_err(),
+            "the fixture must expose an incomplete ledger-first projection"
+        );
+
+        let mut successor = gwt_agent::Session::new(
+            &predecessor.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        successor.project_state_root = Some(predecessor.project.clone());
+        successor.linked_issue_number = Some(predecessor.owner.number);
+        successor.update_status(gwt_agent::AgentStatus::Running);
+        let runtime_path = gwt_agent::runtime_state_path(&predecessor.sessions_dir, &successor.id);
+        persist_finalized_launch_session(
+            &predecessor.sessions_dir,
+            &runtime_path,
+            &mut successor,
+            None,
+        )
+        .expect("persist successor Session");
+
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &predecessor.sessions_dir,
+            session: &mut successor,
+            project_root: &predecessor.project,
+            worktree: &predecessor.project,
+            producing_owner: Some(predecessor.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("fresh launch must repair and continue from ledger-first settlement");
+
+        assert!(
+            gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
+                &predecessor.project,
+                predecessor.owner,
+                &successor.id,
+            )
+            .expect("read repaired fresh attempt")
+            .is_some(),
+            "repair must reach the ordinary Prepared successor route"
         );
     }
 

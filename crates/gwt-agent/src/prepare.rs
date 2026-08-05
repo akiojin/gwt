@@ -15,8 +15,9 @@ use crate::{
     launch::LaunchConfig,
     session::{
         runtime_state_path, Session, SessionRuntimeState, GWT_BIN_PATH_ENV,
-        GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-        GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+        GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_EXECUTION_CAPABILITY_GENERATION_ENV,
+        GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
+        GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::{AgentId, DockerLifecycleIntent, LaunchRuntimeTarget},
 };
@@ -85,6 +86,7 @@ fn private_launch_env_key(key: &str) -> bool {
     matches!(
         key,
         GWT_CONTINUE_WORK_READY_NONCE_ENV
+            | GWT_EXECUTION_CAPABILITY_GENERATION_ENV
             | GWT_HOOK_FORWARD_TOKEN_ENV
             | GWT_SESSION_ID_ENV
             | GWT_SESSION_RUNTIME_PATH_ENV
@@ -3563,6 +3565,7 @@ mod tests {
         const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
         const SESSION_SENTINEL: &str = "session-identity-secret-sentinel";
         const RUNTIME_SENTINEL: &str = "/private/runtime/session.json";
+        const CAPABILITY_GENERATION_SENTINEL: &str = "424242";
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
         config.runtime_target = LaunchRuntimeTarget::Docker;
         let runtime_dir = tempdir().expect("runtime tempdir");
@@ -3583,6 +3586,10 @@ mod tests {
             GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
             RUNTIME_SENTINEL.to_string(),
         );
+        config.env_vars.insert(
+            GWT_EXECUTION_CAPABILITY_GENERATION_ENV.to_string(),
+            CAPABILITY_GENERATION_SENTINEL.to_string(),
+        );
         config
             .env_vars
             .insert("TERM".to_string(), "xterm-256color".to_string());
@@ -3598,12 +3605,18 @@ mod tests {
 
         for key in [
             GWT_HOOK_FORWARD_TOKEN_ENV,
+            GWT_EXECUTION_CAPABILITY_GENERATION_ENV,
             GWT_SESSION_ID_ENV,
             GWT_SESSION_RUNTIME_PATH_ENV,
         ] {
             assert!(args.windows(2).any(|pair| pair == ["-e", key]));
         }
-        for private_value in [TOKEN_SENTINEL, SESSION_SENTINEL, RUNTIME_SENTINEL] {
+        for private_value in [
+            TOKEN_SENTINEL,
+            SESSION_SENTINEL,
+            RUNTIME_SENTINEL,
+            CAPABILITY_GENERATION_SENTINEL,
+        ] {
             assert!(!args.iter().any(|arg| arg.contains(private_value)));
         }
         assert!(args.iter().any(|arg| arg == "TERM=xterm-256color"));
@@ -3613,6 +3626,9 @@ mod tests {
             args: vec![
                 "compose".to_string(),
                 format!("{GWT_HOOK_FORWARD_TOKEN_ENV}={TOKEN_SENTINEL}"),
+                format!(
+                    "{GWT_EXECUTION_CAPABILITY_GENERATION_ENV}={CAPABILITY_GENERATION_SENTINEL}"
+                ),
                 format!("{GWT_SESSION_ID_ENV}={SESSION_SENTINEL}"),
             ],
             env,
@@ -3620,7 +3636,12 @@ mod tests {
             cwd: None,
         };
         let debug = format!("{process_launch:?}");
-        for private_value in [TOKEN_SENTINEL, SESSION_SENTINEL, RUNTIME_SENTINEL] {
+        for private_value in [
+            TOKEN_SENTINEL,
+            SESSION_SENTINEL,
+            RUNTIME_SENTINEL,
+            CAPABILITY_GENERATION_SENTINEL,
+        ] {
             assert!(
                 !debug.contains(private_value),
                 "private value leaked through Debug: {debug}"

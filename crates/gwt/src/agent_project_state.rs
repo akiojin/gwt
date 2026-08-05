@@ -274,10 +274,11 @@ pub fn probe_authenticated_prepared_execution_binding(
 pub fn prepare_resume_producing_authority(
     project_root: &Path,
     predecessor_session_id: &str,
+    launch_operation_id: &str,
 ) -> Option<(AgentExecutionContinuationReceipt, SessionExecutionBinding)> {
     let request = AgentExecutionContinuationRequest {
         schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
-        operation_id: format!("resume-producing-{}", uuid::Uuid::new_v4()),
+        operation_id: format!("resume-producing-{launch_operation_id}"),
     };
     match continue_authenticated_execution(project_root, predecessor_session_id, request) {
         Ok(result) => {
@@ -5616,8 +5617,9 @@ mod tests {
     fn resume_producing_helper_recovers_authority_for_linked_session() {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
-            let (receipt, rebound) = prepare_resume_producing_authority(repo, &session.id)
-                .expect("linked durable session must recover producing authority");
+            let (receipt, rebound) =
+                prepare_resume_producing_authority(repo, &session.id, "launch-window-1")
+                    .expect("linked durable session must recover producing authority");
             assert_eq!(
                 receipt.outcome,
                 AgentExecutionContinuationOutcome::ReboundCurrent
@@ -5627,10 +5629,37 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_resume_launch_operation_does_not_rebind_rotated_epoch() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, binding) = bind_session_to_current_execution(repo, session);
+            let operation_id = "duplicate-launch-window";
+            prepare_resume_producing_authority(repo, &session.id, operation_id)
+                .expect("first launch operation must recover authority");
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let claimed =
+                gwt_agent::rotate_session_execution_capability(&sessions_dir, &session.id)
+                    .expect("simulate first launch capability claim");
+            assert_eq!(
+                claimed.capability_generation,
+                binding.capability_generation + 1
+            );
+
+            assert!(
+                prepare_resume_producing_authority(repo, &session.id, operation_id).is_none(),
+                "redelivery of the same launch operation must not rebind or rotate again"
+            );
+            let durable = Session::load(&sessions_dir.join(format!("{}.toml", session.id)))
+                .expect("reload durable Session");
+            assert_eq!(durable.execution_binding.as_ref(), Some(&claimed));
+        });
+    }
+
+    #[test]
     fn resume_producing_helper_returns_none_without_durable_linkage() {
         with_strict_target_fixture(|repo, _session| {
             assert!(
-                prepare_resume_producing_authority(repo, "session-unknown").is_none(),
+                prepare_resume_producing_authority(repo, "session-unknown", "launch-window-2")
+                    .is_none(),
                 "unknown durable session must stay observation-only"
             );
         });

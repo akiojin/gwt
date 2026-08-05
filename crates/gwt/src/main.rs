@@ -67,7 +67,7 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
-    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    ProjectOpenTarget, ProjectTabRuntime, RuntimeIncarnationId, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1047,6 +1047,7 @@ enum UserEvent {
     },
     RuntimeStatus {
         id: String,
+        incarnation_id: RuntimeIncarnationId,
         status: WindowProcessStatus,
         detail: Option<String>,
     },
@@ -2661,6 +2662,7 @@ mod tests {
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
+            agent_capability_generations: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             knowledge_related_snapshot: Default::default(),
@@ -8116,8 +8118,14 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_daemon_runtime_output(id, data);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
-                let events = app.handle_runtime_status(id, status, detail);
+            Event::UserEvent(UserEvent::RuntimeStatus {
+                id,
+                incarnation_id,
+                status,
+                detail,
+            }) => {
+                let events =
+                    app.handle_pty_runtime_status(id, incarnation_id, status, detail);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {

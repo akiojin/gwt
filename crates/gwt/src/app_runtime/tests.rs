@@ -63,8 +63,8 @@ use super::{
     KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
     LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
     PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch,
-    ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
-    WorkspaceResumeContext,
+    ProjectTabRuntime, RuntimeIncarnationId, UserEvent, WindowRuntime,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -3106,6 +3106,7 @@ fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
     runtime.runtimes.insert(
         window_id.to_string(),
         WindowRuntime {
+            incarnation_id: RuntimeIncarnationId::fresh(),
             pane: Arc::new(Mutex::new(long_running_test_pane(window_id))),
             output_thread: None,
             status_thread: None,
@@ -3179,6 +3180,7 @@ fn sample_runtime_with_events(
         recoverable_agent_error_windows: HashSet::new(),
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
+        agent_capability_generations: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
         issue_link_cache_dir: gwt_cache_dir(),
         knowledge_related_snapshot: Default::default(),
@@ -4924,6 +4926,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
     runtime.runtimes.insert(
         window_id.clone(),
         WindowRuntime {
+            incarnation_id: RuntimeIncarnationId::fresh(),
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: None,
@@ -4990,6 +4993,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
     runtime.runtimes.insert(
         window_id.clone(),
         WindowRuntime {
+            incarnation_id: RuntimeIncarnationId::fresh(),
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: None,
@@ -5071,6 +5075,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
     runtime.runtimes.insert(
         window_id.clone(),
         WindowRuntime {
+            incarnation_id: RuntimeIncarnationId::fresh(),
             pane: Arc::new(Mutex::new(pane)),
             output_thread: None,
             status_thread: None,
@@ -5134,6 +5139,7 @@ fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
         runtime.runtimes.insert(
             window_id.clone(),
             WindowRuntime {
+                incarnation_id: RuntimeIncarnationId::fresh(),
                 pane: Arc::new(Mutex::new(pane)),
                 output_thread: None,
                 status_thread: None,
@@ -8933,6 +8939,9 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
     candidate_session
         .save(&runtime.sessions_dir)
         .expect("save candidate Session");
+    runtime
+        .launch_wizard_cache
+        .record_session_for_test(candidate_session.clone());
     let candidate_runtime_path =
         gwt_agent::runtime_state_path(&runtime.sessions_dir, candidate_session_id);
     gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
@@ -9085,6 +9094,13 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
     assert!(
         !candidate_runtime_path.exists(),
         "the aborted candidate runtime sidecar must be discarded",
+    );
+    assert!(
+        runtime
+            .launch_wizard_cache
+            .session_by_id(candidate_session_id)
+            .is_none(),
+        "the aborted candidate must be evicted from the resumable cache",
     );
 
     let projection = gwt_core::workspace_projection::load_workspace_work_items(&repo)
@@ -11414,12 +11430,11 @@ fn projection_only_continue_rejects_branch_only_container_conflict_without_mutat
     );
 }
 
-// #3426: a same-number kind-only mismatch (Work says `Issue #N`, trusted
-// ledger says `spec/N`) previously wedged Continue work behind
-// execution_owner_ambiguous even though the trusted authority is unambiguous.
-// The trusted owner now wins and the continuation proceeds under it.
+// SPEC #2359 AS-90.23 / FR-599: an explicit Work owner kind must match the
+// trusted generation authority. Same-number Issue/SPEC disagreement is still
+// an authority conflict and must remain zero-mutation.
 #[test]
-fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
+fn continue_work_rejects_issue_kind_work_owner_against_trusted_spec_authority() {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11453,29 +11468,26 @@ fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
     );
 
     assert!(
-        events.iter().all(|event| !matches!(
+        events.iter().any(|event| matches!(
             &event.event,
             BackendEvent::ContinueWorkOutcome {
                 error_code: Some(code),
                 ..
             } if code == "execution_owner_ambiguous"
         )),
-        "a kind-only mismatch against an unambiguous trusted authority must self-heal: {events:?}"
+        "an explicit kind mismatch must fail closed: {events:?}"
     );
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "owner-kind-heal-operation")
-        .expect("healed continuation must prepare one pending attempt");
-    assert_eq!(pending.work_id, work_id);
-    assert_eq!(
-        pending.owner, owner,
-        "the continuation must run under the trusted spec authority"
+    assert!(
+        runtime
+            .pending_continue_work
+            .values()
+            .all(|pending| pending.operation_id != "owner-kind-heal-operation"),
+        "a rejected mismatch must not materialize a pending continuation"
     );
     let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("read healed ledger")
-        .expect("healed ledger");
-    assert_eq!(ledger.continuation_attempts.len(), 1);
+        .expect("read unchanged ledger")
+        .expect("unchanged ledger");
+    assert!(ledger.continuation_attempts.is_empty());
 }
 
 // #3426: with no trusted generation authority and no cache evidence, a
@@ -11576,6 +11588,83 @@ fn continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners() 
     assert!(matches!(
         runtime.classify_nonlocal_active_owner_liveness(session_id),
         ActiveOwnerLiveness::Stale("durable Session is stopped")
+    ));
+}
+
+#[test]
+fn continue_work_nonlocal_liveness_ignores_a_stale_runtime_capability_epoch() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let session_id = "rebound-owner-session";
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-3426", gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.linked_issue_number = Some(3426);
+    session.update_status(gwt_agent::AgentStatus::Running);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: session.repo_hash.clone().expect("repo hash"),
+        owner_kind: "issue".to_string(),
+        owner_number: 3426,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-3426".to_string(),
+            binding_id: "binding-3426".to_string(),
+            ledger_head_hash: "ledger-head-3426".to_string(),
+        },
+        capability_generation: 2,
+    };
+    session
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind current capability epoch");
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save current Running Session");
+    let sidecar = gwt_agent::runtime_state_path_for_pid(
+        &runtime.sessions_dir,
+        std::process::id(),
+        session_id,
+    );
+
+    gwt_agent::SessionRuntimeState::new_for_execution_capability(
+        gwt_agent::AgentStatus::Interrupted,
+        binding.capability_generation - 1,
+    )
+    .save(&sidecar)
+    .expect("save stale interruption sidecar");
+    assert_eq!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Unknown,
+        "an old failed relaunch must not make the current Running epoch defunct"
+    );
+
+    fs::remove_file(&sidecar).expect("remove live stale sidecar");
+    let dead_stale_sidecar =
+        gwt_agent::runtime_state_path_for_pid(&runtime.sessions_dir, i32::MAX as u32, session_id);
+    gwt_agent::SessionRuntimeState::new_for_execution_capability(
+        gwt_agent::AgentStatus::Interrupted,
+        binding.capability_generation - 1,
+    )
+    .save(&dead_stale_sidecar)
+    .expect("save dead stale interruption sidecar");
+    assert_eq!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Unknown,
+        "a dead Host sidecar from an old epoch must not defeat the current Running Session"
+    );
+    fs::remove_file(&dead_stale_sidecar).expect("remove dead stale sidecar");
+
+    gwt_agent::SessionRuntimeState::new_for_execution_capability(
+        gwt_agent::AgentStatus::Interrupted,
+        2,
+    )
+    .save(&sidecar)
+    .expect("save matching interruption sidecar");
+    assert!(matches!(
+        runtime.classify_nonlocal_active_owner_liveness(session_id),
+        ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped")
     ));
 }
 
@@ -13293,7 +13382,6 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     candidate_session
         .save(&runtime.sessions_dir)
         .expect("save candidate Session");
-
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43123/internal/hook-live",
         "ws://127.0.0.1:43124/ws",
@@ -13595,14 +13683,13 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     );
 }
 
-/// #3426: drive an owner-kind-healed Continue work all the way through
-/// authenticated SessionStart. `work_owner_text` is what the Work projection
-/// declares; the trusted execution authority is always `spec/2359`.
-fn continue_work_heal_session_start_events(
+/// Drive an explicit owner mismatch to authenticated SessionStart to prove
+/// the final activation CAS independently revalidates FR-599.
+fn continue_work_mismatched_owner_session_start_events(
     temp_root: &Path,
     case: &str,
     work_owner_text: &str,
-) -> (AppRuntime, PathBuf, Vec<OutboundEvent>, String) {
+) -> (AppRuntime, PathBuf, Vec<OutboundEvent>, String, String) {
     let repo = temp_root.join(format!("repo-{case}"));
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
@@ -13739,6 +13826,9 @@ fn continue_work_heal_session_start_events(
     candidate_session
         .save(&runtime.sessions_dir)
         .expect("save candidate Session");
+    runtime
+        .launch_wizard_cache
+        .record_session_for_test(candidate_session.clone());
 
     let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
         "http://127.0.0.1:43323/internal/hook-live",
@@ -13748,10 +13838,14 @@ fn continue_work_heal_session_start_events(
     let capability = issuer
         .issue_prepared(&repo, candidate_session_id, binding.clone())
         .expect("issue Prepared capability");
+    let prepared_token = capability.token.clone();
     runtime.agent_capability_issuer = Some(issuer);
     runtime
         .agent_capability_tokens
         .insert(window_id.clone(), capability.token);
+    runtime
+        .agent_capability_generations
+        .insert(window_id.clone(), binding.capability_generation);
     runtime.pending_continue_work.insert(
         window_id.clone(),
         PendingContinueWork {
@@ -13780,44 +13874,53 @@ fn continue_work_heal_session_start_events(
     );
 
     let events = runtime.finalize_continue_work_session_start(&window_id, Some(readiness_nonce));
-    (runtime, repo, events, selected_work_id.to_string())
+    (
+        runtime,
+        repo,
+        events,
+        selected_work_id.to_string(),
+        prepared_token,
+    )
 }
 
-// #3426 (A): the Work projection says `Issue #2359` while the trusted ledger
-// says spec/2359. The heal must survive the activation transaction and rewrite
-// the Work owner. Before the fix the pre-transition precondition re-applied the
-// exact-kind check that canonical_continue_work_owner had deliberately relaxed,
-// so the continuation spawned a PTY and then died at authenticated SessionStart.
+// SPEC #2359 AS-90.23 / FR-599: even a forged or stale process-local pending
+// entry cannot relax the explicit Work owner kind at authenticated activation.
 #[test]
-fn continue_work_authenticated_session_start_commits_healed_spec_owner() {
+fn continue_work_authenticated_session_start_rejects_explicit_owner_kind_mismatch() {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
 
-    let (_runtime, repo, events, work_id) =
-        continue_work_heal_session_start_events(temp.path(), "heal-commit", "Issue #2359");
+    let (runtime, repo, events, work_id, prepared_token) =
+        continue_work_mismatched_owner_session_start_events(
+            temp.path(),
+            "kind-mismatch",
+            "Issue #2359",
+        );
 
     assert!(
-        events.iter().all(|event| !matches!(
+        events.iter().any(|event| matches!(
             &event.event,
             BackendEvent::ContinueWorkOutcome {
                 outcome: gwt::ContinueWorkOutcomeKind::Failed,
+                error_code: Some(code),
+                retryable: true,
                 ..
-            }
+            } if code == "launch_failed"
         )),
-        "a healed owner kind must not fail at activation: {events:?}"
+        "an explicit owner-kind mismatch must fail with the pre-activation cleanup code: {events:?}"
     );
     assert!(
-        events.iter().any(|event| matches!(
+        events.iter().all(|event| !matches!(
             &event.event,
             BackendEvent::ContinueWorkOutcome {
                 outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
                 ..
             }
         )),
-        "authenticated readiness must emit one correlated success: {events:?}"
+        "a rejected owner mismatch must not emit success: {events:?}"
     );
     let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .expect("load Work projection")
@@ -13825,16 +13928,97 @@ fn continue_work_authenticated_session_start_commits_healed_spec_owner() {
         .work_items
         .into_iter()
         .find(|item| item.id == work_id)
-        .expect("healed Work");
+        .expect("rejected Work");
     assert_eq!(
         work.owner.as_deref(),
-        Some("SPEC-2359"),
-        "the activation transaction must persist the corrected canonical owner"
+        Some("Issue #2359"),
+        "the rejected activation must not rewrite the Work owner"
+    );
+    assert_eq!(
+        work.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+        "the rejected activation must not reopen the completed Work"
+    );
+    assert!(work.completed_at.is_some());
+    assert!(
+        work.agents
+            .iter()
+            .all(|agent| agent.session_id != "heal-candidate-session"),
+        "the rejected candidate must not join the Work agent list"
+    );
+    let window_id = combined_window_id("tab-1", "agent-1");
+    assert!(
+        !runtime.pending_continue_work.contains_key(&window_id),
+        "the rejected process-local pending attempt must be consumed"
+    );
+    assert!(
+        !runtime.active_agent_sessions.contains_key(&window_id),
+        "the rejected candidate pane must be removed"
+    );
+    assert!(
+        !runtime.agent_capability_tokens.contains_key(&window_id),
+        "the rejected Prepared bearer must be revoked"
+    );
+    assert!(
+        !runtime
+            .agent_capability_generations
+            .contains_key(&window_id),
+        "the rejected Prepared epoch must leave the window registry"
+    );
+    assert!(
+        !runtime
+            .agent_capability_issuer
+            .as_ref()
+            .expect("test capability issuer")
+            .authenticates_token(&prepared_token),
+        "the bearer must be removed from the issuer registry, not only the window map"
+    );
+    assert!(
+        !runtime
+            .sessions_dir
+            .join("heal-candidate-session.toml")
+            .exists(),
+        "the exact candidate Session must be removed"
+    );
+    assert!(
+        runtime
+            .launch_wizard_cache
+            .session_by_id("heal-candidate-session")
+            .is_none(),
+        "the rejected candidate must not remain as a resumable cache ghost"
+    );
+    let ledger = gwt::cli::execution_state::load_generation_ledger(
+        &repo,
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            number: 2359,
+        },
+    )
+    .expect("load rejected continuation ledger")
+    .expect("rejected continuation ledger");
+    assert_eq!(
+        ledger.generations.len(),
+        1,
+        "a rejected Prepared attempt must not append a successor generation"
+    );
+    assert_eq!(
+        ledger.current_effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Completed),
+        "the predecessor must remain current and Completed"
+    );
+    let attempt = ledger
+        .continuation_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == "continue-op-heal")
+        .expect("rejected continuation attempt");
+    assert_eq!(
+        attempt.status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
     );
 }
 
-// The relaxation is kind-only: a genuine owner NUMBER disagreement must stay
-// fail-closed at the same precondition.
+// A genuine owner number disagreement is rejected by the same precondition.
 #[test]
 fn continue_work_session_start_still_refuses_owner_number_mismatch() {
     let _env_guard = env_test_lock()
@@ -13843,8 +14027,12 @@ fn continue_work_session_start_still_refuses_owner_number_mismatch() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
 
-    let (_runtime, repo, events, work_id) =
-        continue_work_heal_session_start_events(temp.path(), "heal-number", "Issue #2360");
+    let (_runtime, repo, events, work_id, _prepared_token) =
+        continue_work_mismatched_owner_session_start_events(
+            temp.path(),
+            "number-mismatch",
+            "Issue #2360",
+        );
 
     assert!(
         events.iter().any(|event| matches!(
@@ -13871,8 +14059,7 @@ fn continue_work_session_start_still_refuses_owner_number_mismatch() {
 }
 
 #[test]
-fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preserves_blocked_history(
-) {
+fn defunct_fresh_execution_route_activates_new_lifetime_and_preserves_blocked_history() {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13898,24 +14085,12 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         false,
     )
     .expect("materialize legacy execution");
-    assert!(matches!(
-        gwt::cli::execution_state::settle(
-            &repo,
-            predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Blocked {
-                reason: "legacy terminal blocker".to_string(),
-                missing_verification: Some("legacy evidence gap".to_string()),
-            },
-        )
-        .expect("settle Blocked predecessor"),
-        gwt::cli::execution_state::SettleResult::Settled(_)
-    ));
     gwt::cli::execution_state::ensure_generation_ledger(
         &repo,
         owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
     )
-    .expect("import Blocked predecessor");
+    .expect("import Active predecessor");
     let predecessor_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
         .expect("load predecessor ledger")
         .expect("predecessor ledger");
@@ -13934,8 +14109,18 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         entrypoint: "$gwt-execute #2359".to_string(),
         requested_at: Utc::now(),
     };
-    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(&repo, owner, &request)
-        .expect("prepare fresh successor");
+    let defunct_reason =
+        "fresh launch route found legacy-blocked-session durably defunct (Session stopped)";
+    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor_from_defunct_active(
+        &repo,
+        owner,
+        &request,
+        predecessor_session_id,
+        &predecessor_binding,
+        defunct_reason,
+        &|| true,
+    )
+    .expect("settle defunct predecessor and prepare fresh successor");
     let planned =
         gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
             .expect("derive fresh binding");
@@ -14088,6 +14273,11 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         .expect("activated ledger");
     assert_eq!(ledger.generations.len(), 2);
     assert_eq!(ledger.generations[0], predecessor_generation);
+    assert!(ledger.lifecycle_events.iter().any(|event| {
+        event.from_status == gwt::cli::execution_state::ExecutionControlStatus::Active
+            && event.to_status == gwt::cli::execution_state::ExecutionControlStatus::Blocked
+            && event.reason == defunct_reason
+    }));
     assert_ne!(
         gwt::cli::execution_state::current_execution_binding(&repo, owner).unwrap(),
         Some(predecessor_binding),
@@ -14371,6 +14561,65 @@ fn pending_fresh_execution_fixture_with_owner_kind(
         issuer,
         token,
     }
+}
+
+#[test]
+fn stale_pending_cleanup_preserves_newer_local_authority() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "stale-pending-cleanup");
+    fixture.runtime.agent_capability_generations.insert(
+        fixture.window_id.clone(),
+        fixture.binding.capability_generation,
+    );
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    let incarnation = fixture.runtime.runtimes[&fixture.window_id].incarnation_id;
+    let session_path = fixture
+        .runtime
+        .sessions_dir
+        .join(format!("{}.toml", fixture.candidate_session_id));
+    let mut durable = gwt_agent::Session::load(&session_path).expect("load candidate Session");
+    durable
+        .execution_binding
+        .as_mut()
+        .expect("candidate binding")
+        .capability_generation += 1;
+    durable
+        .save(&fixture.runtime.sessions_dir)
+        .expect("rotate durable epoch");
+    let durable_before = fs::read(&session_path).expect("read rotated Session");
+
+    assert!(fixture
+        .runtime
+        .stop_pending_continue_work_session_without_projection(&fixture.window_id));
+
+    assert!(fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&fixture.window_id));
+    assert_eq!(
+        fixture
+            .runtime
+            .agent_capability_generations
+            .get(&fixture.window_id),
+        Some(&fixture.binding.capability_generation)
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .agent_capability_tokens
+            .get(&fixture.window_id),
+        Some(&fixture.token)
+    );
+    assert!(fixture.issuer.authenticates_token(&fixture.token));
+    assert_eq!(
+        fixture.runtime.runtimes[&fixture.window_id].incarnation_id,
+        incarnation
+    );
+    assert_eq!(
+        fs::read(session_path).expect("Session readback"),
+        durable_before
+    );
 }
 
 #[test]
@@ -16352,6 +16601,25 @@ fn startup_fresh_recovery_ignores_unindexed_historical_sessions() {
 
 #[cfg(unix)]
 #[test]
+fn durable_launch_recovery_presence_fails_closed_for_dangling_entry() {
+    let temp = tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join("sessions");
+    let recovery_dir = sessions_dir.join("execution-launch-recovery");
+    fs::create_dir_all(&recovery_dir).expect("create recovery directory");
+    std::os::unix::fs::symlink(
+        recovery_dir.join("missing-target.json"),
+        recovery_dir.join("dangling-receipt.json"),
+    )
+    .expect("create dangling recovery entry");
+
+    assert!(
+        durable_launch_recovery_exists(&sessions_dir, "dangling-receipt"),
+        "an unreadable recovery entry must fence launch settlement instead of looking absent"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn durable_launch_recovery_persist_syncs_new_directory_and_receipt_entry() {
     let _env_guard = env_test_lock()
         .lock()
@@ -17941,6 +18209,181 @@ fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
 
     assert!(!issuer.authenticates_token(&target.token));
     assert!(!runtime.agent_capability_tokens.contains_key(&window_id));
+}
+
+#[test]
+fn app_runtime_late_old_window_stop_preserves_newer_local_and_durable_epoch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-old",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut durable = gwt_agent::Session::new(&repo, "work/issue-3426", gwt_agent::AgentId::Codex);
+    durable.repo_hash = Some("repo-hash-3426".to_string());
+    durable.linked_issue_number = Some(3426);
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: durable.id.clone(),
+        repo_hash: "repo-hash-3426".to_string(),
+        owner_kind: "issue".to_string(),
+        owner_number: 3426,
+        identity: gwt_agent::ExecutionBindingIdentity {
+            generation_id: "generation-current".to_string(),
+            binding_id: "binding-current".to_string(),
+            ledger_head_hash: "ledger-current".to_string(),
+        },
+        capability_generation: 3,
+    };
+    durable
+        .set_execution_binding(Some(binding.clone()))
+        .expect("bind current epoch");
+    durable.update_status(gwt_agent::AgentStatus::Running);
+    durable.save(&runtime.sessions_dir).expect("save Session");
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, &durable.id);
+    gwt_agent::SessionRuntimeState::new_for_execution_capability(
+        gwt_agent::AgentStatus::Running,
+        binding.capability_generation,
+    )
+    .save(&runtime_path)
+    .expect("save current runtime");
+
+    let window_id = combined_window_id("tab-1", "agent-old");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = durable.id.clone();
+    active.worktree_path = repo.clone();
+    active.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    runtime
+        .agent_capability_generations
+        .insert(window_id.clone(), binding.capability_generation - 1);
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), "newer-token".to_string());
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let runtime_incarnation = runtime.runtimes[&window_id].incarnation_id;
+
+    runtime.mark_agent_session_stopped(&window_id);
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime.agent_capability_generations.get(&window_id),
+        Some(&(binding.capability_generation - 1))
+    );
+    assert_eq!(
+        runtime
+            .agent_capability_tokens
+            .get(&window_id)
+            .map(String::as_str),
+        Some("newer-token")
+    );
+    assert_eq!(
+        runtime.runtimes[&window_id].incarnation_id,
+        runtime_incarnation
+    );
+    let retained =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", durable.id)))
+            .expect("reload retained current Session");
+    assert_eq!(retained.status, gwt_agent::AgentStatus::Running);
+    assert_eq!(retained.execution_binding.as_ref(), Some(&binding));
+    let retained_runtime =
+        gwt_agent::SessionRuntimeState::load(&runtime_path).expect("reload retained runtime");
+    assert_eq!(retained_runtime.status, gwt_agent::AgentStatus::Running);
+    assert_eq!(
+        retained_runtime.capability_generation,
+        Some(binding.capability_generation)
+    );
+}
+
+#[test]
+fn stale_pty_status_for_reused_window_id_has_zero_side_effects() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let current_incarnation = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("current runtime")
+        .incarnation_id;
+    let stale_incarnation = RuntimeIncarnationId::fresh();
+    assert_ne!(stale_incarnation, current_incarnation);
+
+    let mut durable = gwt_agent::Session::new(&repo, "work/issue-3426", gwt_agent::AgentId::Codex);
+    durable.update_status(gwt_agent::AgentStatus::Running);
+    durable.save(&runtime.sessions_dir).expect("save Session");
+    let durable_path = runtime.sessions_dir.join(format!("{}.toml", durable.id));
+    let durable_before = fs::read(&durable_path).expect("read Session before stale event");
+
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = durable.id.clone();
+    active.worktree_path = repo;
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    runtime
+        .agent_capability_tokens
+        .insert(window_id.clone(), "current-token".to_string());
+    runtime
+        .agent_capability_generations
+        .insert(window_id.clone(), 7);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let events = runtime.handle_pty_runtime_status(
+        window_id.clone(),
+        stale_incarnation,
+        WindowProcessStatus::Stopped,
+        Some("old process exited".to_string()),
+    );
+
+    assert!(events.is_empty());
+    assert_eq!(
+        runtime
+            .runtimes
+            .get(&window_id)
+            .expect("new runtime must survive")
+            .incarnation_id,
+        current_incarnation
+    );
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime
+            .agent_capability_tokens
+            .get(&window_id)
+            .map(String::as_str),
+        Some("current-token")
+    );
+    assert_eq!(
+        runtime.agent_capability_generations.get(&window_id),
+        Some(&7)
+    );
+    assert_eq!(
+        runtime.window_pty_statuses.get(&window_id),
+        Some(&WindowProcessStatus::Running)
+    );
+    assert_eq!(
+        fs::read(&durable_path).expect("read Session after stale event"),
+        durable_before,
+        "a stale status event must leave the current Session byte-identical"
+    );
 }
 
 #[test]
@@ -26019,16 +26462,22 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
             let _ = pane.pty().write_input(b"\x1b[1;1R");
         }
     }
-    let status_thread = runtime.spawn_status_thread(window_id.clone(), pane.clone());
+    let incarnation_id = RuntimeIncarnationId::fresh();
+    let status_thread =
+        runtime.spawn_status_thread(window_id.clone(), incarnation_id, pane.clone());
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut observed_status = None;
     while Instant::now() < deadline {
         if let Ok(events) = captured_events.lock() {
             observed_status = events.iter().find_map(|event| match event {
-                UserEvent::RuntimeStatus { id, status, detail }
-                    if id == &window_id && *status == WindowProcessStatus::Stopped =>
-                {
+                UserEvent::RuntimeStatus {
+                    id,
+                    incarnation_id: observed_incarnation,
+                    status,
+                    detail,
+                } if id == &window_id && *status == WindowProcessStatus::Stopped => {
+                    assert_eq!(*observed_incarnation, incarnation_id);
                     Some(detail.clone())
                 }
                 _ => None,

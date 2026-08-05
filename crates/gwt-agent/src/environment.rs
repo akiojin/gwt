@@ -9,7 +9,8 @@ use std::{
 
 use crate::{
     session::{
-        GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
+        GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+        GWT_EXECUTION_CAPABILITY_GENERATION_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
         GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
         GWT_SESSION_RUNTIME_PATH_ENV,
     },
@@ -23,6 +24,7 @@ const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     GWT_BIN_PATH_ENV,
     GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_EXECUTION_CAPABILITY_GENERATION_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
     GWT_HOOK_FORWARD_URL_ENV,
     GWT_PANE_WS_URL_ENV,
@@ -900,6 +902,10 @@ mod tests {
             (GWT_BIN_PATH_ENV.to_string(), "/stale/gwtd".to_string()),
             (GWT_SESSION_ID_ENV.to_string(), "parent-session".to_string()),
             (
+                GWT_EXECUTION_CAPABILITY_GENERATION_ENV.to_string(),
+                "99".to_string(),
+            ),
+            (
                 GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
                 "/tmp/parent.json".to_string(),
             ),
@@ -921,6 +927,7 @@ mod tests {
         assert!(path_entries.contains(&PathBuf::from("/usr/bin")));
         assert!(!env.contains_key(GWT_BIN_PATH_ENV));
         assert!(!env.contains_key(GWT_SESSION_ID_ENV));
+        assert!(!env.contains_key(GWT_EXECUTION_CAPABILITY_GENERATION_ENV));
         assert!(!env.contains_key(GWT_SESSION_RUNTIME_PATH_ENV));
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
         assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));

@@ -865,13 +865,15 @@ pub(super) fn canonical_continue_work_owner(
     worktree_path: &Path,
     projected: ProjectionOwnerRef,
 ) -> Result<gwt::cli::execution_state::ExecutionOwnerKey, ContinueWorkFailure> {
-    // #3426: a same-number kind-only disagreement self-heals toward the
-    // trusted authority (generation ledger, ECR hint, or cache label
-    // evidence); the corrected owner is committed back to the Work
-    // projection by the continuation transaction. Number mismatches stay
-    // fail-closed.
+    // SPEC #2359 AS-90.23 / FR-599: explicit Issue/SPEC owner kinds and owner
+    // numbers must match trusted authority exactly. Only a bare legacy numeric
+    // owner may derive its kind from the generation ledger, ECR, or cache.
     let validate = |owner: gwt::cli::execution_state::ExecutionOwnerKey| {
-        if owner.number != projected.number {
+        if owner.number != projected.number
+            || projected
+                .declared_kind
+                .is_some_and(|declared| declared != owner.kind)
+        {
             Err(ContinueWorkFailure::failed(
                 "execution_owner_ambiguous",
                 "The Work owner does not match its current execution authority.",
@@ -1085,14 +1087,6 @@ fn work_agent_ref_authenticates_session(
     agent.session_id == session.id && work_agent_ref_authenticates_agent(agent, &session.agent_id)
 }
 
-/// `require_exact_owner_kind` must be `false` for a pre-transition read and
-/// `true` for a post-commit readback (#3426). `canonical_continue_work_owner`
-/// deliberately heals a same-number kind-only disagreement toward the trusted
-/// authority, but the correction is only written *inside* the activation
-/// transaction. Demanding the exact kind of the pre-transition snapshot would
-/// therefore re-reject precisely the set the heal exists to admit, and the
-/// corrected owner could never land. The readbacks still see the healed label
-/// and keep enforcing the strict check.
 #[allow(clippy::too_many_arguments)]
 fn projection_continue_authority_matches(
     item: &gwt_core::workspace_projection::WorkItem,
@@ -1102,16 +1096,14 @@ fn projection_continue_authority_matches(
     branch: &str,
     agent_id: &gwt_agent::AgentId,
     agent_session_id: Option<&str>,
-    require_exact_owner_kind: bool,
 ) -> bool {
     let Ok(projected_owner) = projection_only_continue_owner(item) else {
         return false;
     };
     if projected_owner.number != owner.number
-        || (require_exact_owner_kind
-            && projected_owner
-                .declared_kind
-                .is_some_and(|kind| kind != owner.kind))
+        || projected_owner
+            .declared_kind
+            .is_some_and(|kind| kind != owner.kind)
     {
         return false;
     }
@@ -1504,7 +1496,16 @@ pub(super) fn durable_launch_recovery_session_identity(
 }
 
 pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
-    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
+    let Ok(path) = durable_launch_recovery_path(sessions_dir, session_id) else {
+        return true;
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        // This predicate guards destructive recovery. An unreadable entry is
+        // ambiguous in-flight evidence, never proof that no receipt exists.
+        Err(_) => true,
+    }
 }
 
 fn durable_launch_recovery_records(
@@ -2241,7 +2242,6 @@ fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool 
                     &pending.work_branch,
                     &pending.work_agent_id,
                     Some(&pending.binding.session_id),
-                    true,
                 )
         })
 }
@@ -2275,7 +2275,6 @@ fn transact_pending_continue_work_with_activation(
                 &pending.work_branch,
                 &pending.work_agent_id,
                 pending.work_agent_session_id.as_deref(),
-                false,
             ) {
                 return Err(gwt_core::error::GwtError::Other(
                     "Continue work authority changed before activation".to_string(),
@@ -3677,6 +3676,30 @@ pub(super) fn classify_nonlocal_active_owner_liveness_at(
     sessions_dir: &Path,
     session_id: &str,
 ) -> ActiveOwnerLiveness {
+    classify_nonlocal_active_owner_liveness_with_authority_at(sessions_dir, session_id, None)
+}
+
+pub(super) fn classify_nonlocal_active_owner_liveness_for_binding_at(
+    sessions_dir: &Path,
+    session_id: &str,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    expected_binding: &gwt_agent::ExecutionBindingIdentity,
+) -> ActiveOwnerLiveness {
+    classify_nonlocal_active_owner_liveness_with_authority_at(
+        sessions_dir,
+        session_id,
+        Some((owner, expected_binding)),
+    )
+}
+
+fn classify_nonlocal_active_owner_liveness_with_authority_at(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected_authority: Option<(
+        gwt::cli::execution_state::ExecutionOwnerKey,
+        &gwt_agent::ExecutionBindingIdentity,
+    )>,
+) -> ActiveOwnerLiveness {
     {
         let durable_path = sessions_dir.join(format!("{session_id}.toml"));
         let durable = match gwt_agent::inspect_session_path(&durable_path) {
@@ -3684,6 +3707,50 @@ pub(super) fn classify_nonlocal_active_owner_liveness_at(
             gwt_agent::SessionPathState::Missing => None,
             gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
         };
+        if let (Some((owner, expected_binding)), Some(session)) =
+            (expected_authority, durable.as_ref())
+        {
+            let exact = session.execution_binding.as_ref().is_some_and(|binding| {
+                binding.session_id == session_id
+                    && binding.owner_kind == owner.kind.as_str()
+                    && binding.owner_number == owner.number
+                    && binding.identity == *expected_binding
+            });
+            if !exact {
+                return ActiveOwnerLiveness::Unknown;
+            }
+        }
+        let durable_capability_generation = durable
+            .as_ref()
+            .and_then(|session| session.execution_binding.as_ref())
+            .map(|binding| binding.capability_generation);
+        // A write-ahead failure receipt proves that this exact claimed epoch
+        // never reached capability issuance, regardless of the Session's
+        // last status byte. Requiring a terminal status would reopen the
+        // crash window immediately after the claimed Running Session commit.
+        if let Some(binding) = durable
+            .as_ref()
+            .and_then(|session| session.execution_binding.as_ref())
+        {
+            match gwt_agent::capability_claim_receipt_state(sessions_dir, binding) {
+                Ok(gwt_agent::CapabilityClaimReceiptState::Failed) => {
+                    return ActiveOwnerLiveness::Stale(
+                        "capability claim failed before capability issuance",
+                    );
+                }
+                Ok(gwt_agent::CapabilityClaimReceiptState::Preparing { host_pid }) => {
+                    return if gwt::process::is_host_process_alive(host_pid) {
+                        ActiveOwnerLiveness::Unknown
+                    } else {
+                        ActiveOwnerLiveness::Stale(
+                            "capability claim Host died before capability issuance",
+                        )
+                    };
+                }
+                Ok(gwt_agent::CapabilityClaimReceiptState::Absent) => {}
+                Err(_) => return ActiveOwnerLiveness::Unknown,
+            }
+        }
         let runtime_root = sessions_dir.join("runtime");
         let entries = match std::fs::read_dir(&runtime_root) {
             Ok(entries) => entries,
@@ -3691,12 +3758,13 @@ pub(super) fn classify_nonlocal_active_owner_liveness_at(
                 if durable.is_none() {
                     return ActiveOwnerLiveness::Stale("durable Session is missing");
                 }
-                return if durable.as_ref().is_some_and(|session| {
-                    matches!(
-                        session.status,
-                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                    )
-                }) {
+                return if durable_capability_generation.is_none_or(|generation| generation <= 1)
+                    && durable.as_ref().is_some_and(|session| {
+                        matches!(
+                            session.status,
+                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                        )
+                    }) {
                     ActiveOwnerLiveness::Stale("durable Session is stopped")
                 } else {
                     ActiveOwnerLiveness::Unknown
@@ -3723,12 +3791,35 @@ pub(super) fn classify_nonlocal_active_owner_liveness_at(
                 Ok(true) => {}
                 Err(_) => return ActiveOwnerLiveness::Unknown,
             }
+            let runtime_state = gwt_agent::SessionRuntimeState::load(&sidecar);
+            if runtime_state.is_err()
+                && durable_capability_generation.is_some_and(|generation| generation > 1)
+            {
+                // A rotated Session may only be settled by runtime evidence
+                // carrying its exact immutable capability epoch. Malformed
+                // evidence has unknown provenance even when its PID is dead.
+                return ActiveOwnerLiveness::Unknown;
+            }
+            if let Ok(state) = runtime_state.as_ref() {
+                match (state.capability_generation, durable_capability_generation) {
+                    (Some(sidecar_generation), Some(durable_generation))
+                        if sidecar_generation != durable_generation =>
+                    {
+                        continue;
+                    }
+                    // A pre-epoch writer cannot provide terminal provenance
+                    // for a rotated capability. Ignore it rather than letting
+                    // a late old Host settle the current generation.
+                    (None, Some(durable_generation)) if durable_generation > 1 => continue,
+                    _ => {}
+                }
+            }
             // #3426: use the cross-platform Host probe — `is_process_alive`
             // is a Windows daemon-bootstrap stub that reports every PID dead,
             // which would let a live local Host be classified Stale and its
             // Active generation taken over or auto-settled.
             if gwt::process::is_host_process_alive(pid) {
-                match gwt_agent::SessionRuntimeState::load(&sidecar) {
+                match runtime_state {
                     Ok(state)
                         if matches!(
                             state.status,
@@ -3752,15 +3843,319 @@ pub(super) fn classify_nonlocal_active_owner_liveness_at(
         if durable.is_none() {
             return ActiveOwnerLiveness::Stale("durable Session is missing");
         }
-        if durable.as_ref().is_some_and(|session| {
-            matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            )
-        }) {
+        if durable_capability_generation.is_none_or(|generation| generation <= 1)
+            && durable.as_ref().is_some_and(|session| {
+                matches!(
+                    session.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                )
+            })
+        {
             return ActiveOwnerLiveness::Stale("durable Session is stopped");
         }
         ActiveOwnerLiveness::Unknown
+    }
+}
+
+#[cfg(test)]
+mod capability_liveness_tests {
+    use super::*;
+
+    fn bound_session(
+        sessions_dir: &Path,
+        status: gwt_agent::AgentStatus,
+        capability_generation: u64,
+    ) -> gwt_agent::Session {
+        let mut session = gwt_agent::Session::new(
+            sessions_dir.join("worktree"),
+            "work/issue-3426",
+            gwt_agent::AgentId::Codex,
+        );
+        session.repo_hash = Some("repo-hash-3426".to_string());
+        session.linked_issue_number = Some(3426);
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: "repo-hash-3426".to_string(),
+                owner_kind: "issue".to_string(),
+                owner_number: 3426,
+                identity: gwt_agent::ExecutionBindingIdentity {
+                    generation_id: "generation-current".to_string(),
+                    binding_id: "binding-current".to_string(),
+                    ledger_head_hash: "ledger-current".to_string(),
+                },
+                capability_generation,
+            }))
+            .expect("bind test Session");
+        session.update_status(status);
+        session.save(sessions_dir).expect("save test Session");
+        session
+    }
+
+    #[test]
+    fn rotated_durable_terminal_status_without_matching_runtime_proof_is_unknown() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Stopped, 2);
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn untagged_live_terminal_sidecar_cannot_settle_a_rotated_running_session() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped)
+            .save(&gwt_agent::runtime_state_path(dir.path(), &session.id))
+            .expect("save legacy terminal sidecar");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn untagged_dead_sidecar_cannot_settle_a_rotated_running_session() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+        let sidecar =
+            gwt_agent::runtime_state_path_for_pid(dir.path(), i32::MAX as u32, &session.id);
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped)
+            .save(&sidecar)
+            .expect("save legacy dead sidecar");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn malformed_dead_sidecar_cannot_settle_a_rotated_running_session() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+        let sidecar =
+            gwt_agent::runtime_state_path_for_pid(dir.path(), i32::MAX as u32, &session.id);
+        std::fs::create_dir_all(sidecar.parent().expect("runtime parent"))
+            .expect("create runtime parent");
+        std::fs::write(&sidecar, b"not-json").expect("save malformed dead sidecar");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn stamped_live_running_sidecar_is_unknown_when_durable_binding_is_missing() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session_id = "missing-durable-session";
+        gwt_agent::SessionRuntimeState::new_for_execution_capability(
+            gwt_agent::AgentStatus::Running,
+            3,
+        )
+        .save(&gwt_agent::runtime_state_path(dir.path(), session_id))
+        .expect("save stamped live sidecar");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), session_id),
+            ActiveOwnerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn matching_rotated_terminal_sidecar_proves_stale() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Stopped, 2);
+        gwt_agent::SessionRuntimeState::new_for_execution_capability(
+            gwt_agent::AgentStatus::Stopped,
+            2,
+        )
+        .save(&gwt_agent::runtime_state_path(dir.path(), &session.id))
+        .expect("save matching terminal sidecar");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Stale(_)
+        ));
+    }
+
+    #[test]
+    fn preissuance_claim_failure_receipt_proves_running_claimed_epoch_stale() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 1);
+        let initial = session.execution_binding.clone().expect("initial binding");
+        let runtime_path = gwt_agent::runtime_state_path(dir.path(), &session.id);
+        std::fs::create_dir_all(&runtime_path).expect("block runtime publication");
+        gwt_agent::claim_running_session_execution_capability_if_unchanged_with(
+            dir.path(),
+            &initial,
+            &runtime_path,
+            |_| panic!("capability operation must not run"),
+        )
+        .expect_err("fail capability runtime publication");
+
+        let durable = gwt_agent::Session::load(&dir.path().join(format!("{}.toml", session.id)))
+            .expect("reload failed claim");
+        assert_eq!(durable.status, gwt_agent::AgentStatus::Running);
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Stale("capability claim failed before capability issuance")
+        ));
+    }
+
+    #[test]
+    fn malformed_or_wrong_claim_failure_receipt_cannot_settle_running_epoch() {
+        for case in ["malformed", "wrong-session", "wrong-generation"] {
+            let dir = tempfile::tempdir().expect("sessions dir");
+            let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+            let receipt_path = dir
+                .path()
+                .join("capability-claim-failures")
+                .join(format!("{}.json", session.id));
+            std::fs::create_dir_all(receipt_path.parent().expect("receipt parent"))
+                .expect("create receipt parent");
+            if case == "malformed" {
+                std::fs::write(&receipt_path, b"not-json").expect("write malformed receipt");
+            } else {
+                let mut binding = session.execution_binding.clone().expect("binding");
+                let receipt_session_id = if case == "wrong-session" {
+                    "foreign-session".to_string()
+                } else {
+                    binding.capability_generation += 1;
+                    session.id.clone()
+                };
+                std::fs::write(
+                    &receipt_path,
+                    serde_json::to_vec_pretty(&serde_json::json!({
+                        "schema_version": 1,
+                        "session_id": receipt_session_id,
+                        "execution_binding": binding,
+                        "recorded_at": "2026-08-05T00:00:00Z"
+                    }))
+                    .expect("serialize receipt"),
+                )
+                .expect("write wrong receipt");
+            }
+
+            assert!(
+                matches!(
+                    classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+                    ActiveOwnerLiveness::Unknown
+                ),
+                "{case} receipt must not prove a Running epoch stale"
+            );
+        }
+    }
+
+    #[test]
+    fn live_preparing_claim_receipt_is_not_failure_proof() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+        let binding = session.execution_binding.clone().expect("binding");
+        let receipt_path = dir
+            .path()
+            .join("capability-claim-failures")
+            .join(format!("{}.json", session.id));
+        std::fs::create_dir_all(receipt_path.parent().expect("receipt parent"))
+            .expect("create receipt parent");
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "session_id": session.id,
+                "execution_binding": binding,
+                "host_pid": std::process::id(),
+                "phase": "preparing",
+                "recorded_at": "2026-08-05T00:00:00Z"
+            }))
+            .expect("serialize receipt"),
+        )
+        .expect("write preparing receipt");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Unknown
+        ));
+    }
+
+    #[test]
+    fn dead_preparing_claim_receipt_proves_preissuance_crash_stale() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+        let binding = session.execution_binding.clone().expect("binding");
+        let receipt_path = dir
+            .path()
+            .join("capability-claim-failures")
+            .join(format!("{}.json", session.id));
+        std::fs::create_dir_all(receipt_path.parent().expect("receipt parent"))
+            .expect("create receipt parent");
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "session_id": session.id,
+                "execution_binding": binding,
+                "host_pid": i32::MAX as u32,
+                "phase": "preparing",
+                "recorded_at": "2026-08-05T00:00:00Z"
+            }))
+            .expect("serialize receipt"),
+        )
+        .expect("write preparing receipt");
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_at(dir.path(), &session.id),
+            ActiveOwnerLiveness::Stale("capability claim Host died before capability issuance")
+        ));
+    }
+
+    #[test]
+    fn foreign_replacement_binding_cannot_prove_expected_generation_stale() {
+        let dir = tempfile::tempdir().expect("sessions dir");
+        let session = bound_session(dir.path(), gwt_agent::AgentStatus::Running, 2);
+        let expected = session
+            .execution_binding
+            .as_ref()
+            .expect("expected binding")
+            .identity
+            .clone();
+        let mut replacement = session.clone();
+        replacement
+            .execution_binding
+            .as_mut()
+            .expect("replacement binding")
+            .identity
+            .generation_id = "foreign-generation".to_string();
+        replacement.update_status(gwt_agent::AgentStatus::Stopped);
+        replacement
+            .save(dir.path())
+            .expect("save foreign replacement");
+        gwt_agent::SessionRuntimeState::new_for_execution_capability(
+            gwt_agent::AgentStatus::Stopped,
+            2,
+        )
+        .save(&gwt_agent::runtime_state_path(dir.path(), &session.id))
+        .expect("save matching-epoch terminal sidecar");
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3426,
+        };
+
+        assert!(matches!(
+            classify_nonlocal_active_owner_liveness_for_binding_at(
+                dir.path(),
+                &session.id,
+                owner,
+                &expected,
+            ),
+            ActiveOwnerLiveness::Unknown
+        ));
     }
 }
 
@@ -3776,16 +4171,34 @@ impl AppRuntime {
         {
             return false;
         }
-        if let Some(session) = self.active_agent_sessions.remove(window_id) {
-            self.revoke_agent_capability_for_window(window_id);
-            let _ = gwt_agent::persist_session_status(
+        if let Some(session) = self.active_agent_sessions.get(window_id).cloned() {
+            let capability_generation = self.agent_capability_generations.get(window_id).copied();
+            let capability_token = self.agent_capability_tokens.get(window_id).cloned();
+            let persisted = gwt_agent::persist_session_status_if_capability_generation_matches(
                 &self.sessions_dir,
                 &session.session_id,
+                capability_generation,
                 gwt_agent::AgentStatus::Stopped,
             );
+            match persisted {
+                Ok(true) => {}
+                Ok(false) => return true,
+                Err(_) if capability_generation.is_some() => return true,
+                Err(_) => {}
+            }
+            let local_authority_unchanged = self
+                .active_agent_sessions
+                .get(window_id)
+                .is_some_and(|current| current.session_id == session.session_id)
+                && self.agent_capability_generations.get(window_id).copied()
+                    == capability_generation
+                && self.agent_capability_tokens.get(window_id) == capability_token.as_ref();
+            if !local_authority_unchanged {
+                return true;
+            }
+            self.active_agent_sessions.remove(window_id);
+            let _ = self.revoke_agent_capability_for_window(window_id);
             self.launch_wizard_cache.mark_stopped(&session.session_id);
-        } else {
-            self.revoke_agent_capability_for_window(window_id);
         }
         true
     }
@@ -4890,7 +5303,6 @@ impl AppRuntime {
                                 &exact_candidate.branch,
                                 &exact_candidate.agent_id,
                                 Some(&candidate_session_id),
-                                true,
                             )
                     });
                     if !projection_matches || !work_matches {
@@ -5803,7 +6215,39 @@ impl AppRuntime {
                 );
             }
         }
+        let local_authority_matches =
+            self.active_agent_sessions
+                .get(window_id)
+                .is_none_or(|session| {
+                    session.session_id == pending.binding.session_id
+                        && path_matches(&session.worktree_path, &pending.worktree_path)
+                })
+                && self
+                    .agent_capability_generations
+                    .get(window_id)
+                    .is_none_or(|generation| *generation == pending.binding.capability_generation)
+                && self
+                    .agent_capability_tokens
+                    .get(window_id)
+                    .is_none_or(|token| {
+                        self.agent_capability_issuer.as_ref().is_some_and(|issuer| {
+                            issuer.prepared_token_is_current(token, &pending.binding)
+                                || issuer.active_token_is_current(token, &pending.binding)
+                        })
+                    });
+        if !local_authority_matches {
+            return self.continue_work_pending_uncached_failure_events(
+                &pending,
+                ContinueWorkFailure::conflict(
+                    "The failed continuation local runtime changed before exact cleanup.",
+                ),
+            );
+        }
         self.stop_window_runtime_without_session_projection(window_id);
+        self.active_agent_sessions.remove(window_id);
+        self.launch_wizard_cache
+            .forget_session(&pending.binding.session_id);
+        let _ = self.revoke_agent_capability_for_window(window_id);
         let mut events = self.close_window_events(window_id);
         self.pending_continue_work.remove(window_id);
         let message = format!("Continue work launch failed before activation: {detail}");
