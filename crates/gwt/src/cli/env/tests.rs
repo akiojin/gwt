@@ -25,6 +25,20 @@ use gwt_github::{
     IssueNumber, SpecListFilter,
 };
 
+fn write_executable_fixture(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write executable fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .expect("executable fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make fixture executable");
+    }
+}
+
 fn sample_pr_status() -> PrStatus {
     PrStatus {
         number: 128,
@@ -623,7 +637,12 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 
 #[test]
 fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let temp = tempfile::tempdir().expect("tempdir");
+    let stable_hook_bin = temp.path().join("stable-gwtd");
+    write_executable_fixture(&stable_hook_bin, "test binary");
+    let _hook_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
     gwt_skills::generate_settings_local(temp.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(temp.path()).expect("codex hooks");
     let runtime_path = temp.path().join("runtime-state.json");
@@ -682,6 +701,10 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
     let _runtime_path =
         crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    let stable_hook_bin = temp.path().join("stable-gwtd");
+    write_executable_fixture(&stable_hook_bin, "test binary");
+    let _hook_bin =
+        crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", stable_hook_bin.as_os_str());
     fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.stdin = serde_json::json!({
@@ -708,7 +731,52 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
-    assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+    assert_eq!(doctor["health"]["status"].as_str(), Some("self_healed"));
+}
+
+#[test]
+fn hook_doctor_repair_does_not_persist_path_local_build_binary() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let git_status = gwt_core::process::hidden_command("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git init");
+    assert!(git_status.success());
+    let local_bin = temp.path().join("target/debug/gwtd");
+    fs::create_dir_all(local_bin.parent().expect("bin parent")).expect("bin dir");
+    write_executable_fixture(&local_bin, "local");
+    fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let joined = std::env::join_paths(
+        std::iter::once(local_bin.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&old_path)),
+    )
+    .expect("PATH");
+    let _path = crate::cli::test_support::ScopedEnvVar::set("PATH", joined);
+    assert_eq!(
+        which::which("gwtd").expect("PATH-local gwtd candidate"),
+        local_bin
+    );
+    let _hook_bin = crate::cli::test_support::ScopedEnvVar::set("GWT_HOOK_BIN", "");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.doctor",
+        "params": { "repair": true }
+    })
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stderr));
+    let rendered = fs::read_to_string(temp.path().join(".codex/hooks.json")).unwrap();
+    assert!(rendered.contains("GWT_BIN_PATH"), "{rendered}");
+    assert!(
+        !rendered.contains(&local_bin.display().to_string()),
+        "doctor persisted a worktree-local binary: {rendered}"
+    );
 }
 
 #[test]
