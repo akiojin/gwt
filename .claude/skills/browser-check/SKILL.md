@@ -100,20 +100,67 @@ an old browser tab.
        && [ ! -x "$CHECK_HOOK_BIN" ]; then
        CHECK_HOOK_BIN=""
      fi
+     if [ -z "$CHECK_HOOK_BIN" ]; then
+       PATH_HOOK_BIN="$(command -v gwtd 2>/dev/null || true)"
+       if [ -n "$PATH_HOOK_BIN" ] \
+         && ! is_checkout_local_hook_bin "$PATH_HOOK_BIN"; then
+         CHECK_HOOK_BIN="gwtd"
+       fi
+     fi
      if [ -z "$CHECK_HOOK_BIN" ] \
        && [ -x /Applications/GWT.app/Contents/MacOS/gwtd ]; then
        CHECK_HOOK_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
      fi
      if [ -z "$CHECK_HOOK_BIN" ]; then
-       PATH_HOOK_BIN="$(command -v gwtd 2>/dev/null || true)"
-       if ! is_checkout_local_hook_bin "$PATH_HOOK_BIN"; then
-         CHECK_HOOK_BIN="$PATH_HOOK_BIN"
-       fi
-     fi
-     if [ -z "$CHECK_HOOK_BIN" ]; then
        CHECK_HOOK_BIN="gwtd"
      fi
      # browser-check-hook-authority-end
+     ```
+
+   - Before launch, repair existing managed hook surfaces to the selected
+     fallback with the checkout `gwtd`. This keeps a portable bare `gwtd`
+     fallback when `PATH` already resolves a stable install, preserves user
+     hooks, and prevents the fresh GUI from inheriting provider-to-provider
+     fallback skew:
+
+     ```bash
+     # browser-check-hook-repair-begin
+     HOOK_DOCTOR_ENVELOPE="$(
+       jq -n \
+         --arg expected_hook_bin "$CHECK_HOOK_BIN" \
+         --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
+         '{schema_version:1,operation:"hook.doctor",params:{repair:true,expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+       | (cd "$REPO_ROOT" && env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD")
+     )"
+     if ! HOOK_DOCTOR_HEALTH_JSON="$(
+       printf '%s' "$HOOK_DOCTOR_ENVELOPE" \
+       | jq -er 'select(.ok == true) | .output | fromjson | .health'
+     )"; then
+       echo "browser-check hook convergence failed: hook.doctor did not return evidence" >&2
+       exit 1
+     fi
+     ALLOW_MISSING_LOGICAL_FALLBACK=false
+     if [ "$CHECK_HOOK_BIN" = "gwtd" ] && ! command -v gwtd >/dev/null 2>&1; then
+       ALLOW_MISSING_LOGICAL_FALLBACK=true
+     fi
+     if ! printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" \
+       | jq -e --argjson allow_missing_logical "$ALLOW_MISSING_LOGICAL_FALLBACK" '
+           [
+             .issues[]
+             | select(
+                 ($allow_missing_logical
+                   and startswith("managed hook binary missing: ")
+                   and endswith(" uses gwtd"))
+                 | not
+               )
+           ] as $blocking_issues
+           | .status != "inactive" and ($blocking_issues | length == 0)
+         ' >/dev/null; then
+       echo "browser-check hook convergence failed: hook.doctor could not converge managed surfaces" >&2
+       printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | jq '{status, issues}' >&2
+       exit 1
+     fi
+     # browser-check-hook-repair-end
      ```
 
    - Do not set `GWT_BIN_PATH` on the fresh GUI process. It is launch-scoped:

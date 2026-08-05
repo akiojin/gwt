@@ -172,6 +172,81 @@ fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
 
 #[cfg(unix)]
 #[test]
+fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tools = tempfile::tempdir().expect("tools tempdir");
+    let fake_gwtd = tools.path().join("gwtd");
+    fs::write(&fake_gwtd, "#!/bin/sh\nexit 0\n").expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(tools.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose PATH");
+
+    let script = format!(
+        "{}\nprintf '%s\\n' \"$CHECK_HOOK_BIN\"",
+        browser_check_shell_block("hook-authority")
+    );
+    let output = hidden_command("bash")
+        .args(["-c", &script])
+        .env_remove("GWT_HOOK_BIN")
+        .env("PATH", path)
+        .output()
+        .expect("run authority resolver with stable PATH entry");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "gwtd\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_repairs_exact_hook_fallback_before_launch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    let capture = dir.path().join("capture.txt");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"healthy\\\",\\\"issues\\\":[]}}\"}'\n",
+    )
+    .expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", &fake_gwtd)
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .env("CAPTURE", &capture)
+        .env("GWT_BIN_PATH", "/stale/target/debug/gwtd")
+        .output()
+        .expect("run hook repair block");
+
+    assert!(
+        output.status.success(),
+        "hook repair failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let captured = fs::read_to_string(capture).expect("read captured doctor request");
+    assert!(captured.contains("GWT_BIN_PATH=unset"), "{captured}");
+    assert!(captured.contains("GWT_HOOK_BIN=gwtd"), "{captured}");
+    let request = captured.lines().skip(2).collect::<Vec<_>>().join("\n");
+    let request: serde_json::Value = serde_json::from_str(&request).expect("doctor request JSON");
+    assert_eq!(request["operation"], "hook.doctor");
+    assert_eq!(request["params"]["repair"], true);
+    assert_eq!(request["params"]["expected_hook_bin"], "gwtd");
+}
+
+#[cfg(unix)]
+#[test]
 fn browser_check_launch_script_unsets_ambient_runtime_override() {
     use std::os::unix::fs::PermissionsExt;
 
