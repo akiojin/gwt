@@ -233,16 +233,13 @@ fn run_monitor_status<E: CliEnv>(
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
         .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     crate::scan_issue_monitor_candidates(&mut monitor, &candidates, "gwtd-status");
+    // Serialize through the same projection as the daemon branch above. The
+    // offline fallback used to hand-roll an equivalent JSON object, so every
+    // field added to the snapshot had to be added twice or the two branches
+    // would silently disagree about what a caller can rely on.
     out.push_str(
-        &serde_json::json!({
-            "queue": monitor.queued_issue_numbers(),
-            "active_launches": monitor.active_issue_numbers(),
-            "max_active": prefs.max_active_agents.max(1),
-            "enabled": prefs.enabled,
-            "autonomous_mode": prefs.autonomous_mode,
-            "has_launch_profile": prefs.launch_profile.is_some(),
-        })
-        .to_string(),
+        &serde_json::to_string(&monitor.agent_status())
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?,
     );
     out.push('\n');
     Ok(0)
@@ -1246,6 +1243,15 @@ mod tests {
                 "enabled": true,
                 "autonomous_mode": false,
                 "has_launch_profile": false,
+                // SPEC-3431 FR-024: the offline fallback serializes the same
+                // projection as the daemon branch, so a caller sees one shape
+                // regardless of whether the daemon happens to be publishing.
+                "needs_human": [],
+                "inbox": [
+                    { "issue_number": 2, "state": "queued" },
+                    { "issue_number": 1, "state": "queued" },
+                ],
+                "last_scan_at": "gwtd-status",
             })
         );
     }

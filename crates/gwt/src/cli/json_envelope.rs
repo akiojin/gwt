@@ -806,7 +806,17 @@ fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
     if channels.is_empty() {
         return Err(CliParseError::MissingFlag("channels"));
     }
-    Ok(CliCommand::Daemon(DaemonCommand::Subscribe { channels }))
+    let timeout_seconds = optional_u64(params, "timeout_seconds")?;
+    if timeout_seconds == Some(0) {
+        return Err(CliParseError::InvalidValue {
+            flag: "timeout_seconds",
+            reason: "must be at least 1 second",
+        });
+    }
+    Ok(CliCommand::Daemon(DaemonCommand::Subscribe {
+        channels,
+        timeout_seconds,
+    }))
 }
 
 fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -2347,6 +2357,37 @@ mod tests {
             CliParseError::MissingFlag(flag) => assert_eq!(flag, "channels"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SPEC-3431 FR-025: the PM's resident loop subscribes, then reconciles
+    /// against a fresh snapshot. That only works if the subscribe returns.
+    #[test]
+    fn daemon_subscribe_accepts_a_bounded_timeout() {
+        assert!(matches!(
+            ok(
+                "daemon.subscribe",
+                json!({"channels": ["issue_monitor"], "timeout_seconds": 30})
+            ),
+            CliCommand::Daemon(DaemonCommand::Subscribe {
+                timeout_seconds: Some(30),
+                ..
+            })
+        ));
+        assert!(matches!(
+            ok("daemon.subscribe", json!({"channels": ["board"]})),
+            CliCommand::Daemon(DaemonCommand::Subscribe {
+                timeout_seconds: None,
+                ..
+            })
+        ));
+        // Zero would mean "return before reading anything", which is never
+        // what a caller wants and silently degrades the loop to a busy poll.
+        assert!(err(
+            "daemon.subscribe",
+            json!({"channels": ["board"], "timeout_seconds": 0})
+        )
+        .to_string()
+        .contains("timeout_seconds"));
     }
 
     #[test]

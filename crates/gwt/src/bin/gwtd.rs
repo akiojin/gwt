@@ -137,6 +137,8 @@ fn format_daemon_help() -> String {
         "",
         "Key params:",
         "  channels                                Required for daemon.subscribe",
+        "  timeout_seconds                         Optional for daemon.subscribe; ends the",
+        "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",

@@ -62,7 +62,11 @@ confirmation questions for work the user already asked for.
 
 ## Priority and launches
 
-- Read the queue with `issue.monitor.status`.
+- Read the queue with `issue.monitor.status`. One snapshot carries the
+  ordered queue, the active launches, the issues sitting at
+  `needs_human`, the inbox rows (state, `blocked_by_owner`,
+  `launched_window_id`, `error_message`), and `last_error`. That
+  snapshot is your source of truth.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
@@ -82,23 +86,60 @@ confirmation questions for work the user already asked for.
   agent session can only turn them OFF. `max_active` changes are
   allowed for everyone.
 
+## Observing the running agents
+
+You may watch the agents the Monitor launched. You may not drive them.
+
+- `board.show` with `params.all` set to true returns the project-wide
+  Board, where agents post their own milestones, blockers, and handoffs.
+  Read it before you read scrollback: it is the surface agents write for
+  each other, and it is far cheaper.
+- `pane.list` enumerates the live agent panes in this project.
+- `pane.read` with `params.id` and `params.lines` returns that pane's
+  recent scrollback. Map an issue to its pane with `launched_window_id`
+  from the inbox rows in `issue.monitor.status`.
+- `board.post` with `params.kind` and `params.mentions` is how you speak
+  to another agent. Delivery is pull-based — the recipient sees it at
+  its next intent boundary, not immediately. A Board post never
+  interrupts a running agent, so never wait on one as if it did.
+
+Hard limits, no exceptions:
+
+- Never run `pane.close`. Closing a Monitor-launched pane returns its
+  issue to the queue, so with autonomous mode on the Monitor relaunches
+  the same issue on the next scan — closing produces a launch loop, not
+  a stop. When an agent looks hung or looping, report it to the user
+  with the evidence you read and the option you recommend (demote it
+  with `issue.monitor.priority.move`, hold it with a label, or have the
+  user stop the pane from the GUI), then apply their answer through
+  those operations.
+- Never run `pane.send`. Input injection is scoped to a session's own
+  pane and is not a coordination channel.
+- Read scrollback to diagnose and to report, never to hand an agent
+  instructions behind the Monitor's back.
+- Never edit Issue Monitor state files directly, never submit a review
+  verdict, and never alter acceptance-criteria snapshots. The merge gate
+  decides merges on its own and is not yours to influence.
+
 ## Resident loop (unattended)
 
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
-  `issue_monitor` (and optionally `board`) channels with a timeout.
-  When it returns, reconcile against fresh `issue.monitor.status` and
-  inbox snapshots — the broadcast ring is lossy, so snapshots are the
-  truth — then act on the differences: triage newly arrived issues,
-  re-evaluate order, and issue launch instructions.
+  `issue_monitor` (and optionally `board`) channels with
+  `params.timeout_seconds` set, so the stream ends and hands control
+  back to you. When it returns, reconcile against a fresh
+  `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
+  is the truth — then act on the differences: triage newly arrived
+  issues, re-evaluate order, and issue launch instructions.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
 ## NeedsHuman
 
-- When status/inbox shows `needs_human` for an issue, present the
-  situation and concrete options to the user in conversation, then
-  apply the answer through existing operations (requeue via priority
-  operations, hold via labels, or propose closing).
+- When `issue.monitor.status` lists an issue under `needs_human`,
+  present the situation and concrete options to the user in
+  conversation, then apply the answer through existing operations
+  (requeue via priority operations, hold via labels, or propose
+  closing).
 
 ## Reporting cadence
 
@@ -165,12 +206,23 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Collapse runs of whitespace so a phrase assertion does not depend on
+    /// where the 72-column body happens to wrap. Anchoring on literal line
+    /// breaks makes every reflow of the contract a test failure.
+    fn unwrapped(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn body() -> String {
+        unwrapped(SKILL_BODY_EN)
+    }
+
     /// Canonical phrases the PM contract must always carry (FR anchors).
     fn required_phrases() -> &'static [&'static str] {
         &[
             // FR-004: sole window + full autonomy without mid-confirmations.
             "single conversational window",
-            "No intermediate\nconfirmation questions",
+            "No intermediate confirmation questions",
             // FR-004: registration template.
             "acceptance",
             "`- [ ]` checkboxes",
@@ -186,9 +238,20 @@ mod tests {
             // FR-008/FR-009: privileged ON direction.
             "`issue.monitor.config.set`",
             "ON as well as OFF",
-            // FR-012: bounded subscribe + snapshot reconciliation.
+            // FR-012/FR-025: bounded subscribe + snapshot reconciliation.
             "`daemon.subscribe`",
-            "snapshots are the\n  truth",
+            "`params.timeout_seconds`",
+            "the snapshot is the truth",
+            // FR-023: read-only observation of the other agents.
+            "`board.show`",
+            "`pane.list`",
+            "`pane.read`",
+            "`launched_window_id`",
+            "Never run `pane.close`",
+            "Never run `pane.send`",
+            "relaunches the same issue",
+            // FR-010: the strong merge gate stays out of reach.
+            "never submit a review verdict",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
             // FR-015: the PM must be able to account for its own ordering.
@@ -199,38 +262,32 @@ mod tests {
             "one digest",
             "never held for a digest",
             // FR-007: auxiliary agents never touch production.
-            "must not\n  modify production code",
+            "must not modify production code",
             // FR-013: stopping story.
             "closing the PM pane",
         ]
     }
 
-    /// SPEC-3431 FR-016: the PM's autonomous ordering takes precedence over a
-    /// manual GUI reorder (後勝ち), and #3165 FR-054 is exempted while the PM
-    /// is active. The first contract shipped the opposite rule, which would
-    /// have made the PM defer to a stale GUI order forever.
+    /// Rules the contract must NOT carry. Each one shipped at some point and
+    /// told the PM something the SPEC or the runtime contradicts, so they are
+    /// pinned as negatives — `required_phrases` cannot express an absence.
     #[test]
-    fn contract_states_pm_ordering_precedence_over_the_gui() {
+    fn contract_omits_rules_that_contradict_the_spec_or_the_runtime() {
+        let body = body();
         assert!(
-            !SKILL_BODY_EN.contains("manual GUI reorder always wins"),
-            "the contract must not restore the pre-FR-016 rule"
+            !body.contains("manual GUI reorder always wins"),
+            "FR-016 inverts this: the PM's ordering wins, not the GUI's"
         );
-        assert!(SKILL_BODY_EN.contains("takes precedence over a GUI reorder"));
-    }
-
-    /// FR-015: autonomous ordering is allowed only if the PM can account for
-    /// it. An ordering it cannot explain is not permitted.
-    #[test]
-    fn contract_requires_explainable_ordering() {
-        assert!(SKILL_BODY_EN.contains("explain the current order"));
-    }
-
-    /// FR-017: unsolicited reporting is milestone-only and collapses runs of
-    /// events into one digest; NeedsHuman and fatal failures are never held.
-    #[test]
-    fn contract_defines_milestone_digest_reporting() {
-        assert!(SKILL_BODY_EN.contains("one digest"));
-        assert!(SKILL_BODY_EN.contains("never held for a digest"));
+        assert!(
+            !body.contains("inbox snapshots"),
+            "there is no inbox operation; the snapshot is issue.monitor.status"
+        );
+        for permitted_stop in ["run `pane.close`", "use `pane.close`"] {
+            assert!(
+                !body.contains(&format!("You may {permitted_stop}")),
+                "FR-023: closing a Monitor-launched pane relaunches its issue"
+            );
+        }
     }
 
     #[test]
@@ -239,6 +296,7 @@ mod tests {
         assert!(rendered.starts_with("---\nname: gwt-pm\ndescription: "));
         assert!(rendered.contains(MANAGED_BEGIN));
         assert!(rendered.contains(MANAGED_END));
+        let rendered = unwrapped(&rendered);
         for phrase in required_phrases() {
             assert!(
                 rendered.contains(phrase),

@@ -6441,9 +6441,9 @@ button.workspace-board-ref:focus-visible {
    form first, colour second — so the PM reads as distinct even for users who
    cannot separate the hue from the agent ramp. */
 .workspace-window[data-pm="true"] {
-  /* 3px was measured as "hard to notice" against the dark window chrome in
-     review (2026-08-05); the bar has to be legible at a glance from across
-     the canvas, not on close inspection. */
+  /* 3px read as "hard to notice" against the dark window chrome in review
+     (2026-08-05); the bar has to be legible at a glance from across the
+     canvas, not only when the window is already in focus. */
   border-left: 6px solid var(--color-role-pm);
 }
 

@@ -201,7 +201,12 @@ pub enum DaemonCommand {
     /// subscribe to one or more broadcast channels, and print received events
     /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
     /// fan-out pipeline.
-    Subscribe { channels: Vec<String> },
+    Subscribe {
+        channels: Vec<String>,
+        /// SPEC-3431 FR-025: bound the read so an unattended caller can run
+        /// subscribe → reconcile in a loop without an external supervisor.
+        timeout_seconds: Option<u64>,
+    },
 }
 
 /// SPEC-2359 command model for `workspace.*` JSON operations.

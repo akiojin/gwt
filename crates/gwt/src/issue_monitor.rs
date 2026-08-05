@@ -898,6 +898,35 @@ pub struct IssueMonitorAgentStatus {
     pub enabled: bool,
     pub autonomous_mode: bool,
     pub has_launch_profile: bool,
+    /// SPEC-3431 FR-024: issues handed back to a human. Previously reachable
+    /// only through the daemon's lossy broadcast ring, which made a missed
+    /// escalation unrecoverable for an unattended reader.
+    #[serde(default)]
+    pub needs_human: Vec<u64>,
+    /// Per-issue lifecycle rows, so a caller can tell "not launched yet" from
+    /// "claimed by someone else" from "failed", and can map an issue to the
+    /// pane that is working on it.
+    #[serde(default)]
+    pub inbox: Vec<IssueMonitorInboxSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_at: Option<String>,
+}
+
+/// One inbox row, reduced to the facts an agent acts on. The full
+/// [`IssueMonitorInboxItem`] carries the whole GitHub issue payload, which
+/// would dwarf the rest of the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorInboxSummary {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -2868,6 +2897,7 @@ impl IssueMonitorState {
     }
 
     pub fn agent_status(&self) -> IssueMonitorAgentStatus {
+        let status = self.status_view();
         IssueMonitorAgentStatus {
             queue: self.queued_issue_numbers(),
             active_launches: self.active_issue_numbers(),
@@ -2875,6 +2905,25 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             autonomous_mode: self.autonomous_mode,
             has_launch_profile: self.has_launch_profile(),
+            needs_human: status
+                .autonomous_issues
+                .iter()
+                .filter(|summary| summary.needs_human)
+                .map(|summary| summary.issue_number)
+                .collect(),
+            inbox: self
+                .inbox
+                .iter()
+                .map(|item| IssueMonitorInboxSummary {
+                    issue_number: item.issue.number,
+                    state: item.state,
+                    blocked_by_owner: item.blocked_by_owner.clone(),
+                    launched_window_id: item.launched_window_id.clone(),
+                    error_message: item.error_message.clone(),
+                })
+                .collect(),
+            last_error: status.last_error,
+            last_scan_at: status.last_scan_at,
         }
     }
 
@@ -4570,8 +4619,67 @@ mod tests {
                 enabled: true,
                 autonomous_mode: false,
                 has_launch_profile: false,
+                needs_human: Vec::new(),
+                inbox: vec![IssueMonitorInboxSummary {
+                    issue_number: 42,
+                    state: MonitorInboxState::BlockedByClaim,
+                    blocked_by_owner: Some("other-agent".to_string()),
+                    launched_window_id: None,
+                    error_message: None,
+                }],
+                last_error: None,
+                last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
             }
         );
+    }
+
+    /// SPEC-3431 FR-024: everything the PM's reconcile loop acts on must be in
+    /// one snapshot. `needs_human`, the inbox rows, and `last_error` used to
+    /// exist only on the daemon's capacity-64 broadcast ring, so an escalation
+    /// a lagging subscriber missed was unrecoverable — and the PM contract
+    /// told the PM to read an `inbox` operation that does not exist.
+    #[test]
+    fn agent_status_snapshot_carries_needs_human_and_inbox() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        let mut escalated = issue(7);
+        escalated.labels.push("auto-improve".to_string());
+        let mut blocked = issue(8);
+        blocked.labels.push("auto-improve".to_string());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[escalated.clone(), blocked.clone()],
+            "2026-08-05T00:00:00Z",
+        );
+        monitor.escalate_to_needs_human(7, "review exhausted its retries");
+        monitor.record_blocked_by_claim(blocked, "other-agent", "2026-08-05T00:05:00Z");
+
+        let status = monitor.agent_status();
+
+        assert_eq!(
+            status.needs_human,
+            vec![7],
+            "an escalated issue must be visible without subscribing"
+        );
+        let escalated_row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 7)
+            .expect("escalated issue has an inbox row");
+        assert_eq!(escalated_row.state, MonitorInboxState::NeedsHuman);
+        assert_eq!(
+            escalated_row.error_message.as_deref(),
+            Some("review exhausted its retries")
+        );
+        let blocked_row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 8)
+            .expect("blocked issue has an inbox row");
+        assert_eq!(blocked_row.blocked_by_owner.as_deref(), Some("other-agent"));
     }
 
     fn pending_arm_effect(
