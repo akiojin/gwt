@@ -1,6 +1,37 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.73.0] - 2026-08-05
+
+### Bug Fixes
+
+- **hooks:** Worktree ローカルのバイナリ固定を防ぐ
+- **hooks:** Runtime selectorの境界条件を補強する
+- **launch:** 滞留 generation による起動拒否に holder と回復導線を含める
+- **governance:** Make recovery diagnostics executable
+- **governance:** Close recovery authority gaps
+- **governance:** Validate recovery owner authority
+- **governance:** Enforce continuation predecessor CAS
+- **governance:** Reject activated takeover suffix retries
+- **governance:** Recovery authority transaction を厳密化
+- **governance:** Preserve recovery projection boundaries
+- **pr:** Allow completed lifecycle receipt handoff
+
+### Features
+
+- **governance:** Semantic effect の観測を追加
+
+### Miscellaneous Tasks
+
+- **work:** Correct resumed work handoff
+
+### Testing
+
+- **hooks:** Health envelopeテストの実行環境を固定する
+- **hooks:** Health fixture の実行環境を固定する
+- **hooks:** Projection fixture に安定版バイナリを設定する
+- **hooks:** Self-heal fixture を環境非依存にする
+
 ## [9.72.1] - 2026-08-03
 
 ### Bug Fixes
