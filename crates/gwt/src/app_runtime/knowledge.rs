@@ -19,11 +19,365 @@
 //! `crate::knowledge_bridge` / `crate::index_search`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use gwt::KnowledgeKind;
+
+type KnowledgeRelatedWorksByNumber = HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>>;
+
+const KNOWLEDGE_RELATED_SNAPSHOT_CAPACITY: usize = 8;
+
+struct KnowledgeRelatedSnapshotEntry {
+    project_root: PathBuf,
+    kind: KnowledgeKind,
+    generation: u64,
+    snapshot: Option<Arc<KnowledgeRelatedWorksByNumber>>,
+}
+
+/// SPEC #3170 FR-102: bounded latest related-work snapshots. A generation is
+/// reserved synchronously before each full load/refresh so a late completion
+/// cannot replace a newer request. Search and selection are read-only users.
+#[derive(Default)]
+pub(crate) struct KnowledgeRelatedSnapshotCache {
+    entries: VecDeque<KnowledgeRelatedSnapshotEntry>,
+    next_generation: u64,
+    #[cfg(test)]
+    full_scan_count: usize,
+}
+
+pub(crate) type KnowledgeRelatedSnapshot = Arc<Mutex<KnowledgeRelatedSnapshotCache>>;
+
+fn normalized_snapshot_project_root(project_root: &Path) -> PathBuf {
+    dunce::canonicalize(project_root).unwrap_or_else(|_| {
+        if project_root.is_absolute() {
+            project_root.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(project_root))
+                .unwrap_or_else(|_| project_root.to_path_buf())
+        }
+    })
+}
+
+impl KnowledgeRelatedSnapshotCache {
+    fn entry_index(&self, project_root: &Path, kind: KnowledgeKind) -> Option<usize> {
+        let project_root = normalized_snapshot_project_root(project_root);
+        self.entries
+            .iter()
+            .position(|entry| entry.project_root == project_root && entry.kind == kind)
+    }
+
+    fn get(
+        &mut self,
+        project_root: &Path,
+        kind: KnowledgeKind,
+    ) -> Option<Arc<KnowledgeRelatedWorksByNumber>> {
+        let index = self.entry_index(project_root, kind)?;
+        let entry = self.entries.remove(index)?;
+        let snapshot = entry.snapshot.as_ref().map(Arc::clone);
+        self.entries.push_back(entry);
+        snapshot
+    }
+
+    fn reserve_generation(&mut self, project_root: &Path, kind: KnowledgeKind) -> Option<u64> {
+        if !matches!(kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
+            return None;
+        }
+        if self.next_generation == u64::MAX {
+            self.entries.clear();
+            self.next_generation = 0;
+        }
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        let normalized_root = normalized_snapshot_project_root(project_root);
+        if let Some(index) = self.entry_index(&normalized_root, kind) {
+            if let Some(mut entry) = self.entries.remove(index) {
+                entry.generation = generation;
+                self.entries.push_back(entry);
+            }
+        } else {
+            self.entries.push_back(KnowledgeRelatedSnapshotEntry {
+                project_root: normalized_root,
+                kind,
+                generation,
+                snapshot: None,
+            });
+        }
+        self.trim_to_capacity();
+        Some(generation)
+    }
+
+    fn replace_if_current(
+        &mut self,
+        project_root: &Path,
+        kind: KnowledgeKind,
+        generation: u64,
+        snapshot: Arc<KnowledgeRelatedWorksByNumber>,
+    ) -> bool {
+        let Some(index) = self
+            .entry_index(project_root, kind)
+            .filter(|index| self.entries[*index].generation == generation)
+        else {
+            return false;
+        };
+        let Some(mut entry) = self.entries.remove(index) else {
+            return false;
+        };
+        entry.snapshot = Some(snapshot);
+        self.entries.push_back(entry);
+        true
+    }
+
+    fn trim_to_capacity(&mut self) {
+        while self.entries.len() > KNOWLEDGE_RELATED_SNAPSHOT_CAPACITY {
+            self.entries.pop_front();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_scan_count(&self) -> usize {
+        self.full_scan_count
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+#[cfg(test)]
+mod related_snapshot_cache_tests {
+    use super::*;
+
+    fn snapshot(number: u64) -> Arc<KnowledgeRelatedWorksByNumber> {
+        Arc::new(HashMap::from([(number, Vec::new())]))
+    }
+
+    fn related_work(id: &str) -> gwt::KnowledgeRelatedWorkView {
+        gwt::KnowledgeRelatedWorkView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "active".to_string(),
+            branch: None,
+            worktree_path: None,
+            updated_at: "2026-08-03T00:00:00Z".to_string(),
+            agents: Vec::new(),
+        }
+    }
+
+    fn search_view(number: u64) -> gwt::KnowledgeBridgeView {
+        gwt::KnowledgeBridgeView {
+            kind: KnowledgeKind::Issue,
+            entries: vec![gwt::KnowledgeListItem {
+                number,
+                title: format!("Issue {number}"),
+                state: "open".to_string(),
+                meta: String::new(),
+                labels: Vec::new(),
+                linked_branch_count: 0,
+                related_work_count: 0,
+                related_session_count: 0,
+                match_score: None,
+                phase: None,
+                has_unknown_phase: false,
+                is_spec: false,
+            }],
+            selected_number: Some(number),
+            empty_message: None,
+            refresh_enabled: true,
+            detail: gwt::KnowledgeDetailView {
+                number: Some(number),
+                title: format!("Issue {number}"),
+                subtitle: String::new(),
+                state: "open".to_string(),
+                labels: Vec::new(),
+                sections: Vec::new(),
+                launch_issue_number: Some(number),
+                related_works: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn normalized_key_and_generation_reject_a_late_completion() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("repo");
+        std::fs::create_dir_all(&root).expect("create repo");
+        let equivalent_root = root.join(".");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+
+        let older = cache
+            .reserve_generation(&root, KnowledgeKind::Issue)
+            .expect("issue generation");
+        assert!(cache.replace_if_current(&root, KnowledgeKind::Issue, older, snapshot(21),));
+        let newer = cache
+            .reserve_generation(&equivalent_root, KnowledgeKind::Issue)
+            .expect("new issue generation");
+        assert!(cache.replace_if_current(
+            &equivalent_root,
+            KnowledgeKind::Issue,
+            newer,
+            snapshot(84),
+        ));
+        assert!(!cache.replace_if_current(&root, KnowledgeKind::Issue, older, snapshot(42),));
+
+        let current = cache
+            .get(&root, KnowledgeKind::Issue)
+            .expect("current snapshot");
+        assert!(current.contains_key(&84));
+        assert!(!current.contains_key(&42));
+        assert_eq!(cache.entry_count(), 1, "equivalent roots share one key");
+    }
+
+    #[test]
+    fn snapshot_cache_is_capacity_eight_lru_and_kind_isolated() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+        let mut roots = Vec::new();
+        for index in 0..8_u64 {
+            let root = directory.path().join(format!("repo-{index}"));
+            std::fs::create_dir_all(&root).expect("create repo");
+            let generation = cache
+                .reserve_generation(&root, KnowledgeKind::Issue)
+                .expect("issue generation");
+            assert!(cache.replace_if_current(
+                &root,
+                KnowledgeKind::Issue,
+                generation,
+                snapshot(index),
+            ));
+            roots.push(root);
+        }
+
+        assert!(cache.get(&roots[0], KnowledgeKind::Issue).is_some());
+        let ninth = directory.path().join("repo-8");
+        std::fs::create_dir_all(&ninth).expect("create ninth repo");
+        let generation = cache
+            .reserve_generation(&ninth, KnowledgeKind::Issue)
+            .expect("ninth generation");
+        assert!(cache.replace_if_current(&ninth, KnowledgeKind::Issue, generation, snapshot(8),));
+
+        assert_eq!(cache.entry_count(), 8);
+        assert!(cache.get(&roots[0], KnowledgeKind::Issue).is_some());
+        assert!(cache.get(&roots[1], KnowledgeKind::Issue).is_none());
+        assert!(cache.get(&ninth, KnowledgeKind::Issue).is_some());
+        assert!(cache.get(&ninth, KnowledgeKind::Spec).is_none());
+    }
+
+    #[test]
+    fn pr_reservation_and_snapshot_miss_do_not_mutate_issue_snapshot() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("repo");
+        let other = directory.path().join("other");
+        std::fs::create_dir_all(&root).expect("create repo");
+        std::fs::create_dir_all(&other).expect("create other repo");
+        let mut cache = KnowledgeRelatedSnapshotCache::default();
+        let generation = cache
+            .reserve_generation(&root, KnowledgeKind::Issue)
+            .expect("issue generation");
+        assert!(cache.replace_if_current(&root, KnowledgeKind::Issue, generation, snapshot(42),));
+        let scans_before = cache.full_scan_count();
+
+        assert_eq!(cache.reserve_generation(&root, KnowledgeKind::Pr), None);
+        assert!(cache.get(&other, KnowledgeKind::Issue).is_none());
+        assert_eq!(cache.full_scan_count(), scans_before);
+        assert!(cache
+            .get(&root, KnowledgeKind::Issue)
+            .is_some_and(|snapshot| snapshot.contains_key(&42)));
+    }
+
+    #[test]
+    fn pr_full_augmentation_preserves_baseline_view_without_publishing_a_snapshot() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("repo");
+        let sessions_dir = directory.path().join("sessions");
+        let issue_link_cache_dir = directory.path().join("cache");
+        std::fs::create_dir_all(&root).expect("create repo");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        std::fs::create_dir_all(&issue_link_cache_dir).expect("create cache dir");
+        let snapshots = KnowledgeRelatedSnapshot::default();
+        let generation =
+            reserve_related_snapshot_generation(&snapshots, &root, KnowledgeKind::Issue)
+                .expect("issue generation");
+        assert!(snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace_if_current(&root, KnowledgeKind::Issue, generation, snapshot(42),));
+        let mut pr_view = gwt::load_knowledge_bridge(&root, KnowledgeKind::Pr, Some(77), false)
+            .expect("disabled PR view");
+        let baseline_view = pr_view.clone();
+        let scans_before = snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .full_scan_count();
+
+        augment_and_publish_knowledge_bridge_related_works(
+            &root,
+            &sessions_dir,
+            &issue_link_cache_dir,
+            &mut pr_view,
+            &snapshots,
+            None,
+        );
+
+        assert_eq!(
+            pr_view, baseline_view,
+            "PR full-load augmentation must preserve its existing disabled view"
+        );
+        let mut cache = snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            cache.full_scan_count(),
+            scans_before + 1,
+            "PR full load must retain the pre-existing augmentation pass"
+        );
+        assert!(cache.get(&root, KnowledgeKind::Pr).is_none());
+        assert!(cache
+            .get(&root, KnowledgeKind::Issue)
+            .is_some_and(|snapshot| snapshot.contains_key(&42)));
+        assert_eq!(
+            cache.entry_count(),
+            1,
+            "PR augmentation must not publish or replace an Issue/SPEC snapshot"
+        );
+    }
+
+    #[test]
+    fn partial_search_consumes_but_never_replaces_the_full_snapshot() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("repo");
+        std::fs::create_dir_all(&root).expect("create repo");
+        let snapshots = KnowledgeRelatedSnapshot::default();
+        let generation =
+            reserve_related_snapshot_generation(&snapshots, &root, KnowledgeKind::Issue)
+                .expect("issue generation");
+        let full = Arc::new(HashMap::from([
+            (42, vec![related_work("work-42")]),
+            (43, vec![related_work("work-43")]),
+        ]));
+        assert!(snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace_if_current(&root, KnowledgeKind::Issue, generation, full,));
+        let mut partial_view = search_view(42);
+
+        apply_latest_knowledge_bridge_related_works(&root, &mut partial_view, &snapshots);
+
+        assert_eq!(partial_view.entries[0].related_work_count, 1);
+        assert_eq!(partial_view.detail.related_works[0].id, "work-42");
+        let retained = snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&root, KnowledgeKind::Issue)
+            .expect("full snapshot retained");
+        assert!(retained.contains_key(&42));
+        assert!(retained.contains_key(&43));
+    }
+}
 
 use super::{
     knowledge_kind_for_preset, load_knowledge_bridge, normalize_branch_name, work_session_index,
@@ -76,8 +430,6 @@ struct KnowledgeSearchTask {
     query: String,
     request_id: u64,
     selected_number: Option<u64>,
-    sessions_dir: PathBuf,
-    issue_link_cache_dir: PathBuf,
 }
 
 struct ProjectIndexSearchTask {
@@ -164,11 +516,24 @@ fn knowledge_view_events(
     ]
 }
 
-fn augment_knowledge_bridge_related_works_from_paths(
+fn reserve_related_snapshot_generation(
+    related_snapshot: &KnowledgeRelatedSnapshot,
+    project_root: &Path,
+    kind: KnowledgeKind,
+) -> Option<u64> {
+    related_snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reserve_generation(project_root, kind)
+}
+
+fn augment_and_publish_knowledge_bridge_related_works(
     project_root: &Path,
     sessions_dir: &Path,
     issue_link_cache_dir: &Path,
     view: &mut gwt::KnowledgeBridgeView,
+    related_snapshot: &KnowledgeRelatedSnapshot,
+    generation: Option<u64>,
 ) {
     let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load(sessions_dir);
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(project_root)
@@ -177,13 +542,45 @@ fn augment_knowledge_bridge_related_works_from_paths(
         .map(|projection| projection.work_items)
         .unwrap_or_default();
     let issue_by_branch = load_issue_branch_links(project_root, issue_link_cache_dir);
-    augment_knowledge_bridge_related_works(
+    let related_by_number = augment_knowledge_bridge_related_works(
         project_root,
         view,
         &work_items,
         &sessions,
         &issue_by_branch,
     );
+    let mut snapshots = related_snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(test)]
+    {
+        snapshots.full_scan_count += 1;
+    }
+    if let Some(generation) = generation {
+        snapshots.replace_if_current(
+            project_root,
+            view.kind,
+            generation,
+            Arc::new(related_by_number),
+        );
+    }
+}
+
+fn apply_latest_knowledge_bridge_related_works(
+    project_root: &Path,
+    view: &mut gwt::KnowledgeBridgeView,
+    related_snapshot: &KnowledgeRelatedSnapshot,
+) {
+    if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
+        return;
+    }
+    let snapshot = related_snapshot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root, view.kind);
+    if let Some(snapshot) = snapshot {
+        apply_knowledge_bridge_related_works(view, &snapshot);
+    }
 }
 
 fn augment_knowledge_bridge_related_works(
@@ -192,9 +589,9 @@ fn augment_knowledge_bridge_related_works(
     work_items: &[gwt_core::workspace_projection::WorkItem],
     sessions: &[gwt_agent::Session],
     issue_by_branch: &HashMap<String, u64>,
-) {
+) -> HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> {
     if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-        return;
+        return HashMap::new();
     }
     let relevant_numbers = view
         .entries
@@ -203,7 +600,7 @@ fn augment_knowledge_bridge_related_works(
         .chain(view.detail.number)
         .collect::<HashSet<_>>();
     if relevant_numbers.is_empty() {
-        return;
+        return HashMap::new();
     }
 
     let session_index = work_session_index(sessions);
@@ -262,6 +659,14 @@ fn augment_knowledge_bridge_related_works(
         dedupe_related_work_sessions(works, &session_index);
     }
 
+    apply_knowledge_bridge_related_works(view, &related_by_number);
+    related_by_number
+}
+
+fn apply_knowledge_bridge_related_works(
+    view: &mut gwt::KnowledgeBridgeView,
+    related_by_number: &KnowledgeRelatedWorksByNumber,
+) {
     for entry in &mut view.entries {
         if let Some(works) = related_by_number.get(&entry.number) {
             entry.related_work_count = works.len();
@@ -736,15 +1141,20 @@ impl AppRuntime {
         let selected_number = request.selected_number;
         let sessions_dir = self.sessions_dir.clone();
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        let related_snapshot = self.knowledge_related_snapshot.clone();
+        let related_snapshot_generation =
+            reserve_related_snapshot_generation(&related_snapshot, &project_root, kind);
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
                 Ok(mut view) => {
-                    augment_knowledge_bridge_related_works_from_paths(
+                    augment_and_publish_knowledge_bridge_related_works(
                         &project_root,
                         &sessions_dir,
                         &issue_link_cache_dir,
                         &mut view,
+                        &related_snapshot,
+                        related_snapshot_generation,
                     );
                     view
                 }
@@ -776,11 +1186,13 @@ impl AppRuntime {
             }
             if let Ok(mut view) = load_knowledge_bridge(&project_root, kind, selected_number, false)
             {
-                augment_knowledge_bridge_related_works_from_paths(
+                augment_and_publish_knowledge_bridge_related_works(
                     &project_root,
                     &sessions_dir,
                     &issue_link_cache_dir,
                     &mut view,
+                    &related_snapshot,
+                    related_snapshot_generation,
                 );
                 proxy.send(UserEvent::Dispatch(knowledge_view_events(
                     client_id, id, kind, request_id, view,
@@ -802,6 +1214,9 @@ impl AppRuntime {
             sessions_dir,
             issue_link_cache_dir,
         } = task;
+        let related_snapshot = self.knowledge_related_snapshot.clone();
+        let related_snapshot_generation =
+            reserve_related_snapshot_generation(&related_snapshot, &project_root, kind);
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
             let refreshed = match gwt::refresh_knowledge_bridge_cache(&project_root, force) {
@@ -822,11 +1237,13 @@ impl AppRuntime {
             let event =
                 match gwt::load_knowledge_bridge(&project_root, kind, selected_number, false) {
                     Ok(mut view) => {
-                        augment_knowledge_bridge_related_works_from_paths(
+                        augment_and_publish_knowledge_bridge_related_works(
                             &project_root,
                             &sessions_dir,
                             &issue_link_cache_dir,
                             &mut view,
+                            &related_snapshot,
+                            related_snapshot_generation,
                         );
                         knowledge_view_events(client_id, id, kind, request_id, view)
                     }
@@ -839,6 +1256,81 @@ impl AppRuntime {
         });
     }
 
+    /// SPEC #3170 FR-102 (T-947): explicit selection is a background
+    /// cache-backed detail-only path — it loads exactly the selected entry,
+    /// starts no remote refresh, rebuilds no list, and reuses the latest
+    /// related-work snapshot when one exists.
+    pub(crate) fn select_knowledge_bridge_entry_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        kind: KnowledgeKind,
+        request_id: Option<u64>,
+        number: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(id, kind, "Window not found", request_id, None),
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(id, kind, "Project tab not found", request_id, None),
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(id, kind, "Window not found", request_id, None),
+            )];
+        };
+        if knowledge_kind_for_preset(window.preset) != Some(kind) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window is not a knowledge bridge",
+                    request_id,
+                    None,
+                ),
+            )];
+        }
+
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let project_root = tab.project_root.clone();
+        let related_snapshot = self.knowledge_related_snapshot.clone();
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = match gwt::load_knowledge_bridge_detail(&project_root, kind, number) {
+                Ok(mut detail) => {
+                    let related = related_snapshot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&project_root, kind)
+                        .and_then(|snapshot| snapshot.get(&number).cloned());
+                    if let Some(related) = related {
+                        detail.related_works = related;
+                    }
+                    BackendEvent::KnowledgeDetail {
+                        id,
+                        knowledge_kind: kind,
+                        request_id,
+                        detail,
+                    }
+                }
+                Err(error) => knowledge_error_event(id, kind, error, request_id, None),
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
+    }
+
     pub(crate) fn search_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -847,7 +1339,7 @@ impl AppRuntime {
         let id = request.id;
         let kind = request.kind;
         let Some(address) = self.window_lookup.get(id) else {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -859,7 +1351,7 @@ impl AppRuntime {
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -871,7 +1363,7 @@ impl AppRuntime {
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -883,7 +1375,7 @@ impl AppRuntime {
             )];
         };
         if knowledge_kind_for_preset(window.preset) != Some(kind) {
-            return vec![OutboundEvent::reply(
+            return vec![OutboundEvent::reply_with_nonsemantic_knowledge_error(
                 client_id,
                 knowledge_error_event(
                     id,
@@ -903,8 +1395,6 @@ impl AppRuntime {
             query: request.query.to_string(),
             request_id: request.request_id,
             selected_number: request.selected_number,
-            sessions_dir: self.sessions_dir.clone(),
-            issue_link_cache_dir: self.issue_link_cache_dir.clone(),
         });
         Vec::new()
     }
@@ -918,20 +1408,29 @@ impl AppRuntime {
             query,
             request_id,
             selected_number,
-            sessions_dir,
-            issue_link_cache_dir,
         } = task;
+        let related_snapshot = self.knowledge_related_snapshot.clone();
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
-            let event =
-                match gwt::search_knowledge_bridge(&project_root, kind, &query, selected_number) {
-                    Ok(mut view) => {
-                        augment_knowledge_bridge_related_works_from_paths(
-                            &project_root,
-                            &sessions_dir,
-                            &issue_link_cache_dir,
-                            &mut view,
-                        );
+            // SPEC #3170 FR-098: semantic degradation is a normal completion
+            // (cache rows + optional typed retry directive). Only
+            // non-semantic failures (cache read, window lookup) still use the
+            // visible KnowledgeError channel.
+            let outbound = match gwt::search_knowledge_bridge_outcome(
+                &project_root,
+                kind,
+                &query,
+                selected_number,
+            ) {
+                Ok(outcome) => {
+                    let mut view = outcome.view;
+                    apply_latest_knowledge_bridge_related_works(
+                        &project_root,
+                        &mut view,
+                        &related_snapshot,
+                    );
+                    OutboundEvent::reply_with_knowledge_semantic_retry(
+                        client_id,
                         BackendEvent::KnowledgeSearchResults {
                             id: id.clone(),
                             knowledge_kind: kind,
@@ -941,15 +1440,16 @@ impl AppRuntime {
                             selected_number: view.selected_number,
                             empty_message: view.empty_message,
                             refresh_enabled: view.refresh_enabled,
-                        }
-                    }
-                    Err(error) => {
-                        knowledge_error_event(id, kind, error, Some(request_id), Some(query))
-                    }
-                };
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id, event,
-            )]));
+                        },
+                        outcome.semantic_retry,
+                    )
+                }
+                Err(error) => OutboundEvent::reply_with_nonsemantic_knowledge_error(
+                    client_id,
+                    knowledge_error_event(id, kind, error, Some(request_id), Some(query)),
+                ),
+            };
+            proxy.send(UserEvent::Dispatch(vec![outbound]));
         });
     }
 

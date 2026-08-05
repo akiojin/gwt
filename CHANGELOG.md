@@ -1,6 +1,55 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.73.1] - 2026-08-05
+
+### Bug Fixes
+
+- **ci:** Prepare Release に発行元 PAT を配線しリリース準備を通す
+- Prevent terminal output starvation
+- Add content-free terminal latency tracing
+- Bound workspace hydration and projection
+- Reduce latency across prompt submission and navigation
+- **gui:** Keep session resume projections process-free
+- **gui:** Make background projections converge
+- **gui:** Invalidate topology at materialization
+- **gui:** Converge knowledge and topology refresh
+- **index:** 非ブロッキング検索の修復予約と型付き失敗分類を実装する
+- **knowledge:** 検索劣化を静音化し選択を cache-backed detail-only にする
+- **gui:** 選択を同期プレビュー化し selection generation でフェンスする
+- **gui:** Semantic 検索の静音無期限リトライとローカル即時フォールバックを実装する
+- **gui:** Knowledge Bridge の semantic 検索ステータス表示を除去する
+- **index:** 監査 P0/P1 を解消し検索試行の境界と静音性を強化する
+- **gui:** 選択/リトライの世代フェンスを強化し TOCTOU 送信を排除する
+- **gui:** PR の選択を従来の full-load 経路に維持する
+- **core:** Windows deadline spawn の resume をプロセススコープ化する
+- **index:** Retry metadata を private wire envelope へ移し公開型を保つ
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 3170 completion
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record workspace backfill
+- **spec-3170:** 旧ブランチ内容を origin/develop 基準へ揃える
+- **work:** SPEC-3170 検証フェーズの work イベントを記録する
+- **work:** SPEC-3170 の PR handoff 前 Work イベントを記録する
+- **work:** SPEC-3170 の Work を完了として記録する
+
+### Testing
+
+- 高負荷時のターミナル入力遅延を検証する
+- Separate prompt SLA from shared-suite watchdog
+- Isolate ordered navigation process contract
+- **gui:** 選択即応と静音リトライのブラウザ契約を固定する
+- 負荷依存で偽陽性になるテスト予算を実測値ベースへ是正する
+- **workspace:** Host probe がリクエストを読み切ってから応答する
+- **core:** Fixture のクレート汚染と home 解決レースを止める
+
 ## [9.73.0] - 2026-08-05
 
 ### Bug Fixes

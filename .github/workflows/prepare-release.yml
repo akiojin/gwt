@@ -40,12 +40,29 @@ jobs:
     name: Prepare Release PR
     runs-on: ubuntu-latest
     steps:
+      # Issue #3428: this job writes to protected `develop` and opens the
+      # Release PR. `GITHUB_TOKEN` can do neither — branch protection rejects
+      # its push with GH006, and a PR it opens never starts its own required
+      # checks, so the Release PR could never merge. Both need the same
+      # bypass-capable PAT that auto-merge.yml already uses. Refuse before the
+      # expensive bump so a missing secret cannot waste the run or leave an
+      # orphan local commit.
+      - name: Require release credentials
+        env:
+          RELEASE_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::PERSONAL_ACCESS_TOKEN is not configured; Prepare Release cannot push the bump to protected develop or open a Release PR whose required checks run. Add the secret (Contents: write, Pull requests: write, allowed to bypass develop protection) and re-run." >&2
+            exit 1
+          fi
+
       - name: Checkout develop
         uses: actions/checkout@v7
         with:
           ref: develop
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
 
       - name: Fetch tags
         run: git fetch origin --tags --force
@@ -130,6 +147,12 @@ jobs:
 
       - name: Collect closing issues
         id: issues
+        env:
+          # scripts/release_issue_refs.py shells out to `gh` to classify each
+          # ref as PR or Issue. `gh` refuses to run in Actions without a token
+          # and the script propagates that failure, so the step needs one.
+          # Reads only — the default token is enough here.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           PREV_TAG="${{ steps.version.outputs.prev_tag }}"
@@ -150,7 +173,7 @@ jobs:
 
       - name: Create or update Release PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           BUMP: ${{ inputs.bump }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
           TAG_NAME: ${{ steps.version.outputs.tag_name }}

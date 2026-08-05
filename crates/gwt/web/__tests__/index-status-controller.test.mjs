@@ -181,6 +181,10 @@ test("Index search clears invalidate any in-flight request immediately", () => {
 });
 
 test("Index result Open uses target numbers for Issue and SPEC hits", () => {
+  const openKnowledgeTargetBlock = indexSurfaceSource
+    .split("function openKnowledgeIndexResultTarget(preset, target)")[1]
+    ?.split("// SPEC-3064 Phase 3 (E3)")[0];
+  assert.ok(openKnowledgeTargetBlock, "expected the Knowledge target handoff helper");
   assert.ok(
     indexSurfaceSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
       indexSurfaceSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
@@ -191,6 +195,11 @@ test("Index result Open uses target numbers for Issue and SPEC hits", () => {
     indexSurfaceSource.includes('openKnowledgeIndexResultTarget("issue", target)') &&
       indexSurfaceSource.includes('openKnowledgeIndexResultTarget("spec", target)'),
     "Issue and SPEC index results must use target-aware navigation",
+  );
+  assert.doesNotMatch(
+    openKnowledgeTargetBlock,
+    /requestKnowledgeDetail\(windowId, knowledgeKind, number\);[\s\S]*renderKnowledgeBridge\(windowId\);/,
+    "the selection dispatcher already renders by kind; Index handoff must not rebuild the full Knowledge list again",
   );
 });
 

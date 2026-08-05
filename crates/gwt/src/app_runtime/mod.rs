@@ -282,9 +282,20 @@ pub enum DispatchTarget {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum KnowledgeWireMetadata {
+    SemanticRetry(gwt::KnowledgeSemanticRetry),
+    NonSemanticError,
+}
+
+#[derive(Debug, Clone)]
 pub struct OutboundEvent {
     pub(crate) target: DispatchTarget,
     pub(crate) event: BackendEvent,
+    /// SPEC #1939 FR-407 / SPEC #3170 FR-098: private wire-only metadata for
+    /// semantic retry directives and explicitly non-semantic search errors.
+    /// Keeping it outside the public `BackendEvent` preserves the baseline
+    /// Rust construction/destructuring shape.
+    pub(crate) knowledge_wire_metadata: Option<KnowledgeWireMetadata>,
 }
 
 pub(crate) enum AgentFrontendDispatchOutcome {
@@ -332,6 +343,7 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::Broadcast,
             event,
+            knowledge_wire_metadata: None,
         }
     }
 
@@ -339,6 +351,45 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::Client(client_id.into()),
             event,
+            knowledge_wire_metadata: None,
+        }
+    }
+
+    pub(crate) fn reply_with_knowledge_semantic_retry(
+        client_id: impl Into<ClientId>,
+        event: BackendEvent,
+        semantic_retry: Option<gwt::KnowledgeSemanticRetry>,
+    ) -> Self {
+        assert!(
+            matches!(event, BackendEvent::KnowledgeSearchResults { .. }),
+            "knowledge semantic retry metadata requires KnowledgeSearchResults"
+        );
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+            knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
+        }
+    }
+
+    pub(crate) fn reply_with_nonsemantic_knowledge_error(
+        client_id: impl Into<ClientId>,
+        event: BackendEvent,
+    ) -> Self {
+        assert!(
+            matches!(
+                event,
+                BackendEvent::KnowledgeError {
+                    request_id: Some(_),
+                    query: Some(_),
+                    ..
+                }
+            ),
+            "non-semantic knowledge error metadata requires a correlated KnowledgeError"
+        );
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+            knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
         }
     }
 }
@@ -728,6 +779,10 @@ pub struct AppRuntime {
     /// unguessable process-local ticket, never by wire correlation data.
     pub(crate) pending_agent_self_closes: HashMap<String, PendingAgentSelfClose>,
     pub(crate) issue_link_cache_dir: PathBuf,
+    /// SPEC #3170 FR-102: latest related-work snapshot per project root,
+    /// captured by full load/search/refresh augmentation and reused verbatim
+    /// by the detail-only selection path.
+    pub(crate) knowledge_related_snapshot: knowledge::KnowledgeRelatedSnapshot,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
@@ -1290,6 +1345,7 @@ impl AppRuntime {
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
+            knowledge_related_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
             pty_writers,
@@ -3830,16 +3886,28 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-            } => self.load_knowledge_bridge_events(
-                &client_id,
-                KnowledgeLoadRequest {
-                    id: &id,
-                    kind: knowledge_kind,
-                    request_id,
-                    selected_number: Some(number),
-                    refresh: false,
-                },
-            ),
+            } => match knowledge_kind {
+                KnowledgeKind::Issue | KnowledgeKind::Spec => self
+                    .select_knowledge_bridge_entry_events(
+                        &client_id,
+                        &id,
+                        knowledge_kind,
+                        request_id,
+                        number,
+                    ),
+                // FR-102 intentionally covers only Issue/SPEC. Keep the PR
+                // surface on its pre-existing full-load selection path.
+                KnowledgeKind::Pr => self.load_knowledge_bridge_events(
+                    &client_id,
+                    KnowledgeLoadRequest {
+                        id: &id,
+                        kind: knowledge_kind,
+                        request_id,
+                        selected_number: Some(number),
+                        refresh: false,
+                    },
+                ),
+            },
             FrontendEvent::UpdateKnowledgeBridgePhase {
                 id,
                 request_id,

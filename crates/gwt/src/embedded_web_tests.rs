@@ -2288,9 +2288,26 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
         html.contains("request_id"),
         "expected semantic search requests to carry request ids for stale-response guards",
     );
+    let knowledge_status_block = html
+        .split("function renderKnowledgeStatusOnly")
+        .nth(1)
+        .and_then(|tail| tail.split("function renderIssueRow").next())
+        .expect("knowledge status renderer");
     assert!(
-        html.contains("Searching semantic index"),
-        "expected semantic search to expose an in-progress state",
+        knowledge_status_block.contains("!issueSurface && state.searching")
+            && knowledge_status_block.contains("Searching semantic index"),
+        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+    );
+    let direct_send_block = html
+        .split("function sendKnowledgeSemanticSearchNow")
+        .nth(1)
+        .and_then(|tail| tail.split("const uiTraceWiring").next())
+        .expect("semantic direct-send helper");
+    assert!(
+        direct_send_block.contains("activeSocket.readyState !== WebSocket.OPEN")
+            && direct_send_block.contains("activeSocket.send(JSON.stringify(message))")
+            && !direct_send_block.contains("pendingMessages.push"),
+        "expected semantic search to use an OPEN-only direct send that cannot enter the generic queue",
     );
     assert!(
         html.contains("% match"),
@@ -2420,9 +2437,10 @@ fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results
         "expected semantic search state to track the single in-flight backend request",
     );
     assert!(
-        html.contains("queuedSearchQuery")
-            && html.contains("const nextQuery = state.queuedSearchQuery;"),
-        "expected semantic search state to coalesce additional input to the latest query",
+        html.contains("searchGeneration")
+            && html.contains("inFlightSearchIntent")
+            && html.contains("queuedSearchIntent"),
+        "expected semantic search to coalesce one physical request plus one generation-fenced latest intent",
     );
     assert!(
             !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
@@ -2442,9 +2460,27 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
         html.contains("request_id: requestId,\n          number,"),
         "expected select_knowledge_bridge_entry requests to carry the detail request id",
     );
+    let load_request_block = html
+        .split("function requestKnowledgeBridge")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
+                .next()
+        })
+        .expect("knowledge load request block");
+    let pr_compatibility_block = load_request_block
+        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n        }").next())
+        .expect("PR compatibility reset block");
     assert!(
-        html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
-        "expected new cache loads to invalidate older detail response ids",
+        load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
+            && load_request_block
+                .matches("state.detailRequestId = 0;")
+                .count()
+                == 1
+            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
+        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),

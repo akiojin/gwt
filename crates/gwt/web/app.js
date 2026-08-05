@@ -862,6 +862,22 @@
         pendingMessages.push(message);
       }
 
+      function sendKnowledgeSemanticSearchNow(message) {
+        // Semantic search owns its retry lifecycle and must never enter the
+        // generic reconnect queue. Keep the OPEN check and direct send in one
+        // synchronous operation; a close race is reported as false.
+        const activeSocket = socket;
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+          return false;
+        }
+        try {
+          activeSocket.send(JSON.stringify(message));
+          return true;
+        } catch (_err) {
+          return false;
+        }
+      }
+
       const uiTraceWiring = createUiTraceWiring({
         profiler: uiTraceProfiler,
         send,
@@ -1088,6 +1104,11 @@
 
       function setConnectionState(connected) {
         connectionOverlay.setConnected(connected);
+        // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
+        // retry owner; reconnect restarts degraded open windows at 5s.
+        if (typeof handleKnowledgeTransportChange === "function") {
+          handleKnowledgeTransportChange(connected);
+        }
         // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
         // screen overlay above) is the home for connection state — the
         // permanent canvas hint bar is retired. The class is set on the strip
@@ -4256,8 +4277,10 @@
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        handleKnowledgeTransportChange,
       } = createKnowledgeKanbanSurface({
         send,
+        sendKnowledgeSemanticSearchNow,
         createNode,
         createKnowledgeMarkdownBody,
         windowMap,
