@@ -8407,7 +8407,7 @@ exit 1
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
             .expect("persist excluded state");
 
-        assert!(!super::commit_issue_monitor_effect_result(
+        assert!(super::commit_issue_monitor_effect_result(
             &prefs_path,
             &mut monitor,
             super::CompletedIssueMonitorEffect {

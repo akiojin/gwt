@@ -908,6 +908,82 @@ exit 1\n",
         assert_eq!(entry.snapshot.comments[0].id, gwt_github::CommentId(777));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh() {
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        write_issue_cache_refresh_meta(&cache_root, Duration::from_secs(60))
+            .expect("write initial full refresh metadata");
+        let meta_before = fs::read(issue_cache_refresh_meta_path(&cache_root))
+            .expect("read initial refresh metadata");
+
+        let body = "<!-- gwt-spec id=42 version=1 -->\\n\
+            <!-- sections:\\nplan=comment:777\\nspec=body\\ntasks=body\\n-->\\n\\n\
+            <!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n\
+            <!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->";
+        let view_json = format!(
+            r#"{{"number":42,"title":"Targeted spec","body":"{body}","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"2026-08-05T10:00:00Z","comments":[{{"id":"IC_kwDOTest","url":"https://github.com/example/repo/issues/42#issuecomment-777","body":"<!-- artifact:plan BEGIN -->\nPlan body\n<!-- artifact:plan END -->","createdAt":"2026-08-05T10:00:00Z"}}]}}"#,
+        );
+        let fake_gh = repo_path.join("gh.cmd");
+        fs::write(
+            &fake_gh,
+            format!(
+                "@echo off\r\n\
+if /I \"%1 %2 %3\"==\"issue view 42\" (\r\n\
+  echo {view_json}\r\n\
+  exit /b 0\r\n\
+)\r\n\
+>&2 echo unexpected gh invocation %*\r\n\
+exit /b 1\r\n"
+            ),
+        )
+        .expect("write fake gh");
+
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+        let result =
+            refresh_issue_cache_entry_from_remote(&repo_path, &cache_root, IssueNumber(42));
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+
+        result.expect("targeted refresh succeeds");
+        assert_eq!(
+            fs::read(issue_cache_refresh_meta_path(&cache_root))
+                .expect("read refresh metadata after target update"),
+            meta_before,
+            "one Issue refresh must not claim that the complete cache is fresh"
+        );
+        let entry = Cache::new(cache_root)
+            .load_entry(IssueNumber(42))
+            .expect("targeted snapshot parses");
+        assert_eq!(entry.snapshot.updated_at.0, "2026-08-05T10:00:00Z");
+        assert_eq!(entry.snapshot.comments.len(), 1);
+        assert_eq!(entry.snapshot.comments[0].id, CommentId(777));
+        assert_eq!(
+            entry
+                .spec_body
+                .sections
+                .get(&gwt_github::SectionName("plan".to_string()))
+                .map(String::as_str),
+            Some("Plan body")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh() {

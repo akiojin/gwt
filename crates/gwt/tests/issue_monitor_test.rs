@@ -977,7 +977,7 @@ fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
 }
 
 #[test]
-fn scan_exclusion_revokes_uncommitted_claim_and_rejects_late_acquisition() {
+fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
     for exclusion in ["not-ready", "hold"] {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -1020,13 +1020,16 @@ fn scan_exclusion_revokes_uncommitted_claim_and_rejects_late_acquisition() {
             "2026-08-05T10:01:00Z",
         );
 
-        assert!(!monitor.pending_effects().iter().any(|effect| matches!(
-            effect.payload,
-            gwt::IssueMonitorEffectPayload::AcquireClaim {
-                issue_number: 42,
-                ..
-            }
-        )));
+        assert!(monitor.pending_effects().iter().any(|effect| {
+            effect.state == gwt::IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    gwt::IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: 42,
+                        ..
+                    }
+                )
+        }));
         assert!(monitor.pending_effects().iter().any(|effect| matches!(
             &effect.payload,
             gwt::IssueMonitorEffectPayload::ReleaseClaim {

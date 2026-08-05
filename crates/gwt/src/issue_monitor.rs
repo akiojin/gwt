@@ -313,13 +313,14 @@ fn revoke_uncommitted_claims_for_issue(
         .cloned()
         .collect::<Vec<_>>();
     pending_effects.retain(|effect| {
-        !matches!(
-            effect.payload,
-            IssueMonitorEffectPayload::AcquireClaim {
-                issue_number: pending_issue,
-                ..
-            } if pending_issue == issue_number
-        )
+        effect.state != IssueMonitorEffectState::Prepared
+            || !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: pending_issue,
+                    ..
+                } if pending_issue == issue_number
+            )
     });
     for effect in attempting {
         if let IssueMonitorEffectPayload::AcquireClaim {
@@ -3551,13 +3552,13 @@ impl IssueMonitorState {
         owner: impl Into<String>,
         expires_at: impl Into<String>,
     ) -> bool {
+        self.queue.retain(|queued| *queued != issue.number);
         if !self
             .inbox_item(issue.number)
             .is_some_and(|item| item.state == MonitorInboxState::Queued)
         {
             return false;
         }
-        self.queue.retain(|queued| *queued != issue.number);
         self.upsert_inbox(IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
@@ -4763,6 +4764,27 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
             }
+        );
+    }
+
+    #[test]
+    fn rejected_blocked_claim_removes_a_stale_nonqueued_queue_entry() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        let candidate = issue(42);
+        monitor.record_candidate(candidate.clone());
+        monitor.set_inbox_state(42, MonitorInboxState::HoldExcluded);
+
+        assert!(!monitor.record_blocked_by_claim(candidate, "other-agent", "2026-08-05T10:30:00Z",));
+        assert!(
+            monitor.queued_issue_numbers().is_empty(),
+            "a rejected late claim result must still guarantee synchronous loop progress"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::HoldExcluded)
         );
     }
 

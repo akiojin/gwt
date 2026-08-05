@@ -229,6 +229,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_gh_issues_json_accepts_missing_updated_at() {
+        let issues =
+            parse_gh_issues_json(r#"[{"number":42,"title":"Legacy payload","state":"OPEN"}]"#)
+                .expect("parse legacy payload");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 42);
+        assert!(issues[0].updated_at.is_none());
+    }
+
+    #[test]
     fn parse_gh_issues_json_invalid() {
         let result = parse_gh_issues_json("not json");
         assert!(result.is_err());

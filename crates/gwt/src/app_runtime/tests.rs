@@ -31074,7 +31074,7 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
             )),
             "2026-08-05T10:01:00Z",
         ),
-        0
+        1
     );
 
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");

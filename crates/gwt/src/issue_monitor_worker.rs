@@ -9,6 +9,8 @@ use crate::{
 };
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
+const ISSUE_MONITOR_TARGETED_REFRESH_LIMIT: usize = 20;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
     pub event: String,
@@ -247,6 +249,23 @@ fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
 fn issue_monitor_candidates_with_readiness<F>(
     issues: Vec<gwt_git::issue::Issue>,
     cache_root: &Path,
+    refresh: F,
+) -> (Vec<IssueMonitorIssue>, Vec<String>)
+where
+    F: FnMut(IssueNumber) -> Result<(), String>,
+{
+    issue_monitor_candidates_with_readiness_and_refresh_limit(
+        issues,
+        cache_root,
+        ISSUE_MONITOR_TARGETED_REFRESH_LIMIT,
+        refresh,
+    )
+}
+
+fn issue_monitor_candidates_with_readiness_and_refresh_limit<F>(
+    issues: Vec<gwt_git::issue::Issue>,
+    cache_root: &Path,
+    refresh_limit: usize,
     mut refresh: F,
 ) -> (Vec<IssueMonitorIssue>, Vec<String>)
 where
@@ -255,6 +274,7 @@ where
     let cache = Cache::new(cache_root.to_path_buf());
     let mut candidates = Vec::with_capacity(issues.len());
     let mut errors = Vec::new();
+    let mut refresh_count = 0;
 
     for issue in issues {
         let is_spec = issue
@@ -278,7 +298,14 @@ where
         });
         let entry = if cache_matches_live {
             cached
+        } else if refresh_count >= refresh_limit {
+            errors.push(format!(
+                "issue #{} targeted refresh skipped: per-scan limit {} reached",
+                issue.number, refresh_limit
+            ));
+            None
         } else {
+            refresh_count += 1;
             match refresh(number) {
                 Ok(()) => {
                     let refreshed = cache.load_entry(number);
@@ -1233,6 +1260,40 @@ mod tests {
     }
 
     #[test]
+    fn targeted_refresh_limit_bounds_serial_remote_work_and_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut refreshed_numbers = Vec::new();
+
+        let (issues, errors) = issue_monitor_candidates_with_readiness_and_refresh_limit(
+            vec![
+                live_issue(42, &["gwt-spec"], Some("2026-08-05T10:00:00Z")),
+                live_issue(43, &["gwt-spec"], Some("2026-08-05T10:00:00Z")),
+            ],
+            dir.path(),
+            1,
+            |number| {
+                refreshed_numbers.push(number.0);
+                cache
+                    .write_snapshot(&structured_spec(
+                        number.0,
+                        "2026-08-05T10:00:00Z",
+                        "Plan body",
+                        "- [ ] T-001",
+                    ))
+                    .map_err(|error| error.to_string())
+            },
+        );
+
+        assert_eq!(refreshed_numbers, vec![42]);
+        assert_eq!(issues[0].readiness, IssueMonitorReadiness::Ready);
+        assert_eq!(issues[1].readiness, IssueMonitorReadiness::NotReady);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("#43"));
+        assert!(errors[0].contains("per-scan limit 1 reached"));
+    }
+
+    #[test]
     fn targeted_refresh_with_unparseable_spec_remains_not_ready() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = Cache::new(dir.path().to_path_buf());
@@ -2010,6 +2071,14 @@ exit 1
         .is_empty());
         assert!(monitor.autonomous_record(50).is_none());
         assert!(monitor.autonomous_record(51).is_none());
+        assert_eq!(
+            monitor.inbox_item(50).map(|item| item.state),
+            Some(MonitorInboxState::NotReady)
+        );
+        assert_eq!(
+            monitor.inbox_item(51).map(|item| item.state),
+            Some(MonitorInboxState::HoldExcluded)
+        );
     }
 
     #[test]
