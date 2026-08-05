@@ -566,7 +566,7 @@ export function createProjectShellSurface({
           : "";
         const worktreeBadgeView = windowWorktreeBadgeView(entry);
         const worktreeBadge = shouldShowWindowWorktreeBadge(entry)
-          ? `<span class="window-worktree-badge window-list-worktree" data-worktree-form="${escapeHtml(worktreeBadgeView.form)}" data-worktree-label="${escapeHtml(worktreeBadgeView.label)}" data-worktree-symbol="${escapeHtml(worktreeBadgeView.symbol)}" aria-label="${escapeHtml(worktreeBadgeView.ariaLabel)}" title="${escapeHtml(worktreeBadgeView.title)}">${escapeHtml(worktreeBadgeView.shortLabel)}</span>`
+          ? `<span class="window-worktree-badge window-list-worktree" role="img" data-worktree-form="${escapeHtml(worktreeBadgeView.form)}" data-worktree-label="${escapeHtml(worktreeBadgeView.label)}" data-worktree-symbol="${escapeHtml(worktreeBadgeView.symbol)}" aria-label="${escapeHtml(worktreeBadgeView.ariaLabel)}" title="${escapeHtml(worktreeBadgeView.title)}">${escapeHtml(worktreeBadgeView.shortLabel)}</span>`
           : "";
         // FR-045 (anshin): surface the agent's live activity detail
         // (dynamic_title_detail) as a glanceable line when it differs from the

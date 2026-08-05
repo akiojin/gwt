@@ -76,6 +76,7 @@ export function renderWindowWorktreeBadge(badgeElement, windowData) {
     delete badgeElement.dataset.worktreeForm;
     delete badgeElement.dataset.worktreeLabel;
     delete badgeElement.dataset.worktreeSymbol;
+    badgeElement.removeAttribute("role");
     badgeElement.removeAttribute("aria-label");
     badgeElement.removeAttribute("title");
     return;
@@ -86,6 +87,7 @@ export function renderWindowWorktreeBadge(badgeElement, windowData) {
   badgeElement.dataset.worktreeForm = view.form;
   badgeElement.dataset.worktreeLabel = view.label;
   badgeElement.dataset.worktreeSymbol = view.symbol;
+  badgeElement.setAttribute("role", "img");
   badgeElement.setAttribute("aria-label", view.ariaLabel);
   badgeElement.title = view.title;
 }

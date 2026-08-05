@@ -98,6 +98,7 @@ test("DOM helpers attach semantic worktree data and accessible badge labels", ()
   assert.equal(badge.dataset.worktreeLabel, "Ephemeral");
   assert.equal(badge.dataset.worktreeSymbol, "Ø");
   assert.equal(badge.textContent, "Ephemeral");
+  assert.equal(badge.getAttribute("role"), "img");
   assert.equal(badge.getAttribute("aria-label"), "Ephemeral branchless worktree");
   assert.equal(badge.title, "Ephemeral branchless worktree");
 });
@@ -120,6 +121,7 @@ test("hidden ordinary-panel badges clear semantic attributes", () => {
   assert.equal(badge.dataset.worktreeForm, undefined);
   assert.equal(badge.dataset.worktreeLabel, undefined);
   assert.equal(badge.dataset.worktreeSymbol, undefined);
+  assert.equal(badge.getAttribute("role"), null);
   assert.equal(badge.getAttribute("aria-label"), null);
   assert.equal(badge.getAttribute("title"), null);
 });

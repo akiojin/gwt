@@ -597,6 +597,21 @@ test("workspace windows expose semantic worktree badges separately from agent co
   );
   assert.match(
     projectShellSurfaceSource,
+    /class="window-worktree-badge window-list-worktree"[^>]*role="img"/,
+    "window list worktree badges must expose an image role for their accessible name",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /badgeElement\.setAttribute\("role",\s*"img"\)/,
+    "visible titlebar worktree badges must expose an image role",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /badgeElement\.removeAttribute\("role"\)/,
+    "hidden titlebar worktree badges must remove their image role",
+  );
+  assert.match(
+    projectShellSurfaceSource,
     /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(entry\)\)/,
     "window list render keys must use the same worktree-form adapter as the badge",
   );
@@ -609,6 +624,16 @@ test("workspace windows expose semantic worktree badges separately from agent co
     frontendStyle,
     /\.fleet-minimap__cell\[data-worktree-symbol\]::before/,
     "minimap cells must render a compact worktree marker",
+  );
+  assert.match(
+    fleetMinimapSource,
+    /const WORKTREE_MARKER_MIN_CELL_SIZE = 16;/,
+    "minimap marker footprint must have one semantic 16px boundary",
+  );
+  assert.match(
+    fleetMinimapSource,
+    /width >= WORKTREE_MARKER_MIN_CELL_SIZE[\s\S]*height >= WORKTREE_MARKER_MIN_CELL_SIZE/,
+    "minimap cells must apply the marker boundary on both dimensions",
   );
   assert.match(
     windowWorktreeFormSource,

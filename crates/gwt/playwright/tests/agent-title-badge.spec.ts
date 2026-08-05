@@ -65,6 +65,10 @@ test.describe("Agent title role and worktree badges", () => {
       "aria-label",
       "Branch-backed worktree",
     );
+    await expect(branchBackedBadge).toHaveAttribute("role", "img");
+    await expect(branchBackedBadge).toHaveAccessibleName(
+      "Branch-backed worktree",
+    );
     await expect(branchBackedBadge).toHaveAttribute(
       "title",
       "Branch-backed worktree",
@@ -86,6 +90,10 @@ test.describe("Agent title role and worktree badges", () => {
       "aria-label",
       "Ephemeral branchless worktree",
     );
+    await expect(ephemeralBadge).toHaveAttribute("role", "img");
+    await expect(ephemeralBadge).toHaveAccessibleName(
+      "Ephemeral branchless worktree",
+    );
 
     const unknownBadge = unknownWindow.locator(".window-worktree-badge");
     await expect(unknownBadge).toBeVisible();
@@ -100,6 +108,8 @@ test.describe("Agent title role and worktree badges", () => {
       "aria-label",
       "Unknown worktree form",
     );
+    await expect(unknownBadge).toHaveAttribute("role", "img");
+    await expect(unknownBadge).toHaveAccessibleName("Unknown worktree form");
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible();
@@ -120,10 +130,6 @@ test.describe("Agent title role and worktree badges", () => {
       "data-worktree-label",
       "Branch-backed",
     );
-    await expect(minimapBranchBacked).toHaveAttribute(
-      "data-worktree-symbol",
-      "B",
-    );
     await expect(minimapEphemeral).toHaveAttribute(
       "data-worktree-form",
       "ephemeral",
@@ -132,16 +138,26 @@ test.describe("Agent title role and worktree badges", () => {
       "data-worktree-label",
       "Ephemeral",
     );
-    await expect(minimapEphemeral).toHaveAttribute(
-      "data-worktree-symbol",
-      "Ø",
-    );
     await expect(minimapUnknown).toHaveAttribute("data-worktree-form", "unknown");
     await expect(minimapUnknown).toHaveAttribute(
       "data-worktree-label",
       "Unknown worktree form",
     );
-    await expect(minimapUnknown).toHaveAttribute("data-worktree-symbol", "?");
+    for (const minimapCell of [
+      minimapBranchBacked,
+      minimapEphemeral,
+      minimapUnknown,
+    ]) {
+      const cellBox = await requiredBoundingBox(
+        minimapCell,
+        "compact minimap worktree cell",
+      );
+      expect(Math.min(cellBox.width, cellBox.height)).toBeLessThan(16);
+      await expect(minimapCell).not.toHaveAttribute(
+        "data-worktree-symbol",
+        /.+/,
+      );
+    }
 
     await page.locator("#window-list-button").click();
     const panel = page.locator("#window-list-panel");
@@ -163,14 +179,26 @@ test.describe("Agent title role and worktree badges", () => {
       "data-worktree-form",
       "branch-backed",
     );
+    await expect(branchBackedListBadge).toHaveAttribute("role", "img");
+    await expect(branchBackedListBadge).toHaveAccessibleName(
+      "Branch-backed worktree",
+    );
     await expect(ephemeralListBadge).toHaveText("Ephemeral");
     await expect(ephemeralListBadge).toHaveAttribute(
       "data-worktree-form",
       "ephemeral",
     );
+    await expect(ephemeralListBadge).toHaveAttribute("role", "img");
+    await expect(ephemeralListBadge).toHaveAccessibleName(
+      "Ephemeral branchless worktree",
+    );
     await expect(unknownListBadge).toHaveText("?");
     await expect(unknownListBadge).toHaveAttribute(
       "data-worktree-label",
+      "Unknown worktree form",
+    );
+    await expect(unknownListBadge).toHaveAttribute("role", "img");
+    await expect(unknownListBadge).toHaveAccessibleName(
       "Unknown worktree form",
     );
 
