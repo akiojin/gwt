@@ -1535,6 +1535,8 @@
       }
 
       function windowRoleBadgeLabel(windowData) {
+        // FR-020: the PM's badge names its role, not its provider.
+        if (windowData?.is_pm) return PM_ROLE_BADGE;
         const displayTitle = windowDisplayTitle(windowData);
         const isAgentWindow = isAgentWindowPreset(windowData?.preset);
         const label = isAgentWindow
@@ -1566,6 +1568,13 @@
         return "Normal";
       }
 
+      // SPEC-3431 FR-020. The PM runs Claude like any other agent pane, so
+      // without an explicit identity its chrome reads "Claude Code / Execution
+      // / Claude Code" — indistinguishable from a worker (observed in review,
+      // 2026-08-05). The role name leads; the PM's own focus follows it.
+      const PM_WINDOW_TITLE = "Project Manager";
+      const PM_ROLE_BADGE = "PM";
+
       function windowDisplayTitle(windowData) {
         const candidates = [
           windowData?.dynamic_title,
@@ -1573,6 +1582,16 @@
           windowData?.title,
           windowData?.agent_id,
         ];
+        if (windowData?.is_pm) {
+          // Keep the identity fixed and append whatever the PM is currently
+          // focused on, so the window never stops saying what it is.
+          const focus = String(
+            windowData?.dynamic_title || windowData?.purpose_title || "",
+          ).trim();
+          return focus && focus !== PM_WINDOW_TITLE
+            ? `${PM_WINDOW_TITLE} — ${focus}`
+            : PM_WINDOW_TITLE;
+        }
         for (const value of candidates) {
           const title = String(value || "").trim();
           if (title) return title;

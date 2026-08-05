@@ -6352,14 +6352,22 @@ button.workspace-board-ref:focus-visible {
    runtime state, so it never replaces the status chip or the agent colour.
    --------------------------------------------------------------------------- */
 
-/* Rail launcher (FR-018). Rests like any rail item; the role colour only
-   appears on hover/focus and in the state dot, so an idle rail stays calm. */
-.op-rail__item--pm:hover,
-.op-rail__item--pm:focus-visible {
+/* Rail launcher (FR-018). The PM is the one rail item that is a *destination*
+   rather than a command, and review (2026-08-05) showed a plain icon does not
+   read as "this is the PM". It therefore carries a persistent accent chip so
+   it stands apart from the command icons at a glance, in every state. */
+.op-rail__item--pm {
   color: var(--color-role-pm);
+  background: color-mix(in oklab, var(--color-role-pm) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-role-pm) 45%, transparent);
 }
 
-.op-rail__item--pm[data-pm-state="running"] .op-rail__icon {
+.op-rail__item--pm:hover,
+.op-rail__item--pm:focus-visible {
+  background: color-mix(in oklab, var(--color-role-pm) 26%, transparent);
+}
+
+.op-rail__item--pm .op-rail__icon {
   color: var(--color-role-pm);
 }
 
@@ -6433,11 +6441,21 @@ button.workspace-board-ref:focus-visible {
    form first, colour second — so the PM reads as distinct even for users who
    cannot separate the hue from the agent ramp. */
 .workspace-window[data-pm="true"] {
-  border-left: 3px solid var(--color-role-pm);
+  /* 3px was measured as "hard to notice" against the dark window chrome in
+     review (2026-08-05); the bar has to be legible at a glance from across
+     the canvas, not on close inspection. */
+  border-left: 6px solid var(--color-role-pm);
 }
 
 .workspace-window[data-pm="true"] .titlebar {
-  background: color-mix(in oklab, var(--color-role-pm) 10%, transparent);
+  background: color-mix(in oklab, var(--color-role-pm) 22%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-role-pm) 45%, transparent);
+}
+
+/* Keep the identity readable when the PM is not the focused window. */
+.workspace-window[data-pm="true"] .title-text {
+  color: var(--color-text-strong);
+  font-weight: 700;
 }
 
 .workspace-window[data-pm="true"] .window-role-badge {

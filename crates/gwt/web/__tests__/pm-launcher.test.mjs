@@ -95,6 +95,36 @@ test("FR-020: PM の role トークンは両テーマに定義され raw color �
   );
 });
 
+test("FR-020: PM ウィンドウは『何であるか』を文字で名乗る", () => {
+  // 実機レビュー（2026-08-05）で判明した欠陥の回帰固定。
+  // 初版は既存 role badge に色を付けただけで、表示文字列は通常の
+  // エージェント窓と同じ "Claude Code" のままだった。色は補助であって
+  // 識別子ではない — タイトルと badge が PM だと名乗る必要がある。
+  assert.match(
+    appJs,
+    /function windowDisplayTitle\(windowData\)\s*\{[\s\S]*?windowData\?\.is_pm/,
+    "PM 窓のタイトルは PM だと分かる文字列にする",
+  );
+  assert.match(appJs, /PM_WINDOW_TITLE\s*=\s*"Project Manager"/);
+  // role badge は agent 名ではなく PM を出す。
+  assert.match(
+    appJs,
+    /function windowRoleBadgeLabel\(windowData\)\s*\{[\s\S]*?windowData\?\.is_pm[\s\S]*?PM_ROLE_BADGE/,
+  );
+  assert.match(appJs, /PM_ROLE_BADGE\s*=\s*"PM"/);
+});
+
+test("FR-020: PM ウィンドウは lane badge を出さない", () => {
+  // PM は Execution/Intake という実行レーンの住人ではないので、lane badge は
+  // 意味を持たないノイズになる（実機で "Execution" が出て PM 表示と競合した）。
+  const laneIdentity = readFileSync(resolve(here, "../window-lane-identity.js"), "utf8");
+  assert.match(
+    laneIdentity,
+    /shouldShowWindowLaneBadge[\s\S]*?is_pm/,
+    "PM 窓では lane badge を抑止する",
+  );
+});
+
 test("FR-020: PM ウィンドウは左アクセント帯と塗り badge で識別する", () => {
   assert.match(
     componentsCss,
