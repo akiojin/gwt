@@ -13,9 +13,11 @@
 //! crash respawn, and every later refresh funnel through it, so this module
 //! never materializes the skill itself.
 //!
-//! Fresh spawns deliberately avoid the Launch Wizard profile machinery:
-//! a silent-launch profile does not exist on a fresh project (the Issue
-//! Monitor bootstrap trap), so the PM uses a fixed default agent instead.
+//! Fresh spawns read the project's own `PmSettings::launch_profile` and fall
+//! back to a fixed default. They deliberately avoid the Launch Wizard profile
+//! machinery: those profiles are derived from unrelated launches and do not
+//! exist at all on a fresh project (the Issue Monitor bootstrap trap), and the
+//! PM must come up regardless.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
