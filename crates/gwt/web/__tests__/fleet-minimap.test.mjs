@@ -252,7 +252,7 @@ test("worktree marker is suppressed when the minimap cell is too small to contai
   );
 });
 
-test("worktree marker appears only when a cell reaches the full 16px footprint", () => {
+test("worktree marker appears only when a cell reaches the full 17px footprint", () => {
   function renderMarkerAtCellSize(cellSize) {
     const { container } = setupDom();
     const windows = [
@@ -282,15 +282,15 @@ test("worktree marker appears only when a cell reaches the full 16px footprint",
     return container.querySelector(`[data-window-id="w-${cellSize}"]`);
   }
 
-  const fifteenPixelCell = renderMarkerAtCellSize(15);
-  assert.equal(Number.parseFloat(fifteenPixelCell.style.width), 15);
-  assert.equal(Number.parseFloat(fifteenPixelCell.style.height), 15);
-  assert.equal(fifteenPixelCell.dataset.worktreeSymbol, undefined);
-
   const sixteenPixelCell = renderMarkerAtCellSize(16);
   assert.equal(Number.parseFloat(sixteenPixelCell.style.width), 16);
   assert.equal(Number.parseFloat(sixteenPixelCell.style.height), 16);
-  assert.equal(sixteenPixelCell.dataset.worktreeSymbol, "Ø");
+  assert.equal(sixteenPixelCell.dataset.worktreeSymbol, undefined);
+
+  const seventeenPixelCell = renderMarkerAtCellSize(17);
+  assert.equal(Number.parseFloat(seventeenPixelCell.style.width), 17);
+  assert.equal(Number.parseFloat(seventeenPixelCell.style.height), 17);
+  assert.equal(seventeenPixelCell.dataset.worktreeSymbol, "Ø");
 });
 
 test("unknown agent worktree form propagates to the minimap", () => {

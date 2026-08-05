@@ -627,8 +627,8 @@ test("workspace windows expose semantic worktree badges separately from agent co
   );
   assert.match(
     fleetMinimapSource,
-    /const WORKTREE_MARKER_MIN_CELL_SIZE = 16;/,
-    "minimap marker footprint must have one semantic 16px boundary",
+    /const WORKTREE_MARKER_MIN_CELL_SIZE = 17;/,
+    "minimap marker footprint must have one semantic 17px boundary",
   );
   assert.match(
     fleetMinimapSource,

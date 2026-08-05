@@ -35,8 +35,8 @@ const FRAME_FRACTION_DEFAULT = 0.45;
 const FRAME_FRACTION_MIN = 0.15;
 const FRAME_FRACTION_MAX = 0.9;
 const MINIMAP_ZOOM_STEP = 1.25; // per wheel notch / button press.
-// Marker footprint: 2px inset + 8px content + 4px padding + 2px border.
-const WORKTREE_MARKER_MIN_CELL_SIZE = 16;
+// Marker footprint: 1px cell border + 2px inset + 8px content + 4px padding + 2px marker border.
+const WORKTREE_MARKER_MIN_CELL_SIZE = 17;
 
 function finiteOr(value, fallback) {
   return Number.isFinite(value) ? value : fallback;

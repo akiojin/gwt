@@ -314,11 +314,14 @@ async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
       `${expectedMarker.form} minimap marker in viewport`,
     );
     const pseudo = await marker.evaluate((element) => {
+      const cellStyle = getComputedStyle(element);
       const style = getComputedStyle(element, "::before");
       const pixels = (value) => Number.parseFloat(value) || 0;
       const contentWidth = Math.max(pixels(style.width), pixels(style.minWidth));
       const contentHeight = Math.max(pixels(style.height), pixels(style.minHeight));
       return {
+        cellBorderBottom: pixels(cellStyle.borderBottomWidth),
+        cellBorderLeft: pixels(cellStyle.borderLeftWidth),
         content: style.content,
         bottom: pixels(style.bottom),
         left: pixels(style.left),
@@ -339,14 +342,15 @@ async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
     expect(pseudo.content).toContain(expectedMarker.symbol);
     expect(pseudo.outerWidth).toBeGreaterThan(0);
     expect(pseudo.outerHeight).toBeGreaterThan(0);
+    const roundingTolerance = 0.01;
     expect(
-      pseudo.left + pseudo.outerWidth,
+      pseudo.cellBorderLeft + pseudo.left + pseudo.outerWidth,
       `${expectedMarker.form} marker must fit its minimap cell horizontally`,
-    ).toBeLessThanOrEqual(markerBox.width + 1);
+    ).toBeLessThanOrEqual(markerBox.width + roundingTolerance);
     expect(
-      pseudo.bottom + pseudo.outerHeight,
+      pseudo.cellBorderBottom + pseudo.bottom + pseudo.outerHeight,
       `${expectedMarker.form} marker must fit its minimap cell vertically`,
-    ).toBeLessThanOrEqual(markerBox.height + 1);
+    ).toBeLessThanOrEqual(markerBox.height + roundingTolerance);
   }
 }
 
