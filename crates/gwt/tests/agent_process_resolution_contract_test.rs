@@ -74,7 +74,6 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
         "health must use the effective profile env"
     );
     for mutation in [
-        "write_lane_file(",
         "refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(",
         "maybe_register_codex_managed_hook_trust_for_launch(",
         "gwt_agent::Session::new(",

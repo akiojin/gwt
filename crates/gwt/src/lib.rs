@@ -47,6 +47,7 @@ pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
 pub mod work_notes;
+pub mod worktree_form;
 pub mod worktree_inventory;
 
 #[cfg(test)]
@@ -116,15 +117,15 @@ pub use issue_monitor::{
     save_issue_monitor_prefs, scan_issue_monitor_candidates,
     scan_issue_monitor_candidates_with_provenance, try_mutate_issue_monitor_prefs,
     try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousIssueRecord, AutonomousPhase,
-    AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAuthorityFence,
-    IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
-    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchPlan,
-    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest,
-    IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue, IssueMonitorPrefs,
-    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, MonitorInboxState,
-    PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAgentStatus,
+    IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
+    IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,
+    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource,
+    IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
+    IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
+    MonitorInboxState, PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

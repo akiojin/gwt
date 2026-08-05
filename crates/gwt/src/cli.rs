@@ -17,6 +17,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
@@ -54,7 +55,7 @@ use std::{
 };
 
 pub use board::{BoardCommand, BoardPostCommand};
-pub use commands::{IssueCommand, PrCommand};
+pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;

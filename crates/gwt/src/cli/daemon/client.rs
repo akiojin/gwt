@@ -359,6 +359,10 @@ mod tests {
                     "expected at least one tracked connection, got {}",
                     status.connections
                 );
+                let issue_monitor = status
+                    .issue_monitor
+                    .expect("live daemon exposes Issue Monitor projection");
+                assert_eq!(issue_monitor["queue"], serde_json::json!([]));
             }
             other => panic!("expected Status frame, got: {other:?}"),
         }

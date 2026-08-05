@@ -1405,6 +1405,10 @@ pub struct ActiveWorkItemView {
     pub blocked_agents: usize,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    /// Worktree-specific managed-hook health. Unlike the projection-level
+    /// compatibility field, this is audited against this row's exact worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
@@ -3634,6 +3638,7 @@ mod tests {
                     blocked_agents: 0,
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    managed_hook_health: None,
                     pr_number: Some(2538),
                     pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
                     pr_state: Some("OPEN".to_string()),
