@@ -193,6 +193,21 @@ pub enum AttachmentProgressPhase {
     Failed,
 }
 
+/// Final, client-scoped result of one correlated `Continue work` operation.
+///
+/// The public result deliberately carries no Session, conversation, execution
+/// binding, Host route, or capability identity. Those values are resolved and
+/// verified by the current Host and remain internal authorization evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinueWorkOutcomeKind {
+    FocusedExisting,
+    ContinuedConversation,
+    StartedWithHandoff,
+    ConflictUnknown,
+    Failed,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -586,6 +601,9 @@ pub enum FrontendEvent {
     /// which previous agent to restart without going through the Launch
     /// Wizard.
     ListResumableAgents {
+        /// Retry correlation only; this value grants no authority.
+        #[serde(default)]
+        operation_id: String,
         #[serde(default)]
         workspace_id: Option<String>,
     },
@@ -600,9 +618,22 @@ pub enum FrontendEvent {
     /// current viewport so the spawned agent window appears at a sensible
     /// position inside the visible canvas.
     ResumeWorkspaceAgent {
+        /// Retry correlation only; this value grants no authority.
+        #[serde(default)]
+        operation_id: String,
         session_id: String,
         #[serde(default)]
         agent_session_id: Option<String>,
+        bounds: WindowGeometry,
+    },
+    /// Start or recover the producing Execution for one opaque Work identity.
+    ///
+    /// Caller-controlled Session/conversation/generation/binding identifiers
+    /// are intentionally absent. `operation_id` is a retry correlation key,
+    /// not authority.
+    ContinueWork {
+        operation_id: String,
+        work_id: String,
         bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {
@@ -1153,6 +1184,66 @@ pub struct WorkspaceHistoryAgentView {
 
 pub type WorkAgentView = WorkspaceHistoryAgentView;
 
+/// Read-only execution diagnosis shared by the CLI status operation and the
+/// Workspace detail surface. String fields preserve the stable snake_case wire
+/// values produced by the execution state machine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExecutionDiagnosisView {
+    #[serde(default = "default_execution_diagnosis_schema_version")]
+    pub schema_version: u32,
+    pub ecr_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_verification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    pub binding_state: String,
+    pub binding_cause: String,
+    pub verification_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trivial_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_update_applicable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_update_applicability_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_revival: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_repair: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_event_receipt_generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_event_receipt_matches_current_generation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<serde_json::Value>,
+    pub settlement_severity: String,
+    #[serde(default)]
+    pub settlement_obligation_open: bool,
+    #[serde(default)]
+    pub open_obligations: Vec<String>,
+    #[serde(default)]
+    pub available_recoveries: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn default_execution_diagnosis_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExecutionContainerView {
     pub branch: Option<String>,
@@ -1160,6 +1251,8 @@ pub struct WorkspaceExecutionContainerView {
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnosis: Option<WorkspaceExecutionDiagnosisView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1283,6 +1376,8 @@ pub struct ActiveWorkspaceWorkView {
     pub close_blocked_reason: Option<String>,
     #[serde(default)]
     pub agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_diagnosis: Option<WorkspaceExecutionDiagnosisView>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -1310,6 +1405,10 @@ pub struct ActiveWorkItemView {
     pub blocked_agents: usize,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    /// Worktree-specific managed-hook health. Unlike the projection-level
+    /// compatibility field, this is audited against this row's exact worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
@@ -1817,6 +1916,8 @@ pub enum BackendEvent {
     /// so the picker modal can render an explicit "Nothing to resume"
     /// notice instead of silently leaving the user without feedback.
     WorkspaceResumableAgents {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         agents: Vec<crate::launch_wizard::ResumableAgentView>,
         #[serde(skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
@@ -1825,6 +1926,8 @@ pub enum BackendEvent {
     /// Client-scoped reply so the picker modal can keep itself open and
     /// re-enable the selected entry with the user-facing reason.
     WorkspaceResumeAgentError {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         session_id: String,
         message: String,
     },
@@ -1833,9 +1936,24 @@ pub enum BackendEvent {
     /// focused. Lets the frontend settle its pending Resume UI
     /// deterministically instead of guessing from broadcasts.
     WorkspaceResumeAgentStarted {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        operation_id: String,
         session_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+    },
+    /// Strong, exactly-correlated result for [`FrontendEvent::ContinueWork`].
+    /// Success variants are emitted only after their required Host/ledger/Work
+    /// readback; scheduling or PTY allocation is never success.
+    ContinueWorkOutcome {
+        operation_id: String,
+        work_id: String,
+        outcome: ContinueWorkOutcomeKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        retryable: bool,
     },
     LaunchProgress {
         id: String,
@@ -2210,6 +2328,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "process_line",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "terminal_snapshot",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -2244,10 +2367,15 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
     ),
+    // Issue #3315: attachment progress is a lossless latest-state snapshot
+    // coalesced per operation (`operation_id`), not a droppable ephemeral
+    // status. This guarantees the terminal `Attached` / `Failed` phase reaches
+    // the client even under a lossy terminal-output flood, so the frontend
+    // surface never gets stuck at `Queued · 100%`.
     BackendEventPolicy::new(
         "attachment_progress",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "window_state",
@@ -2458,6 +2586,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     // always-deliver (same transport guarantee as errors).
     BackendEventPolicy::new(
         "workspace_resume_agent_started",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "continue_work_outcome",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
@@ -2704,6 +2837,7 @@ impl BackendEvent {
             BackendEvent::WorkspaceResumableAgents { .. } => "workspace_resumable_agents",
             BackendEvent::WorkspaceResumeAgentError { .. } => "workspace_resume_agent_error",
             BackendEvent::WorkspaceResumeAgentStarted { .. } => "workspace_resume_agent_started",
+            BackendEvent::ContinueWorkOutcome { .. } => "continue_work_outcome",
             BackendEvent::LaunchProgress { .. } => "launch_progress",
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
@@ -2804,9 +2938,9 @@ mod tests {
     use super::{
         backend_event_policy, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
-        FrontendEvent, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-        IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-        UiTracePayload, BACKEND_EVENT_POLICIES,
+        ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
+        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
+        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -3134,6 +3268,115 @@ mod tests {
     }
 
     #[test]
+    fn workspace_resume_agent_wire_contract_echoes_operation_correlation() {
+        let list_request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "list_resumable_agents",
+            "operation_id": "list-operation-1",
+            "workspace_id": "workspace-1"
+        }))
+        .expect("deserialize correlated list request");
+        assert!(matches!(
+            list_request,
+            FrontendEvent::ListResumableAgents { operation_id, .. }
+                if operation_id == "list-operation-1"
+        ));
+
+        let list = serde_json::to_value(BackendEvent::WorkspaceResumableAgents {
+            operation_id: "list-operation-1".to_string(),
+            agents: Vec::new(),
+            workspace_id: Some("workspace-1".to_string()),
+        })
+        .expect("serialize correlated list response");
+        assert_eq!(list["operation_id"], "list-operation-1");
+
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "resume_workspace_agent",
+            "operation_id": "resume-operation-1",
+            "session_id": "session-1",
+            "bounds": { "x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0 }
+        }))
+        .expect("deserialize correlated Resume request");
+        assert!(matches!(
+            request,
+            FrontendEvent::ResumeWorkspaceAgent { operation_id, .. }
+                if operation_id == "resume-operation-1"
+        ));
+
+        let started = serde_json::to_value(BackendEvent::WorkspaceResumeAgentStarted {
+            operation_id: "resume-operation-1".to_string(),
+            session_id: "session-1".to_string(),
+            branch: None,
+        })
+        .expect("serialize correlated Resume ack");
+        assert_eq!(started["operation_id"], "resume-operation-1");
+    }
+
+    #[test]
+    fn continue_work_wire_contract_carries_only_correlated_intent_and_typed_outcome() {
+        let request = serde_json::json!({
+            "kind": "continue_work",
+            "operation_id": "continue-work-operation-1",
+            "work_id": "work-session-opaque",
+            "bounds": {
+                "x": 12.0,
+                "y": 24.0,
+                "width": 960.0,
+                "height": 640.0
+            }
+        });
+        let parsed: FrontendEvent =
+            serde_json::from_value(request).expect("parse Continue work request");
+        assert!(matches!(
+            parsed,
+            FrontendEvent::ContinueWork {
+                operation_id,
+                work_id,
+                ..
+            } if operation_id == "continue-work-operation-1"
+                && work_id == "work-session-opaque"
+        ));
+
+        let event = BackendEvent::ContinueWorkOutcome {
+            operation_id: "continue-work-operation-1".to_string(),
+            work_id: "work-session-opaque".to_string(),
+            outcome: ContinueWorkOutcomeKind::ContinuedConversation,
+            message: None,
+            error_code: None,
+            retryable: false,
+        };
+        let value = serde_json::to_value(event).expect("serialize Continue work outcome");
+        assert_eq!(value["kind"], "continue_work_outcome");
+        assert_eq!(value["operation_id"], "continue-work-operation-1");
+        assert_eq!(value["work_id"], "work-session-opaque");
+        assert_eq!(value["outcome"], "continued_conversation");
+        assert_eq!(value["retryable"], false);
+        for forbidden in [
+            "session_id",
+            "conversation_id",
+            "generation_id",
+            "binding_id",
+            "host_route",
+            "token",
+        ] {
+            assert!(
+                value.get(forbidden).is_none(),
+                "public outcome must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_work_outcome_policy_guarantees_delivery() {
+        let policy = backend_event_policy("continue_work_outcome")
+            .expect("continue_work_outcome registered in BACKEND_EVENT_POLICIES");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
+        );
+    }
+
+    #[test]
     fn backend_event_policy_classifies_high_risk_delivery_contract() {
         let terminal_output =
             backend_event_policy("terminal_output").expect("terminal_output policy");
@@ -3144,6 +3387,13 @@ mod tests {
         );
         assert_eq!(
             terminal_output.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
+        let process_line = backend_event_policy("process_line").expect("process_line policy");
+        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
+        assert_eq!(
+            process_line.backpressure,
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
@@ -3244,6 +3494,64 @@ mod tests {
     }
 
     #[test]
+    fn workspace_execution_diagnosis_serializes_and_legacy_container_remains_compatible() {
+        let legacy: super::WorkspaceExecutionContainerView =
+            serde_json::from_value(serde_json::json!({
+                "branch": "work/3393",
+                "worktree_path": "/repo/work/3393",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": null
+            }))
+            .expect("deserialize legacy execution container");
+        assert_eq!(legacy.diagnosis, None);
+
+        let diagnosed: super::WorkspaceExecutionContainerView =
+            serde_json::from_value(serde_json::json!({
+                "branch": "work/3393",
+                "worktree_path": "/repo/work/3393",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": null,
+                "diagnosis": {
+                    "ecr_status": "blocked",
+                    "owner_kind": "spec",
+                    "owner_number": 3393,
+                    "blocked_reason": "verification evidence is stale",
+                    "missing_verification": "user confirmation",
+                    "generation_id": "generation-2",
+                    "binding_state": "stale",
+                    "binding_cause": "current_session_not_authorized",
+                    "verification_state": "stale_fingerprint",
+                    "settlement": {"blocked": "missing_upstream"},
+                    "settlement_severity": "warning",
+                    "settlement_obligation_open": true,
+                    "open_obligations": ["user_verification"],
+                    "available_recoveries": ["verify.run", "execution.reopen"],
+                    "warnings": ["Host status is temporarily unavailable"]
+                }
+            }))
+            .expect("deserialize diagnosed execution container");
+
+        let diagnosis = diagnosed.diagnosis.expect("diagnosis");
+        assert_eq!(diagnosis.ecr_status, "blocked");
+        assert_eq!(diagnosis.binding_state, "stale");
+        assert_eq!(diagnosis.settlement_severity, "warning");
+        assert_eq!(
+            diagnosis.available_recoveries,
+            vec!["verify.run", "execution.reopen"]
+        );
+
+        let serialized = serde_json::to_value(diagnosis).expect("serialize diagnosis");
+        assert_eq!(
+            serialized["blocked_reason"],
+            "verification evidence is stale"
+        );
+        assert_eq!(serialized["verification_state"], "stale_fingerprint");
+        assert_eq!(serialized["settlement_severity"], "warning");
+    }
+
+    #[test]
     fn active_work_projection_uses_distinct_wire_event_from_canvas_workspace_state() {
         let event = BackendEvent::ActiveWorkProjection {
             projection: Box::new(super::ActiveWorkProjectionView {
@@ -3308,6 +3616,7 @@ mod tests {
                     blocked_agents: 0,
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    managed_hook_health: None,
                     pr_number: Some(2538),
                     pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
                     pr_state: Some("OPEN".to_string()),
@@ -4054,6 +4363,31 @@ mod tests {
             event.delivery_policy().kind,
             "attachment_progress",
             "attachment progress must be registered in the backend event policy catalog"
+        );
+    }
+
+    // Issue #3315: attachment progress must be delivered as a lossless
+    // latest-state snapshot (coalesced per operation) so the terminal
+    // `Attached` / `Failed` phase is never dropped under a lossy output flood.
+    // The former `EphemeralStatus` / `BestEffort` class treated it as droppable,
+    // which left the frontend surface stuck at `Queued · 100%`.
+    #[test]
+    fn attachment_progress_delivers_as_lossless_snapshot() {
+        let policy =
+            backend_event_policy("attachment_progress").expect("attachment_progress policy");
+        assert_eq!(
+            policy.delivery,
+            BackendEventDeliveryClass::Snapshot,
+            "attachment progress must be a lossless snapshot, not a droppable ephemeral status"
+        );
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot,
+            "attachment progress coalesces the latest state per client scope"
+        );
+        assert!(
+            !policy.coalesces_on_frontend(),
+            "snapshot delivery is server-coalesced, not frontend LatestWins"
         );
     }
 

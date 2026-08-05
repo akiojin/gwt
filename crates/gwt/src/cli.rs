@@ -5,6 +5,7 @@
 //! module owns argv parsing, dispatches to the high-level SPEC operations in
 //! `gwt-github`, and writes the result to stdout/stderr.
 
+pub(crate) mod action_obligation;
 mod actions;
 pub(crate) mod artifact_operability;
 mod board;
@@ -16,6 +17,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
@@ -27,6 +29,7 @@ pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
+pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
 mod pane;
@@ -52,7 +55,7 @@ use std::{
 };
 
 pub use board::{BoardCommand, BoardPostCommand};
-pub use commands::{IssueCommand, PrCommand};
+pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;

@@ -9,8 +9,9 @@ use std::{
 
 use crate::{
     session::{
-        GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV,
-        GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+        GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
+        GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+        GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::LaunchRuntimeTarget,
 };
@@ -21,6 +22,7 @@ const GWT_WORKTREE_HASH_ENV: &str = "GWT_WORKTREE_HASH";
 const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     GWT_BIN_PATH_ENV,
+    GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
     GWT_HOOK_FORWARD_URL_ENV,
     GWT_PANE_WS_URL_ENV,
@@ -33,7 +35,16 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
 
 /// Return the current host process environment with GUI-launch PATH gaps filled.
 pub fn host_process_env() -> HashMap<String, String> {
-    hydrate_host_base_env(std::env::vars())
+    hydrate_host_base_env(process_env_lossy())
+}
+
+fn process_env_lossy() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os().map(|(key, value)| {
+        (
+            key.to_string_lossy().into_owned(),
+            value.to_string_lossy().into_owned(),
+        )
+    })
 }
 
 /// Fill common GUI-launch PATH gaps in a host base environment.
@@ -77,17 +88,39 @@ where
 /// Idempotent: re-running on an already-hydrated PATH yields the same value
 /// because `push_unique_path` deduplicates entries. No-op on Windows.
 ///
-/// Reads the current process env via `vars_os` (not `vars`) so a single
-/// non-Unicode environment variable does not panic startup. Skips writing to
-/// `std::env` if the computed PATH is empty so we never blank a usable PATH.
+/// Reads the current process env via `vars_os` (not `vars`) and lossily
+/// decodes non-Unicode entries so a single value does not panic startup. Skips
+/// writing to `std::env` if the computed PATH is empty so we never blank a
+/// usable PATH.
 pub fn apply_host_path_hydration_to_std_env() {
     if cfg!(windows) {
         return;
     }
-    let before = std::env::var("PATH").unwrap_or_default();
+    apply_host_path_hydration(process_env_lossy(), |hydrated| {
+        std::env::set_var("PATH", hydrated);
+    });
+}
+
+fn apply_host_path_hydration<I, F>(base_env: I, mut apply_path: F)
+where
+    I: IntoIterator<Item = (String, String)>,
+    F: FnMut(&str),
+{
+    if cfg!(windows) {
+        return;
+    }
+    let base_env = base_env.into_iter().collect::<Vec<_>>();
+    let before = base_env
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("PATH").then_some(value.clone()))
+        .unwrap_or_default();
     let before_count = std::env::split_paths(&before).count();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let Some(hydrated) = current_process_hydrated_path() else {
+    let home = base_env
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("HOME").then_some(value.clone()))
+        .unwrap_or_default();
+    let Some(hydrated) = compute_hydrated_path(base_env).filter(|hydrated| !hydrated.is_empty())
+    else {
         tracing::info!(
             target: "gwt::launch::startup",
             stage = "path_hydration",
@@ -102,7 +135,7 @@ pub fn apply_host_path_hydration_to_std_env() {
     };
     let after_count = std::env::split_paths(&hydrated).count();
     let added = after_count.saturating_sub(before_count);
-    std::env::set_var("PATH", &hydrated);
+    apply_path(&hydrated);
     tracing::info!(
         target: "gwt::launch::startup",
         stage = "path_hydration",
@@ -115,22 +148,6 @@ pub fn apply_host_path_hydration_to_std_env() {
         home = %home,
         "host PATH hydration applied"
     );
-}
-
-/// Compute the hydrated PATH from the running process env.
-///
-/// Returns `None` when the hydrated PATH is empty so `apply_host_path_hydration_to_std_env`
-/// never overwrites a usable `std::env::PATH` with a blank value (which would
-/// disable command lookup for subsequent `Command::new(...)` calls).
-fn current_process_hydrated_path() -> Option<String> {
-    let base_env: Vec<(String, String)> = std::env::vars_os()
-        .filter_map(|(key, value)| {
-            let key = key.into_string().ok()?;
-            let value = value.into_string().ok()?;
-            Some((key, value))
-        })
-        .collect();
-    compute_hydrated_path(base_env).filter(|hydrated| !hydrated.is_empty())
 }
 
 /// Effective environment assembled from the active profile and launch context.
@@ -460,6 +477,46 @@ mod tests {
     use gwt_config::{Profile, Settings};
 
     use super::*;
+
+    #[test]
+    fn environment_tests_never_mutate_the_process_path() {
+        let test_source = include_str!("environment.rs")
+            .split_once("mod tests {")
+            .expect("environment test module")
+            .1;
+        for mutation in [
+            concat!("std::env::", "set_var(\"PATH\""),
+            concat!("std::env::", "remove_var(\"PATH\""),
+        ] {
+            assert!(
+                !test_source.contains(mutation),
+                "PATH-mutating tests race every parallel process-spawn test: {mutation}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_process_env_lossily_decodes_non_unicode_entries() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let invalid_value = std::ffi::OsString::from_vec(vec![b'f', b'o', 0x80, b'o']);
+        let expected_value = invalid_value.to_string_lossy().into_owned();
+        let _env = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_NON_UTF8_PROCESS_ENV",
+            &invalid_value,
+        );
+
+        let env = host_process_env();
+
+        assert_eq!(
+            env.get("GWT_TEST_NON_UTF8_PROCESS_ENV"),
+            Some(&expected_value)
+        );
+    }
 
     fn write_profile_config(profile: Profile) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -957,15 +1014,7 @@ mod tests {
 
     #[test]
     fn apply_host_path_hydration_to_std_env_does_not_panic() {
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("PATH");
-        apply_host_path_hydration_to_std_env();
-        match original {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
+        apply_host_path_hydration(process_env_lossy(), |_| {});
     }
 
     #[cfg(target_os = "linux")]
@@ -982,99 +1031,24 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn apply_host_path_hydration_to_std_env_does_not_blank_path_when_no_inputs_on_linux() {
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_path = std::env::var_os("PATH");
-        let original_home = std::env::var_os("HOME");
-        std::env::remove_var("PATH");
-        std::env::remove_var("HOME");
-
-        apply_host_path_hydration_to_std_env();
-
-        if let Some(value) = std::env::var_os("PATH") {
-            assert!(
-                !value.is_empty(),
-                "apply_host_path_hydration_to_std_env must not write an empty PATH"
-            );
-        }
-
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+        let mut applied = false;
+        apply_host_path_hydration(Vec::<(String, String)>::new(), |_| applied = true);
+        assert!(!applied, "empty hydration must not write PATH");
     }
 
     #[cfg(not(windows))]
     #[test]
     fn apply_host_path_hydration_to_std_env_preserves_existing_path_entries() {
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-
-        apply_host_path_hydration_to_std_env();
-        let after = std::env::var("PATH").unwrap_or_default();
+        let mut after = String::new();
+        apply_host_path_hydration(
+            vec![(
+                "PATH".to_string(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            )],
+            |hydrated| after = hydrated.to_string(),
+        );
         let entries = std::env::split_paths(&after).collect::<Vec<_>>();
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
         assert!(entries.contains(&PathBuf::from("/bin")));
-
-        match original {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-    }
-
-    fn path_env_test_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn apply_host_path_hydration_to_std_env_emits_info_event_with_path_summary() {
-        use crate::test_capture::{CaptureLayer, CapturedEvents};
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let _lock = path_env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", "/usr/bin:/bin");
-
-        let events = CapturedEvents::new();
-        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
-        tracing::subscriber::with_default(subscriber, || {
-            apply_host_path_hydration_to_std_env();
-        });
-
-        match original_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
-
-        let captured = events.snapshot();
-        let info_events: Vec<_> = captured
-            .iter()
-            .filter(|event| event.level == tracing::Level::INFO)
-            .filter(|event| event.target == "gwt::launch::startup")
-            .collect();
-        assert!(
-            !info_events.is_empty(),
-            "expected at least one INFO event with target gwt::launch::startup; captured = {:?}",
-            captured
-        );
-        let event = info_events[0];
-        assert_eq!(
-            event.fields.get("stage").map(String::as_str),
-            Some("path_hydration")
-        );
-        assert!(event.fields.contains_key("path_before"));
-        assert!(event.fields.contains_key("path_entry_count_before"));
     }
 }

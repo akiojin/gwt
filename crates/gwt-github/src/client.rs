@@ -185,7 +185,30 @@ pub trait IssueClient: Send + Sync {
         new_body: &str,
     ) -> Result<CommentSnapshot, ApiError>;
 
+    /// Mutation-aware comment patch. Generic clients conservatively classify
+    /// their ordinary API error as pre-submit; transports that can distinguish
+    /// response loss must override this method.
+    fn patch_comment_mutation(
+        &self,
+        comment_id: CommentId,
+        new_body: &str,
+    ) -> OwnerMutationResult<CommentSnapshot> {
+        self.patch_comment(comment_id, new_body)
+            .map_err(OwnerMutationError::PreSubmit)
+    }
+
     fn create_comment(&self, number: IssueNumber, body: &str) -> Result<CommentSnapshot, ApiError>;
+
+    /// Mutation-aware comment creation. The stable claim id in `body` makes an
+    /// unknown result reconcilable by a later authoritative fetch.
+    fn create_comment_mutation(
+        &self,
+        number: IssueNumber,
+        body: &str,
+    ) -> OwnerMutationResult<CommentSnapshot> {
+        self.create_comment(number, body)
+            .map_err(OwnerMutationError::PreSubmit)
+    }
 
     /// Delete an Issue comment. Used by the multipart section writer
     /// (SPEC-3248 P7C / #3284) to clean up stale part comments after a

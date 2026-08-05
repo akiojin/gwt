@@ -119,6 +119,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let mut session = Session::new(&project_root, branch, AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(project_root.clone());
+    session.linked_issue_number = Some(3412);
     assert!(
         session.repo_hash.is_some(),
         "fixture origin must set repo hash"
@@ -160,6 +161,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let mut event = WorkEvent::new(WorkEventKind::Start, work_id, now);
     event.title = Some("Fixture Work".to_string());
     event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = Some("Issue #3412".to_string());
     event.agent_session_id = Some(session_id.to_string());
     event.agent_id = Some("codex".to_string());
     event.display_name = Some("Codex".to_string());

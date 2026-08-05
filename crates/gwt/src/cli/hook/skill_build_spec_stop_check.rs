@@ -32,13 +32,6 @@ pub fn handle_with_input(
     input: &str,
     current_session_id: Option<&str>,
 ) -> HookOutput {
-    let lane = super::context::HookContext::for_worktree(worktree).lane;
-    // A reduced-skill lane (intake today) does not run implementation skills,
-    // so stale build-spec state must not force a producing-work Stop gate.
-    if lane.policy_flags.reduced_skill_set {
-        return HookOutput::Silent;
-    }
-
     super::state_file_stop_check::decide(
         worktree,
         input,
@@ -133,16 +126,18 @@ mod tests {
     }
 
     #[test]
-    fn silent_for_intake_lane_even_when_build_state_is_active() {
+    fn active_build_state_gates_uniformly_after_lane_removal() {
+        // SPEC #3245 FR-007: the former intake-lane exemption is gone — an
+        // active build-spec state blocks Stop in every worktree the same way.
         let dir = tempfile::tempdir().unwrap();
-        gwt_skills::write_lane_file(dir.path(), &gwt_skills::INTAKE_PROFILE)
-            .expect("write intake lane file");
         save(dir.path(), SKILL_NAME, &active_state("sess-1", "red")).unwrap();
 
-        assert_eq!(
-            handle_with_input(dir.path(), "{}", Some("sess-1")),
-            HookOutput::Silent,
-            "intake sessions must not be forced through producing-work build-spec Stop gates"
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the build-spec gate fires uniformly after the lane removal"
         );
     }
 }

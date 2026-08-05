@@ -73,7 +73,7 @@ impl Pane {
         let rows = config.rows;
         let cols = config.cols;
         let pty = Arc::new(PtyHandle::spawn(config)?);
-        let parser = vt100::Parser::new(rows, cols, 0);
+        let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
         let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
         Ok(Self {
@@ -138,24 +138,22 @@ impl Pane {
 
     /// Build a replayable terminal snapshot for frontend reconnect.
     ///
-    /// `vt100::Screen::contents_formatted()` only describes the currently
-    /// visible grid. Prepending completed scrollback lines lets a fresh xterm.js
-    /// instance rebuild normal-buffer history before the current screen is
-    /// redrawn.
+    /// The snapshot is serialized from parsed vt100 state rather than raw PTY
+    /// fragments, preserving cursor, erase, wrapping, styling, and alternate
+    /// screen semantics without replaying external control-sequence side
+    /// effects.
+    ///
+    /// A terminal byte stream has only one saved-cursor slot per active
+    /// buffer, so it cannot simultaneously reproduce distinct saved
+    /// cursor/attributes and a pending-wrap cursor over a blank cell. In that
+    /// compound state, the snapshot preserves the current frame, cursor,
+    /// attributes, and next-printable continuation exactly; saved
+    /// cursor/attributes are best effort. Representable saved states remain
+    /// exact.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
-        let mut snapshot = Vec::new();
-        let scrollback_len = self.scrollback.len();
-        let visible_overlap =
-            visible_scrollback_overlap_len(&self.scrollback, self.parser.screen());
-        let replayable_len = scrollback_len.saturating_sub(visible_overlap);
-        let start = replayable_len.saturating_sub(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-
-        for line in self.scrollback.get_lines(start, replayable_len - start) {
-            append_snapshot_scrollback_line(&mut snapshot, line);
-        }
-
-        snapshot.extend_from_slice(&self.parser.screen().contents_formatted());
-        snapshot
+        self.parser
+            .screen()
+            .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
     }
 
     /// Get scrollback lines from the ring buffer.
@@ -235,115 +233,6 @@ impl Pane {
     }
 }
 
-fn visible_scrollback_overlap_len(scrollback: &ScrollbackStorage, screen: &vt100::Screen) -> usize {
-    let scrollback_len = scrollback.len();
-    if scrollback_len == 0 {
-        return 0;
-    }
-
-    let (_, cols) = screen.size();
-    let visible_rows: Vec<String> = screen.rows(0, cols).collect();
-    let max_overlap = scrollback_len.min(visible_rows.len());
-    let scrollback_tail: Vec<String> = scrollback
-        .get_lines(scrollback_len - max_overlap, max_overlap)
-        .into_iter()
-        .map(normalized_scrollback_text)
-        .collect();
-
-    for overlap in (1..=max_overlap).rev() {
-        let scrollback_suffix = &scrollback_tail[max_overlap - overlap..];
-        if visible_rows
-            .windows(overlap)
-            .any(|window| window == scrollback_suffix)
-        {
-            return overlap;
-        }
-    }
-
-    0
-}
-
-fn normalized_scrollback_text(line: &ScrollbackLine) -> String {
-    line.text.trim_end_matches('\r').to_string()
-}
-
-fn append_snapshot_scrollback_line(snapshot: &mut Vec<u8>, line: &ScrollbackLine) {
-    let before = snapshot.len();
-    let raw = if line.formatted.is_empty() {
-        line.text.as_bytes()
-    } else {
-        line.formatted.as_slice()
-    };
-
-    append_sanitized_snapshot_line(snapshot, raw);
-    if snapshot.len() > before {
-        snapshot.push(b'\n');
-    }
-}
-
-fn append_sanitized_snapshot_line(output: &mut Vec<u8>, raw: &[u8]) {
-    let mut index = 0;
-    while index < raw.len() {
-        match raw[index] {
-            b'\x1b' => {
-                index = append_or_skip_escape_sequence(output, raw, index);
-            }
-            b'\r' | b'\t' => {
-                output.push(raw[index]);
-                index += 1;
-            }
-            0x20..=0x7e | 0x80..=0xff => {
-                output.push(raw[index]);
-                index += 1;
-            }
-            _ => {
-                index += 1;
-            }
-        }
-    }
-}
-
-fn append_or_skip_escape_sequence(output: &mut Vec<u8>, raw: &[u8], start: usize) -> usize {
-    let Some(kind) = raw.get(start + 1).copied() else {
-        return start + 1;
-    };
-    match kind {
-        b'[' => append_or_skip_csi_sequence(output, raw, start),
-        b']' => skip_osc_sequence(raw, start),
-        _ => (start + 2).min(raw.len()),
-    }
-}
-
-fn append_or_skip_csi_sequence(output: &mut Vec<u8>, raw: &[u8], start: usize) -> usize {
-    let mut index = start + 2;
-    while index < raw.len() {
-        let byte = raw[index];
-        if (0x40..=0x7e).contains(&byte) {
-            let next = index + 1;
-            if byte == b'm' {
-                output.extend_from_slice(&raw[start..next]);
-            }
-            return next;
-        }
-        index += 1;
-    }
-    raw.len()
-}
-
-fn skip_osc_sequence(raw: &[u8], start: usize) -> usize {
-    let mut index = start + 2;
-    while index < raw.len() {
-        if raw[index] == b'\x07' {
-            return index + 1;
-        }
-        if raw[index] == b'\x1b' && raw.get(index + 1) == Some(&b'\\') {
-            return index + 2;
-        }
-        index += 1;
-    }
-    raw.len()
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -408,16 +297,550 @@ mod tests {
         let _ = pane.kill();
     }
 
-    #[test]
-    fn test_snapshot_sanitizer_preserves_sgr_but_drops_destructive_csi() {
-        let mut output = Vec::new();
+    fn replay_snapshot(source: &vt100::Parser, max_scrollback: usize) -> vt100::Parser {
+        let (rows, cols) = source.screen().size();
+        let mut replay = vt100::Parser::new(rows, cols, max_scrollback);
+        replay.process(&source.screen().snapshot_formatted(max_scrollback));
+        replay
+    }
 
-        append_sanitized_snapshot_line(&mut output, b"\x1b[H\x1b[J\x1b[31;1mALERT\x1b[0m\x1b[2K");
+    fn screen_at_oldest_scrollback(screen: &vt100::Screen) -> vt100::Screen {
+        let mut screen = screen.clone();
+        screen.set_scrollback(usize::MAX);
+        screen
+    }
+
+    #[test]
+    fn test_semantic_snapshot_round_trips_cursor_movement_and_erase() {
+        let mut source = vt100::Parser::new(4, 12, 32);
+        source.process(b"alpha\r\nbravo\r\ncharlie");
+        source.process(b"\x1b[2;3H\x1b[4XOK\x1b[1;1H\x1b[K\x1b[3;5H");
+        source.process(b"\x1b]2;must-not-replay\x07");
+
+        let snapshot = source.screen().snapshot_formatted(32);
+        assert!(
+            !snapshot.windows(2).any(|window| window == b"\x1b]"),
+            "semantic snapshots must not replay OSC side effects"
+        );
+
+        let replay = replay_snapshot(&source, 32);
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        assert_eq!(
+            replay.screen().contents_formatted(),
+            source.screen().contents_formatted()
+        );
+
+        let mut pending_source = vt100::Parser::new(3, 4, 8);
+        pending_source.process(b"abcd");
+        let mut pending_replay = replay_snapshot(&pending_source, 8);
+        pending_source.process(b"X");
+        pending_replay.process(b"X");
+        assert_eq!(
+            pending_replay.screen().contents(),
+            pending_source.screen().contents(),
+            "a current pending-wrap cursor must wrap the next output after replay"
+        );
+        assert_eq!(
+            pending_replay.screen().cursor_position(),
+            pending_source.screen().cursor_position()
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_round_trips_styled_history_without_visible_overlap() {
+        let mut source = vt100::Parser::new(4, 12, 32);
+        for line in 1..=10 {
+            source.process(format!("\x1b[3{}mline-{line:02}\x1b[0m\r\n", line % 7 + 1).as_bytes());
+        }
+
+        let replay = replay_snapshot(&source, 32);
+        let source_oldest = screen_at_oldest_scrollback(source.screen());
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        assert_eq!(replay_oldest.scrollback(), source_oldest.scrollback());
+        assert_eq!(replay_oldest.contents(), source_oldest.contents());
+        assert_eq!(
+            replay_oldest.contents_formatted(),
+            source_oldest.contents_formatted(),
+            "history styling and the history-visible boundary must round-trip exactly"
+        );
+
+        let limited_replay = replay_snapshot(&source, 3);
+        let limited_oldest = screen_at_oldest_scrollback(limited_replay.screen());
+        let mut expected_limited = source.screen().clone();
+        expected_limited.set_scrollback(3);
+        assert_eq!(limited_oldest.scrollback(), 3);
+        assert_eq!(
+            limited_oldest.contents_formatted(),
+            expected_limited.contents_formatted(),
+            "snapshot history must honor the requested parsed-scrollback bound"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_round_trips_soft_wrap_and_wide_characters() {
+        let mut source = vt100::Parser::new(3, 6, 32);
+        source.process("ab漢cdEFgh漢ijKLmn".as_bytes());
+
+        let replay = replay_snapshot(&source, 32);
+        let source_oldest = screen_at_oldest_scrollback(source.screen());
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        assert_eq!(replay_oldest.scrollback(), source_oldest.scrollback());
+        assert_eq!(replay_oldest.contents(), source_oldest.contents());
+        for row in 0..source.screen().size().0 {
+            assert_eq!(
+                replay_oldest.row_wrapped(row),
+                source_oldest.row_wrapped(row),
+                "soft-wrap state differs at row {row}"
+            );
+        }
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_full_scrollback_row_after_narrow_resize() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process(b"ABCDEFGHIJ\r\ntwo\r\nthree\r\nfour");
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        for (col, expected) in ["A", "B", "C", "D", "E", "F"].iter().enumerate() {
+            assert_eq!(
+                replay_oldest
+                    .cell(0, col.try_into().unwrap())
+                    .expect("first reflowed history row cell")
+                    .contents(),
+                *expected
+            );
+        }
+        for (col, expected) in ["G", "H", "I", "J"].iter().enumerate() {
+            assert_eq!(
+                replay_oldest
+                    .cell(1, col.try_into().unwrap())
+                    .expect("second reflowed history row cell")
+                    .contents(),
+                *expected,
+                "old-width history suffix was lost at reflowed column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_scrollback_sgr_after_narrow_resize() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process(b"\x1b[31mABCDEF\x1b[34mGHIJ\x1b[0m\r\ntwo\r\nthree\r\nfour");
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        for col in 0..6 {
+            assert_eq!(
+                replay_oldest
+                    .cell(0, col)
+                    .expect("red history cell")
+                    .fgcolor(),
+                vt100::Color::Idx(1),
+                "red SGR attribute changed at first reflowed row column {col}"
+            );
+        }
+        for col in 0..4 {
+            assert_eq!(
+                replay_oldest
+                    .cell(1, col)
+                    .expect("blue history cell")
+                    .fgcolor(),
+                vt100::Color::Idx(4),
+                "blue SGR attribute changed at second reflowed row column {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_semantic_snapshot_does_not_split_wide_glyph_at_reflow_boundary() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process("abcde漢Z\r\ntwo\r\nthree\r\nfour".as_bytes());
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 32);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
 
         assert_eq!(
-            String::from_utf8_lossy(&output),
-            "\x1b[31;1mALERT\x1b[0m",
-            "scrollback replay must keep styling but not cursor moves or clears"
+            replay_oldest
+                .cell(1, 0)
+                .expect("wide history cell")
+                .contents(),
+            "漢"
+        );
+        assert!(
+            replay_oldest
+                .cell(1, 1)
+                .expect("wide history continuation")
+                .is_wide_continuation(),
+            "wide glyph continuation must remain adjacent after reflow"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(1, 2)
+                .expect("cell after wide history glyph")
+                .contents(),
+            "Z",
+            "cell following a boundary-wide glyph must not be lost"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_applies_history_limit_after_narrow_reflow() {
+        let mut source = vt100::Parser::new(3, 12, 32);
+        source.process(b"ABCDEFGHIJ\r\nKLMNOPQRST\r\nthree\r\nfour\r\nfive");
+        resize_parser_preserving_state(&mut source, 3, 6);
+
+        let replay = replay_snapshot(&source, 3);
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+
+        assert_eq!(
+            replay_oldest.scrollback(),
+            3,
+            "max_scrollback must bound reflowed physical history rows"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(0, 0)
+                .expect("oldest retained physical history row")
+                .contents(),
+            "G",
+            "the newest physical history rows must be retained after reflow"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(1, 0)
+                .expect("first physical row from newest logical line")
+                .contents(),
+            "K"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(2, 0)
+                .expect("second physical row from newest logical line")
+                .contents(),
+            "Q"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_replays_wide_history_at_single_column() {
+        let mut source = vt100::Parser::new(3, 4, 32);
+        source.process("\x1b[31m漢\x1b[0mA\r\nx\r\ny\r\nz".as_bytes());
+        resize_parser_preserving_state(&mut source, 3, 1);
+
+        let snapshot = source.screen().snapshot_formatted(32);
+        let replay = std::panic::catch_unwind(|| {
+            let mut replay = vt100::Parser::new(3, 1, 32);
+            replay.process(&snapshot);
+            replay
+        });
+
+        assert!(
+            replay.is_ok(),
+            "a one-column snapshot must replay wide history without panicking"
+        );
+        let replay = replay.expect("one-column replay");
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+        let wide_cell = replay_oldest.cell(0, 0).expect("single-column wide cell");
+        assert_eq!(wide_cell.contents(), "漢");
+        assert_eq!(wide_cell.fgcolor(), vt100::Color::Idx(1));
+        assert!(
+            !wide_cell.is_wide(),
+            "a wide glyph must use one effective cell in a one-column terminal"
+        );
+        assert_eq!(
+            replay_oldest
+                .cell(1, 0)
+                .expect("ASCII cell following wide history")
+                .contents(),
+            "A",
+            "the ASCII cell following a collapsed wide glyph must be retained"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_normalizes_zero_terminal_size() {
+        let result = std::panic::catch_unwind(|| {
+            let mut source = vt100::Parser::new(0, 0, 8);
+            assert_eq!(source.screen().size(), (1, 1));
+            source.process(b"A");
+            source.screen_mut().set_size(0, 0);
+            assert_eq!(source.screen().size(), (1, 1));
+
+            let snapshot = source.screen().snapshot_formatted(8);
+            let mut replay = vt100::Parser::new(0, 0, 8);
+            replay.process(&snapshot);
+            replay
+        });
+
+        assert!(
+            result.is_ok(),
+            "zero-sized parser input must normalize and snapshot without panicking or stalling"
+        );
+        assert_eq!(
+            result
+                .expect("normalized zero-sized replay")
+                .screen()
+                .size(),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_round_trips_active_alternate_screen_and_restore_state() {
+        let mut source = vt100::Parser::new(3, 10, 32);
+        source.process(b"\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b=\x1b[?25l");
+        source.process(b"\x1b[32mPRIMARY\r\n$ \x1b[2;5H");
+        source.process(b"\x1b[?1049h\x1b[34mALT\x1b[2;3H@");
+
+        let mut replay = replay_snapshot(&source, 32);
+        assert!(replay.screen().alternate_screen());
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        assert_eq!(
+            replay.screen().application_cursor(),
+            source.screen().application_cursor()
+        );
+        assert_eq!(
+            replay.screen().application_keypad(),
+            source.screen().application_keypad()
+        );
+        assert_eq!(
+            replay.screen().bracketed_paste(),
+            source.screen().bracketed_paste()
+        );
+        assert_eq!(
+            replay.screen().mouse_protocol_mode(),
+            source.screen().mouse_protocol_mode()
+        );
+        assert_eq!(
+            replay.screen().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::ButtonMotion
+        );
+        assert_eq!(
+            replay.screen().mouse_protocol_encoding(),
+            source.screen().mouse_protocol_encoding()
+        );
+        assert_eq!(
+            replay.screen().mouse_protocol_encoding(),
+            vt100::MouseProtocolEncoding::Sgr
+        );
+        assert_eq!(replay.screen().hide_cursor(), source.screen().hide_cursor());
+
+        source.process(b"\x1b[?1049l");
+        replay.process(b"\x1b[?1049l");
+        assert!(!replay.screen().alternate_screen());
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position(),
+            "the saved primary cursor must survive alternate-screen replay"
+        );
+        assert_eq!(replay.screen().fgcolor(), source.screen().fgcolor());
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_saved_cursor_and_attributes_for_continuation() {
+        let mut source = vt100::Parser::new(4, 12, 32);
+        source.process(b"\x1b[2;4H\x1b[31;1mS\x1b7");
+        source.process(b"\x1b[4;9H\x1b[34mC");
+        let mut replay = replay_snapshot(&source, 32);
+
+        source.process(b"\x1b8R");
+        replay.process(b"\x1b8R");
+
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        assert_eq!(replay.screen().fgcolor(), source.screen().fgcolor());
+        assert_eq!(replay.screen().bold(), source.screen().bold());
+        assert_eq!(
+            replay.screen().cell(1, 4).expect("restored cell").fgcolor(),
+            source.screen().cell(1, 4).expect("restored cell").fgcolor()
+        );
+
+        let mut pending_source = vt100::Parser::new(3, 4, 8);
+        pending_source.process(b"abcd\x1b7\x1b[3;1HC");
+        let mut pending_replay = replay_snapshot(&pending_source, 8);
+        pending_source.process(b"\x1b8X");
+        pending_replay.process(b"\x1b8X");
+        assert_eq!(
+            pending_replay.screen().contents(),
+            pending_source.screen().contents(),
+            "a saved pending-wrap cursor must wrap the next output after replay"
+        );
+        assert_eq!(
+            pending_replay.screen().cursor_position(),
+            pending_source.screen().cursor_position()
+        );
+        assert_eq!(
+            pending_replay.screen().row_wrapped(0),
+            pending_source.screen().row_wrapped(0)
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_reachable_blank_pending_cursor_continuation() {
+        // T-165 / FR-003p: this is the reachable compound state identified by
+        // review. A stricter assertion that ESC8 must also restore the distinct
+        // outer ESC7 state was RED (exit 101): terminal byte streams have only
+        // one active-buffer saved-cursor slot, so reconstructing a blank
+        // pending-wrap cursor consumes that slot. Phase 16A therefore requires
+        // exact current-frame and printable-continuation fidelity here, while
+        // the representable saved-state contract remains covered above.
+        let mut source = vt100::Parser::new(3, 4, 8);
+        source.process(b"\x1b[1;2H\x1b[31m\x1b7\x1b[3;1H\x1b[34mABCD\x1b[S");
+
+        assert_eq!(source.screen().cursor_position(), (2, 4));
+        assert_eq!(source.screen().fgcolor(), vt100::Color::Idx(4));
+        assert!(!source
+            .screen()
+            .cell(2, 3)
+            .expect("blank pending cell")
+            .has_contents());
+
+        let mut replay = replay_snapshot(&source, 8);
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        assert_eq!(replay.screen().fgcolor(), source.screen().fgcolor());
+        for row in 0..source.screen().size().0 {
+            for col in 0..source.screen().size().1 {
+                assert_eq!(
+                    replay.screen().cell(row, col),
+                    source.screen().cell(row, col),
+                    "current-frame cell differs at ({row}, {col})"
+                );
+            }
+        }
+        assert!(!replay
+            .screen()
+            .cell(2, 3)
+            .expect("replayed blank pending cell")
+            .has_contents());
+
+        source.process(b"X");
+        replay.process(b"X");
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        for row in 0..source.screen().size().0 {
+            assert_eq!(
+                replay.screen().row_wrapped(row),
+                source.screen().row_wrapped(row),
+                "printable continuation wrap differs at row {row}"
+            );
+        }
+        let source_oldest = screen_at_oldest_scrollback(source.screen());
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+        assert_eq!(replay_oldest.scrollback(), source_oldest.scrollback());
+        assert_eq!(
+            replay_oldest.contents_formatted(),
+            source_oldest.contents_formatted(),
+            "printable continuation must preserve bounded history and cell attributes"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_scroll_region_for_lf_continuation() {
+        let mut source = vt100::Parser::new(5, 8, 32);
+        source.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        source.process(b"\x1b[2;4r\x1b[4;1H");
+        let mut replay = replay_snapshot(&source, 32);
+
+        source.process(b"\nX");
+        replay.process(b"\nX");
+
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_origin_mode_for_relative_cup_continuation() {
+        let mut source = vt100::Parser::new(5, 8, 32);
+        source.process(b"\x1b[2;4r\x1b[?6h\x1b[2;3HX");
+        let mut replay = replay_snapshot(&source, 32);
+
+        source.process(b"\x1b[1;1HZ");
+        replay.process(b"\x1b[1;1HZ");
+
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        assert_eq!(
+            replay
+                .screen()
+                .cell(1, 0)
+                .expect("origin-relative cell")
+                .contents(),
+            "Z"
+        );
+    }
+
+    #[test]
+    fn test_semantic_snapshot_preserves_bounded_normal_history_and_alternate_continuation() {
+        let mut source = vt100::Parser::new(4, 10, 32);
+        for line in 1..=8 {
+            source.process(format!("normal-{line}\r\n").as_bytes());
+        }
+        source.process(b"\x1b[?1049h");
+        source.process(b"\x1b[2;3r\x1b[?6h\x1b[2;2H\x1b[35mS\x1b7");
+        source.process(b"\x1b[1;4H\x1b[36mC");
+
+        let snapshot = source.screen().snapshot_formatted(3);
+        let mut replay = vt100::Parser::new(4, 10, 3);
+        replay.process(&snapshot);
+
+        source.process(b"\x1b8R\nN");
+        replay.process(b"\x1b8R\nN");
+        assert!(replay.screen().alternate_screen());
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
+        );
+        assert_eq!(replay.screen().fgcolor(), source.screen().fgcolor());
+
+        source.process(b"\x1b[?1049l");
+        replay.process(b"\x1b[?1049l");
+        let source_primary = screen_at_oldest_scrollback(source.screen());
+        let replay_primary = screen_at_oldest_scrollback(replay.screen());
+        assert_eq!(replay_primary.scrollback(), 3);
+        let mut expected_primary = source_primary.clone();
+        expected_primary.set_scrollback(3);
+        assert_eq!(replay_primary.contents(), expected_primary.contents());
+        assert_eq!(
+            replay.screen().cursor_position(),
+            source.screen().cursor_position()
         );
     }
 
@@ -436,6 +859,48 @@ mod tests {
             snapshot.contains("line-13"),
             "snapshot should include the boundary scrollback line; got: {snapshot:?}"
         );
+    }
+
+    #[test]
+    fn test_pane_snapshot_bounds_parsed_history_at_replay_limit() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-parsed-history-bound", 3, sleep_command("60"));
+
+        // Three rows plus 5,000 additional CRLF advances produce 5,001
+        // historical rows. Parsed history must evict the first one at the
+        // snapshot replay boundary, while the legacy raw-line store retains
+        // all completed lines under its independent 10,000-line policy.
+        for line in 1..=SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + 3 {
+            pane.process_bytes(format!("line-{line:04}\r\n").as_bytes());
+        }
+
+        let source_oldest = screen_at_oldest_scrollback(pane.screen());
+        assert_eq!(
+            source_oldest.scrollback(),
+            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+            "Pane parsed history must be bounded at the snapshot replay limit"
+        );
+        assert_eq!(
+            pane.scrollback_len(),
+            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + 3,
+            "raw scrollback storage keeps its independent compatibility capacity"
+        );
+
+        let mut replay = vt100::Parser::new(3, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        replay.process(&pane.snapshot_bytes());
+        let replay_oldest = screen_at_oldest_scrollback(replay.screen());
+        assert_eq!(replay_oldest.scrollback(), SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        let oldest_contents = replay_oldest.contents();
+        assert!(
+            oldest_contents.contains("line-0002"),
+            "snapshot must retain the oldest line inside the 5,000-line boundary: {oldest_contents:?}"
+        );
+        assert!(
+            !oldest_contents.contains("line-0001"),
+            "snapshot must not retain the line immediately before the boundary: {oldest_contents:?}"
+        );
+
+        let _ = pane.kill();
     }
 
     #[test]

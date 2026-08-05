@@ -11,24 +11,23 @@
 //! Individual hook handlers (runtime-state, block-*, forward) will live in
 //! sibling files and consume these types.
 
+pub mod action_obligation_stop_check;
 pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
-pub mod context;
 pub mod coordination_event;
 pub mod diagnostics;
+pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
-pub mod execution_completion_stop_check;
 pub mod execution_control_stop_check;
 pub mod forward;
 pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
-pub mod intake_completion_stop_check;
 pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;
@@ -40,6 +39,7 @@ pub mod state_file_stop_check;
 pub mod work_event_settlement_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
+pub(crate) use workspace_identity::register_session_in_projection;
 pub mod worktree;
 
 use std::io::{self, Read};
@@ -204,8 +204,6 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
 
     refresh_managed_assets_for_hook_front_door(project_root)?;
 
-    crate::index_worker::bootstrap_project_index_for_path(project_root)?;
-
     let scope = gwt_core::daemon::RuntimeScope::from_project_root(
         project_root,
         gwt_core::daemon::RuntimeTarget::Host,
@@ -284,12 +282,13 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match event_dispatcher::handle_with_input(
+            let dispatch_result = event_dispatcher::handle_with_input(
                 event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
-            ) {
+            );
+            match dispatch_result {
                 Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -311,13 +310,14 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match provider_event::handle_with_input(
+            let dispatch_result = provider_event::handle_with_input(
                 provider,
                 native_event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
-            ) {
+            );
+            match dispatch_result {
                 Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -487,6 +487,23 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    #[test]
+    fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {
+        let source = include_str!("mod.rs");
+        let front_door = source
+            .split_once("pub fn prepare_daemon_front_door_for_path")
+            .expect("front-door function must exist")
+            .1
+            .split_once("pub(crate) fn refresh_managed_assets_for_hook_front_door")
+            .expect("managed-assets function must follow the front door")
+            .0;
+
+        assert!(
+            !front_door.contains("bootstrap_project_index_for_"),
+            "GUI front door must not block server startup on Project Index bootstrap"
+        );
+    }
 
     #[test]
     fn daemon_hook_argv_and_internal_command_output_preserve_streams() {

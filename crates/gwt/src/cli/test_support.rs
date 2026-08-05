@@ -250,10 +250,10 @@ fn main() -> ExitCode {
 }
 
 pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
-    let _env_lock = crate::env_test_lock()
+    let env_lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _lock = fake_gh_test_lock()
+    let fake_gh_lock = fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
@@ -262,35 +262,61 @@ pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     let repo_path = temp.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo path");
 
-    let old_path = env::var_os("PATH");
-    let old_mode = env::var_os("GWT_FAKE_GH_MODE");
-    let old_state = env::var_os("GWT_FAKE_GH_STATE_FILE");
+    let existing_path = env::var_os("PATH");
+    let existing_mode = env::var_os("GWT_FAKE_GH_MODE");
+    let existing_state = env::var_os("GWT_FAKE_GH_STATE_FILE");
     let state_file = temp.path().join("gh-state");
     let joined_path = env::join_paths(
         std::iter::once(PathBuf::from(temp.path()))
-            .chain(old_path.iter().flat_map(env::split_paths)),
+            .chain(existing_path.iter().flat_map(env::split_paths)),
     )
     .expect("join PATH");
-    env::set_var("PATH", joined_path);
-    env::set_var("GWT_FAKE_GH_MODE", mode);
-    env::set_var("GWT_FAKE_GH_STATE_FILE", &state_file);
+    let outcome = {
+        let _path = ScopedEnvVar::set("PATH", joined_path);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+        let _state = ScopedEnvVar::set("GWT_FAKE_GH_STATE_FILE", &state_file);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&repo_path)))
+    };
+    assert_eq!(
+        env::var_os("PATH"),
+        existing_path,
+        "fake gh helper must restore PATH before releasing the environment lock",
+    );
+    assert_eq!(
+        env::var_os("GWT_FAKE_GH_MODE"),
+        existing_mode,
+        "fake gh helper must restore its mode before releasing the environment lock",
+    );
+    assert_eq!(
+        env::var_os("GWT_FAKE_GH_STATE_FILE"),
+        existing_state,
+        "fake gh helper must restore its state path before releasing the environment lock",
+    );
 
-    let result = test(&repo_path);
+    // Resume a callback panic only after releasing process-wide test locks so
+    // one negative-path assertion cannot poison unrelated parallel tests.
+    drop(fake_gh_lock);
+    drop(env_lock);
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
 
-    match old_path {
-        Some(value) => env::set_var("PATH", value),
-        None => env::remove_var("PATH"),
-    }
-    match old_mode {
-        Some(value) => env::set_var("GWT_FAKE_GH_MODE", value),
-        None => env::remove_var("GWT_FAKE_GH_MODE"),
-    }
-    match old_state {
-        Some(value) => env::set_var("GWT_FAKE_GH_STATE_FILE", value),
-        None => env::remove_var("GWT_FAKE_GH_STATE_FILE"),
-    }
+#[test]
+fn fake_gh_helper_restores_process_env_when_callback_panics() {
+    let outcome = std::panic::catch_unwind(|| {
+        with_fake_gh("success", |_| {
+            std::panic::panic_any("intentional fake-gh callback panic");
+        });
+    });
 
-    result
+    let payload = outcome.expect_err("callback panic must be resumed");
+    assert_eq!(
+        payload.downcast_ref::<&'static str>().copied(),
+        Some("intentional fake-gh callback panic"),
+        "the original callback panic must escape after environment restoration",
+    );
 }
 
 pub fn sample_thread() -> PrReviewThread {

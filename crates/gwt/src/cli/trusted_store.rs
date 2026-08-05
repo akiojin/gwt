@@ -32,7 +32,15 @@ use sha2::{Digest, Sha256};
 /// mode).
 #[must_use]
 pub fn trusted_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let repo_hash = crate::index_worker::detect_repo_hash(worktree)?;
+    // A trusted-store key is defined only for an actual Git worktree (or bare
+    // repository). Do not use the project-index resolver here: its
+    // workspace-home compatibility fallback shells out to `git rev-parse`.
+    // Diagnosis is projected for every historical Work on the GUI event
+    // loop, so one non-Git/stale directory would otherwise spawn Git
+    // repeatedly and freeze the Workspace surface. The core resolver reads
+    // `.git` / config files directly and returns `None` for those rows,
+    // preserving the documented mirror-only degenerate mode.
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)?;
     Some(
         gwt_core::paths::gwt_projects_dir()
             .join(repo_hash.as_str())
@@ -97,6 +105,30 @@ pub fn write(worktree: &Path, file_name: &str, bytes: &[u8]) -> io::Result<()> {
     write_to_resolved_dir(&dir, file_name, bytes)
 }
 
+/// Write one authoritative repo-scoped record and read it back under the
+/// same resolved-directory lease.
+///
+/// Unlike [`write()`], this operation refuses mirror-only degenerate mode:
+/// callers use the returned bytes to decide whether a security-sensitive
+/// outcome may be reported as successful.
+pub fn write_with_readback(worktree: &Path, file_name: &str, bytes: &[u8]) -> io::Result<String> {
+    let trusted_dir = trusted_dir_for_worktree(worktree).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "trusted write readback requires a canonical repository scope",
+        )
+    })?;
+    with_write_lease_for_resolved_dir(&trusted_dir, || {
+        write_to_resolved_dir(&trusted_dir, file_name, bytes)?;
+        read_from_resolved_dir(&trusted_dir, file_name)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "trusted record disappeared after write",
+            )
+        })
+    })
+}
+
 /// Write to a trusted directory that the caller already resolved and leased.
 /// This prevents a second resolver call from moving the authoritative write
 /// beneath a directory whose lease is not held.
@@ -106,6 +138,63 @@ pub(crate) fn write_to_resolved_dir(
     bytes: &[u8],
 ) -> io::Result<()> {
     gwt_github::cache::write_atomic(&trusted_dir.join(file_name), bytes)
+}
+
+/// Result of moving one unhealthy trusted-state file out of the canonical
+/// authority path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuarantinedTrustedFile {
+    pub source_hash: String,
+    pub destination: PathBuf,
+}
+
+/// Move an unhealthy trusted-state file to a collision-resistant sibling.
+///
+/// The hard-link-first sequence gives the destination create-new semantics:
+/// an existing path is never overwritten. Callers hold the surrounding
+/// trusted-store lease, so removing the source after the link succeeds
+/// completes the move without another canonical writer racing the source.
+pub(crate) fn quarantine_file(source: &Path) -> io::Result<QuarantinedTrustedFile> {
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "quarantine source has no UTF-8 file name",
+            )
+        })?;
+    let bytes = fs::read(source)?;
+    let source_hash = format!("{:x}", Sha256::digest(&bytes));
+    for _ in 0..16 {
+        let destination = source.with_file_name(format!(
+            "{file_name}.corrupt-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        match quarantine_file_to(source, &destination) {
+            Ok(()) => {
+                return Ok(QuarantinedTrustedFile {
+                    source_hash,
+                    destination,
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        ErrorKind::AlreadyExists,
+        "trusted-state quarantine could not allocate a unique destination",
+    ))
+}
+
+fn quarantine_file_to(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::hard_link(source, destination)?;
+    if let Err(error) = fs::remove_file(source) {
+        let _ = fs::remove_file(destination);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Write the authoritative trusted copy, then the worktree mirror. Once the
@@ -122,6 +211,7 @@ pub fn write_with_mirror(
     let trusted_dir = trusted_dir_for_worktree(worktree);
     if let Some(dir) = &trusted_dir {
         gwt_github::cache::write_atomic(&dir.join(file_name), bytes)?;
+        stamp_worktree_marker(dir, worktree);
     }
     match gwt_github::cache::write_atomic(mirror_path, bytes) {
         Err(err) if trusted_dir.is_some() => {
@@ -134,6 +224,85 @@ pub fn write_with_mirror(
         }
         result => result,
     }
+}
+
+/// Marker file naming the worktree a trusted directory belongs to. The
+/// directory key is a one-way hash, so GC (T-181) needs this to decide
+/// whether the worktree still exists.
+const WORKTREE_MARKER_FILE: &str = "worktree-path.txt";
+
+/// How long an orphaned trusted directory survives after its worktree
+/// disappears (T-181). Long enough for post-deletion inspection and the
+/// T-182 relaunch import; short enough that ephemeral worktrees do not
+/// accumulate forever.
+const GC_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+fn stamp_worktree_marker(trusted_dir: &Path, worktree: &Path) {
+    let marker = trusted_dir.join(WORKTREE_MARKER_FILE);
+    if marker.exists() {
+        return;
+    }
+    let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    if let Err(error) =
+        gwt_github::cache::write_atomic(&marker, canonical.to_string_lossy().as_bytes())
+    {
+        tracing::warn!(?error, "trusted store worktree marker write failed");
+    }
+}
+
+/// T-181 core: best-effort GC of sibling trusted directories whose recorded
+/// worktree no longer exists and whose newest file is older than the
+/// retention window. Marker-less directories (pre-T-181) are left alone —
+/// GC never guesses. Runs from launch materialization; failures only warn.
+pub fn gc_best_effort(current_worktree: &Path) {
+    gc_with_retention(current_worktree, GC_RETENTION);
+}
+
+fn gc_with_retention(current_worktree: &Path, retention: Duration) {
+    let Some(own_dir) = trusted_dir_for_worktree(current_worktree) else {
+        return;
+    };
+    let Some(root) = own_dir.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() || dir == own_dir {
+            continue;
+        }
+        let marker = dir.join(WORKTREE_MARKER_FILE);
+        let Ok(recorded) = fs::read_to_string(&marker) else {
+            continue;
+        };
+        if Path::new(recorded.trim()).exists() {
+            continue;
+        }
+        if newest_modification_age(&dir).is_none_or(|age| age < retention) {
+            continue;
+        }
+        if let Err(error) = fs::remove_dir_all(&dir) {
+            tracing::warn!(?error, path = %dir.display(), "trusted store GC failed");
+        } else {
+            tracing::info!(path = %dir.display(), "trusted store GC removed orphaned entry");
+        }
+    }
+}
+
+/// Age of the most recently modified file in the directory (None when the
+/// directory is unreadable or clocks misbehave — GC then keeps it).
+fn newest_modification_age(dir: &Path) -> Option<Duration> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        newest = Some(match newest {
+            Some(current) if current >= modified => current,
+            _ => modified,
+        });
+    }
+    newest?.elapsed().ok()
 }
 
 /// Bounded wait before a second concurrent writer is refused (T-149). Long
@@ -253,6 +422,24 @@ fn with_write_lease_for_resolved_dir_wait<T>(
     result
 }
 
+/// T-177 core: turn a trusted-state I/O or parse failure into an
+/// actionable repair message for the canonical operations. The raw error
+/// used to surface as a misleading "network error"; store failures are a
+/// local health problem with local repair paths.
+#[must_use]
+pub fn store_health_error(context: &str, err: &std::io::Error) -> String {
+    format!(
+        "trusted state unhealthy while {context}: {err}. The execution/verification records \
+         under the repo-scoped trusted store (`~/.gwt/projects/<repo-hash>/trusted/<worktree-key>/`) \
+         or their worktree mirrors (`.gwt/skill-state/`) could not be read or parsed. Repair by \
+         rerunning the canonical writer: `execution.repair` quarantines an unreadable execution \
+         control record and materializes a fresh Active one (`execution.adopt` takes over only \
+         records that still pass integrity); `verify.plan` / `verify.run` rewrite verification state; \
+         `intake.outcome.record` rewrites the intake outcome. If the failure persists, inspect the \
+         store directory for filesystem problems."
+    )
+}
+
 /// True when the worktree is under trusted-store management: launch
 /// materialization wrote the Execution Control Record's trusted copy, so
 /// every later canonical `verify.plan` / `verify.run` write produced a
@@ -360,6 +547,99 @@ mod tests {
         assert!(!ran, "refused writer must not run its operation");
         release_tx.send(()).unwrap();
         holder.join().unwrap();
+    }
+
+    #[test]
+    fn quarantine_preserves_source_bytes_and_never_overwrites_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("execution-control.json");
+        let collision = dir.path().join("execution-control.json.corrupt-fixed");
+        fs::write(&source, b"corrupt authority").unwrap();
+        fs::write(&collision, b"existing quarantine").unwrap();
+
+        let error = quarantine_file_to(&source, &collision).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"corrupt authority");
+        assert_eq!(fs::read(&collision).unwrap(), b"existing quarantine");
+
+        let quarantined = quarantine_file(&source).unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(&quarantined.destination).unwrap(),
+            b"corrupt authority"
+        );
+        assert_eq!(
+            quarantined.source_hash,
+            format!("{:x}", Sha256::digest(b"corrupt authority"))
+        );
+        assert_ne!(quarantined.destination, collision);
+    }
+
+    // T-181: GC removes orphaned sibling entries (marker points at a gone
+    // worktree, files older than retention) and keeps live and marker-less
+    // ones.
+    #[test]
+    fn gc_removes_only_orphaned_marked_siblings() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(dir.path());
+        write(dir.path(), "own.json", b"{}").unwrap();
+        let own_dir = trusted_dir_for_worktree(dir.path()).unwrap();
+        let root = own_dir.parent().unwrap().to_path_buf();
+
+        // Orphan: marker points at a deleted worktree.
+        let orphan = root.join("00000000deadbeef");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("execution-control.json"), "{}").unwrap();
+        std::fs::write(
+            orphan.join(WORKTREE_MARKER_FILE),
+            dir.path()
+                .join("no-such-worktree")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        // Live sibling: marker points at an existing path.
+        let live = root.join("00000000cafebabe");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("execution-control.json"), "{}").unwrap();
+        std::fs::write(
+            live.join(WORKTREE_MARKER_FILE),
+            dir.path().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        // Marker-less legacy sibling: never touched.
+        let legacy = root.join("00000000feedf00d");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("execution-control.json"), "{}").unwrap();
+
+        gc_with_retention(dir.path(), Duration::ZERO);
+        assert!(!orphan.exists(), "orphaned entry must be removed");
+        assert!(live.exists(), "live entry must survive");
+        assert!(legacy.exists(), "marker-less legacy entry must survive");
+        assert!(own_dir.exists(), "own entry must survive");
+
+        // Fresh orphans inside the retention window survive.
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("execution-control.json"), "{}").unwrap();
+        std::fs::write(
+            orphan.join(WORKTREE_MARKER_FILE),
+            dir.path()
+                .join("no-such-worktree")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        gc_with_retention(dir.path(), Duration::from_secs(3600));
+        assert!(
+            orphan.exists(),
+            "entries younger than retention must survive"
+        );
     }
 
     #[test]

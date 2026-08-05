@@ -9,6 +9,42 @@ pub const RUNTIME_STATUS_CHANNEL: &str = "runtime_status";
 pub const RUNTIME_HOOK_CHANNEL: &str = "runtime_hook";
 pub const ISSUE_MONITOR_CHANNEL: &str = "issue_monitor";
 pub const ISSUE_MONITOR_CONTROL_CHANNEL: &str = "issue_monitor_control";
+pub const ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR: &str =
+    "issue monitor control rejected: authority recovery is blocked";
+pub const ISSUE_MONITOR_CONTROL_CLOSED_ERROR: &str =
+    "issue monitor control rejected: worker is closed";
+pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
+    "issue monitor control rejected before commit";
+pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
+    "issue monitor control rejected: admission is full";
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueMonitorControlPublishError {
+    TransportUnavailable(String),
+    OutcomeUnknown(String),
+    Busy(String),
+    RecoveryBlocked,
+    Rejected(String),
+}
+
+impl IssueMonitorControlPublishError {
+    pub fn allows_local_fallback(&self) -> bool {
+        matches!(self, Self::TransportUnavailable(_))
+    }
+}
+
+impl std::fmt::Display for IssueMonitorControlPublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TransportUnavailable(message)
+            | Self::OutcomeUnknown(message)
+            | Self::Busy(message)
+            | Self::Rejected(message) => formatter.write_str(message),
+            Self::RecoveryBlocked => {
+                formatter.write_str(ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeDaemonEvent {
@@ -82,11 +118,10 @@ pub fn runtime_status_payload(
 }
 
 pub fn runtime_hook_payload(event: &crate::RuntimeHookEvent, source_pid: u32) -> Value {
-    serde_json::to_value(RuntimeHookPayload {
-        source_pid,
-        event: event.clone(),
-    })
-    .expect("runtime hook payload serializes")
+    let mut event = event.clone();
+    event.continuation_readiness_nonce = None;
+    serde_json::to_value(RuntimeHookPayload { source_pid, event })
+        .expect("runtime hook payload serializes")
 }
 
 pub fn issue_monitor_payload(event: &str, payload: Value, source_pid: u32) -> Value {
@@ -208,6 +243,7 @@ mod tests {
             kind: RuntimeHookEventKind::RuntimeState,
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
+            continuation_readiness_nonce: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some("/tmp/project".to_string()),
             branch: Some("work/runtime".to_string()),
@@ -228,6 +264,38 @@ mod tests {
             decode_runtime_daemon_event(RUNTIME_HOOK_CHANNEL, payload, 42),
             None
         );
+    }
+
+    #[test]
+    fn runtime_hook_payload_never_publishes_continue_work_readiness_nonce() {
+        let mut event = RuntimeHookEvent {
+            kind: RuntimeHookEventKind::CoordinationEvent,
+            source_event: Some("SessionStart".to_string()),
+            gwt_session_id: Some("session-private".to_string()),
+            continuation_readiness_nonce: Some("continue-ready-private".to_string()),
+            agent_session_id: Some("provider-session".to_string()),
+            project_root: Some("/tmp/project".to_string()),
+            branch: Some("work/issue-2359".to_string()),
+            status: None,
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-07-25T00:00:00Z".to_string(),
+        };
+
+        let payload = runtime_hook_payload(&event, 42);
+        let encoded = serde_json::to_string(&payload).expect("serialize daemon payload");
+        assert!(!encoded.contains("continue-ready-private"));
+
+        let RuntimeDaemonEvent::Hook { event: decoded } =
+            decode_runtime_daemon_event(RUNTIME_HOOK_CHANNEL, payload, 7)
+                .expect("decode sanitized hook")
+        else {
+            panic!("expected hook event");
+        };
+        assert!(decoded.continuation_readiness_nonce.is_none());
+
+        event.continuation_readiness_nonce = None;
+        assert_eq!(decoded, event);
     }
 
     #[test]

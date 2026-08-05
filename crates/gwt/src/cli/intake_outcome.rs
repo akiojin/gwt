@@ -124,11 +124,6 @@ impl IntakeOutcome {
         }
         Ok(())
     }
-
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        self.validate().is_ok()
-    }
 }
 
 /// Persisted per-worktree intake outcome state. One intake session owns a
@@ -142,25 +137,6 @@ pub struct IntakeOutcomeState {
     pub required_since: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<IntakeOutcome>,
-}
-
-impl IntakeOutcomeState {
-    /// FR-016: does this state hold a valid outcome fresh enough for the
-    /// latest prompt? (`required_since` absent means no prompt marked the
-    /// requirement dirty yet — any valid outcome passes.)
-    #[must_use]
-    pub fn has_fresh_valid_outcome(&self) -> bool {
-        let Some(outcome) = &self.outcome else {
-            return false;
-        };
-        if !outcome.is_valid() {
-            return false;
-        }
-        match self.required_since {
-            Some(required_since) => outcome.recorded_at >= required_since,
-            None => true,
-        }
-    }
 }
 
 /// Resolve the state-file path for a worktree.
@@ -192,50 +168,6 @@ pub fn save(worktree: &Path, state: &IntakeOutcomeState) -> io::Result<()> {
     let serialized = serde_json::to_vec_pretty(state)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     gwt_github::cache::write_atomic(&path, &serialized)
-}
-
-/// T-079 / FR-016: mark the artifact requirement dirty for `session_id` at
-/// `at` (the user-prompt boundary). A same-session outcome is preserved — it
-/// simply becomes stale relative to the new `required_since` — while a state
-/// owned by a different (previous) session is replaced wholesale. A
-/// malformed state file is replaced too: restoring the dirty marker restores
-/// the gate.
-/// Arm the intake gate for `session_id`. The only production caller is the
-/// blocking UserPromptSubmit hook, so the T-149 lease uses a short bounded
-/// wait and falls back to an unleased write on refusal: the rare interleave
-/// can only lose a concurrent outcome update, which fails CLOSED (the gate
-/// blocks and the outcome is re-recorded), while a dropped marker would
-/// fail OPEN (T-149 review).
-pub fn mark_required_since(worktree: &Path, session_id: &str, at: DateTime<Utc>) -> io::Result<()> {
-    match crate::cli::trusted_store::with_write_lease_wait(
-        worktree,
-        std::time::Duration::from_millis(300),
-        || mark_required_since_locked(worktree, session_id, at),
-    ) {
-        Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            mark_required_since_locked(worktree, session_id, at)
-        }
-        result => result,
-    }
-}
-
-fn mark_required_since_locked(
-    worktree: &Path,
-    session_id: &str,
-    at: DateTime<Utc>,
-) -> io::Result<()> {
-    let state = match load(worktree) {
-        Ok(Some(existing)) if existing.session_id == session_id => IntakeOutcomeState {
-            required_since: Some(at),
-            ..existing
-        },
-        _ => IntakeOutcomeState {
-            session_id: session_id.to_string(),
-            required_since: Some(at),
-            outcome: None,
-        },
-    };
-    save(worktree, &state)
 }
 
 /// Record an outcome for `session_id` (explicit `intake.outcome.record` and
@@ -342,13 +274,12 @@ pub(super) fn run<E: CliEnv>(
 // issue.spec.edit success paths)
 // ---------------------------------------------------------------------------
 
-/// Best-effort auto-record after a successful Issue/SPEC operation (FR-013).
+/// Best-effort auto-record after a successful Issue/SPEC operation.
 ///
-/// The gate is self-contained: it fires only when the resolved lane for the
-/// worktree is intake and `GWT_SESSION_ID` is set, so GUI/argv invocations
-/// and execution sessions never write outcome state. Failures are logged and
-/// swallowed — the GitHub operation already succeeded and its exit code must
-/// not change (Board posts never reach this path, FR-013/FR-017).
+/// Non-enforcing bookkeeping (SPEC #3245 FR-001): every session with
+/// `GWT_SESSION_ID` records the outcome uniformly — no lane condition.
+/// Failures are logged and swallowed — the GitHub operation already succeeded
+/// and its exit code must not change (Board posts never reach this path).
 pub(crate) fn auto_record_issue_operation(
     repo_path: &Path,
     source_operation: &str,
@@ -356,9 +287,19 @@ pub(crate) fn auto_record_issue_operation(
     number: u64,
 ) {
     let worktree = gwt_core::paths::resolve_current_worktree_root(repo_path);
-    let profile = gwt_skills::resolve_lane_for_worktree(&worktree);
-    if profile.id != "intake" {
-        return;
+    // SPEC-3248 P11: the same canonical success points settle open
+    // issue-update obligations for the current session, in any lane.
+    if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        crate::cli::action_obligation::settle_kinds_best_effort(
+            &worktree,
+            &session_id,
+            &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+            source_operation,
+        );
     }
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
@@ -388,16 +329,6 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 7, 16, hour, minute, 0).unwrap()
     }
 
-    fn issue_outcome(recorded_at: DateTime<Utc>) -> IntakeOutcome {
-        IntakeOutcome {
-            kind: IntakeOutcomeKind::IssueUpdated,
-            number: Some(3248),
-            reason: None,
-            source_operation: "issue.comment".to_string(),
-            recorded_at,
-        }
-    }
-
     // T-070: roundtrip with session_id, kind, number, reason, source
     // operation, and timestamps.
     #[test]
@@ -421,31 +352,6 @@ mod tests {
     // T-149 review fix: the hook-side gate-arming write survives a wedged
     // lease holder through the unleased fallback — a dropped marker would
     // fail OPEN at the Stop gate.
-    #[test]
-    fn hook_marker_write_survives_held_lease() {
-        let dir = tempfile::tempdir().unwrap();
-        let worktree = dir.path().to_path_buf();
-        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let holder = std::thread::spawn(move || {
-            crate::cli::trusted_store::with_write_lease(&worktree, || {
-                acquired_tx.send(()).unwrap();
-                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
-                Ok(())
-            })
-            .unwrap();
-        });
-        acquired_rx.recv().unwrap();
-
-        mark_required_since(dir.path(), "sess-1", t(9, 0)).unwrap();
-        assert_eq!(
-            load(dir.path()).unwrap().unwrap().required_since,
-            Some(t(9, 0)),
-            "marker must be written even while the lease is held"
-        );
-        release_tx.send(()).unwrap();
-        holder.join().unwrap();
-    }
 
     #[test]
     fn load_returns_none_when_absent_and_invalid_data_when_malformed() {
@@ -506,309 +412,5 @@ mod tests {
         }
         assert_eq!(IntakeOutcomeKind::parse("board_posted"), None);
         assert_eq!(IntakeOutcomeKind::parse(""), None);
-    }
-
-    // T-079: marking dirty preserves the same-session outcome (it becomes
-    // stale), replaces another session's state, and replaces malformed state.
-    #[test]
-    fn mark_required_since_preserves_same_session_outcome() {
-        let dir = tempfile::tempdir().unwrap();
-        record_outcome(dir.path(), "sess-1", issue_outcome(t(9, 0))).unwrap();
-        mark_required_since(dir.path(), "sess-1", t(10, 0)).unwrap();
-        let state = load(dir.path()).unwrap().unwrap();
-        assert_eq!(state.session_id, "sess-1");
-        assert_eq!(state.required_since, Some(t(10, 0)));
-        assert!(state.outcome.is_some(), "same-session outcome preserved");
-        assert!(
-            !state.has_fresh_valid_outcome(),
-            "outcome recorded before the new prompt must be stale"
-        );
-    }
-
-    #[test]
-    fn mark_required_since_replaces_other_session_state() {
-        let dir = tempfile::tempdir().unwrap();
-        record_outcome(dir.path(), "sess-old", issue_outcome(t(9, 0))).unwrap();
-        mark_required_since(dir.path(), "sess-new", t(10, 0)).unwrap();
-        let state = load(dir.path()).unwrap().unwrap();
-        assert_eq!(state.session_id, "sess-new");
-        assert_eq!(state.outcome, None, "old session's outcome must not leak");
-    }
-
-    #[test]
-    fn mark_required_since_replaces_malformed_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = state_path(dir.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "{not json").unwrap();
-        mark_required_since(dir.path(), "sess-1", t(10, 0)).unwrap();
-        let state = load(dir.path()).unwrap().unwrap();
-        assert_eq!(state.session_id, "sess-1");
-        assert_eq!(state.required_since, Some(t(10, 0)));
-    }
-
-    // FR-016 freshness evaluation (AS-9 / AS-11).
-    #[test]
-    fn fresh_valid_outcome_passes_and_stale_or_missing_fails() {
-        // No outcome → not fresh.
-        let state = IntakeOutcomeState {
-            session_id: "sess-1".to_string(),
-            required_since: Some(t(10, 0)),
-            outcome: None,
-        };
-        assert!(!state.has_fresh_valid_outcome());
-
-        // Outcome recorded before the prompt → stale.
-        let stale = IntakeOutcomeState {
-            outcome: Some(issue_outcome(t(9, 59))),
-            ..state.clone()
-        };
-        assert!(!stale.has_fresh_valid_outcome());
-
-        // Outcome recorded at/after the prompt → fresh.
-        let fresh = IntakeOutcomeState {
-            outcome: Some(issue_outcome(t(10, 0))),
-            ..state.clone()
-        };
-        assert!(fresh.has_fresh_valid_outcome());
-
-        // Invalid persisted outcome never passes (AS-10).
-        let invalid = IntakeOutcomeState {
-            outcome: Some(IntakeOutcome {
-                kind: IntakeOutcomeKind::NoAction,
-                number: None,
-                reason: Some(String::new()),
-                source_operation: "intake.outcome.record".to_string(),
-                recorded_at: t(10, 5),
-            }),
-            ..state
-        };
-        assert!(!invalid.has_fresh_valid_outcome());
-    }
-
-    // record_outcome preserves the same-session dirty marker so a
-    // subsequent Stop evaluates freshness against the latest prompt.
-    #[test]
-    fn record_outcome_preserves_required_since_for_same_session() {
-        let dir = tempfile::tempdir().unwrap();
-        mark_required_since(dir.path(), "sess-1", t(10, 0)).unwrap();
-        record_outcome(dir.path(), "sess-1", issue_outcome(t(10, 5))).unwrap();
-        let state = load(dir.path()).unwrap().unwrap();
-        assert_eq!(state.required_since, Some(t(10, 0)));
-        assert!(state.has_fresh_valid_outcome());
-    }
-
-    #[test]
-    fn record_outcome_rejects_invalid_outcomes_strictly() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = record_outcome(
-            dir.path(),
-            "sess-1",
-            IntakeOutcome {
-                kind: IntakeOutcomeKind::NoAction,
-                number: None,
-                reason: None,
-                source_operation: "intake.outcome.record".to_string(),
-                recorded_at: t(9, 0),
-            },
-        )
-        .expect_err("no_action without reason must be rejected");
-        assert!(err.contains("reason"), "{err}");
-        assert_eq!(load(dir.path()).unwrap(), None, "state must stay untouched");
-    }
-
-    // ------------------------------------------------------------------
-    // T-072: `intake.outcome.record` command behavior
-    // ------------------------------------------------------------------
-
-    mod command {
-        use super::*;
-        use crate::cli::{run_collect, CliCommand, TestEnv};
-        use gwt_core::test_support::ScopedEnvVar;
-
-        fn run_record(
-            repo: &Path,
-            kind: &str,
-            number: Option<u64>,
-            reason: Option<&str>,
-        ) -> Result<(i32, String), gwt_github::SpecOpsError> {
-            let mut env = TestEnv::new(repo.to_path_buf());
-            run_collect(
-                &mut env,
-                CliCommand::Intake(IntakeCommand::OutcomeRecord {
-                    kind: kind.to_string(),
-                    number,
-                    reason: reason.map(str::to_string),
-                }),
-            )
-        }
-
-        #[test]
-        fn record_op_persists_outcome_for_current_session() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
-            let dir = tempfile::tempdir().unwrap();
-
-            let (code, out) =
-                run_record(dir.path(), "no_action", None, Some("duplicate of #42")).unwrap();
-            assert_eq!(code, 0);
-            assert!(out.contains("no_action"), "{out}");
-
-            let state = load(dir.path()).unwrap().unwrap();
-            assert_eq!(state.session_id, "sess-op");
-            let outcome = state.outcome.unwrap();
-            assert_eq!(outcome.kind, IntakeOutcomeKind::NoAction);
-            assert_eq!(outcome.reason.as_deref(), Some("duplicate of #42"));
-            assert_eq!(outcome.source_operation, "intake.outcome.record");
-        }
-
-        // FR-012: strict validation for explicit writes.
-        #[test]
-        fn record_op_rejects_invalid_payloads() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
-            let dir = tempfile::tempdir().unwrap();
-
-            // no_action without reason.
-            assert!(run_record(dir.path(), "no_action", None, None).is_err());
-            // Issue/SPEC kinds without number.
-            assert!(run_record(dir.path(), "issue_updated", None, None).is_err());
-            // Unknown kind.
-            assert!(run_record(dir.path(), "board_posted", None, None).is_err());
-            assert_eq!(load(dir.path()).unwrap(), None);
-        }
-
-        #[test]
-        fn record_op_requires_session_id() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
-            let dir = tempfile::tempdir().unwrap();
-
-            let err = run_record(dir.path(), "no_action", None, Some("reason"))
-                .expect_err("missing GWT_SESSION_ID must fail");
-            assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // T-073: FR-013 auto-record from Issue/SPEC operation success paths
-    // ------------------------------------------------------------------
-
-    mod auto_record {
-        use super::*;
-        use gwt_core::test_support::ScopedEnvVar;
-        use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
-
-        fn mk_worktree(profile: &gwt_skills::LaneProfile) -> tempfile::TempDir {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-            write_lane_file(dir.path(), profile).unwrap();
-            dir
-        }
-
-        #[test]
-        fn records_for_intake_lane_with_session() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-auto");
-            let dir = mk_worktree(&INTAKE_PROFILE);
-
-            auto_record_issue_operation(
-                dir.path(),
-                "issue.comment",
-                IntakeOutcomeKind::IssueUpdated,
-                3248,
-            );
-
-            let state = load(dir.path()).unwrap().unwrap();
-            assert_eq!(state.session_id, "sess-auto");
-            let outcome = state.outcome.unwrap();
-            assert_eq!(outcome.kind, IntakeOutcomeKind::IssueUpdated);
-            assert_eq!(outcome.number, Some(3248));
-            assert_eq!(outcome.source_operation, "issue.comment");
-        }
-
-        // FR-015: execution lane must not write outcome state.
-        #[test]
-        fn skips_execution_lane() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-auto");
-            let dir = mk_worktree(&EXECUTION_PROFILE);
-
-            auto_record_issue_operation(
-                dir.path(),
-                "issue.create",
-                IntakeOutcomeKind::IssueCreated,
-                7,
-            );
-            assert_eq!(load(dir.path()).unwrap(), None);
-        }
-
-        // Without a session id the outcome cannot be attributed — skip.
-        #[test]
-        fn skips_without_session_id() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
-            let dir = mk_worktree(&INTAKE_PROFILE);
-
-            auto_record_issue_operation(
-                dir.path(),
-                "issue.create",
-                IntakeOutcomeKind::IssueCreated,
-                7,
-            );
-            assert_eq!(load(dir.path()).unwrap(), None);
-        }
-
-        // FR-013 end-to-end: a successful issue.comment through the CLI
-        // records the outcome for the intake session.
-        #[test]
-        fn issue_comment_success_auto_records_through_cli() {
-            use crate::cli::{run_collect, CliCommand, IssueCommand, TestEnv};
-            use gwt_github::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
-
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-cli");
-            let dir = mk_worktree(&INTAKE_PROFILE);
-
-            let mut env = TestEnv::new(dir.path().to_path_buf());
-            env.client.seed(IssueSnapshot {
-                number: IssueNumber(42),
-                title: "T".to_string(),
-                body: String::new(),
-                labels: vec![],
-                state: IssueState::Open,
-                updated_at: UpdatedAt::new("seed"),
-                comments: Vec::new(),
-            });
-            let (code, _) = run_collect(
-                &mut env,
-                CliCommand::Issue(IssueCommand::CommentBody {
-                    number: 42,
-                    body: "progress note".to_string(),
-                }),
-            )
-            .unwrap();
-            assert_eq!(code, 0);
-
-            let state = load(dir.path()).unwrap().unwrap();
-            assert_eq!(state.session_id, "sess-cli");
-            let outcome = state.outcome.unwrap();
-            assert_eq!(outcome.kind, IntakeOutcomeKind::IssueUpdated);
-            assert_eq!(outcome.number, Some(42));
-        }
     }
 }

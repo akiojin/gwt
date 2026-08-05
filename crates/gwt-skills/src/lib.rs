@@ -7,10 +7,8 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
-pub mod lane;
 pub mod provider_hooks;
 pub mod registry;
-pub mod session_kind;
 pub mod settings_local;
 pub mod validate;
 
@@ -29,19 +27,15 @@ pub use coordination_guidance::{
     generate_coordination_guidance_for_codex,
 };
 pub use distribute::{
-    apply_reduced_skill_set, distribute_to_worktree, distribute_to_worktree_for_targets,
-    prune_stale_gwt_assets, prune_stale_gwt_assets_for_targets, DistributeReport,
-    ManagedAssetTarget, CURATION_EXCLUDED_SKILLS,
+    distribute_to_worktree, distribute_to_worktree_for_targets,
+    distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
+    prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
+    TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
-};
-pub use lane::{
-    lane_file_path, read_lane_profile, resolve_lane_for_worktree, write_lane_file, GuidanceVariant,
-    LanePolicyFlags, LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE,
-    LANE_FILE_RELATIVE, LANE_FILE_VERSION,
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
@@ -49,7 +43,6 @@ pub use provider_hooks::{
     hermes_source_home, opencode_is_configured, opencode_is_configured_global,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use session_kind::{SessionKind, GWT_SESSION_KIND_ENV};
 pub use settings_local::{
     generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
     managed_hook_config_has_user_content, CodexHookDiscoveryMode,
@@ -723,6 +716,44 @@ mod tests {
         }
     }
 
+    // SPEC #3245 FR-006 / AC-3: the registration template produces
+    // autonomous-eligible Issues by default — a mandatory `- [ ] AC-N:`
+    // checkbox structure plus the `auto-merge` label applied by default with
+    // an explicit opt-out. The `issue.create` operation itself stays neutral
+    // (labels optional, no unconditional default).
+    #[test]
+    fn registration_template_defaults_to_autonomous_eligible_issues() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-register-issue/SKILL.md",
+            ".codex/skills/gwt-register-issue/SKILL.md",
+        ] {
+            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                issue_skill.contains("## Acceptance Criteria"),
+                "expected a mandatory Acceptance Criteria section in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("- [ ] AC-1:"),
+                "expected the `- [ ] AC-N:` checkbox structure in the template: {relative}"
+            );
+            assert!(
+                issue_skill.contains("\"labels\":[\"auto-merge\"]"),
+                "expected the auto-merge label applied by default at issue.create: {relative}"
+            );
+            assert!(
+                issue_skill.contains("opt-out") || issue_skill.contains("opt out"),
+                "expected an explicit auto-merge opt-out path: {relative}"
+            );
+            assert!(
+                issue_skill.contains("Issue Monitor"),
+                "expected the Issue Monitor eligibility alignment note: {relative}"
+            );
+        }
+    }
+
     #[test]
     fn local_github_issue_workflows_use_canonical_gwt_surfaces() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -868,12 +899,8 @@ mod tests {
                 "execution.reopen",
                 "temporary question",
                 "params.derive:true",
-                "required_recovery_commands",
-                "execution_root",
-                "Non-Vacuous No-Change Floor",
-                "Legacy Requirement Gap",
-                "cannot be repaired in the same execution lifetime",
-                "fresh linked-owner launch",
+                "execution.repair",
+                "execution.status",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -1547,6 +1574,13 @@ mod tests {
                     && content.contains("\"operation\":\"pane.list\"")
                     && content.contains("\"operation\":\"pane.read\"")
                     && content.contains("\"operation\":\"pane.close\"")
+                    && content.contains("\"operation\":\"issue.monitor.status\"")
+                    && content.contains("\"operation\":\"issue.monitor.priority.move\"")
+                    && content.contains("\"operation\":\"issue.monitor.priority.set\"")
+                    && content.contains("\"operation\":\"issue.monitor.config.set\"")
+                    && content.contains("enabled=true")
+                    && content.contains("autonomous_mode=true")
+                    && content.contains("next scan")
                     && content.contains("params.targets")
                     && content.contains("handoff")
                     && content.contains("request"),
@@ -1570,10 +1604,34 @@ mod tests {
             command.contains("Board")
                 && command.contains("\"operation\":\"board.post\"")
                 && command.contains("`pane.list`, `pane.read`, or `pane.close`")
+                && command.contains("issue.monitor.status")
+                && command.contains("issue.monitor.priority.move")
+                && command.contains("issue.monitor.priority.set")
+                && command.contains("issue.monitor.config.set")
                 && !command.contains("[message]")
                 && !command.contains("sending"),
             "expected gwt-agent command to route pane operations through JSON and communication through Board"
         );
+
+        for relative in ["README.md", "README.ja.md"] {
+            let readme = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for operation in [
+                "issue.monitor.status",
+                "issue.monitor.priority.move",
+                "issue.monitor.priority.set",
+                "issue.monitor.config.set",
+            ] {
+                assert!(
+                    readme.contains(operation),
+                    "expected {relative} to document {operation}"
+                );
+            }
+            assert!(
+                readme.contains("next scan"),
+                "expected {relative} to document eventual consistency"
+            );
+        }
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
@@ -1674,6 +1732,68 @@ mod tests {
             assert!(
                 !content.contains("summary in English"),
                 "unexpected English-only description guidance in {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn planning_and_verification_guidance_require_complete_blocking_gate_evidence() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
+        let required = [
+            "agent-reachable recovery operation",
+            "diagnostic visibility",
+            "positive test",
+            "false-positive negative test",
+        ];
+
+        for skill in ["gwt-plan-spec", "gwt-verify"] {
+            let source_relative = format!(".claude/skills/{skill}/SKILL.md");
+            let generated_relative = format!(".codex/skills/{skill}/SKILL.md");
+            let source = std::fs::read_to_string(workspace_root.join(&source_relative))
+                .unwrap_or_else(|err| panic!("failed to read {source_relative}: {err}"));
+            let generated = std::fs::read_to_string(workspace_root.join(&generated_relative))
+                .unwrap_or_else(|err| panic!("failed to read {generated_relative}: {err}"));
+            let materialized_claude = std::fs::read_to_string(
+                materialized.path().join(&source_relative),
+            )
+            .unwrap_or_else(|err| panic!("failed to read materialized {source_relative}: {err}"));
+            let materialized_codex =
+                std::fs::read_to_string(materialized.path().join(&generated_relative))
+                    .unwrap_or_else(|err| {
+                        panic!("failed to read materialized {generated_relative}: {err}")
+                    });
+
+            for phrase in required {
+                assert!(
+                    source.contains(phrase),
+                    "{source_relative} must require blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    generated.contains(phrase),
+                    "{generated_relative} must materialize blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    materialized_claude.contains(phrase),
+                    "materialized {source_relative} must require blocking-gate evidence: {phrase}"
+                );
+                assert!(
+                    materialized_codex.contains(phrase),
+                    "materialized {generated_relative} must require blocking-gate evidence: {phrase}"
+                );
+            }
+            assert_eq!(
+                generated, source,
+                "{generated_relative} drifted from canonical {source_relative}"
+            );
+            assert_eq!(
+                materialized_claude, source,
+                "materialized {source_relative} drifted from canonical source"
+            );
+            assert_eq!(
+                materialized_codex, source,
+                "materialized {generated_relative} drifted from canonical source"
             );
         }
     }

@@ -71,9 +71,37 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     distribute_to_worktree_for_targets(worktree, &ManagedAssetTarget::ALL)
 }
 
+/// How distribution treats an existing git-tracked copy of a managed asset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackedAssetWritePolicy {
+    /// Preserve existing tracked files (default): never overwrite content a
+    /// project has checked in (SPEC #1942).
+    PreserveTracked,
+    /// Overwrite tracked copies of gwt-managed skill/command assets with the
+    /// embedded bundle. Used by ephemeral intake worktrees (#3374), where the
+    /// tracked copy can be months older than the running binary and the
+    /// worktree is disposable. Scoped to the same `gwt-*` namespaces the
+    /// intake reaper treats as disposable (`is_disposable_worktree_entry` in
+    /// gwt-git), so a refreshed file never makes an intake worktree look like
+    /// user work. Prune-side tracked protection is unchanged.
+    OverrideGwtManaged,
+}
+
 pub fn distribute_to_worktree_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
+) -> io::Result<DistributeReport> {
+    distribute_to_worktree_for_targets_with_policy(
+        worktree,
+        targets,
+        TrackedAssetWritePolicy::PreserveTracked,
+    )
+}
+
+pub fn distribute_to_worktree_for_targets_with_policy(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: TrackedAssetWritePolicy,
 ) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
@@ -87,6 +115,7 @@ pub fn distribute_to_worktree_for_targets(
             worktree,
             &worktree.join(".claude/skills"),
             &tracked_paths,
+            policy,
             &mut report,
         )?;
         write_dir_assets(
@@ -94,6 +123,7 @@ pub fn distribute_to_worktree_for_targets(
             worktree,
             &worktree.join(".claude/commands"),
             &tracked_paths,
+            policy,
             &mut report,
         )?;
     }
@@ -104,6 +134,7 @@ pub fn distribute_to_worktree_for_targets(
             worktree,
             &worktree.join(".codex/skills"),
             &tracked_paths,
+            policy,
             &mut report,
         )?;
     }
@@ -114,49 +145,12 @@ pub fn distribute_to_worktree_for_targets(
             worktree,
             &worktree.join(".gwt/hermes/skills"),
             &tracked_paths,
+            policy,
             &mut report,
         )?;
     }
 
     Ok(report)
-}
-
-/// Implementation-skill basenames a reduced (curation) skill set omits. An
-/// intake lane registers Issues/SPECs and does not implement, so it should not
-/// surface the build / verify / PR skills. Curation skills (register-issue,
-/// discussion, plan-spec, search, arch-review, register-spec, …) and the
-/// always-present gwt-coordination guidance stay.
-pub const CURATION_EXCLUDED_SKILLS: &[&str] = &[
-    "gwt-execute",
-    "gwt-build-spec",
-    "gwt-verify",
-    "gwt-manage-pr",
-    "gwt-fix-issue",
-];
-
-/// Apply a reduced (curation) skill set to a worktree by removing the
-/// implementation skills/commands (SPEC-3248 P4, FR-011). Runs after
-/// distribution as a post-pass, so the write/prune materialization core is
-/// untouched. Idempotent: missing paths are ignored. Only gwt-managed
-/// (gitignored) assets are removed; a re-materialize restores the full set for
-/// a non-reduced lane.
-pub fn apply_reduced_skill_set(worktree: &Path) -> io::Result<usize> {
-    let mut removed = 0usize;
-    for name in CURATION_EXCLUDED_SKILLS {
-        for skills_root in [".claude/skills", ".codex/skills", ".gwt/hermes/skills"] {
-            let dir = worktree.join(skills_root).join(name);
-            if dir.is_dir() {
-                fs::remove_dir_all(&dir)?;
-                removed += 1;
-            }
-        }
-        let command = worktree.join(".claude/commands").join(format!("{name}.md"));
-        if command.is_file() {
-            fs::remove_file(&command)?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
 }
 
 /// Remove stale gwt-managed asset paths from the target worktree without
@@ -277,9 +271,10 @@ fn write_dir_assets(
     worktree: &Path,
     dest: &Path,
     tracked_paths: &HashSet<PathBuf>,
+    policy: TrackedAssetWritePolicy,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
-    write_dir_assets_inner(source, worktree, dest, tracked_paths, false, report)
+    write_dir_assets_inner(source, worktree, dest, tracked_paths, policy, false, report)
 }
 
 fn write_gwt_skill_dir_assets(
@@ -287,9 +282,10 @@ fn write_gwt_skill_dir_assets(
     worktree: &Path,
     dest: &Path,
     tracked_paths: &HashSet<PathBuf>,
+    policy: TrackedAssetWritePolicy,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
-    write_dir_assets_inner(source, worktree, dest, tracked_paths, true, report)
+    write_dir_assets_inner(source, worktree, dest, tracked_paths, policy, true, report)
 }
 
 fn write_dir_assets_inner(
@@ -297,6 +293,7 @@ fn write_dir_assets_inner(
     worktree: &Path,
     dest: &Path,
     tracked_paths: &HashSet<PathBuf>,
+    policy: TrackedAssetWritePolicy,
     root_gwt_only: bool,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
@@ -305,7 +302,14 @@ fn write_dir_assets_inner(
         // Preserve existing tracked files so we do not overwrite user-checked-in
         // assets with an older bundle snapshot, but still recreate missing
         // tracked files so worktrees can self-heal after an accidental delete.
-        if target.exists() && should_skip_tracked_path(worktree, &target, tracked_paths) {
+        // #3374: ephemeral intake worktrees invert this for gwt-managed
+        // namespaces — there the tracked copy is a stale base-ref snapshot,
+        // not user content, and the embedded bundle wins.
+        if target.exists()
+            && should_skip_tracked_path(worktree, &target, tracked_paths)
+            && !(policy == TrackedAssetWritePolicy::OverrideGwtManaged
+                && is_gwt_managed_override_path(worktree, &target))
+        {
             continue;
         }
         if let Some(parent) = target.parent() {
@@ -328,6 +332,7 @@ fn write_dir_assets_inner(
             worktree,
             &dest.join(subdir_name),
             tracked_paths,
+            policy,
             report,
         )?;
     }
@@ -418,6 +423,30 @@ fn remove_path(path: &Path) -> io::Result<()> {
     } else {
         fs::remove_file(path)
     }
+}
+
+/// gwt-managed namespaces the intake override may refresh even when tracked
+/// (#3374). Must stay in lockstep with `is_disposable_worktree_entry` in
+/// gwt-git: refreshing a file OUTSIDE the reaper's disposable set would make a
+/// pristine intake worktree look like user work and leak it past cleanup.
+/// `.gwt/hermes/skills` is deliberately absent for the same reason.
+const GWT_MANAGED_OVERRIDE_PREFIXES: &[&str] = &[
+    ".claude/skills/gwt-",
+    ".claude/commands/gwt-",
+    ".codex/skills/gwt-",
+];
+
+fn is_gwt_managed_override_path(worktree: &Path, target: &Path) -> bool {
+    target
+        .strip_prefix(worktree)
+        .ok()
+        .and_then(|relative| relative.to_str())
+        .map(|relative| relative.replace('\\', "/"))
+        .is_some_and(|relative| {
+            GWT_MANAGED_OVERRIDE_PREFIXES
+                .iter()
+                .any(|prefix| relative.starts_with(prefix))
+        })
 }
 
 fn should_skip_tracked_path(
@@ -579,60 +608,6 @@ mod tests {
                 .exists(),
             "gwt-* skill must still be materialized for ClaudeCode target"
         );
-    }
-
-    #[test]
-    fn apply_reduced_skill_set_removes_implementation_skills_keeps_curation() {
-        let dir = tempfile::tempdir().unwrap();
-        distribute_to_worktree_for_targets(
-            dir.path(),
-            &[ManagedAssetTarget::ClaudeCode, ManagedAssetTarget::Codex],
-        )
-        .unwrap();
-
-        // Sanity: implementation + curation skills both present after full
-        // distribution.
-        assert!(dir
-            .path()
-            .join(".claude/skills/gwt-build-spec/SKILL.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/gwt-execute/SKILL.md")
-            .exists());
-        assert!(dir
-            .path()
-            .join(".claude/skills/gwt-register-issue/SKILL.md")
-            .exists());
-
-        let removed = apply_reduced_skill_set(dir.path()).unwrap();
-        assert!(removed > 0, "reduced skill set must remove something");
-
-        // Implementation skills + their commands are gone (Claude + Codex).
-        for excluded in CURATION_EXCLUDED_SKILLS {
-            assert!(
-                !dir.path().join(".claude/skills").join(excluded).exists(),
-                "intake must drop implementation skill {excluded} (claude)"
-            );
-            assert!(
-                !dir.path().join(".codex/skills").join(excluded).exists(),
-                "intake must drop implementation skill {excluded} (codex)"
-            );
-        }
-        assert!(
-            !dir.path().join(".claude/commands/gwt-execute.md").exists(),
-            "intake must drop implementation command gwt-execute"
-        );
-        // Curation skills survive.
-        assert!(
-            dir.path()
-                .join(".claude/skills/gwt-register-issue/SKILL.md")
-                .exists(),
-            "intake must keep curation skills"
-        );
-
-        // Idempotent: a second application removes nothing.
-        assert_eq!(apply_reduced_skill_set(dir.path()).unwrap(), 0);
     }
 
     #[test]
@@ -873,6 +848,58 @@ mod tests {
             tracked_codex_skill.exists(),
             "tracked codex gwt skill dir must not be pruned before the running binary bundles it: {}",
             tracked_codex_skill.display()
+        );
+    }
+
+    // #3374: an ephemeral intake worktree must surface the embedded bundle
+    // even where the project tracks gwt skills (the gwt repo itself). Tracked
+    // gwt-* copies are refreshed; non-gwt tracked files stay untouched; a
+    // tracked gwt dir absent from the bundle is still preserved (prune
+    // protection is unchanged).
+    #[test]
+    fn distribute_override_policy_refreshes_stale_tracked_gwt_assets_only() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let tracked_skill = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
+        let tracked_future_skill = dir.path().join(".claude/skills/gwt-future-search/SKILL.md");
+        let tracked_user_command = dir.path().join(".claude/commands/release.md");
+        fs::create_dir_all(tracked_skill.parent().unwrap()).unwrap();
+        fs::create_dir_all(tracked_future_skill.parent().unwrap()).unwrap();
+        fs::create_dir_all(tracked_user_command.parent().unwrap()).unwrap();
+        fs::write(&tracked_skill, "stale tracked skill").unwrap();
+        fs::write(&tracked_future_skill, "tracked future skill").unwrap();
+        fs::write(&tracked_user_command, "user release command").unwrap();
+        track_path(dir.path(), ".claude/skills/gwt-manage-pr/SKILL.md");
+        track_path(dir.path(), ".claude/skills/gwt-future-search/SKILL.md");
+        track_path(dir.path(), ".claude/commands/release.md");
+
+        distribute_to_worktree_for_targets_with_policy(
+            dir.path(),
+            &[ManagedAssetTarget::ClaudeCode],
+            TrackedAssetWritePolicy::OverrideGwtManaged,
+        )
+        .unwrap();
+
+        let refreshed = fs::read_to_string(&tracked_skill).unwrap();
+        let bundled = CLAUDE_SKILLS
+            .get_file("gwt-manage-pr/SKILL.md")
+            .expect("bundled skill")
+            .contents_utf8()
+            .expect("utf8 bundled skill");
+        assert_eq!(
+            refreshed, bundled,
+            "stale tracked gwt skill is refreshed from the embedded bundle"
+        );
+        assert_eq!(
+            fs::read_to_string(&tracked_future_skill).unwrap(),
+            "tracked future skill",
+            "a tracked gwt skill absent from the bundle is still preserved"
+        );
+        assert_eq!(
+            fs::read_to_string(&tracked_user_command).unwrap(),
+            "user release command",
+            "non-gwt tracked files are never overwritten"
         );
     }
 

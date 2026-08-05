@@ -88,20 +88,17 @@ pub fn set_proposal_status_by_label(
             return Ok(false);
         };
         let proposals = parse_document_proposals(&document);
-        let targets: Vec<_> = proposals
+        let Some(target) = proposals
             .into_iter()
-            .filter(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
-            .collect();
-        if targets.is_empty() {
+            .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
+        else {
             return Ok(false);
-        }
+        };
 
         let mut lines: Vec<String> = document.content.lines().map(str::to_string).collect();
-        for target in targets {
-            if let Some(line) = lines.get_mut(target.header_line_index) {
-                if let Some(rewritten) = replace_trailing_status_tag(line, new_status) {
-                    *line = rewritten;
-                }
+        if let Some(line) = lines.get_mut(target.header_line_index) {
+            if let Some(rewritten) = replace_trailing_status_tag(line, new_status) {
+                *line = rewritten;
             }
         }
         let rewritten = lines.join("\n");

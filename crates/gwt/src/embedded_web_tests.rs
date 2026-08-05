@@ -46,6 +46,18 @@ fn protocol_enums_js() -> &'static str {
     root_js_module_source("/protocol-enums.js")
 }
 
+fn workspace_resume_picker_js() -> &'static str {
+    root_js_module_source("/workspace-resume-picker-modal.js")
+}
+
+fn launch_wizard_surface_js() -> &'static str {
+    root_js_module_source("/launch-wizard-surface.js")
+}
+
+fn workspace_kanban_surface_js() -> &'static str {
+    root_js_module_source("/workspace-kanban-surface.js")
+}
+
 fn styles_components_css() -> &'static str {
     static_asset_text("/styles/components.css")
 }
@@ -537,7 +549,7 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // short-circuit on a background tab leaves xterm with stale cell
     // metrics and dead scrollback wheel until the next OS resize.
     let snapshot_write = regex::Regex::new(
-            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*\);",
+            r"(?s)createTerminalSnapshotWriteCoordinator\(\{[\s\S]*?onLatestSnapshotWritten:\s*\(\)\s*=>\s*\{[\s\S]*?try\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*finally\s*\{[\s\S]*?flushDeferredTerminalWrites\(windowId,\s*runtime\);",
         )
         .expect("valid regex");
     let snapshot_activation = regex::Regex::new(
@@ -590,9 +602,9 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     assert!(
         html.contains("viewportRefreshPending: false")
             && html.contains("runtime.viewportRefreshPending = true")
-            && html.contains("rearmPendingTerminalViewportRefresh")
+            && html.contains("consumePendingTerminalViewportRefresh")
             && html.contains("rearmRefreshOnVisible({"),
-        "expected hidden viewport refreshes to stay pending and re-arm on visible transition",
+        "expected hidden viewport refreshes to stay pending, then be consumed before the shared activation scheduler runs",
     );
     assert!(
         html.contains("document.addEventListener(\"visibilitychange\"")
@@ -600,9 +612,10 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         "expected document visibility restore to re-arm visible terminal refreshes",
     );
     assert!(
-            html.contains("terminalOutputBatcher.clear(windowId);"),
-            "expected pending terminal output batches to be cleared on snapshot and removed-window cleanup",
-        );
+        html.contains("clearTerminalOutputBeforeSnapshot({")
+            && html.contains("clearBatchedOutput: (id) => terminalOutputBatcher.clear(id)"),
+        "expected snapshot receipt to clear every pre-boundary terminal output queue",
+    );
     assert!(
         html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
         "expected terminal cleanup to clear pending shared viewport refreshes",
@@ -625,12 +638,14 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     // render at their own world geometry, so geometry-persist is gated purely
     // on a real dimension change (Tile/Stack/Align). The old
     // restore-from-minimized branch (wasMinimized / windowData.minimized) no
-    // longer exists.
+    // longer exists. Issue #3364 folded the intermediate `dimensionsChanged`
+    // into `shouldPersistTerminalGeometry` (conflict suppression moved to the
+    // renderWorkspace pre-pass).
     assert!(
         html.contains("const previousWidth = parseFloat(element.style.width")
             && html.contains("const previousHeight = parseFloat(element.style.height")
-            && html.contains("const dimensionsChanged =")
             && html.contains("const shouldPersistTerminalGeometry =")
+            && html.contains("previousWidth !== windowData.geometry.width")
             && html.contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
         "expected terminals to persist fitted geometry to backend on window \
              resize (Tile/Stack/Align)",
@@ -664,7 +679,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // is false so we do not flip isReady while hidden, and (b) only
     // mark the runtime ready after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -675,11 +690,11 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     let write_gate = regex::Regex::new(
-            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(\s*runtime\.isReady === false\s*\|\|\s*runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) === true\s*\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     let snapshot_gate = regex::Regex::new(
-            r#"(?s)function replaceTerminalSnapshot\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*pendingSnapshotMap\.set\(windowId, base64\);\s*return;\s*\}"#,
+            r#"(?s)function replaceTerminalSnapshot\(windowId, base64\) \{[\s\S]*?pendingSnapshotMap\.set\(windowId, base64\);[\s\S]*?if \(!runtime \|\| runtime\.isReady === false\) \{\s*return;\s*\}[\s\S]*?runtime\.snapshotWriteCoordinator\.start\(\);"#,
         )
         .expect("valid regex");
 
@@ -765,7 +780,7 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
     // the revealed terminal keeps the stale grid until a manual resize.
     let html = frontend_bundle_source();
     let focus_retry = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
+            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -779,19 +794,90 @@ fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
             runtime_init.is_match(html),
             "expected createTerminalRuntime to initialize activationAttempts so the focus-path retry has a bounded counter (Issue #2937)",
         );
+    let refresh_settlement = regex::Regex::new(
+            r#"(?s)const hasAuthoritativePendingRefresh =\s*activeRuntime\.viewportRefreshPending === true;[\s\S]*?const hasPendingRefresh =\s*hasAuthoritativePendingRefresh \|\|[\s\S]*?terminalViewportRefreshScheduler\?\.hasPending\?\.\(windowId\) === true;[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?hasPendingRefresh,[\s\S]*?\}\);[\s\S]*?const refreshSettlement = resolveTerminalViewportRefreshSettlement\(\{[\s\S]*?activationRan:\s*activation\.ran,[\s\S]*?shouldPersistGeometry,[\s\S]*?hasAuthoritativePendingRefresh,[\s\S]*?\}\);[\s\S]*?if \(refreshSettlement\.shouldUpdate\) \{[\s\S]*?activeRuntime\.viewportRefreshPending = refreshSettlement\.pending;[\s\S]*?\}[\s\S]*?if \(!activation\.ran\)[\s\S]*?if \(activation\.fastPath\)"#,
+        )
+        .expect("valid regex");
+    assert!(
+            refresh_settlement.is_match(html),
+            "expected failed authoritative activation to rearm viewportRefreshPending before retry exhaustion and successful activation to clear it before the fast-path return (SPEC-2008 FR-122)",
+        );
+    let persisted_fit_settlement = regex::Regex::new(
+            r#"(?s)runTerminalFitRequest\(\{[\s\S]*?persist,[\s\S]*?markPending:[\s\S]*?clearPending:[\s\S]*?viewportRefreshPending = false[\s\S]*?activate:"#,
+        )
+        .expect("valid regex");
+    assert!(
+            persisted_fit_settlement.is_match(html),
+            "expected successful persisted fits to clear authoritative pending state while failed/hidden fits remain pending (SPEC-2008 FR-122)",
+        );
+    let retry_restart = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?restartRetryBudget\s*=\s*false[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{[\s\S]*?if \(restartRetryBudget\) \{\s*runtime\.activationAttempts = 0;\s*\}[\s\S]*?if \(runtime\.activationFrame !== null\) \{\s*return;"#,
+        )
+        .expect("valid regex");
+    assert!(
+            retry_restart.is_match(html),
+            "expected an external authoritative activation to restart the bounded retry budget before the coalesced-frame early return (SPEC-2008 FR-122)",
+        );
+    for reason in [
+        "force_refresh_retry",
+        "visibility_reveal",
+        "visibility_restore",
+    ] {
+        let external_restart = regex::Regex::new(&format!(
+                r#"(?s)scheduleTerminalFocusActivation\(windowId,\s*\{{[\s\S]*?reason:\s*"{reason}",\s*restartRetryBudget:\s*true"#
+            ))
+            .expect("valid regex");
+        assert!(
+            external_restart.is_match(html),
+            "expected {reason} to restart a previously exhausted activation retry budget (SPEC-2008 FR-122)",
+        );
+    }
+    assert_eq!(
+        html.matches("restartRetryBudget: true").count(),
+        3,
+        "internal retries and topmost focus must not restart the bounded activation retry budget",
+    );
 }
 
 #[test]
-fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
+fn embedded_web_plain_redraw_does_not_clear_authoritative_pending_refresh() {
+    let html = frontend_bundle_source();
+    let fallback_start = html
+        .find("function scheduleTerminalViewportRefresh(")
+        .expect("scheduleTerminalViewportRefresh must exist");
+    let redraw_start = html[fallback_start..]
+        .find("function refreshTerminalViewport(")
+        .map(|offset| fallback_start + offset)
+        .expect("refreshTerminalViewport must follow the scheduler");
+    assert!(
+        !html[fallback_start..redraw_start].contains("viewportRefreshPending = false"),
+        "plain fallback redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
+    );
+
+    let scheduler_start = html
+        .find("terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({")
+        .expect("terminal viewport refresh scheduler must exist");
+    let force_refresh_start = html[scheduler_start..]
+        .find("function forceTerminalViewportRefresh(")
+        .map(|offset| scheduler_start + offset)
+        .expect("forceTerminalViewportRefresh must follow the scheduler");
+    assert!(
+        !html[scheduler_start..force_refresh_start].contains("viewportRefreshPending = false"),
+        "plain scheduled redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
+    );
+}
+
+#[test]
+fn embedded_web_window_pointer_events_finalize_resize_on_mismatch() {
     // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
     // emits pointerup / pointercancel with a pointerId that does not
     // match the one captured at pointerdown. The previous handlers
     // gated finishWindowResize behind a strict pointerId equality
     // check, so a mismatched pointerup left resizeState alive until
     // the 30 second staleness guard finally cleaned it up. This
-    // contract pins the new fallback: any window-level pointerup or
-    // pointercancel that fires while a resize is pending must clean
-    // up resizeState immediately via forceResetResizeState.
+    // contract pins the fallback: any window-level pointerup or
+    // pointercancel that fires while a resize is pending must finalize
+    // the original gesture immediately via forceResetResizeState.
     let html = frontend_bundle_source();
     let pointerup_fallback = regex::Regex::new(
             r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
@@ -810,6 +896,23 @@ fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
             pointercancel_fallback.is_match(html),
             "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
         );
+
+    let force_reset_start = html
+        .find("function forceResetResizeState(reason)")
+        .expect("forceResetResizeState must exist");
+    let next_function_start = html[force_reset_start..]
+        .find("function scheduleTerminalViewportRefresh(")
+        .map(|offset| force_reset_start + offset)
+        .expect("scheduleTerminalViewportRefresh must follow forceResetResizeState");
+    let force_reset_body = &html[force_reset_start..next_function_start];
+    assert!(
+        force_reset_body.contains("finishWindowResize(previous.pointerId);"),
+        "pointerId mismatch must finalize and persist the latest resize geometry",
+    );
+    assert!(
+        !force_reset_body.contains("clearLocalGeometryEdit("),
+        "pointerId mismatch must not discard the local geometry guard before a stale snapshot arrives",
+    );
 }
 
 #[test]
@@ -819,8 +922,11 @@ fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
             r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
         )
         .expect("valid regex");
+    // Issue #3364 — the finalizer commits through the shared
+    // commitWindowGeometryGesture path (guard + optimistic model/minimap
+    // sync + unconditional send) instead of a raw sendGeometry.
     let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)commitWindowGeometryGesture\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
         )
         .expect("valid regex");
 
@@ -2500,6 +2606,82 @@ fn embedded_web_work_surface_renders_lifecycle_state_badge() {
 }
 
 #[test]
+fn embedded_web_work_detail_keeps_task_first_action_and_session_open_contract() {
+    let js = workspace_kanban_surface_js();
+    let css = styles_components_css();
+
+    assert!(
+        js.contains("workspace-detail-work-action-rail")
+            && js.contains("workspace-detail-work-primary-action")
+            && js.contains("Open session")
+            && js.contains("No previous session to open. Continue work can start a new one."),
+        "embedded Work detail must keep producing continuation on Work while historical sessions reopen with input enabled",
+    );
+    assert!(
+        js.contains("createNode(\"button\", \"wizard-button\", \"Launch Agent\")")
+            && !js.contains("createNode(\"button\", \"wizard-button primary\", \"Launch Agent\")"),
+        "Continue work must remain the sole producing primary action",
+    );
+    assert!(
+        css.contains(".workspace-detail-work-action-rail")
+            && css.contains("@container (max-width: 760px)")
+            && css.contains("white-space: nowrap"),
+        "embedded task-first action rail must retain its container-responsive layout contract",
+    );
+}
+
+#[test]
+fn embedded_web_work_detail_execution_diagnosis_uses_existing_surface_and_operator_tokens() {
+    let js = workspace_kanban_surface_js();
+    let css = styles_components_css();
+
+    assert!(
+        js.contains("section.dataset.section = \"execution-diagnosis\"")
+            && js.contains("settlement_severity")
+            && js.contains("available_recoveries"),
+        "execution diagnosis must render from the backend contract in the existing Work detail",
+    );
+    assert!(
+        css.contains(".workspace-execution-diagnosis")
+            && css.contains("var(--color-state-blocked)")
+            && css.contains("var(--color-state-needs-input)")
+            && css.contains("var(--color-state-done)"),
+        "execution diagnosis styling must use Operator state tokens",
+    );
+    let diagnosis_css = css
+        .split_once(".workspace-execution-diagnosis")
+        .map(|(_, suffix)| suffix)
+        .expect("execution diagnosis CSS")
+        .split("/*")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        !diagnosis_css.contains('#')
+            && !diagnosis_css.contains("rgb(")
+            && !diagnosis_css.contains("rgba(")
+            && !diagnosis_css.contains("position: fixed")
+            && !diagnosis_css.contains("position: absolute"),
+        "execution diagnosis must not introduce raw colors or a bespoke overlay",
+    );
+}
+
+#[test]
+fn embedded_web_board_entry_ids_are_diagnostics_only() {
+    let js = workspace_kanban_surface_js();
+
+    assert!(
+        js.contains("details.dataset.section = \"board-diagnostics\"")
+            && js.contains("appendBoardDiagnostics(body, boardDiagnosticRefs(workspace))"),
+        "raw Board entry ids must be routed through the collapsed Diagnostics disclosure",
+    );
+    assert!(
+        !js.contains("event?.kind || event?.board_entry_id")
+            && !js.contains("appendMetaText(meta, event.board_entry_id)"),
+        "raw Board entry ids must not leak into lifecycle titles or metadata",
+    );
+}
+
+#[test]
 fn embedded_web_board_messages_put_user_on_right_and_agent_on_left() {
     let html = frontend_bundle_source();
     fn css_block<'a>(html: &'a str, selector: &str) -> &'a str {
@@ -3705,13 +3887,21 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
     // longer ends with a maximized-viewport sync. It now recomputes operator
     // telemetry (rail window-count badge / empty-canvas state) after mounting
-    // every window and applying its visibility transition.
+    // every window and applying its visibility transition. Issue #3365: the
+    // loop is a per-window `isolate` callback inside workspaceRenderSync so
+    // one poisoned window cannot block the others, and the telemetry
+    // recompute is the guard's `recompute` hook (guaranteed even on a failed
+    // sync).
     let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*//[^\n]*\n(?:\s*//[^\n]*\n)*\s*recomputeOperatorTelemetry\(\);",
+            r#"(?s)isolate\("ensure_window", workspace\.windows, \(windowData\) => \{(?P<body>.*?)\}\);"#,
         )
         .expect("valid regex");
     let captures = visibility_block.captures(js).expect(
         "expected the workspace.windows visibility loop that applies the visibility transition",
+    );
+    assert!(
+        js.contains("recompute: recomputeOperatorTelemetry"),
+        "expected the render guard to keep operator telemetry recompute wired after the visibility loop",
     );
     let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
     // After SPEC-2008 Phase 24 follow-up, the loop delegates to
@@ -3728,10 +3918,15 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
         "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
     );
     assert!(
-        body.contains("scheduleTerminalFocusActivation(") && body.contains("terminalMap"),
-        "expected hidden->visible transition to schedule terminal focus activation \
-             (fit + viewport refresh + focus) so scrollback responds without a manual \
-             resize (SPEC-2008 FR-051); body: {body}",
+        body.contains("onReveal: () => activateTerminalOnReveal(windowData.id)"),
+        "expected hidden->visible transition to delegate to the single reveal activation router; body: {body}",
+    );
+    assert!(
+        js.contains("function activateTerminalOnReveal(windowId)")
+            && js.contains("runTerminalRevealActivation({")
+            && js.contains("scheduleTerminalFocusActivation(windowId, {")
+            && js.contains("reason: \"visibility_reveal\""),
+        "expected the reveal router to consume pending state and schedule one persisted terminal activation",
     );
     // SPEC-2008 camera-focus: the coalesced maximized-viewport sync scheduler
     // was removed entirely; no rAF fan-out for maximized windows remains.
@@ -3741,5 +3936,62 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
             && !shell_js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)")
             && !js.contains("scheduleMaximizedWindowsToViewportSync()"),
         "expected maximized viewport sync machinery to be removed under camera-focus",
+    );
+}
+
+#[test]
+fn embedded_web_first_party_assets_carry_no_inspection_concept() {
+    // Issue #3410 (AC-2): the observation-only Inspection launch mode is
+    // removed as a mechanism. No shipped first-party asset may carry the
+    // concept — neither the blocking copy nor the execution-intent value.
+    let sources: [(&str, &str); 3] = [
+        ("frontend bundle", frontend_bundle_source()),
+        (
+            "workspace-resume-picker-modal.js",
+            workspace_resume_picker_js(),
+        ),
+        (
+            "styles/components.css",
+            include_str!("../web/styles/components.css"),
+        ),
+    ];
+    let banned = [
+        "inspection",
+        "inspect session",
+        "inspect conversation",
+        "inspect this conversation",
+        "session to inspect",
+        "history only",
+    ];
+    for (name, source) in sources {
+        let lowered = source.to_ascii_lowercase();
+        for phrase in banned {
+            assert!(
+                !lowered.contains(phrase),
+                "expected {name} to carry no inspection-mode concept ({phrase:?}) after #3410 removed observation-only launches"
+            );
+        }
+    }
+}
+
+#[test]
+fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
+    let picker = workspace_resume_picker_js();
+    let wizard = launch_wizard_surface_js();
+
+    assert!(
+        picker.contains("agent.resume_kind !== \"metadata_only\"")
+            && picker.contains("row.dataset.executionIntent = \"resume\""),
+        "expected the Work Resume picker to exclude fresh-start metadata and open sessions as plain input-capable resumes",
+    );
+    assert!(
+        wizard.contains("export function launchWizardStartMethodIntent")
+            && wizard.contains("button.dataset.executionIntent = startMethodIntent")
+            && !wizard.contains("History only"),
+        "expected legacy conversation methods in the Launch Wizard to reopen conversations without an observation-only notice",
+    );
+    assert!(
+        !picker.contains("kind: \"continue_work\"") && !wizard.contains("kind: \"continue_work\""),
+        "Resume surfaces must never synthesize the producing Continue work request",
     );
 }

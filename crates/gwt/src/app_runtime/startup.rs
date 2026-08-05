@@ -18,13 +18,18 @@
 //! Behavior-preserving move: `AppRuntime::new` and
 //! `PendingStartupAutoResumeSession` stay in `mod.rs`.
 
-use std::path::Path;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    thread::JoinHandle,
+};
 
 use super::{
-    combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees,
-    same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
-    AgentCapabilityIssuer, AppRuntime, OutboundEvent, PendingStartupAutoResumeSession,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
+    plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
+    workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
+    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -33,6 +38,109 @@ const MAX_STARTUP_INTAKE_PRUNE: usize = 32;
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
+
+pub(super) fn spawn_startup_orphan_intake_prune_with<T, F>(
+    jobs: Vec<T>,
+    mut prune: F,
+) -> Option<JoinHandle<()>>
+where
+    T: Send + 'static,
+    F: FnMut(T) -> usize + Send + 'static,
+{
+    if jobs.is_empty() {
+        return None;
+    }
+    std::thread::Builder::new()
+        .name("gwt-startup-intake-recovery".to_string())
+        .spawn(move || {
+            for job in jobs {
+                let _ = prune(job);
+            }
+        })
+        .ok()
+}
+
+fn spawn_startup_orphan_intake_prune(plans: Vec<(PathBuf, OrphanIntakePrunePlan)>) {
+    let _ = spawn_startup_orphan_intake_prune_with(plans, |(project_root, plan)| {
+        let pruned = execute_orphan_intake_worktree_prune(plan, MAX_STARTUP_INTAKE_PRUNE);
+        if pruned > 0 {
+            tracing::info!(
+                project_root = %project_root.display(),
+                pruned,
+                "reaped orphaned ephemeral intake worktrees on startup"
+            );
+        }
+        pruned
+    });
+}
+
+pub(super) fn self_heal_managed_hooks_in_worktrees<'a>(
+    worktrees: impl IntoIterator<Item = &'a Path>,
+) {
+    let expected_hook_bin = std::env::var("GWT_HOOK_BIN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            gwt::managed_assets::resolve_public_gwt_bin_path()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+    self_heal_managed_hooks_in_worktrees_with_expected(worktrees, expected_hook_bin.as_deref());
+}
+
+pub(super) fn self_heal_managed_hooks_in_worktrees_with_expected<'a>(
+    worktrees: impl IntoIterator<Item = &'a Path>,
+    expected_hook_bin: Option<&str>,
+) {
+    let mut seen = HashSet::new();
+    for worktree in worktrees {
+        let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&canonical);
+        input.runtime_state_path = None;
+        if let Some(expected_hook_bin) = expected_hook_bin {
+            input.expected_hook_bin = Some(expected_hook_bin.to_string());
+        }
+        let health = gwt::cli::hook::health::read_managed_hook_health(&input);
+        let needs_repair = matches!(
+            health.status,
+            gwt::cli::hook::health::ManagedHookHealthStatus::NeedsAttention
+                | gwt::cli::hook::health::ManagedHookHealthStatus::Degraded
+        );
+        let only_current_binary_is_missing = expected_hook_bin.is_some()
+            && !health.issues.is_empty()
+            && health
+                .issues
+                .iter()
+                .all(|issue| issue.starts_with("managed hook binary missing:"));
+        if only_current_binary_is_missing {
+            continue;
+        }
+        if !needs_repair {
+            continue;
+        }
+        if let Err(error) =
+            gwt::managed_assets::regenerate_existing_managed_hook_configs(&canonical)
+        {
+            tracing::warn!(
+                worktree = %canonical.display(),
+                %error,
+                "managed hook startup self-heal failed"
+            );
+        } else if needs_repair {
+            if let Err(error) = gwt::cli::hook::health::record_managed_hook_self_healed(&canonical)
+            {
+                tracing::warn!(
+                    worktree = %canonical.display(),
+                    %error,
+                    "managed hook self-heal marker failed"
+                );
+            }
+        }
+    }
+}
 
 fn startup_auto_resume_window_geometry(
     index: usize,
@@ -96,6 +204,30 @@ pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id:
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
+        let startup_worktrees = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None)
+                    .map(|entries| entries.into_iter().map(|entry| entry.path).collect())
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            project_root = %tab.project_root.display(),
+                            %error,
+                            "managed hook startup self-heal inventory failed"
+                        );
+                        vec![tab.project_root.clone()]
+                    })
+            })
+            .collect::<Vec<_>>();
+        self_heal_managed_hooks_in_worktrees(startup_worktrees.iter().map(PathBuf::as_path));
+
+        // Fresh linked-owner launch authority is durable in the Session and
+        // owner ledger, while readiness capabilities are intentionally
+        // process-local. Reconcile that durable pair before startup migrations
+        // or auto-resume can observe a partial Activated/Aborted transaction.
+        self.reconcile_durable_fresh_execution_launches();
+
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
         // Workspace Overview Completed column reflects past completions on the
@@ -103,6 +235,7 @@ impl AppRuntime {
         // per `work_item_id` and skips silently when journal / work_events
         // files are missing or unreadable.
         let now = chrono::Utc::now();
+        let mut orphan_intake_prune_plans = Vec::new();
         for tab in &self.tabs {
             let _ =
                 gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
@@ -142,21 +275,19 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
                 &tab.project_root,
             );
-            // SPEC-3214 T-006: reap ephemeral `.intake-*` worktrees orphaned by
-            // a crash (no intake session is live at startup). Clean ones are
-            // removed; dirty ones are kept. Bounded so a pile-up cannot stall
-            // startup.
-            let pruned = prune_orphan_intake_worktrees(&tab.project_root, MAX_STARTUP_INTAKE_PRUNE);
-            if pruned > 0 {
-                tracing::info!(
-                    project_root = %tab.project_root.display(),
-                    pruned,
-                    "reaped orphaned ephemeral intake worktrees on startup"
-                );
+            // Snapshot candidates before the GUI becomes interactive, then
+            // inspect/remove only that fixed set on a recovery worker. A new
+            // intake launched after startup can never enter this plan.
+            if let Some(plan) = plan_orphan_intake_worktree_prune(&tab.project_root) {
+                orphan_intake_prune_plans.push((tab.project_root.clone(), plan));
             }
         }
-
-        self.queue_startup_auto_resume_sessions();
+        let planned_orphan_intake_paths = orphan_intake_prune_plans
+            .iter()
+            .flat_map(|(_, plan)| plan.detached_worktree_paths().iter().cloned())
+            .collect::<HashSet<_>>();
+        self.queue_startup_auto_resume_sessions(&planned_orphan_intake_paths);
+        spawn_startup_orphan_intake_prune(orphan_intake_prune_plans);
 
         let windows = self
             .tabs
@@ -180,7 +311,10 @@ impl AppRuntime {
         let _ = self.persist();
     }
 
-    fn queue_startup_auto_resume_sessions(&mut self) {
+    pub(super) fn queue_startup_auto_resume_sessions(
+        &mut self,
+        planned_orphan_intake_paths: &HashSet<PathBuf>,
+    ) {
         self.pending_startup_auto_resume_sessions.clear();
         let mut sessions = self.load_recovery_sessions();
         sessions.sort_by(|left, right| {
@@ -193,6 +327,20 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
+            // The startup prune plan is the authoritative fixed snapshot of
+            // detached intake paths that are about to be removed. Exclude
+            // those exact worktrees before dispatching the prune worker so a
+            // persisted Session/placeholder cannot race remove_force with an
+            // auto-resume launch. Use path identity rather than the
+            // `.intake-*` basename: a branch-backed worktree may legitimately
+            // share that name, and Windows/symlink aliases may differ
+            // textually while resolving to the same worktree.
+            if planned_orphan_intake_paths
+                .iter()
+                .any(|planned| same_worktree_path(planned, &session.worktree_path))
+            {
+                continue;
+            }
             // Issue #2942: a persisted Stopped agent placeholder means the user
             // did not explicitly close the window (closing removes it from the
             // workspace). Such "still open" windows must restore regardless of
@@ -252,8 +400,12 @@ impl AppRuntime {
             if config.session_mode != gwt_agent::SessionMode::Resume {
                 continue;
             }
+            let project_state_root = session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path);
             let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                &session.worktree_path,
+                project_state_root,
                 Some(session.branch.as_str()),
                 &session.worktree_path,
             ));
@@ -371,8 +523,12 @@ impl AppRuntime {
         let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
             return Vec::new();
         };
+        let project_state_root = session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(&session.worktree_path);
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            &session.worktree_path,
+            project_state_root,
             Some(session.branch.as_str()),
             &session.worktree_path,
         ));
@@ -440,8 +596,12 @@ impl AppRuntime {
                 {
                     continue;
                 }
+                let project_state_root = session
+                    .project_state_root
+                    .as_deref()
+                    .unwrap_or(&session.worktree_path);
                 let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                    &session.worktree_path,
+                    project_state_root,
                     Some(session.branch.as_str()),
                     &session.worktree_path,
                 ));
@@ -550,7 +710,7 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
-    fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+    pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
             return Vec::new();
         };
@@ -560,8 +720,9 @@ impl AppRuntime {
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
             .filter_map(|path| {
                 let session_id = path.file_stem()?.to_str()?;
-                gwt_agent::update_session(&self.sessions_dir, session_id, |session| {
-                    if session.worktree_path.exists()
+                gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
+                    if session.status != gwt_agent::AgentStatus::Interrupted
+                        && session.worktree_path.exists()
                         && session.should_mark_interrupted_from_lifecycle()
                     {
                         session.update_status(gwt_agent::AgentStatus::Interrupted);

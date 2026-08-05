@@ -19,16 +19,8 @@ const AGENT_PROBE_SITES: &[ProbeSite] = &[
         function_name: "fetch_version",
     },
     ProbeSite {
-        relative_path: "crates/gwt/src/app_runtime/launch.rs",
-        function_name: "detect_installed_codex_hook_discovery_mode",
-    },
-    ProbeSite {
         relative_path: "crates/gwt-agent/src/prepare.rs",
-        function_name: "probe_host_package_runner",
-    },
-    ProbeSite {
-        relative_path: "crates/gwt/src/launch_runtime.rs",
-        function_name: "probe_host_package_runner_with_timeout_and_hub",
+        function_name: "probe_host_runner_bounded_with_hub",
     },
 ];
 
@@ -38,6 +30,62 @@ fn repo_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("gwt crate must be nested under crates/")
         .to_path_buf()
+}
+
+#[test]
+fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
+    let path = repo_root().join("crates/gwt/src/app_runtime/launch.rs");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let policy = function_source(&source, "codex_hook_discovery_mode_for_launch_config");
+    for forbidden in [
+        "resolved_command(",
+        "std::process::Command::new(",
+        "tokio::process::Command::new(",
+        "TokioCommand::new(",
+    ] {
+        assert!(
+            !policy.contains(forbidden),
+            "Codex hook discovery policy must stay process-free: {forbidden}"
+        );
+    }
+    assert!(policy.contains("health_report"));
+    assert!(policy.contains("version_output"));
+
+    let launch = function_source(&source, "spawn_agent_window_async");
+    assert_eq!(
+        launch
+            .matches("resolve_host_runner_health_checked(")
+            .count(),
+        1,
+        "Host launch must perform exactly one canonical runner-health check"
+    );
+    assert!(launch.contains(
+        "codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref())"
+    ));
+    let profile_env = launch
+        .find(".apply_to_parts(")
+        .expect("profile env applied");
+    let health = launch
+        .find("resolve_host_runner_health_checked(")
+        .expect("canonical host health");
+    assert!(
+        profile_env < health,
+        "health must use the effective profile env"
+    );
+    for mutation in [
+        "refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(",
+        "maybe_register_codex_managed_hook_trust_for_launch(",
+        "gwt_agent::Session::new(",
+    ] {
+        assert!(
+            health
+                < launch
+                    .find(mutation)
+                    .unwrap_or_else(|| panic!("missing {mutation}")),
+            "canonical health must precede launch mutation {mutation}"
+        );
+    }
 }
 
 fn function_source<'a>(source: &'a str, name: &str) -> &'a str {

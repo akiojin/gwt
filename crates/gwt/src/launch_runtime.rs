@@ -1,9 +1,5 @@
 use super::*;
 
-use std::fs;
-use std::io::{BufRead, BufReader, Read};
-use std::sync::{Arc, Mutex};
-
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
 }
@@ -200,7 +196,33 @@ pub fn resolve_ephemeral_launch_worktree(
     // Default to HEAD: `git worktree add --detach <path> HEAD` always resolves
     // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
     // base ref such as `origin/develop` when they need a specific base.
+    // #3374: a remote base must reflect the FRESH origin state — fetch before
+    // materializing so the remote-tracking ref is not months stale. Unlike
+    // Start Work's prepare step, intake never creates remote branches: a repo
+    // without an origin remote, or whose origin lacks the base branch, falls
+    // back to HEAD (the local checkout is the only truth there).
     let base_ref = base_ref.unwrap_or("HEAD");
+    let base_ref = if base_ref.starts_with("origin/") {
+        let has_origin = manager
+            .has_origin_remote()
+            .map_err(|err| format!("failed to inspect origin remote: {err}"))?;
+        if has_origin {
+            manager
+                .fetch_origin()
+                .map_err(|err| format!("failed to fetch origin for intake base: {err}"))?;
+        }
+        if has_origin
+            && manager
+                .remote_branch_exists(base_ref)
+                .map_err(|err| format!("failed to verify intake base {base_ref}: {err}"))?
+        {
+            base_ref
+        } else {
+            "HEAD"
+        }
+    } else {
+        base_ref
+    };
     manager
         .create_detached(base_ref, &worktree_path)
         .map_err(|err| err.to_string())?;
@@ -223,42 +245,73 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
 /// the dirty ones (uncommitted work is never destroyed). Bounded by
 /// `max_removals` so a pathological pile-up cannot stall startup. Returns the
 /// number removed. Never errors — best-effort recovery.
+#[cfg(test)]
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
-    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
+    let Some(plan) = plan_orphan_intake_worktree_prune(repo_path) else {
         return 0;
+    };
+    execute_orphan_intake_worktree_prune(plan, max_removals)
+}
+
+/// Fixed startup snapshot of detached `.intake-*` worktrees that existed
+/// before the GUI became interactive. Keeping discovery separate from safety
+/// inspection lets startup dispatch the expensive per-worktree checks to a
+/// worker without ever considering an intake created after startup.
+#[derive(Debug)]
+pub struct OrphanIntakePrunePlan {
+    main_repo_path: PathBuf,
+    worktree_paths: Vec<PathBuf>,
+}
+
+impl OrphanIntakePrunePlan {
+    pub(crate) fn detached_worktree_paths(&self) -> &[PathBuf] {
+        &self.worktree_paths
+    }
+}
+
+pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntakePrunePlan> {
+    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
+        return None;
     };
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
     let Ok(worktrees) = manager.list() else {
-        return 0;
+        return None;
     };
+    let worktree_paths = worktrees
+        .into_iter()
+        .filter(|worktree| {
+            is_ephemeral_intake_worktree(&worktree.path) && worktree.branch.is_none()
+        })
+        .map(|worktree| worktree.path)
+        .collect();
+    Some(OrphanIntakePrunePlan {
+        main_repo_path,
+        worktree_paths,
+    })
+}
 
+pub fn execute_orphan_intake_worktree_prune(
+    plan: OrphanIntakePrunePlan,
+    max_removals: usize,
+) -> usize {
+    let manager = gwt_git::WorktreeManager::new(&plan.main_repo_path);
     let mut removed = 0;
-    for worktree in worktrees {
+    for worktree_path in plan.worktree_paths {
         if removed >= max_removals {
             break;
         }
-        if !is_ephemeral_intake_worktree(&worktree.path) {
-            continue;
-        }
-        // codex #3236 P2: only reap the branchless intake worktrees this feature
-        // creates — a real branch worktree a user happens to name `.intake-*`
-        // has a branch and must be left alone (mirrors is_ephemeral_intake_session).
-        if worktree.branch.is_some() {
-            continue;
-        }
-        let worktree_path = worktree.path.clone();
-        match manager.ephemeral_worktree_has_local_work_with(&worktree.path, |entry| {
+        match manager.ephemeral_worktree_has_local_work_with(&worktree_path, |entry| {
             intake_hook_config_is_disposable(&worktree_path, entry)
         }) {
             Ok(false) => {
-                if manager.remove_force(&worktree.path).is_ok() {
+                if manager.remove_force(&worktree_path).is_ok() {
                     removed += 1;
                 }
             }
             // Has local work or unknown → keep it (fail closed).
             _ => {
                 tracing::warn!(
-                    worktree_path = %worktree.path.display(),
+                    worktree_path = %worktree_path.display(),
                     "keeping orphaned intake worktree with local work (changes, ignored files, or commits)"
                 );
             }
@@ -707,303 +760,12 @@ fn build_powershell_command_script(command: &str, args: &[String], cwd: Option<&
 pub fn apply_host_package_runner_fallback_with_probe<F>(
     config: &mut gwt_agent::LaunchConfig,
     fallback_executable: String,
-    mut probe: F,
+    probe: F,
 ) -> bool
 where
     F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
 {
-    let Some(program) =
-        resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
-    else {
-        return false;
-    };
-    config.command = program.executable;
-    config.args = program.args;
-    true
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HostPackageRunnerFallbackReport {
-    pub switched_to_fallback: bool,
-    pub repaired_npx_cache: bool,
-    pub messages: Vec<String>,
-}
-
-pub fn apply_host_package_runner_fallback_checked(
-    config: &mut gwt_agent::LaunchConfig,
-) -> Result<HostPackageRunnerFallbackReport, String> {
-    // Issue #2981: resolve a Windows-spawnable npx (prefers `npx.cmd`) instead of
-    // a bare `npx` that `CreateProcess` cannot launch after a failed bunx probe.
-    let fallback_executable = gwt_agent::resolve_host_npx_fallback_executable(&config.env_vars);
-    apply_host_package_runner_fallback_checked_with_probe_and_repair(
-        config,
-        fallback_executable,
-        default_windows_npx_cache_base(),
-        probe_host_package_runner_outcome,
-        repair_windows_npx_cache,
-    )
-}
-
-fn apply_host_package_runner_fallback_checked_with_probe_and_repair<F, R>(
-    config: &mut gwt_agent::LaunchConfig,
-    fallback_executable: String,
-    npx_cache_base: Option<PathBuf>,
-    mut probe: F,
-    mut repair: R,
-) -> Result<HostPackageRunnerFallbackReport, String>
-where
-    F: FnMut(
-        &str,
-        Vec<String>,
-        &HashMap<String, String>,
-        &[String],
-        Option<PathBuf>,
-    ) -> PackageRunnerProbeOutcome,
-    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
-{
-    let Some(version_spec) = host_package_runner_version_spec(config) else {
-        return Ok(HostPackageRunnerFallbackReport::default());
-    };
-    if !command_matches_runner(&config.command, "bunx") {
-        return Ok(HostPackageRunnerFallbackReport::default());
-    }
-
-    let cwd = config.working_dir.clone();
-    let bunx_probe = probe(
-        &config.command,
-        vec![version_spec.clone(), "--version".to_string()],
-        &config.env_vars,
-        &config.remove_env,
-        cwd.clone(),
-    );
-    if bunx_probe.success {
-        return Ok(HostPackageRunnerFallbackReport::default());
-    }
-
-    let agent_args = strip_package_runner_args(&config.args, &version_spec);
-    let mut fallback_args = vec!["--yes".to_string(), version_spec.clone()];
-    fallback_args.extend(agent_args);
-    let fallback_probe_args = vec![
-        "--yes".to_string(),
-        version_spec.clone(),
-        "--version".to_string(),
-    ];
-    let mut report = HostPackageRunnerFallbackReport::default();
-    let first_npx_probe = probe(
-        &fallback_executable,
-        fallback_probe_args.clone(),
-        &config.env_vars,
-        &config.remove_env,
-        cwd.clone(),
-    );
-    if first_npx_probe.success {
-        config.command = fallback_executable;
-        config.args = fallback_args;
-        report.switched_to_fallback = true;
-        report
-            .messages
-            .push("bunx unavailable, switching to npx...".to_string());
-        return Ok(report);
-    }
-    if first_npx_probe.timed_out {
-        config.command = fallback_executable;
-        config.args = fallback_args;
-        report.switched_to_fallback = true;
-        report.messages.push(format!(
-            "npx package-runner probe timed out; continuing with npx so launch output remains visible in the terminal. {}",
-            first_npx_probe.diagnostic()
-        ));
-        return Ok(report);
-    }
-
-    let probe_output = first_npx_probe.combined_output();
-    let repair_candidate = npx_cache_base
-        .as_deref()
-        .and_then(|base| detect_windows_npx_cache_corruption(&probe_output, base));
-    let Some(repair_candidate) = repair_candidate else {
-        return Err(format!(
-            "npx package-runner probe failed for {version_spec}. {} Manual recovery: run `npx --yes {version_spec} --version` in a terminal and repair the reported npm `_npx` directory if npm reports a missing executable.",
-            first_npx_probe.diagnostic()
-        ));
-    };
-
-    report.repaired_npx_cache = true;
-    report.messages.push(format!(
-        "Detected broken npm npx cache; repairing {}...",
-        repair_candidate.npx_root.display()
-    ));
-    repair(&repair_candidate).map_err(|error| {
-        format!(
-            "Failed to repair npm npx cache at {}: {error}. Manual recovery: remove this `_npx` directory and retry the launch.",
-            repair_candidate.npx_root.display()
-        )
-    })?;
-    report
-        .messages
-        .push("npm npx cache repair succeeded; retrying launch...".to_string());
-
-    let second_npx_probe = probe(
-        &fallback_executable,
-        fallback_probe_args,
-        &config.env_vars,
-        &config.remove_env,
-        cwd,
-    );
-    if second_npx_probe.timed_out {
-        config.command = fallback_executable;
-        config.args = fallback_args;
-        report.switched_to_fallback = true;
-        report.messages.push(format!(
-            "npx package-runner probe timed out after cache repair; continuing with npx so launch output remains visible in the terminal. {}",
-            second_npx_probe.diagnostic()
-        ));
-        return Ok(report);
-    }
-    if !second_npx_probe.success {
-        return Err(format!(
-            "npx package-runner probe failed after repairing npm npx cache at {}. {} Manual recovery: remove this `_npx` directory and retry the launch.",
-            repair_candidate.npx_root.display(),
-            second_npx_probe.diagnostic()
-        ));
-    }
-
-    config.command = fallback_executable;
-    config.args = fallback_args;
-    report.switched_to_fallback = true;
-    report
-        .messages
-        .push("bunx unavailable, switching to npx...".to_string());
-    Ok(report)
-}
-
-#[cfg(test)]
-fn resolve_host_package_runner_with_probe<F>(
-    config: &gwt_agent::LaunchConfig,
-    fallback_executable: String,
-    probe: &mut F,
-) -> Option<PackageRunnerProgram>
-where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
-{
-    let version_spec = host_package_runner_version_spec(config)?;
-    if !command_matches_runner(&config.command, "bunx") {
-        return None;
-    }
-
-    let probe_args = vec![version_spec.clone(), "--version".to_string()];
-    let cwd = config.working_dir.clone();
-    if probe(
-        &config.command,
-        probe_args,
-        &config.env_vars,
-        &config.remove_env,
-        cwd,
-    ) {
-        return None;
-    }
-
-    let agent_args = strip_package_runner_args(&config.args, &version_spec);
-    let mut args = vec!["--yes".to_string(), version_spec];
-    args.extend(agent_args);
-    Some(PackageRunnerProgram {
-        executable: fallback_executable,
-        args,
-    })
-}
-
-fn host_package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
-    package_runner_version_spec(config)
-        .or_else(|| infer_package_runner_version_spec(&config.command, &config.args))
-}
-
-fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<String> {
-    if !(command_matches_runner(command, "bunx") || command_matches_runner(command, "npx")) {
-        return None;
-    }
-
-    let version_spec = match args.first().map(String::as_str) {
-        Some("--yes" | "-y") => args.get(1)?,
-        _ => args.first()?,
-    };
-    if version_spec.is_empty() || version_spec.starts_with('-') {
-        return None;
-    }
-    Some(version_spec.clone())
-}
-
-fn probe_host_package_runner_outcome(
-    command: &str,
-    args: Vec<String>,
-    env_vars: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<PathBuf>,
-) -> PackageRunnerProbeOutcome {
-    #[cfg(windows)]
-    {
-        // Windows keeps executing the target package so the corrupt npm `_npx`
-        // cache auto-repair (`895ccadce`) can inspect the failed runner output.
-        let hub = gwt_core::process_console::global();
-        probe_host_package_runner_with_timeout_and_hub(
-            PackageRunnerProbeRequest {
-                command,
-                args,
-                env_vars,
-                remove_env,
-                cwd,
-                timeout: Duration::from_secs(5),
-                poll_interval: Duration::from_millis(50),
-            },
-            &hub,
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        // Non-Windows only verifies that the runner *binary* resolves. Running
-        // `<runner> <package> --version` to "validate" the runner downloads the
-        // whole package; on a cold/slow first run that exceeds any probe budget
-        // and aborts the launch with a misleading error card (issue #2948).
-        // A binary-availability check is instant and never blocks, so the real
-        // package download and any genuine runner error surface in the agent's
-        // raw TTY instead of a preparation-error card.
-        let _ = (args, remove_env, cwd);
-        host_package_runner_binary_outcome(command, env_vars)
-    }
-}
-
-/// Build a probe outcome from runner *binary* availability without executing
-/// the target package. `success` means the runner resolves on PATH; it never
-/// reports `timed_out`, so a slow package download can no longer fail the probe.
-#[cfg(not(windows))]
-fn host_package_runner_binary_outcome(
-    command: &str,
-    env_vars: &HashMap<String, String>,
-) -> PackageRunnerProbeOutcome {
-    let available = runner_binary_available(command, env_vars);
-    PackageRunnerProbeOutcome {
-        success: available,
-        exit_code: Some(if available { 0 } else { 127 }),
-        stdout: String::new(),
-        stderr: String::new(),
-        timed_out: false,
-        error: None,
-    }
-}
-
-/// Resolve whether a package-runner binary exists in the launch environment.
-/// Absolute paths are trusted by existence; bare names are resolved against the
-/// launch env `PATH` (mirroring the PTY spawn) so the decision matches what the
-/// real launch will execute.
-#[cfg(not(windows))]
-fn runner_binary_available(command: &str, env_vars: &HashMap<String, String>) -> bool {
-    let candidate = Path::new(command);
-    if candidate.is_absolute() {
-        return candidate.exists();
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match env_vars.get("PATH") {
-        Some(path) => which::which_in(command, Some(path.as_str()), &cwd).is_ok(),
-        None => which::which(command).is_ok(),
-    }
+    gwt_agent::apply_host_package_runner_fallback_with_probe(config, fallback_executable, probe)
 }
 
 #[cfg(test)]
@@ -1016,128 +778,8 @@ pub fn probe_host_package_runner_with_timeout(
     timeout: Duration,
     poll_interval: Duration,
 ) -> bool {
-    let hub = gwt_core::process_console::global();
-    probe_host_package_runner_with_timeout_and_hub(
-        PackageRunnerProbeRequest {
-            command,
-            args,
-            env_vars,
-            remove_env,
-            cwd,
-            timeout,
-            poll_interval,
-        },
-        &hub,
-    )
-    .success
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PackageRunnerProbeOutcome {
-    success: bool,
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    timed_out: bool,
-    error: Option<String>,
-}
-
-impl PackageRunnerProbeOutcome {
-    #[cfg(all(test, windows))]
-    fn success() -> Self {
-        Self {
-            success: true,
-            exit_code: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-            timed_out: false,
-            error: None,
-        }
-    }
-
-    #[cfg(all(test, windows))]
-    fn failure_with_stderr(stderr: &str) -> Self {
-        Self {
-            success: false,
-            exit_code: Some(1),
-            stdout: String::new(),
-            stderr: stderr.to_string(),
-            timed_out: false,
-            error: None,
-        }
-    }
-
-    #[cfg(all(test, windows))]
-    fn timeout() -> Self {
-        Self {
-            success: false,
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            timed_out: true,
-            error: None,
-        }
-    }
-
-    fn combined_output(&self) -> String {
-        format!("{}\n{}", self.stdout, self.stderr)
-    }
-
-    fn diagnostic(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(error) = &self.error {
-            parts.push(error.clone());
-        }
-        if self.timed_out {
-            parts.push("probe timed out".to_string());
-        }
-        if let Some(code) = self.exit_code {
-            parts.push(format!("exit status {code}"));
-        }
-        let output = self.combined_output();
-        let output = output.trim();
-        if !output.is_empty() {
-            let redacted = gwt_core::process_console::redact_line(output);
-            parts.push(truncate_diagnostic(&redacted, 1200));
-        }
-        if parts.is_empty() {
-            "probe failed without output.".to_string()
-        } else {
-            format!("Probe detail: {}.", parts.join("; "))
-        }
-    }
-}
-
-fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
-}
-
-// Only Windows still executes the package runner during launch (for `_npx`
-// cache repair); other platforms resolve by binary availability (#2948), so the
-// bounded-poll probe machinery below is unused on non-Windows non-test builds.
-#[allow(dead_code)]
-struct PackageRunnerProbeRequest<'a> {
-    command: &'a str,
-    args: Vec<String>,
-    env_vars: &'a HashMap<String, String>,
-    remove_env: &'a [String],
-    cwd: Option<PathBuf>,
-    timeout: Duration,
-    poll_interval: Duration,
-}
-
-#[allow(dead_code)]
-fn probe_host_package_runner_with_timeout_and_hub(
-    request: PackageRunnerProbeRequest<'_>,
-    hub: &gwt_core::process_console::ProcessConsoleHub,
-) -> PackageRunnerProbeOutcome {
-    let PackageRunnerProbeRequest {
+    gwt_agent::prepare::probe_host_runner_with_timeout(
+        gwt_agent::HostRunnerProbeKind::Package,
         command,
         args,
         env_vars,
@@ -1145,405 +787,11 @@ fn probe_host_package_runner_with_timeout_and_hub(
         cwd,
         timeout,
         poll_interval,
-    } = request;
-    // SPEC-1924 FR-039 / SPEC-2809 Phase D-agent — emit summary tracing
-    // around the bounded-poll spawn and forward probe stdout/stderr into
-    // the ProcessConsoleHub so failed package-runner probes are inspectable.
-    let agent_spawn_id =
-        AGENT_LAUNCH_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let agent_label = format!("{} {}", command, args.join(" "));
-    tracing::info!(
-        target: "gwt.process.summary",
-        kind = "agent",
-        spawn_id = agent_spawn_id,
-        label = %agent_label,
-        phase = "start",
-        "process start",
-    );
-
-    let mut request = gwt_core::process::ProcessPlanRequest::new(command).args(&args);
-    for key in remove_env {
-        request = request.env_remove(key);
-    }
-    for (key, value) in env_vars {
-        request = request.env(key, value);
-    }
-    if let Some(cwd) = cwd {
-        request = request.current_dir(cwd);
-    }
-    let mut process = match gwt_core::process::resolved_command(request) {
-        Ok(process) => process,
-        Err(error) => {
-            let message = format!("[gwt] failed to resolve package-runner probe safely: {error}");
-            push_probe_console_line(
-                hub,
-                agent_spawn_id,
-                gwt_core::process_console::ProcessStream::Stderr,
-                &message,
-            );
-            tracing::info!(
-                target: "gwt.process.summary",
-                kind = "agent",
-                spawn_id = agent_spawn_id,
-                label = %agent_label,
-                phase = "end",
-                exit_code = None::<i64>,
-                success = false,
-                error = "resolution failed",
-                "process end",
-            );
-            return PackageRunnerProbeOutcome {
-                success: false,
-                exit_code: None,
-                stdout: String::new(),
-                stderr: message,
-                timed_out: false,
-                error: Some(error.to_string()),
-            };
-        }
-    };
-    process
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = match process.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            let message = format!("[gwt] failed to start package-runner probe: {error}");
-            push_probe_console_line(
-                hub,
-                agent_spawn_id,
-                gwt_core::process_console::ProcessStream::Stderr,
-                &message,
-            );
-            tracing::info!(
-                target: "gwt.process.summary",
-                kind = "agent",
-                spawn_id = agent_spawn_id,
-                label = %agent_label,
-                phase = "end",
-                exit_code = None::<i64>,
-                success = false,
-                error = "spawn failed",
-                "process end",
-            );
-            return PackageRunnerProbeOutcome {
-                success: false,
-                exit_code: None,
-                stdout: String::new(),
-                stderr: message,
-                timed_out: false,
-                error: Some(error.to_string()),
-            };
-        }
-    };
-    let captured_stdout = Arc::new(Mutex::new(String::new()));
-    let captured_stderr = Arc::new(Mutex::new(String::new()));
-    let stdout_forwarder = child.stdout.take().map(|stdout| {
-        forward_probe_stream(
-            stdout,
-            hub.clone(),
-            agent_spawn_id,
-            gwt_core::process_console::ProcessStream::Stdout,
-            Arc::clone(&captured_stdout),
-        )
-    });
-    let stderr_forwarder = child.stderr.take().map(|stderr| {
-        forward_probe_stream(
-            stderr,
-            hub.clone(),
-            agent_spawn_id,
-            gwt_core::process_console::ProcessStream::Stderr,
-            Arc::clone(&captured_stderr),
-        )
-    });
-    let start = Instant::now();
-    let emit_end = |exit_code: Option<i32>, success: bool, note: Option<&str>| {
-        tracing::info!(
-            target: "gwt.process.summary",
-            kind = "agent",
-            spawn_id = agent_spawn_id,
-            label = %agent_label,
-            phase = "end",
-            exit_code = exit_code.map(|c| c as i64),
-            duration_ms = start.elapsed().as_millis() as u64,
-            success = success,
-            note = note,
-            "process end",
-        );
-    };
-    let join_forwarders = |stdout_forwarder: Option<JoinHandle<()>>,
-                           stderr_forwarder: Option<JoinHandle<()>>| {
-        if let Some(handle) = stdout_forwarder {
-            let _ = handle.join();
-        }
-        if let Some(handle) = stderr_forwarder {
-            let _ = handle.join();
-        }
-    };
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                join_forwarders(stdout_forwarder, stderr_forwarder);
-                let success = status.success();
-                emit_end(status.code(), success, None);
-                return PackageRunnerProbeOutcome {
-                    success,
-                    exit_code: status.code(),
-                    stdout: captured_string(&captured_stdout),
-                    stderr: captured_string(&captured_stderr),
-                    timed_out: false,
-                    error: None,
-                };
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    emit_end(None, false, Some("timeout"));
-                    return PackageRunnerProbeOutcome {
-                        success: false,
-                        exit_code: None,
-                        stdout: captured_string(&captured_stdout),
-                        stderr: captured_string(&captured_stderr),
-                        timed_out: true,
-                        error: None,
-                    };
-                }
-                thread::sleep(poll_interval);
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                emit_end(None, false, Some("wait error"));
-                return PackageRunnerProbeOutcome {
-                    success: false,
-                    exit_code: None,
-                    stdout: captured_string(&captured_stdout),
-                    stderr: captured_string(&captured_stderr),
-                    timed_out: false,
-                    error: Some("wait error".to_string()),
-                };
-            }
-        }
-    }
+    )
+    .success
 }
 
-#[allow(dead_code)]
-fn forward_probe_stream<R>(
-    reader: R,
-    hub: gwt_core::process_console::ProcessConsoleHub,
-    spawn_id: u64,
-    stream: gwt_core::process_console::ProcessStream,
-    captured: Arc<Mutex<String>>,
-) -> JoinHandle<()>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    for piece in line.trim_end_matches(['\r', '\n']).split('\r') {
-                        if let Ok(mut captured) = captured.lock() {
-                            captured.push_str(piece);
-                            captured.push('\n');
-                        }
-                        push_probe_console_line(&hub, spawn_id, stream, piece);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    })
-}
-
-#[allow(dead_code)]
-fn captured_string(captured: &Arc<Mutex<String>>) -> String {
-    captured
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or_else(|_| String::new())
-}
-
-#[allow(dead_code)]
-fn push_probe_console_line(
-    hub: &gwt_core::process_console::ProcessConsoleHub,
-    spawn_id: u64,
-    stream: gwt_core::process_console::ProcessStream,
-    message: &str,
-) {
-    if message.is_empty() {
-        return;
-    }
-    let stripped = gwt_core::process_console::strip_ansi(message);
-    let redacted = gwt_core::process_console::redact_line(&stripped);
-    hub.push(gwt_core::process_console::ProcessLine::new(
-        gwt_core::process_console::ProcessKind::AgentBootstrap,
-        spawn_id,
-        stream,
-        redacted,
-    ));
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WindowsNpxCacheRepairCandidate {
-    npx_root: PathBuf,
-    missing_binary: PathBuf,
-}
-
-fn detect_windows_npx_cache_corruption(
-    output: &str,
-    npx_cache_base: &Path,
-) -> Option<WindowsNpxCacheRepairCandidate> {
-    #[cfg(not(windows))]
-    {
-        let _ = output;
-        let _ = npx_cache_base;
-        None
-    }
-    #[cfg(windows)]
-    {
-        let npx_cache_base = lexical_normalize_path(npx_cache_base);
-        for candidate in extract_windows_exe_paths(output) {
-            let missing_binary = lexical_normalize_path(Path::new(&candidate));
-            if !missing_binary.starts_with(&npx_cache_base) || missing_binary.exists() {
-                continue;
-            }
-            let relative = missing_binary.strip_prefix(&npx_cache_base).ok()?;
-            let mut components = relative.components();
-            let hash = components.next()?.as_os_str();
-            if hash.is_empty() {
-                continue;
-            }
-            let npx_root = npx_cache_base.join(hash);
-            if !npx_root.is_dir() || !has_old_binary_marker(&missing_binary) {
-                continue;
-            }
-            return Some(WindowsNpxCacheRepairCandidate {
-                npx_root,
-                missing_binary,
-            });
-        }
-        None
-    }
-}
-
-#[cfg(windows)]
-fn extract_windows_exe_paths(output: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for segment in output.split(['"', '\'']) {
-        collect_windows_exe_path_candidate(segment, &mut paths);
-    }
-    for token in output.split_whitespace() {
-        collect_windows_exe_path_candidate(token, &mut paths);
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-#[cfg(windows)]
-fn collect_windows_exe_path_candidate(segment: &str, paths: &mut Vec<String>) {
-    let normalized = segment
-        .trim_matches(|ch: char| ch == '`' || ch == ',' || ch == ';')
-        .replace('/', "\\");
-    let lower = normalized.to_ascii_lowercase();
-    let Some(start) = lower.find("\\npm-cache\\_npx\\") else {
-        return;
-    };
-    let Some(exe_end) = lower[start..].find(".exe").map(|index| start + index + 4) else {
-        return;
-    };
-    let prefix_start = find_windows_path_start(&normalized, start).unwrap_or_else(|| {
-        normalized[..start]
-            .rfind(char::is_whitespace)
-            .map_or(0, |i| i + 1)
-    });
-    let mut candidate = normalized[prefix_start..exe_end].to_string();
-    while candidate.contains("\\\\") {
-        candidate = candidate.replace("\\\\", "\\");
-    }
-    if !candidate.is_empty() {
-        paths.push(candidate);
-    }
-}
-
-#[cfg(windows)]
-fn find_windows_path_start(value: &str, end: usize) -> Option<usize> {
-    let bytes = value.as_bytes();
-    let max = end.saturating_sub(2).min(bytes.len().saturating_sub(2));
-    (0..=max).rev().find(|&index| {
-        bytes[index].is_ascii_alphabetic()
-            && bytes.get(index + 1) == Some(&b':')
-            && bytes
-                .get(index + 2)
-                .is_some_and(|separator| *separator == b'\\' || *separator == b'/')
-    })
-}
-
-#[cfg(windows)]
-fn lexical_normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
-}
-
-#[cfg(windows)]
-fn has_old_binary_marker(missing_binary: &Path) -> bool {
-    let Some(parent) = missing_binary.parent() else {
-        return false;
-    };
-    let Some(file_name) = missing_binary.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let prefix = format!("{file_name}.old.");
-    let Ok(entries) = fs::read_dir(parent) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix(&prefix))
-            .is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
-            })
-    })
-}
-
-fn default_windows_npx_cache_base() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .map(|base| PathBuf::from(base).join("npm-cache").join("_npx"))
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-fn repair_windows_npx_cache(candidate: &WindowsNpxCacheRepairCandidate) -> Result<(), String> {
-    fs::remove_dir_all(&candidate.npx_root).map_err(|error| error.to_string())
-}
-
-#[allow(dead_code)]
-static AGENT_LAUNCH_SPAWN_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
-
+#[cfg(test)]
 pub fn command_matches_runner(command: &str, runner: &str) -> bool {
     let path = Path::new(command);
     path.file_stem()
@@ -1617,7 +865,7 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     let gwt_bin = match runtime_target {
         gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWTD_BIN_PATH.to_string(),
         gwt_agent::LaunchRuntimeTarget::Host => {
-            gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+            gwt_agent::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
                 .to_string_lossy()
                 .into_owned()
         }
@@ -1650,6 +898,7 @@ pub fn install_launch_gwt_bin_env_with_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
 
     fn test_path(entries: &[&str]) -> String {
@@ -1678,6 +927,196 @@ mod tests {
         config.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
         config.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Connect;
         config
+    }
+
+    #[cfg(not(windows))]
+    fn sample_direct_codex_launch_config(bin_dir: &Path) -> gwt_agent::LaunchConfig {
+        write_executable(&bin_dir.join("bunx"));
+        write_executable(&bin_dir.join("npx"));
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(bin_dir)
+            .model("gpt-5.6-codex")
+            .session_mode(gwt_agent::SessionMode::Continue)
+            .skip_permissions(true)
+            .extra_arg("--search")
+            .build();
+        config.command = "/opt/homebrew/bin/codex".to_string();
+        config.env_vars = HashMap::from([
+            ("PATH".to_string(), bin_dir.display().to_string()),
+            ("HOME".to_string(), bin_dir.display().to_string()),
+        ]);
+        config
+    }
+
+    fn probe_success() -> gwt_agent::HostRunnerProbeOutcome {
+        gwt_agent::HostRunnerProbeOutcome {
+            success: true,
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    // Only the `#[cfg(not(windows))]` fallback tests build failing probes.
+    #[cfg_attr(windows, allow(dead_code))]
+    fn probe_failure(detail: &str) -> gwt_agent::HostRunnerProbeOutcome {
+        gwt_agent::HostRunnerProbeOutcome {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: detail.to_string(),
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn checked_host_runner_falls_back_from_broken_direct_to_healthy_bunx() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        let original_args = config.args.clone();
+        let mut probes = Vec::new();
+
+        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            temp.path().join("npx").display().to_string(),
+            None,
+            |_kind, command, args, _env, _remove_env, _cwd| {
+                probes.push((command.to_string(), args));
+                match probes.len() {
+                    1 => probe_failure("direct wrapper vendor binary missing"),
+                    2 => probe_success(),
+                    _ => panic!("unexpected probe sequence: {probes:?}"),
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy bunx fallback");
+
+        assert!(report.switched_to_fallback);
+        assert_eq!(probes[0].0, "/opt/homebrew/bin/codex");
+        assert_eq!(probes[0].1, vec!["--version".to_string()]);
+        assert_eq!(probes[1].0, temp.path().join("bunx").display().to_string());
+        assert_eq!(probes[1].1, vec!["--version".to_string()]);
+        assert_eq!(config.command, probes[1].0);
+        let package_index = config
+            .args
+            .iter()
+            .position(|arg| arg == "@openai/codex@latest")
+            .expect("latest package prefix");
+        assert_eq!(&config.args[package_index + 1..], original_args.as_slice());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn checked_host_runner_falls_back_from_broken_bunx_to_healthy_npx() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        let original_args = config.args.clone();
+        let mut probes = Vec::new();
+
+        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            temp.path().join("npx").display().to_string(),
+            None,
+            |_kind, command, args, _env, _remove_env, _cwd| {
+                probes.push((command.to_string(), args));
+                match probes.len() {
+                    1 => probe_failure("direct wrapper vendor binary missing"),
+                    2 => probe_failure("bunx unavailable"),
+                    3 => probe_success(),
+                    _ => panic!("unexpected probe sequence: {probes:?}"),
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy npx fallback");
+
+        assert!(report.switched_to_fallback);
+        assert_eq!(probes.len(), 3);
+        assert_eq!(probes[0].1, vec!["--version".to_string()]);
+        assert_eq!(probes[1].1, vec!["--version".to_string()]);
+        assert_eq!(probes[2].0, temp.path().join("npx").display().to_string());
+        assert_eq!(probes[2].1, vec!["--version".to_string()]);
+        assert_eq!(config.command, probes[2].0);
+        assert_eq!(config.args[0], "--yes");
+        let package_index = config
+            .args
+            .iter()
+            .position(|arg| arg == "@openai/codex@latest")
+            .expect("latest package prefix");
+        assert_eq!(&config.args[package_index + 1..], original_args.as_slice());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn checked_host_runner_rejects_broken_direct_bunx_and_npx_without_mutating_launch() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        config
+            .env_vars
+            .insert("RUNNER_SENTINEL".into(), "keep".into());
+        config.remove_env.push("REMOVE_SENTINEL".into());
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+        let original_config = format!("{config:?}");
+        let mut probes = Vec::new();
+
+        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            temp.path().join("npx").display().to_string(),
+            None,
+            |_kind, command, args, _env, _remove_env, _cwd| {
+                probes.push((command.to_string(), args));
+                probe_failure(match probes.len() {
+                    1 => "direct wrapper vendor binary missing",
+                    2 => "bunx unavailable",
+                    3 => "npx unavailable",
+                    _ => panic!("unexpected probe sequence: {probes:?}"),
+                })
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect_err("all broken runners must stop before dispatch");
+
+        assert_eq!(probes.len(), 3);
+        assert_eq!(config.command, original_command);
+        assert_eq!(config.args, original_args);
+        assert_eq!(format!("{config:?}"), original_config);
+        assert!(error.contains("direct wrapper vendor binary missing"));
+        assert!(error.contains("npx unavailable"));
+    }
+
+    #[test]
+    fn checked_host_runner_uses_descriptor_version_argv_for_copilot() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Copilot).build();
+        config.command = "/usr/local/bin/gh".to_string();
+        let original_args = config.args.clone();
+        let mut probes = Vec::new();
+
+        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, command, args, _env, _remove_env, _cwd| {
+                probes.push((command.to_string(), args));
+                probe_success()
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy Copilot direct runner");
+
+        assert!(!report.switched_to_fallback);
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].0, "/usr/local/bin/gh");
+        assert_eq!(
+            probes[0].1,
+            vec!["copilot".to_string(), "--version".to_string()]
+        );
+        assert_eq!(config.args, original_args);
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -2128,48 +1567,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn package_runner_probe_forwards_failed_stderr_to_agent_console() {
-        let hub = gwt_core::process_console::ProcessConsoleHub::new();
-        let (command, args) = if cfg!(windows) {
-            (
-                "cmd".to_string(),
-                vec![
-                    "/C".to_string(),
-                    "echo probe boom 1>&2 & exit /b 1".to_string(),
-                ],
-            )
-        } else {
-            (
-                "sh".to_string(),
-                vec!["-c".to_string(), "echo probe boom >&2; exit 1".to_string()],
-            )
-        };
-
-        let outcome = probe_host_package_runner_with_timeout_and_hub(
-            PackageRunnerProbeRequest {
-                command: &command,
-                args,
-                env_vars: &HashMap::new(),
-                remove_env: &[],
-                cwd: None,
-                timeout: Duration::from_secs(2),
-                poll_interval: Duration::from_millis(10),
-            },
-            &hub,
-        );
-
-        assert!(!outcome.success);
-        let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
-        assert!(
-            lines.iter().any(|line| {
-                line.stream == gwt_core::process_console::ProcessStream::Stderr
-                    && line.message.contains("probe boom")
-            }),
-            "expected failed probe stderr in agent console lines: {lines:?}",
-        );
-    }
-
     #[cfg(windows)]
     #[test]
     fn windows_npx_cache_corruption_detection_requires_verified_old_binary_signature() {
@@ -2194,7 +1591,7 @@ mod tests {
             missing_binary.display()
         );
 
-        let candidate = detect_windows_npx_cache_corruption(&stderr, &npx_base)
+        let candidate = gwt_agent::prepare::detect_windows_npx_cache_corruption(&stderr, &npx_base)
             .expect("corrupt npx cache should be detected");
 
         assert_eq!(candidate.npx_root, npx_root);
@@ -2202,7 +1599,7 @@ mod tests {
 
         fs::write(&candidate.missing_binary, "restored binary").expect("write expected binary");
         assert!(
-            detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
+            gwt_agent::prepare::detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
             "existing expected binary must not be treated as repairable",
         );
     }
@@ -2227,7 +1624,7 @@ mod tests {
         );
 
         assert!(
-            detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
+            gwt_agent::prepare::detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
             "paths outside the verified npm _npx root must never be repaired",
         );
     }
@@ -2254,16 +1651,16 @@ mod tests {
         let mut probe_calls = Vec::new();
         let mut repair_calls = Vec::new();
 
-        let report = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
             "npx".to_string(),
             Some(npx_base.clone()),
-            |command, args, _env, _remove_env, _cwd| {
+            |_kind, command, args, _env, _remove_env, _cwd| {
                 probe_calls.push((command.to_string(), args.clone()));
                 match probe_calls.len() {
-                    1 => PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
-                    2 => PackageRunnerProbeOutcome::failure_with_stderr(&stderr),
-                    3 => PackageRunnerProbeOutcome::success(),
+                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
+                    2 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr),
+                    3 => gwt_agent::HostRunnerProbeOutcome::success(),
                     _ => panic!("unexpected extra probe call: {probe_calls:?}"),
                 }
             },
@@ -2280,14 +1677,7 @@ mod tests {
         assert_eq!(repair_calls, vec![npx_root]);
         assert_eq!(probe_calls.len(), 3);
         assert_eq!(probe_calls[1].0, "npx");
-        assert_eq!(
-            probe_calls[1].1,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--version".to_string(),
-            ],
-        );
+        assert_eq!(probe_calls[1].1, vec!["--version".to_string()]);
         assert_eq!(config.command, "npx");
         assert_eq!(
             config.args,
@@ -2321,15 +1711,15 @@ mod tests {
         let original_command = config.command.clone();
         let mut repair_calls = 0;
 
-        let error = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
             "npx".to_string(),
             Some(npx_base),
-            |command, _args, _env, _remove_env, _cwd| {
+            |_kind, command, _args, _env, _remove_env, _cwd| {
                 if command.eq_ignore_ascii_case("bunx") {
-                    PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
                 } else {
-                    PackageRunnerProbeOutcome::failure_with_stderr(&stderr)
+                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr)
                 }
             },
             |_candidate| {
@@ -2354,15 +1744,15 @@ mod tests {
         let mut config = sample_versioned_launch_config();
         let mut repair_calls = 0;
 
-        let error = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
             "npx".to_string(),
             Some(npx_base),
-            |command, _args, _env, _remove_env, _cwd| {
+            |_kind, command, _args, _env, _remove_env, _cwd| {
                 if command.eq_ignore_ascii_case("bunx") {
-                    PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
                 } else {
-                    PackageRunnerProbeOutcome::failure_with_stderr("registry timeout")
+                    gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
                 }
             },
             |_candidate| {
@@ -2379,22 +1769,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn checked_host_package_runner_fallback_continues_when_npx_probe_times_out() {
+    fn checked_host_package_runner_fallback_rejects_npx_timeout_without_mutating_launch() {
         let temp = tempdir().expect("tempdir");
         let npx_base = temp.path().join("npm-cache").join("_npx");
         let mut config = sample_versioned_launch_config();
+        config
+            .env_vars
+            .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
+        config.remove_env.push("REMOVE_SENTINEL".to_string());
+        let original = format!("{config:?}");
         let mut probe_calls = Vec::new();
         let mut repair_calls = 0;
 
-        let report = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
             &mut config,
             "npx".to_string(),
             Some(npx_base),
-            |command, args, _env, _remove_env, _cwd| {
+            |_kind, command, args, _env, _remove_env, _cwd| {
                 probe_calls.push((command.to_string(), args.clone()));
                 match probe_calls.len() {
-                    1 => PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
-                    2 => PackageRunnerProbeOutcome::timeout(),
+                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
+                    2 => gwt_agent::HostRunnerProbeOutcome::timeout(),
                     _ => panic!("unexpected extra probe call: {probe_calls:?}"),
                 }
             },
@@ -2403,94 +1798,45 @@ mod tests {
                 Ok(())
             },
         )
-        .expect("npx probe timeout should not stop host launch before PTY spawn");
+        .expect_err("npx probe timeout must stop before PTY spawn");
 
-        assert!(report.switched_to_fallback);
-        assert!(!report.repaired_npx_cache);
         assert_eq!(repair_calls, 0);
         assert_eq!(probe_calls.len(), 2);
-        assert_eq!(config.command, "npx");
-        assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@latest".to_string(),
-                "--print".to_string(),
-            ],
-        );
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|message| message.contains("probe timed out")),
-            "timeout continuation should be visible in launch feedback: {report:?}",
-        );
+        assert_eq!(format!("{config:?}"), original);
+        assert!(error.contains("npx"));
+        assert!(error.contains("@anthropic-ai/claude-code@latest"));
+        assert!(error.contains("probe timed out"));
+        assert!(!error.contains("must-not-leak"));
     }
 
-    // Issue #2948 — non-Windows host launches must decide the package runner by
-    // *binary availability* only, never by executing `<runner> <pkg> --version`
-    // (a cold first-run download exceeds the probe budget, times out, and aborts
-    // the launch with an error card instead of showing the raw TTY download).
+    // Issue #2948 reconciliation — non-Windows host launches execute only the
+    // package runner's own bounded `--version` probe. They must never execute
+    // `<runner> <pkg> --version`, which can trigger a cold package download.
 
     #[cfg(not(windows))]
     fn write_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
-        fs::write(path, "#!/bin/sh\nexit 1\n").expect("write executable");
+        fs::write(
+            path,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 1\nprintf '1.2.3\\n'\n",
+        )
+        .expect("write executable");
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod +x");
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn runner_binary_available_trusts_existing_absolute_path() {
+    fn host_launch_keeps_bunx_when_runner_version_probe_succeeds() {
         let temp = tempdir().expect("tempdir");
-        let bin = temp.path().join("bunx");
-        write_executable(&bin);
-        let env = HashMap::new();
-        assert!(runner_binary_available(bin.to_str().unwrap(), &env));
-        let missing = temp.path().join("does-not-exist");
-        assert!(!runner_binary_available(missing.to_str().unwrap(), &env));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn runner_binary_available_resolves_bare_name_via_env_path() {
-        let temp = tempdir().expect("tempdir");
-        write_executable(&temp.path().join("bunx"));
-        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
-        assert!(runner_binary_available("bunx", &env));
-        assert!(!runner_binary_available("npx", &env));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_package_runner_binary_outcome_succeeds_from_existence_without_executing() {
-        // /bin/sh exists but is not a package runner; success comes purely from
-        // binary existence, proving no `<runner> <pkg> --version` is executed.
-        let env = HashMap::new();
-        let outcome = host_package_runner_binary_outcome("/bin/sh", &env);
-        assert!(outcome.success);
-        assert!(!outcome.timed_out);
-
-        let missing = host_package_runner_binary_outcome("/no/such/runner-xyz", &env);
-        assert!(!missing.success);
-        assert!(!missing.timed_out);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_launch_keeps_bunx_when_binary_resolves_and_never_aborts() {
-        let temp = tempdir().expect("tempdir");
-        // A "bunx" that fails (`exit 1`) if executed — proving the launch path
-        // only checks existence and keeps bunx, where the old execution probe
-        // would reject it and fall through to an abort.
         let bunx = temp.path().join("bunx");
         write_executable(&bunx);
         let mut config = sample_versioned_launch_config();
         config.command = bunx.display().to_string();
         config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        config.working_dir = Some(temp.path().to_path_buf());
 
-        let report = apply_host_package_runner_fallback_checked(&mut config)
-            .expect("binary-availability resolution must never abort the launch");
+        let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
+            .expect("runner version probe should keep bunx healthy");
 
         assert!(!report.switched_to_fallback);
         assert_eq!(config.command, bunx.display().to_string());
@@ -2504,9 +1850,10 @@ mod tests {
         let mut config = sample_versioned_launch_config();
         config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
         config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        config.working_dir = Some(temp.path().to_path_buf());
 
-        let report = apply_host_package_runner_fallback_checked(&mut config)
-            .expect("resolution must never abort the launch");
+        let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
+            .expect("healthy npx version probe should select the fallback");
 
         assert!(report.switched_to_fallback);
         // Issue #2981: the fallback now resolves the npx executable on PATH
@@ -2552,6 +1899,54 @@ mod tests {
     }
 
     #[test]
+    fn install_launch_gwt_bin_env_host_uses_checkout_sibling_before_foreign_path_install() {
+        let temp = tempdir().expect("tempdir");
+        let executable_name = if cfg!(windows) { "gwt.exe" } else { "gwt" };
+        let daemon_name = if cfg!(windows) { "gwtd.exe" } else { "gwtd" };
+        let current_exe = temp.path().join("checkout").join(executable_name);
+        let checkout_daemon = current_exe.with_file_name(daemon_name);
+        let foreign_daemon = temp.path().join("foreign").join(daemon_name);
+        fs::create_dir_all(current_exe.parent().expect("checkout executable parent"))
+            .expect("create checkout executable parent");
+        fs::create_dir_all(foreign_daemon.parent().expect("foreign daemon parent"))
+            .expect("create foreign daemon parent");
+        fs::write(&current_exe, b"gwt").expect("write checkout executable");
+        fs::write(&checkout_daemon, b"gwtd").expect("write checkout daemon");
+        fs::write(&foreign_daemon, b"foreign gwtd").expect("write foreign daemon");
+        let mut env_vars = HashMap::from([(
+            "PATH".to_string(),
+            std::env::join_paths([
+                foreign_daemon.parent().expect("foreign daemon directory"),
+                Path::new("/usr/bin"),
+            ])
+            .expect("join test PATH entries")
+            .to_string_lossy()
+            .into_owned(),
+        )]);
+
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(foreign_daemon),
+        )
+        .expect("install checkout gwtd");
+
+        assert_eq!(
+            env_vars
+                .get(gwt_agent::session::GWT_BIN_PATH_ENV)
+                .map(String::as_str),
+            checkout_daemon.to_str(),
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries.first().map(PathBuf::as_path),
+            checkout_daemon.parent(),
+        );
+    }
+
+    #[test]
     fn install_launch_gwt_bin_env_host_dedups_existing_path_entry() {
         let mut env_vars = HashMap::from([(
             "PATH".to_string(),
@@ -2581,7 +1976,7 @@ mod tests {
     fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
         let original_path = test_path(&["/usr/bin", "/bin"]);
         let mut env_vars = HashMap::from([("PATH".to_string(), original_path.clone())]);
-        let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
+        let current_exe = PathBuf::from("/tmp/bunx-123-gwt/bin/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
             gwt_agent::LaunchRuntimeTarget::Host,

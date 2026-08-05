@@ -14,7 +14,6 @@ use gwt_core::process::hidden_command;
 use gwt_skills::coordination_guidance::{generate_coordination_guidance, render_skill_md};
 use gwt_skills::distribute::distribute_to_worktree;
 use gwt_skills::git_exclude::update_git_exclude;
-use gwt_skills::SessionKind;
 
 /// Create a real (empty) git repository so asset distribution and
 /// `.git/info/exclude` resolution behave as they do in a gwt worktree.
@@ -25,6 +24,30 @@ fn init_git_repo(path: &Path) {
         .status()
         .expect("git init");
     assert!(status.success(), "git init failed for {}", path.display());
+}
+
+fn markdown_block<'a>(source: &'a str, start: &str, end: Option<&str>) -> &'a str {
+    let start_index = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing markdown block start {start:?}"));
+    let remainder = &source[start_index..];
+    let end_index = end
+        .and_then(|marker| remainder.find(marker))
+        .unwrap_or(remainder.len());
+    &remainder[..end_index]
+}
+
+fn line_starting_with<'a>(block: &'a str, prefix: &str) -> &'a str {
+    block
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing line starting with {prefix:?}"))
+}
+
+fn first_inline_code(line: &str) -> &str {
+    line.split('`')
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing inline code in {line:?}"))
 }
 
 #[test]
@@ -78,6 +101,267 @@ fn repo_keeps_managed_claude_and_codex_skill_assets_in_parity() {
         assert!(
             claude == codex,
             "managed gwt-* skill asset must be byte-identical between .claude and .codex: {relative:?}"
+        );
+    }
+}
+
+#[test]
+fn user_verification_handoff_is_identifiable_and_actionable() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+
+    for verify_dir in [
+        workspace_root.join(".claude/skills/gwt-verify"),
+        workspace_root.join(".codex/skills/gwt-verify"),
+        dir.path().join(".claude/skills/gwt-verify"),
+        dir.path().join(".codex/skills/gwt-verify"),
+    ] {
+        let skill_path = verify_dir.join("SKILL.md");
+        let guide_path = verify_dir.join("references/user-verification-guide.md");
+        let skill = fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+        let guide = fs::read_to_string(&guide_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", guide_path.display()));
+
+        for required in [
+            "Verification Target Card",
+            "Owner Issue/SPEC:",
+            "Work purpose:",
+            "Success Goal:",
+            "Requesting agent/session:",
+            "Branch:",
+            "Absolute worktree:",
+            "Commit:",
+            "Prepared instance ID:",
+            "URL or launch target:",
+            "Action → Expected",
+            "Manual Feasibility Gate",
+            "Automated-only Evidence",
+            "skipped(<reason>)",
+        ] {
+            assert!(
+                skill.contains(required),
+                "{} must contain actionable user-verification contract token {required:?}",
+                skill_path.display()
+            );
+            assert!(
+                guide.contains(required),
+                "{} must contain actionable user-verification contract token {required:?}",
+                guide_path.display()
+            );
+        }
+
+        for (source, path) in [(&skill, &skill_path), (&guide, &guide_path)] {
+            let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains("must match a `PASS` entry under `Executed`"),
+                "{} must link automated-only evidence to an Executed PASS entry",
+                path.display()
+            );
+        }
+
+        let target_card_fields = [
+            "Owner Issue/SPEC:",
+            "Work purpose:",
+            "Success Goal:",
+            "Requesting agent/session:",
+            "Branch:",
+            "Absolute worktree:",
+            "Commit:",
+            "Prepared instance ID:",
+            "URL or launch target:",
+        ];
+        let skill_target_card =
+            markdown_block(&skill, "#### Verification Target Card", Some("#### 導線"));
+        let guide_target_card = markdown_block(
+            &guide,
+            "## Verification Target Card",
+            Some("## The 4-step 導線"),
+        );
+        for (target_card, path) in [
+            (skill_target_card, &skill_path),
+            (guide_target_card, &guide_path),
+        ] {
+            for field in target_card_fields {
+                assert!(
+                    target_card.contains(field),
+                    "{} target card must contain {field:?}",
+                    path.display()
+                );
+            }
+        }
+
+        assert_eq!(
+            line_starting_with(&skill, "User Verification Result:"),
+            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a",
+            "{} evidence-bundle enum must include every supported result",
+            skill_path.display()
+        );
+
+        for category in ["Expected", "Edge", "Regression"] {
+            let actionable_prefix = format!("- [ ] {category} — Action:");
+            assert!(
+                skill.lines().any(
+                    |line| line.starts_with(&actionable_prefix) && line.contains("→ Expected:")
+                ),
+                "{} must express {category} as Action → Expected",
+                skill_path.display()
+            );
+            assert!(
+                guide.lines().any(
+                    |line| line.starts_with(&actionable_prefix) && line.contains("→ Expected:")
+                ),
+                "{} must express {category} as Action → Expected",
+                guide_path.display()
+            );
+
+            let vague_prefix = format!("- [ ] {category}:");
+            assert!(
+                !skill.lines().any(|line| line.starts_with(&vague_prefix)),
+                "{} must not retain vague {category}-only checkboxes",
+                skill_path.display()
+            );
+            assert!(
+                !guide.lines().any(|line| line.starts_with(&vague_prefix)),
+                "{} must not retain vague {category}-only checkboxes",
+                guide_path.display()
+            );
+
+            for (source, path) in [(&skill, &skill_path), (&guide, &guide_path)] {
+                for line in source
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with(&format!("- [ ] {category}")))
+                {
+                    assert!(
+                        line.contains("— Action:") && line.contains("→ Expected:"),
+                        "{} has a non-actionable {category} checkbox: {line}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        let skill_target = skill
+            .find("#### Verification Target Card")
+            .expect("skill target card heading");
+        let skill_route = skill[skill_target..]
+            .find("#### 導線")
+            .map(|offset| skill_target + offset)
+            .expect("skill route heading");
+        let skill_checks = skill[skill_route..]
+            .find("#### Check Items")
+            .map(|offset| skill_route + offset)
+            .expect("skill check-items heading");
+        let skill_automated = skill[skill_checks..]
+            .find("#### Automated-only Evidence")
+            .map(|offset| skill_checks + offset)
+            .expect("skill automated-only evidence heading");
+        assert!(
+            skill_target < skill_route
+                && skill_route < skill_checks
+                && skill_checks < skill_automated,
+            "{} must present target, route, checks, and automated evidence in order",
+            skill_path.display()
+        );
+
+        let guide_target = guide
+            .find("## Verification Target Card")
+            .expect("guide target card heading");
+        let guide_route = guide
+            .find("## The 4-step 導線")
+            .expect("guide route heading");
+        let guide_checks = guide.find("## Check Items").expect("guide checks heading");
+        let guide_feasibility = guide
+            .find("## Manual Feasibility Gate")
+            .expect("guide feasibility heading");
+        let guide_automated = guide[guide_feasibility..]
+            .find("#### Automated-only Evidence")
+            .map(|offset| guide_feasibility + offset)
+            .expect("guide automated-only evidence heading");
+        assert!(
+            guide_target < guide_route
+                && guide_route < guide_checks
+                && guide_checks < guide_feasibility
+                && guide_feasibility < guide_automated,
+            "{} must define target, route, checks, feasibility, and automated evidence in order",
+            guide_path.display()
+        );
+
+        let automated_example_command = "cargo test -p gwt --lib \
+cli::daemon::server::tests::daemon_scan_records_merge_reconciliation_error_and_preserves_active_slot -- --exact";
+        let example_a = markdown_block(&guide, "### Example A", Some("### Example B"));
+        let example_b = markdown_block(&guide, "### Example B", Some("### Example C"));
+        let example_c = markdown_block(&guide, "### Example C", Some("### Example D"));
+        let example_d = markdown_block(&guide, "### Example D", None);
+
+        for (example, label) in [
+            (example_a, "Example A"),
+            (example_b, "Example B"),
+            (example_c, "Example C"),
+        ] {
+            for field in target_card_fields {
+                assert!(
+                    example.contains(field),
+                    "{} {label} target card must contain {field:?}",
+                    guide_path.display()
+                );
+            }
+        }
+
+        let example_a_launch = line_starting_with(example_a, "2. launch:");
+        let example_a_navigate = line_starting_with(example_a, "3. navigate:");
+        assert!(
+            example_a_launch.contains("Prepared instance ID")
+                && example_a_launch.contains("do not start another process")
+                && !example_a_launch.contains("./target/debug/gwt")
+                && !example_a_launch.contains("<port>")
+                && example_a_navigate.contains("http://127.0.0.1:61234/")
+                && !example_a_navigate.contains("<port>"),
+            "{} Example A must route to its exact prepared URL without launching another process",
+            guide_path.display()
+        );
+
+        let example_b_launch = line_starting_with(example_b, "2. launch:");
+        assert!(
+            example_b_launch.contains("that exact Editor window")
+                && example_b_launch.contains("Assets/Scenes/Main.unity"),
+            "{} Example B must stay in its identified prepared editor",
+            guide_path.display()
+        );
+
+        let example_c_launch = line_starting_with(example_c, "2. launch:");
+        assert!(
+            example_c_launch.contains("App.exe PID 6840")
+                && example_c_launch.contains("do not run another copy")
+                && !example_c_launch.contains("dotnet run"),
+            "{} Example C must focus its exact prepared process",
+            guide_path.display()
+        );
+
+        let example_d_executed = line_starting_with(example_d, "- `cargo test");
+        let example_d_automated = line_starting_with(example_d, "- Merge-query failure injection:");
+        assert_eq!(
+            first_inline_code(example_d_executed),
+            automated_example_command,
+            "{} Example D Executed command must be the expected real test",
+            guide_path.display()
+        );
+        assert_eq!(
+            first_inline_code(example_d_executed),
+            first_inline_code(example_d_automated),
+            "{} Example D automated-only command must exactly match Executed",
+            guide_path.display()
+        );
+        assert!(
+            example_d_executed.contains(": PASS")
+                && example_d_automated.contains("— PASS")
+                && example_d_automated.contains(
+                    "daemon_scan_records_merge_reconciliation_error_and_preserves_active_slot"
+                ),
+            "{} Example D must name the same passing scenario on both sides",
+            guide_path.display()
         );
     }
 }
@@ -153,7 +437,7 @@ fn distribute_to_worktree_prunes_stale_managed_skills() {
 fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    generate_coordination_guidance(dir.path(), SessionKind::Execution).expect("generate guidance");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
 
     for skill_md in [
         dir.path().join(".claude/skills/gwt-coordination/SKILL.md"),
@@ -171,7 +455,7 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 
 #[test]
 fn render_skill_md_embeds_frontmatter_name_and_description() {
-    let md = render_skill_md(SessionKind::Execution);
+    let md = render_skill_md();
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
     assert!(md.contains("\"operation\":\"board.post\""));

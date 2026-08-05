@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.69.0"
+version = "9.73.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -101,7 +101,7 @@ winresource = "0.1.31"
 futures-util = "0.3"
 
 # Base64 encoding
-base64 = "0.22"
+base64 = "0.23"
 
 # Hashing
 sha2 = "0.10"

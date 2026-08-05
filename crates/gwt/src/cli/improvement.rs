@@ -459,7 +459,7 @@ pub(super) enum OccurrenceReplayProof {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(super) enum OccurrenceOrigin {
+pub(crate) enum OccurrenceOrigin {
     Interpretive,
     Deterministic,
 }
@@ -518,6 +518,8 @@ pub(crate) struct RegisteredCaptureInput {
     pub(crate) details: Option<String>,
     pub(crate) local_evidence: Vec<Value>,
     pub(crate) recurrence: Option<TypedRecurrenceEvidence>,
+    pub(crate) occurrence_origin: OccurrenceOrigin,
+    pub(crate) interpretive_session_id: Option<String>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -532,6 +534,7 @@ struct ProducerRegistration {
     target_artifact: &'static str,
     allowed_budget: CaptureBudgetProfile,
     recurrence_capable: bool,
+    interpretive_capable: bool,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -539,6 +542,18 @@ const PRODUCER_REGISTRY_REVISION: u64 = 1;
 const _: () = assert!(PRODUCER_REGISTRY_REVISION > 0);
 #[cfg_attr(not(test), allow(dead_code))]
 const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
+    ProducerRegistration {
+        public_id: super::improvement_contract::MANAGED_HOOK_PRODUCER_ID,
+        producer_id: "managed-hook.failure.v1",
+        subsystem: "managed-hook",
+        contract_id: super::improvement_contract::MANAGED_HOOK_GATE_ID,
+        contract_schema_revision: super::improvement_contract::MANAGED_HOOK_CONTRACT_REVISION,
+        routing_basis_revision: 1,
+        target_artifact: super::improvement_contract::MANAGED_HOOK_TARGET_ARTIFACT,
+        allowed_budget: CaptureBudgetProfile::StrictStop,
+        recurrence_capable: false,
+        interpretive_capable: true,
+    },
     #[cfg(test)]
     ProducerRegistration {
         public_id: "test.coordination-gate",
@@ -550,6 +565,7 @@ const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
         target_artifact: "coordination",
         allowed_budget: CaptureBudgetProfile::Normal,
         recurrence_capable: true,
+        interpretive_capable: false,
     },
     #[cfg(test)]
     ProducerRegistration {
@@ -562,6 +578,7 @@ const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
         target_artifact: "coordination",
         allowed_budget: CaptureBudgetProfile::Normal,
         recurrence_capable: false,
+        interpretive_capable: false,
     },
 ];
 
@@ -760,6 +777,8 @@ enum ValidatedCaptureOrigin {
         producer_registry_revision: u64,
         routing_basis_revision: u64,
         recurrence: Option<TypedRecurrenceEvidence>,
+        occurrence_origin: OccurrenceOrigin,
+        interpretive_session_id: Option<String>,
     },
 }
 
@@ -813,26 +832,45 @@ fn capture_typed(
                 producer_registry_revision,
                 routing_basis_revision,
                 recurrence,
-            } => Some(DistinctOccurrence {
-                opaque_key: opaque_occurrence_key(
-                    nonce,
-                    &fingerprint,
-                    producer_id,
-                    source_event_id,
-                ),
-                evidence_digest: occurrence_evidence_digest(&evidence, recurrence.as_ref()),
-                captured_at: now.clone(),
-                origin: OccurrenceOrigin::Deterministic,
-                qualifies_unattended,
-                producer_id: Some((*producer_id).to_string()),
-                producer_registry_revision: Some(*producer_registry_revision),
-                routing_basis_revision: Some(*routing_basis_revision),
-                replay_proof: Some(OccurrenceReplayProof::RegisteredEvent {
-                    source_scope_nonce: nonce.to_string(),
-                    source_event_id: source_event_id.clone(),
-                }),
-                recurrence: recurrence.clone(),
-            }),
+                occurrence_origin,
+                interpretive_session_id,
+            } => {
+                let (replay_key, replay_proof) = match occurrence_origin {
+                    OccurrenceOrigin::Deterministic => (
+                        source_event_id.as_str(),
+                        OccurrenceReplayProof::RegisteredEvent {
+                            source_scope_nonce: nonce.to_string(),
+                            source_event_id: source_event_id.clone(),
+                        },
+                    ),
+                    OccurrenceOrigin::Interpretive => {
+                        let session_id = interpretive_session_id.as_deref().ok_or_else(|| {
+                            invalid(
+                                "registered interpretive occurrence is missing session identity",
+                            )
+                        })?;
+                        (
+                            session_id,
+                            OccurrenceReplayProof::InterpretiveSession {
+                                source_scope_nonce: nonce.to_string(),
+                                session_id: session_id.to_string(),
+                            },
+                        )
+                    }
+                };
+                Some(DistinctOccurrence {
+                    opaque_key: opaque_occurrence_key(nonce, &fingerprint, producer_id, replay_key),
+                    evidence_digest: occurrence_evidence_digest(&evidence, recurrence.as_ref()),
+                    captured_at: now.clone(),
+                    origin: *occurrence_origin,
+                    qualifies_unattended,
+                    producer_id: Some((*producer_id).to_string()),
+                    producer_registry_revision: Some(*producer_registry_revision),
+                    routing_basis_revision: Some(*routing_basis_revision),
+                    replay_proof: Some(replay_proof),
+                    recurrence: recurrence.clone(),
+                })
+            }
         };
 
         if let Some(candidate) = store
@@ -980,6 +1018,26 @@ pub(crate) fn capture_registered<E: CliEnv>(
     if input.recurrence.is_some() && !registration.recurrence_capable {
         return Err(invalid("registered producer is not recurrence-capable"));
     }
+    if input.occurrence_origin == OccurrenceOrigin::Interpretive {
+        if !registration.interpretive_capable {
+            return Err(invalid("registered producer is not interpretive-capable"));
+        }
+        if input.recurrence.is_some() {
+            return Err(invalid(
+                "registered interpretive occurrence cannot carry recurrence evidence",
+            ));
+        }
+        let Some(session_id) = input.interpretive_session_id.as_deref() else {
+            return Err(invalid(
+                "registered interpretive occurrence requires a session identity",
+            ));
+        };
+        if !interpretive_session_is_verified_for_repo(env.repo_path(), session_id) {
+            return Err(invalid(
+                "registered interpretive occurrence session is not verified for this repository",
+            ));
+        }
+    }
     validate_enum(
         "source",
         &input.source,
@@ -1033,6 +1091,8 @@ pub(crate) fn capture_registered<E: CliEnv>(
             producer_registry_revision: PRODUCER_REGISTRY_REVISION,
             routing_basis_revision: registration.routing_basis_revision,
             recurrence: input.recurrence,
+            occurrence_origin: input.occurrence_origin,
+            interpretive_session_id: input.interpretive_session_id,
         },
     )?;
     let mut candidate = result.candidate;
@@ -1053,6 +1113,114 @@ pub(crate) fn capture_registered<E: CliEnv>(
         candidate = resolve_candidate_owner(env, &candidate.id, input.budget_profile)?;
     }
     Ok(candidate)
+}
+
+pub(crate) fn capture_managed_hook_failure<E: CliEnv>(
+    env: &mut E,
+    event: super::improvement_contract::ManagedHookFailureEvent,
+) -> Result<super::improvement_contract::ManagedHookCaptureResult, SpecOpsError> {
+    use super::improvement_contract::{
+        ManagedHookCaptureResult, ManagedHookEligibility, ManagedHookEvidenceKind,
+    };
+
+    let (token, canonical_fingerprint) = validate_managed_hook_failure(&event)?;
+    if event.fingerprint != canonical_fingerprint {
+        return Err(invalid("managed-hook fingerprint is not canonical"));
+    }
+    if gwt_agent::validate_session_id_path_component(&event.session_key).is_err() {
+        return Err(invalid("managed-hook session key is not canonical"));
+    }
+    let occurrence_origin = match event.evidence_kind {
+        ManagedHookEvidenceKind::Deterministic => OccurrenceOrigin::Deterministic,
+        ManagedHookEvidenceKind::Interpretive => OccurrenceOrigin::Interpretive,
+    };
+    let interpretive_session_id =
+        (occurrence_origin == OccurrenceOrigin::Interpretive).then_some(event.session_key);
+    let candidate = capture_registered(
+        env,
+        RegisteredCaptureInput {
+            token,
+            source_event_id: event.event_key,
+            routing_basis_revision: 1,
+            budget_profile: CaptureBudgetProfile::StrictStop,
+            source: "hook-runtime".to_string(),
+            target_artifact: event.target_artifact,
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            failure_code: event.failure_code.clone(),
+            expected_outcome: event.expected_outcome,
+            observed_outcome: event.observed_outcome,
+            summary: Some(format!(
+                "Managed hook failure: {}/{}",
+                event.gate_id, event.failure_code
+            )),
+            details: None,
+            local_evidence: Vec::new(),
+            recurrence: None,
+            occurrence_origin,
+            interpretive_session_id,
+        },
+    )?;
+    let eligibility = match candidate.eligibility {
+        ImprovementEligibility::Deterministic => ManagedHookEligibility::Deterministic,
+        ImprovementEligibility::InterpretiveCorroboration => {
+            ManagedHookEligibility::InterpretiveCorroboration
+        }
+        ImprovementEligibility::NeedsEvidence => ManagedHookEligibility::NeedsEvidence,
+        ImprovementEligibility::Ineligible => ManagedHookEligibility::Ineligible,
+    };
+    Ok(ManagedHookCaptureResult {
+        candidate_id: candidate.id,
+        fingerprint: candidate
+            .fingerprint
+            .ok_or_else(|| invalid("managed-hook candidate fingerprint is missing"))?,
+        occurrences: candidate.occurrences,
+        eligibility,
+    })
+}
+
+pub(crate) fn managed_hook_failure_fingerprint(
+    event: &super::improvement_contract::ManagedHookFailureEvent,
+) -> Result<String, SpecOpsError> {
+    validate_managed_hook_failure(event).map(|(_, fingerprint)| fingerprint)
+}
+
+fn validate_managed_hook_failure(
+    event: &super::improvement_contract::ManagedHookFailureEvent,
+) -> Result<(RegisteredProducerToken, String), SpecOpsError> {
+    use super::improvement_contract::{
+        MANAGED_HOOK_CONTRACT_REVISION, MANAGED_HOOK_GATE_ID, MANAGED_HOOK_TARGET_ARTIFACT,
+    };
+
+    let token = registered_producer_token(&event.producer)?;
+    let registration = registration_for_token(token)?;
+    if event.gate_id != MANAGED_HOOK_GATE_ID || event.gate_id != registration.contract_id {
+        return Err(invalid("managed-hook gate id is not registered"));
+    }
+    if event.contract_revision != MANAGED_HOOK_CONTRACT_REVISION
+        || event.contract_revision != registration.contract_schema_revision
+    {
+        return Err(invalid("managed-hook contract revision is stale"));
+    }
+    if event.target_artifact != MANAGED_HOOK_TARGET_ARTIFACT
+        || event.target_artifact != registration.target_artifact
+    {
+        return Err(invalid(
+            "managed-hook target artifact does not match its registry entry",
+        ));
+    }
+    let evidence = validate_typed_evidence(
+        &ImprovementTypedEvidenceCommand {
+            subsystem: registration.subsystem.to_string(),
+            contract_id: registration.contract_id.to_string(),
+            contract_schema_revision: registration.contract_schema_revision,
+            failure_code: event.failure_code.clone(),
+            expected_outcome: event.expected_outcome.clone(),
+            observed_outcome: event.observed_outcome.clone(),
+        },
+        registration.target_artifact,
+    )?;
+    Ok((token, improvement_fingerprint(&evidence)))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1711,9 +1879,14 @@ pub(super) fn owner_eligibility_is_canonical(
                         source_scope_nonce,
                         session_id,
                     }),
-                ) if interpretive_session_is_verified_for_repo(repo_root, session_id) => {
-                    (source_scope_nonce, "json.interpretive", session_id)
-                }
+                ) if interpretive_session_is_verified_for_repo(repo_root, session_id) => (
+                    source_scope_nonce,
+                    occurrence
+                        .producer_id
+                        .as_deref()
+                        .unwrap_or("json.interpretive"),
+                    session_id,
+                ),
                 _ => return false,
             };
         if source_scope_nonce != canonical_source_scope_nonce
@@ -1750,8 +1923,25 @@ pub(super) fn owner_eligibility_is_canonical(
                 qualifying_deterministic += usize::from(occurrence.qualifies_unattended);
             }
             OccurrenceOrigin::Interpretive => {
-                if occurrence.producer_id.is_some()
-                    || occurrence.producer_registry_revision.is_some()
+                if let Some(producer_id) = occurrence.producer_id.as_deref() {
+                    let registered = REGISTERED_PRODUCERS.iter().any(|registration| {
+                        producer_id == registration.producer_id
+                            && registration.interpretive_capable
+                            && occurrence.producer_registry_revision
+                                == Some(PRODUCER_REGISTRY_REVISION)
+                            && occurrence.routing_basis_revision
+                                == Some(registration.routing_basis_revision)
+                            && evidence.subsystem == registration.subsystem
+                            && evidence.contract_id == registration.contract_id
+                            && evidence.contract_schema_revision
+                                == registration.contract_schema_revision
+                            && evidence.target_artifact == registration.target_artifact
+                            && occurrence.recurrence.is_none()
+                    });
+                    if !registered {
+                        return false;
+                    }
+                } else if occurrence.producer_registry_revision.is_some()
                     || occurrence.routing_basis_revision.is_some()
                     || occurrence.recurrence.is_some()
                 {
@@ -1880,12 +2070,7 @@ fn interpretive_session_is_verified_for_repo(repo_root: &Path, session_id: &str)
     scope_matches
 }
 
-/// Stable dedupe key for the intake artifact gate's auto-captured candidate
-/// (SPEC-3248 P7A T-084): every missing/stale-outcome StopBlock updates the
-/// same `issue-spec-workflow` candidate instead of piling up duplicates.
-pub(crate) const INTAKE_GATE_DEDUPE_KEY: &str = "issue-spec-workflow:intake-artifact-gate";
-
-/// Compact result the intake gate embeds into its StopBlock reason.
+/// Compact result legacy workflow-integrity callers embed into gate messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IntakeGateCaptureSummary {
     pub id: String,
@@ -1893,52 +2078,15 @@ pub(crate) struct IntakeGateCaptureSummary {
     pub updated: bool,
 }
 
-/// SPEC-3164 workflow-violation auto-capture helper used by the intake
-/// artifact gate (SPEC-3248 P7A T-083/T-084, FR-019). Env-free so the Stop
-/// hook can call it; goes through the exact same validation, sanitization,
-/// dedupe, and storage as `improvement.capture`. Confidence stays `medium`,
-/// so the Board-status publish rule (high-confidence only) and the
-/// producing-work self-improvement Stop gate (high-confidence only) are both
-/// deliberately not triggered by the gate's own bookkeeping.
-pub(crate) fn capture_intake_gate_violation(
-    worktree_root: &Path,
-    summary: &str,
-    details: &str,
-) -> Result<IntakeGateCaptureSummary, String> {
-    let command = ImprovementCaptureCommand {
-        source: "hook-runtime".to_string(),
-        target_artifact: "issue-spec-workflow".to_string(),
-        classification: "gwt-caused".to_string(),
-        confidence: "medium".to_string(),
-        summary: summary.to_string(),
-        details: Some(details.to_string()),
-        evidence_digest: None,
-        dedupe_key: Some(INTAKE_GATE_DEDUPE_KEY.to_string()),
-        local_evidence: Vec::new(),
-        typed_evidence: None,
-    };
-    capture_candidate_core(worktree_root, command)
-        .map(|result| IntakeGateCaptureSummary {
-            id: result.candidate.id,
-            occurrences: result
-                .candidate
-                .legacy_occurrence_count
-                .unwrap_or(result.candidate.occurrences),
-            updated: result.updated_existing,
-        })
-        .map_err(|err| err.to_string())
-}
-
 /// Stable dedupe key for execution-integrity violations (SPEC-3248 P9,
 /// T-124): repeated tamper detections, unauthorized settlement attempts,
 /// and duplicate-owner takeover attempts all update one candidate.
 pub(crate) const EXECUTION_INTEGRITY_DEDUPE_KEY: &str = "issue-spec-workflow:execution-integrity";
 
-/// T-124 auto-capture for execution-integrity violations. Same env-free
-/// pipeline (validation, sanitization, dedupe, storage) and `medium`
-/// confidence as the intake gate capture; callers keep summaries/details to
-/// owner ids and violation kinds — never tokens, environment values, or
-/// record contents.
+/// T-124 auto-capture for execution-integrity violations. This legacy
+/// env-free compatibility path keeps `medium` confidence; callers keep
+/// summaries/details to owner ids and violation kinds — never tokens,
+/// environment values, or record contents.
 pub(crate) fn capture_execution_integrity_violation(
     worktree_root: &Path,
     summary: &str,
@@ -2599,6 +2747,20 @@ mod tests {
         (home, gwt_home)
     }
 
+    /// A resolution deadline for fake-client fixtures that do not exercise
+    /// timeout behavior. `ResolutionDeadline` is an absolute wall-clock expiry,
+    /// and these tests reuse one deadline across several store-writing,
+    /// lock-taking operations, so a short budget expires spuriously under load
+    /// (issue #3339). Timeout paths are covered separately by injecting
+    /// `ApiError::Timeout` through `fail_next_owner_operation`, so the budget
+    /// here only needs to outlast any realistic test run.
+    fn generous_owner_deadline() -> gwt_github::client::ResolutionDeadline {
+        gwt_github::client::ResolutionDeadline::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(3600),
+        )
+    }
+
     fn board_entries_json(env: &mut TestEnv) -> Value {
         let (_, board_out) = run_collect(
             env,
@@ -3168,6 +3330,8 @@ mod tests {
             details: None,
             local_evidence: Vec::new(),
             recurrence: None,
+            occurrence_origin: OccurrenceOrigin::Deterministic,
+            interpretive_session_id: None,
         }
     }
 
@@ -3206,6 +3370,8 @@ mod tests {
                 producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                 routing_basis_revision: 1,
                 recurrence: None,
+                occurrence_origin: OccurrenceOrigin::Deterministic,
+                interpretive_session_id: None,
             },
         )
         .expect("capture candidate")
@@ -3473,6 +3639,8 @@ mod tests {
                     producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                     routing_basis_revision: 1,
                     recurrence: None,
+                    occurrence_origin: OccurrenceOrigin::Deterministic,
+                    interpretive_session_id: None,
                 },
             )
             .expect("qualifying capture")
@@ -3505,6 +3673,8 @@ mod tests {
                     producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                     routing_basis_revision: 1,
                     recurrence: None,
+                    occurrence_origin: OccurrenceOrigin::Deterministic,
+                    interpretive_session_id: None,
                 },
             )
             .expect("nonqualifying capture")
@@ -4119,6 +4289,8 @@ mod tests {
                 producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                 routing_basis_revision: 1,
                 recurrence: None,
+                occurrence_origin: OccurrenceOrigin::Deterministic,
+                interpretive_session_id: None,
             },
         )
         .expect("capture candidate")
@@ -4212,9 +4384,8 @@ mod tests {
     fn resolver_reconciles_exact_plain_issue_duplicates_to_lowest_owner() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4257,7 +4428,7 @@ mod tests {
 
         assert_eq!(resolved.state, CandidateState::Linked);
         assert_eq!(resolved.owner.as_ref().unwrap().number, 78);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let duplicate = env
             .owner_client
             .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -4290,10 +4461,8 @@ mod tests {
     fn independent_machine_stores_converge_after_delayed_duplicate_visibility() {
         use gwt_github::client::{
             fake::FakeIssueClient, IssueNumber, IssueState, OwnerRepositoryClient,
-            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline,
-            UpdatedAt,
+            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home_a = tempfile::tempdir().expect("machine A home");
         let home_b = tempfile::tempdir().expect("machine B home");
@@ -4377,7 +4546,7 @@ mod tests {
 
         assert_eq!(resolved_b.state, CandidateState::Linked);
         assert_eq!(resolved_b.owner.as_ref().unwrap().number, 78);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             shared_owner
                 .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -4414,10 +4583,7 @@ mod tests {
     #[test]
     fn reconciliation_failure_stops_then_retry_reuses_exact_comment() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
-        use gwt_github::client::{
-            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
-        };
-        use std::time::Duration;
+        use gwt_github::client::{IssueNumber, OwnerRepositoryClient, RepositoryIdentity};
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4496,7 +4662,7 @@ mod tests {
         })
         .expect("simulate crash after reconciliation attempt acquisition");
 
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let canonical = env
             .owner_client
             .fetch_issue(
@@ -4589,10 +4755,7 @@ mod tests {
     #[test]
     fn reconciliation_post_submit_unknown_adopts_comment_before_close_retry() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
-        use gwt_github::client::{
-            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
-        };
-        use std::time::Duration;
+        use gwt_github::client::{IssueNumber, OwnerRepositoryClient, RepositoryIdentity};
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4630,7 +4793,7 @@ mod tests {
         assert_eq!(linked.state, CandidateState::Linked);
         assert_eq!(linked.owner.as_ref().unwrap().number, 78);
         assert_eq!(env.owner_client.owner_mutation_count(), 3);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let comments = env
             .owner_client
             .list_comments(
@@ -4701,9 +4864,8 @@ mod tests {
     fn occurrence_comment_unknown_rebinds_to_lower_canonical_owner_after_readback() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
         use gwt_github::client::{
-            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -4729,7 +4891,7 @@ mod tests {
         assert_eq!(env.owner_client.owner_mutation_count(), 1);
 
         let repository = RepositoryIdentity::gwt_upstream();
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let submitted_comments = env
             .owner_client
             .list_comments(&repository, IssueNumber(79), &deadline)
@@ -5100,6 +5262,8 @@ mod tests {
                 producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                 routing_basis_revision: 1,
                 recurrence: None,
+                occurrence_origin: OccurrenceOrigin::Deterministic,
+                interpretive_session_id: None,
             },
         )
         .expect("second public outcome")
@@ -5441,6 +5605,8 @@ mod tests {
                 producer_registry_revision: 1,
                 routing_basis_revision: 1,
                 recurrence: None,
+                occurrence_origin: OccurrenceOrigin::Deterministic,
+                interpretive_session_id: None,
             },
         )
         .expect("registered capture without status delivery")
@@ -5710,10 +5876,7 @@ mod tests {
         .expect("initial owner creation");
         assert_eq!(created.state, CandidateState::Created);
         assert_eq!(created.owner.as_ref().unwrap().number, 78);
-        let deadline = gwt_github::client::ResolutionDeadline::new(
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(5),
-        );
+        let deadline = generous_owner_deadline();
         let unrelated = env
             .owner_client
             .fetch_issue(
@@ -5870,14 +6033,7 @@ mod tests {
         );
         assert!(env
             .owner_client
-            .fetch_issue(
-                &repository,
-                IssueNumber(79),
-                &gwt_github::client::ResolutionDeadline::new(
-                    std::time::Duration::from_secs(1),
-                    std::time::Duration::from_secs(5),
-                ),
-            )
+            .fetch_issue(&repository, IssueNumber(79), &generous_owner_deadline())
             .is_err());
     }
 
@@ -5885,9 +6041,8 @@ mod tests {
     fn created_owner_number_survives_one_shot_source_save_failure() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -5952,7 +6107,7 @@ mod tests {
                 }
             )
         ));
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             env.owner_client
                 .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -5990,9 +6145,8 @@ mod tests {
     fn post_create_hidden_owner_preserves_the_complete_reconciliation_set() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -6050,7 +6204,7 @@ mod tests {
         assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
         assert!(unknown.reconciliation_required);
         assert_eq!(unknown.reconciliation_owner_numbers, vec![78, 79]);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             env.owner_client
                 .fetch_issue(&repository, IssueNumber(79), &deadline)
@@ -6103,9 +6257,8 @@ mod tests {
     fn post_create_duplicate_view_unions_the_hidden_created_owner() {
         use gwt_github::client::{
             IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
-            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+            RepositoryIssueKind, UpdatedAt,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -6181,7 +6334,7 @@ mod tests {
         ));
         assert!(unsettled.reconciliation_required);
         assert_eq!(unsettled.reconciliation_owner_numbers, vec![78, 79, 80]);
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         assert_eq!(
             env.owner_client
                 .fetch_issue(&repository, IssueNumber(80), &deadline)
@@ -6209,9 +6362,8 @@ mod tests {
     #[test]
     fn visible_owner_conflicting_with_durable_owner_is_reconciled_before_rebind() {
         use gwt_github::client::{
-            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity,
         };
-        use std::time::Duration;
 
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -6237,7 +6389,7 @@ mod tests {
 
         seed_exact_plain_owners(&mut env, &[78]);
         let repository = RepositoryIdentity::gwt_upstream();
-        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let deadline = generous_owner_deadline();
         let lower_owner = env
             .owner_client
             .fetch_issue(&repository, IssueNumber(78), &deadline)

@@ -504,3 +504,29 @@ test("the camera frame hides when there are no framable windows", () => {
   assert.ok(frame, "the camera frame element persists across empties");
   assert.equal(frame.hidden, true, "camera frame hides when nothing is framable");
 });
+
+// Issue #3364 — the "window moved → its minimap cell follows" scenario was
+// uncovered: renderCells() must re-lay an EXISTING cell when only its window's
+// geometry changed (same window set, same scale inputs).
+test("renderCells repositions an existing cell after its window geometry changes", () => {
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 120, 100), windowAt("w-2", 400, 300)];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  const leftBefore = parseFloat(cell.style.left);
+  const topBefore = parseFloat(cell.style.top);
+
+  windows[0].geometry = { ...windows[0].geometry, x: 320, y: 250 };
+  minimap.renderCells();
+
+  assert.ok(
+    parseFloat(cell.style.left) > leftBefore,
+    "the moved window's cell must shift right with its new world x",
+  );
+  assert.ok(
+    parseFloat(cell.style.top) > topBefore,
+    "the moved window's cell must shift down with its new world y",
+  );
+});

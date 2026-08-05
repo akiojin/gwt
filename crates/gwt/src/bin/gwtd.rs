@@ -163,12 +163,20 @@ fn format_issue_help() -> String {
         "  issue.spec.read | issue.spec.section | issue.spec.edit",
         "  issue.spec.create | issue.spec.list | issue.spec.pull",
         "  issue.spec.repair | issue.spec.rename",
+        "  issue.monitor.status | issue.monitor.priority.move",
+        "  issue.monitor.priority.set | issue.monitor.config.set",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
         "  structured                             Treat issue.spec body as structured JSON",
         "  replace                                Replace structured SPEC section instead of merging",
         "  all, numbers                           Controls issue.spec.pull",
+        "  project_root                          Optional Issue Monitor project scope",
+        "  number, position                      Move one priority (head or numeric index)",
+        "  issue_numbers                         Replace the complete priority order",
+        "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
+        "  max_active                            Positive concurrent-agent limit",
+        "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
     ]
     .join("\n")
@@ -382,34 +390,31 @@ fn format_execution_help() -> String {
         "",
         "Usage:",
         "  gwtd <<'JSON'",
-        "  {\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"<blocker>\",\"missing_verification\":\"<what could not run>\",\"required_recovery_commands\":[{\"execution_root\":\"worktree\",\"command\":\"<exact blocker verifier>\"}]}}",
+        "  {\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}",
+        "  {\"schema_version\":1,\"operation\":\"execution.continue\",\"params\":{\"operation_id\":\"<stable-operation-id>\"}}",
+        "  JSON",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"<blocker>\",\"missing_verification\":\"<what could not run>\"}}",
         "  {\"schema_version\":1,\"operation\":\"execution.reopen\",\"params\":{\"reason\":\"<resolved blocker>\"}}",
         "  JSON",
         "",
         "Operations:",
-        "  execution.complete | execution.blocked | execution.adopt | execution.reopen",
+        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
         "  settles the record for gwt-build-spec flows. Blocked is not done.",
         "  execution.adopt takes over another session's active record with an",
         "  audited params.reason (crash recovery / handoff) only when integrity",
-        "  is valid. An integrity-failed record cannot be repaired in the same",
-        "  execution lifetime; use a fresh linked-owner launch to preserve audit.",
+        "  is valid. For an integrity-failed ECR or generation ledger, use",
+        "  execution.repair with a non-empty params.reason; it quarantines the",
+        "  corrupt bytes and creates fresh authority with an independent audit.",
         "  Do not use execution.blocked for temporary questions or decisions.",
-        "  To support same-session recovery, execution.blocked must capture a",
-        "  non-empty ordered required_recovery_commands array. Each entry binds",
-        "  the exact command text to execution_root:\"worktree\". Omitting the",
-        "  array creates an audit-only Legacy Requirement Gap; same-session",
-        "  recovery is unavailable, so use a fresh linked-owner launch.",
-        "  If the same owning session resolves a terminal block, use verify.plan",
-        "  params.derive:true. Ordinary matrices include every missing required",
-        "  recovery command. With no non-bookkeeping changes, gwtd derives the",
-        "  machine-owned Non-Vacuous No-Change Floor followed by the immutable",
-        "  required recovery commands as the exact plan. verify.run may execute a",
-        "  superset only when it covers that exact plan. Run the full post-block",
-        "  matrix, then call execution.reopen with a non-empty params.reason.",
-        "  Reopen returns to Active; it does not claim completion.",
+        "  If the same owning session resolves a terminal block, register a",
+        "  derived plan with verify.plan params.derive:true, run the full",
+        "  post-block matrix through verify.run, then call execution.reopen",
+        "  with a non-empty params.reason. Reopen returns to Active; it does",
+        "  not claim completion.",
         "",
     ]
     .join("\n")
@@ -815,16 +820,14 @@ mod tests {
     fn format_execution_help_documents_same_session_recovery() {
         let help = format_execution_help();
         for expected in [
+            "execution.continue",
             "execution.reopen",
             "params.derive:true",
-            "required_recovery_commands",
-            "execution_root",
-            "Non-Vacuous No-Change Floor",
-            "Legacy Requirement Gap",
             "temporary questions",
             "post-block",
-            "cannot be repaired in the same",
-            "fresh linked-owner launch",
+            "execution.repair",
+            "quarantines",
+            "creates fresh authority",
         ] {
             assert!(
                 help.contains(expected),
@@ -832,6 +835,8 @@ mod tests {
             );
         }
         assert!(!help.contains("integrity repair"), "{help}");
+        assert!(!help.contains("cannot be repaired in the same"), "{help}");
+        assert!(!help.contains("fresh linked-owner launch"), "{help}");
     }
 
     #[test]
@@ -850,6 +855,25 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "board help must document {expected} JSON param. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
+    fn format_issue_help_documents_issue_monitor_queue_operations() {
+        let help = format_issue_help();
+        for expected in [
+            "issue.monitor.status",
+            "issue.monitor.priority.move",
+            "issue.monitor.priority.set",
+            "issue.monitor.config.set",
+            "project_root",
+            "enabled=false",
+            "autonomous_mode=false",
+        ] {
+            assert!(
+                help.contains(expected),
+                "issue help must document {expected}. help:\n{help}"
             );
         }
     }

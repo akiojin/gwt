@@ -258,96 +258,17 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
         return output;
     };
     let tail = &content[start + heading.len()..];
-    let next = next_discussion_entry_heading_offset(tail)
-        .map(|index| start + heading.len() + index)
+    let next = tail
+        .find("\n## ")
+        .map(|index| start + heading.len() + index + 1)
         .unwrap_or(content.len());
     let mut output = String::new();
     output.push_str(content[..start].trim_end());
     output.push_str("\n\n");
     output.push_str(entry.trim_end());
     output.push('\n');
-    let suffix = remove_sections_with_heading(&content[next..], heading);
-    output.push_str(suffix.trim_start_matches('\n'));
+    output.push_str(content[next..].trim_start_matches('\n'));
     output
-}
-
-fn remove_sections_with_heading(content: &str, heading: &str) -> String {
-    let sections = discussion_entry_headings(content)
-        .into_iter()
-        .map(|(offset, line)| (offset, line == heading))
-        .collect::<Vec<_>>();
-
-    let mut output = String::new();
-    let mut cursor = 0;
-    for (index, (start, matches_heading)) in sections.iter().copied().enumerate() {
-        if !matches_heading {
-            continue;
-        }
-        output.push_str(&content[cursor..start]);
-        cursor = sections
-            .get(index + 1)
-            .map(|(next_start, _)| *next_start)
-            .unwrap_or(content.len());
-    }
-    output.push_str(&content[cursor..]);
-    output
-}
-
-fn next_discussion_entry_heading_offset(content: &str) -> Option<usize> {
-    discussion_entry_headings(content)
-        .first()
-        .map(|(offset, _)| *offset)
-}
-
-fn discussion_entry_headings(content: &str) -> Vec<(usize, &str)> {
-    let mut h2_headings = Vec::new();
-    let mut offset = 0;
-    for raw_line in content.split_inclusive('\n') {
-        let line = raw_line.trim_end();
-        if line.starts_with("## ") {
-            h2_headings.push((offset, line));
-        }
-        offset += raw_line.len();
-    }
-
-    h2_headings
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (start, line))| {
-            let end = h2_headings
-                .get(index + 1)
-                .map(|(next_start, _)| *next_start)
-                .unwrap_or(content.len());
-            let section = &content[*start..end];
-            (is_dated_discussion_heading(line)
-                || is_standalone_legacy_discussion_heading(line, section))
-            .then_some((*start, *line))
-        })
-        .collect()
-}
-
-fn is_standalone_legacy_discussion_heading(line: &str, section: &str) -> bool {
-    if line == "## Legacy gwt-discussion state" {
-        return true;
-    }
-    !is_dated_discussion_heading(line)
-        && section
-            .lines()
-            .skip(1)
-            .any(|line| line.starts_with("Status:"))
-}
-
-fn is_dated_discussion_heading(line: &str) -> bool {
-    let Some(rest) = line.strip_prefix("## ") else {
-        return false;
-    };
-    let Some((date, title)) = rest.split_once(" — ") else {
-        return false;
-    };
-    let Ok(parsed) = NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
-        return false;
-    };
-    !title.trim().is_empty() && parsed.format("%Y-%m-%d").to_string() == date
 }
 
 fn io_as_spec_error(err: std::io::Error) -> SpecOpsError {

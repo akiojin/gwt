@@ -6,11 +6,19 @@
 use std::{io::Read, path::Path};
 
 use super::{
-    block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, HookError,
-    HookEvent, HookOutput,
+    block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override,
+    effect_classifier, HookError, HookEvent, HookOutput,
 };
 
 pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<HookOutput> {
+    effect_classifier::observe_bash_command(command, worktree_root, worktree_root);
+    evaluate_bash_command_without_observation(command, worktree_root)
+}
+
+fn evaluate_bash_command_without_observation(
+    command: &str,
+    worktree_root: &Path,
+) -> Option<HookOutput> {
     block_git_branch_ops::evaluate_bash_command(command)
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
@@ -21,13 +29,24 @@ pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<Hook
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
+    effect_classifier::observe_event(event, worktree_root);
+    evaluate_without_observation(event, worktree_root)
+}
+
+pub(crate) fn evaluate_without_observation(
+    event: &HookEvent,
+    worktree_root: &Path,
+) -> Result<HookOutput, HookError> {
     if event.tool_name.as_deref() != Some("Bash") {
         return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
         return Ok(HookOutput::Silent);
     };
-    Ok(evaluate_bash_command(command, worktree_root).unwrap_or(HookOutput::Silent))
+    Ok(
+        evaluate_bash_command_without_observation(command, worktree_root)
+            .unwrap_or(HookOutput::Silent),
+    )
 }
 
 pub fn handle() -> Result<HookOutput, HookError> {
@@ -244,10 +263,25 @@ fn evaluate_github_mutation_sinks(command: &str) -> Option<HookOutput> {
             "curl" if is_mutating_github_curl(&tokens) => {
                 return Some(github_mutation_block_decision(command));
             }
+            "wget" if is_mutating_github_wget(&tokens) => {
+                return Some(github_mutation_block_decision(command));
+            }
+            "powershell" | "pwsh" if is_mutating_github_powershell(&segment) => {
+                return Some(github_mutation_block_decision(command));
+            }
             _ => {}
         }
     }
     None
+}
+
+pub(crate) fn is_github_remote_mutation(command: &str) -> bool {
+    evaluate_github_mutation_sinks(command).is_some()
+}
+
+pub(crate) fn targets_github_api(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    lowered.contains("api.github.com") || lowered.contains("uploads.github.com")
 }
 
 /// Normalize a method value for comparison (agents habitually quote it).
@@ -381,9 +415,18 @@ fn is_mutating_github_curl(tokens: &[&str]) -> bool {
         let lowered = token.to_ascii_lowercase();
         lowered.contains("api.github.com") || lowered.contains("uploads.github.com")
     });
-    if !targets_github_api {
-        return false;
-    }
+    targets_github_api && is_mutating_curl(tokens)
+}
+
+pub(crate) fn curl_remote_mutation(segment: &str) -> Option<bool> {
+    let tokens = command_tokens(segment);
+    tokens
+        .first()
+        .is_some_and(|command| normalize_command_name(command) == "curl")
+        .then(|| is_mutating_curl(&tokens))
+}
+
+fn is_mutating_curl(tokens: &[&str]) -> bool {
     let mut method: Option<String> = None;
     let mut has_body = false;
     let mut forces_get = false;
@@ -460,6 +503,90 @@ fn is_mutating_github_curl(tokens: &[&str]) -> bool {
         Some(_) => true,
         None => has_body && !forces_get,
     }
+}
+
+/// `wget` against a GitHub API host with a mutating method or body flag
+/// (P10 transport extension — same classification as curl).
+fn is_mutating_github_wget(tokens: &[&str]) -> bool {
+    let targets_github_api = tokens.iter().any(|token| {
+        let lowered = token.to_ascii_lowercase();
+        lowered.contains("api.github.com") || lowered.contains("uploads.github.com")
+    });
+    if !targets_github_api {
+        return false;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i];
+        if token == "--method" {
+            if let Some(method) = tokens.get(i + 1) {
+                if !matches!(normalize_method(method).as_str(), "GET" | "HEAD") {
+                    return true;
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--method=") {
+            if !matches!(normalize_method(value).as_str(), "GET" | "HEAD") {
+                return true;
+            }
+        } else if ["--post-data", "--post-file", "--body-data", "--body-file"]
+            .iter()
+            .any(|flag| token == *flag || token.starts_with(&format!("{flag}=")))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// PowerShell (`powershell -Command …` / `pwsh -c …`) invoking
+/// Invoke-RestMethod / Invoke-WebRequest / irm / iwr against a GitHub API
+/// host with a mutation marker (`-Method` POST/PUT/PATCH/DELETE or a
+/// `-Body`/`-InFile` payload). Plain GET reads pass.
+fn is_mutating_github_powershell(segment: &str) -> bool {
+    let lowered = segment.to_ascii_lowercase();
+    if !lowered.contains("api.github.com") && !lowered.contains("uploads.github.com") {
+        return false;
+    }
+    let invokes_http = lowered.contains("invoke-restmethod")
+        || lowered.contains("invoke-webrequest")
+        || contains_word(&lowered, "irm")
+        || contains_word(&lowered, "iwr");
+    if !invokes_http {
+        return false;
+    }
+    if lowered.contains("-body") || lowered.contains("-infile") {
+        return true;
+    }
+    if let Some(index) = lowered.find("-method") {
+        let rest = lowered[index + "-method".len()..].trim_start_matches([' ', ':', '=']);
+        let verb: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect();
+        return !matches!(verb.as_str(), "get" | "head" | "");
+    }
+    false
+}
+
+/// True when `word` (ASCII) appears with word boundaries in `lowered`.
+fn contains_word(lowered: &str, word: &str) -> bool {
+    let bytes = lowered.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = lowered[start..].find(word) {
+        let begin = start + pos;
+        let end = begin + word.len();
+        let before_ok = begin == 0 || !bytes[begin - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 fn github_mutation_block_decision(command: &str) -> HookOutput {
@@ -716,6 +843,44 @@ mod tests {
             "curl -G https://api.github.com/search/code -d q=foo",
             "curl -Gd q=foo https://api.github.com/search/code",
             "curl -X 'GET' https://api.github.com/repos/o/r",
+        ] {
+            assert!(
+                evaluate_bash_command(command, Path::new("/worktree")).is_none(),
+                "must pass: {command}"
+            );
+        }
+    }
+
+    // P10 transport extension (T-217): wget and PowerShell mutations
+    // against the GitHub API are classified like curl; reads pass.
+    #[test]
+    fn blocks_wget_and_powershell_github_mutations_but_not_reads() {
+        for command in [
+            "wget --method=PUT https://api.github.com/repos/o/r/branches/main/protection",
+            "wget --method PUT https://api.github.com/repos/o/r/branches/main/protection",
+            "wget --post-data='{}' https://api.github.com/repos/o/r/merges",
+            "wget --post-file=body.json https://api.github.com/repos/o/r/issues",
+            "wget --body-data='{}' --method=PATCH https://api.github.com/repos/o/r/contents/x",
+            r#"powershell -Command "Invoke-RestMethod -Uri https://api.github.com/repos/o/r/merges -Method Put""#,
+            r#"pwsh -c "irm https://api.github.com/repos/o/r/forks -Method Post""#,
+            r#"powershell -Command "iwr -Uri https://uploads.github.com/repos/o/r/releases/1/assets -Body $b""#,
+        ] {
+            let decision = evaluate_bash_command(command, Path::new("/worktree"))
+                .unwrap_or_else(|| panic!("expected block: {command}"));
+            assert_eq!(
+                decision.summary(),
+                "\u{1F6AB} Direct GitHub API mutations are not allowed",
+                "{command}"
+            );
+        }
+
+        for command in [
+            "wget https://api.github.com/repos/o/r",
+            "wget https://example.com/file.tar.gz",
+            "wget --post-data='{}' https://internal.example.com/hook",
+            r#"powershell -Command "irm https://api.github.com/repos/o/r""#,
+            r#"powershell -Command "Get-Process | Sort-Object CPU""#,
+            r#"pwsh -c "Invoke-RestMethod -Uri https://internal.example.com/x -Method Post""#,
         ] {
             assert!(
                 evaluate_bash_command(command, Path::new("/worktree")).is_none(),

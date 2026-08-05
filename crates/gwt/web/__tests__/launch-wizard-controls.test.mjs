@@ -475,6 +475,24 @@ const wizardSource = readFileSync(
   "utf8",
 );
 
+test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
+  assert.match(
+    wizardSource,
+    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
+    "wizard start methods must classify history, focus, and new-launch intents independently",
+  );
+  assert.match(
+    wizardSource,
+    /button\.dataset\.executionIntent\s*=\s*startMethodIntent/,
+    "start method rows must expose their execution intent to the rendered contract",
+  );
+  assert.doesNotMatch(
+    wizardSource,
+    /History only/,
+    "legacy conversation methods carry no observation-only notice",
+  );
+});
+
 test("wizard surface extends the interaction guard to the reasoning slider", () => {
   // The guard previously covered only native <select> (Issue #2698). The
   // slider must be guarded too, or its set_reasoning re-render destroys the

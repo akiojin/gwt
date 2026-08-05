@@ -203,7 +203,21 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let expected = which::which("git").expect("git must be available to the test runner");
-        let detected = AgentDetector::detect_by_command("git").expect("git must be detected");
+
+        // `detect_by_command` spawns `git --version` to read a version string,
+        // and a heavily loaded machine can make that child spawn transiently
+        // fail (e.g. EAGAIN on fork), yielding a spurious None while the
+        // spawn-free `which` lookup still succeeds. Retry a few times so only a
+        // genuine detection failure (every attempt None) fails the test
+        // (issue #3339).
+        let detected = (0..8)
+            .find_map(|_| {
+                AgentDetector::detect_by_command("git").or_else(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    None
+                })
+            })
+            .expect("git must be detected");
 
         assert_eq!(detected.path, expected);
     }

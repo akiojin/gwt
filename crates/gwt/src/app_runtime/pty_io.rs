@@ -149,14 +149,13 @@ impl AppRuntime {
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let data_len = data.len();
         let write_result = {
             let Some(runtime) = self.runtimes.get(id) else {
                 tracing::debug!(
                     target: "gwt_input_trace",
                     stage = "event_loop_runtime_missing",
                     window_id = %id,
-                    data_len,
+                    outcome = "runtime_missing",
                     "terminal_input dropped: no runtime for window"
                 );
                 return Vec::new();
@@ -176,7 +175,6 @@ impl AppRuntime {
                         target: "gwt_input_trace",
                         stage = "pty_write",
                         window_id = %id,
-                        data_len,
                         lock_wait_us,
                         write_us = write_started.elapsed().as_micros() as u64,
                         ok = result.is_ok(),
@@ -189,9 +187,8 @@ impl AppRuntime {
                         target: "gwt_input_trace",
                         stage = "pane_lock_failed",
                         window_id = %id,
-                        data_len,
                         lock_wait_us,
-                        error = %error,
+                        outcome = "lock_failed",
                         "terminal_input dropped: pane mutex poisoned"
                     );
                     Err(error)
@@ -223,12 +220,12 @@ impl AppRuntime {
             Ok(mut guard) => {
                 guard.insert(id.to_string(), pty);
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "registry_write_poisoned",
                     window_id = %id,
-                    error = %error,
+                    outcome = "registry_lock_failed",
                     "failed to register PTY writer: registry poisoned"
                 );
             }
@@ -240,12 +237,12 @@ impl AppRuntime {
             Ok(mut guard) => {
                 guard.remove(id);
             }
-            Err(error) => {
+            Err(_error) => {
                 tracing::warn!(
                     target: "gwt_input_trace",
                     stage = "registry_deregister_poisoned",
                     window_id = %id,
-                    error = %error,
+                    outcome = "registry_lock_failed",
                     "failed to deregister PTY writer: registry poisoned"
                 );
             }
@@ -254,6 +251,10 @@ impl AppRuntime {
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
         self.stop_window_runtime_inner(window_id, true);
+    }
+
+    pub(crate) fn stop_window_runtime_without_session_projection(&mut self, window_id: &str) {
+        self.stop_window_runtime_inner(window_id, false);
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
@@ -385,7 +386,6 @@ impl AppRuntime {
                                     target: "gwt_input_trace",
                                     stage = "reader_pane_lock",
                                     window_id = %id,
-                                    chunk_len = read,
                                     lock_wait_us,
                                     parse_us,
                                     "reader thread held pane mutex (output parsing)"

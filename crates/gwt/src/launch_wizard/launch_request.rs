@@ -93,7 +93,7 @@ impl LaunchWizardState {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
 
-        if self.skip_permissions {
+        if self.effective_skip_permissions() {
             builder = builder.skip_permissions(true);
         }
 
@@ -186,8 +186,11 @@ impl LaunchWizardState {
             // disposable detached worktree from the launch runtime. Clearing
             // branch/base/working_dir here is the invariant guard — no wizard
             // state may leak a named branch into an intake launch.
+            // #3374: the ephemeral base ref is NOT branch state — it is the
+            // intake base (e.g. `origin/develop`). Clearing it made the launch
+            // runtime fall back to `HEAD` and materialize a stale worktree.
             config.is_ephemeral = true;
-            config.ephemeral_base_ref = None;
+            config.ephemeral_base_ref = self.context.ephemeral_base_ref.clone();
             config.branch = None;
             config.base_branch = None;
             config.working_dir = None;
@@ -274,6 +277,33 @@ mod tests {
     }
 
     #[test]
+    fn build_launch_config_for_intake_wizard_mode_keeps_ephemeral_base_ref() {
+        // #3374: the production intake path goes through
+        // `mark_as_ephemeral_intake`, which sets `wizard_mode = Intake`. The
+        // Intake invariant guard must clear branch state WITHOUT wiping the
+        // ephemeral base ref — losing it makes the launch runtime fall back to
+        // `HEAD` (the possibly months-stale main checkout), which is exactly
+        // the stale-intake-worktree bug.
+        let mut state = LaunchWizardState::open_with(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.mark_as_ephemeral_intake("origin/develop");
+
+        let config = state.build_launch_config().expect("intake launch config");
+        assert!(config.is_ephemeral, "intake launch is ephemeral");
+        assert_eq!(
+            config.ephemeral_base_ref.as_deref(),
+            Some("origin/develop"),
+            "the Intake invariant guard must keep the ephemeral base ref"
+        );
+        assert!(config.branch.is_none(), "intake launch creates no branch");
+        assert!(config.base_branch.is_none());
+        assert!(config.working_dir.is_none());
+    }
+
+    #[test]
     fn build_launch_config_for_codex_resume_uses_resume_session_id() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -300,7 +330,17 @@ mod tests {
         assert_eq!(config.reasoning_level.as_deref(), Some("high"));
         assert_eq!(config.tool_version.as_deref(), Some("0.110.0"));
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
-        assert!(config.skip_permissions);
+        assert!(
+            !config.skip_permissions,
+            "a Resume launch must never inherit a permission bypass"
+        );
+        assert!(
+            !config
+                .args
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+            "a Resume launch must not carry Codex's dangerous bypass flag"
+        );
         assert!(config.codex_fast_mode);
     }
 
@@ -920,7 +960,11 @@ mod tests {
         assert_eq!(config.display_name, "Claude Proxy");
         assert!(config.args.contains(&"--serve".to_string()));
         assert!(config.args.contains(&"--resume".to_string()));
-        assert!(config.args.contains(&"--unsafe".to_string()));
+        assert!(!config.skip_permissions);
+        assert!(
+            !config.args.contains(&"--unsafe".to_string()),
+            "a Resume launch must not carry the custom agent permission bypass"
+        );
         assert_eq!(
             config.env_vars.get("API_KEY").map(String::as_str),
             Some("secret")

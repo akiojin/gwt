@@ -27,6 +27,23 @@ import {
   buildToggleField,
 } from "/launch-controls.js";
 
+// SPEC-2359 W-24 (FR-572) / #3410: conversation history and Execution
+// generation are independent intents. The legacy resume methods reopen the
+// conversation with input enabled; producing authority is recovered by the
+// backend continuation coordinator, and Work-level Continue work owns
+// successor generations.
+export function launchWizardStartMethodIntent(methodKind) {
+  switch (methodKind) {
+    case "continue_last_session":
+    case "open_session_picker":
+      return "resume";
+    case "focus_running_session":
+      return "focus";
+    default:
+      return "launch";
+  }
+}
+
 export function createLaunchWizardSurface({
   createNode,
   closeModal,
@@ -1054,7 +1071,7 @@ export function createLaunchWizardSurface({
               title: "Available",
               copy: isIntakeWizard
                 ? "Other ways to prepare or resume this intake session."
-                : "Other ways to start or resume this agent.",
+                : "Other ways to start, resume, or focus this agent.",
             },
             {
               id: "unavailable",
@@ -1097,6 +1114,8 @@ export function createLaunchWizardSurface({
             for (const method of methods) {
               const button = createNode("button", "start-method-button");
               button.type = "button";
+              const startMethodIntent = launchWizardStartMethodIntent(method.kind);
+              button.dataset.executionIntent = startMethodIntent;
               const isStartMethodPending =
                 launchWizardPendingAction?.kind === "use_start_method"
                   && launchWizardPendingAction.method === method.kind;
@@ -1110,7 +1129,13 @@ export function createLaunchWizardSurface({
                 createNode(
                   "div",
                   "start-method-title",
-                  isStartMethodPending ? "Preparing..." : method.label,
+                  isStartMethodPending
+                    ? startMethodIntent === "resume"
+                      ? "Opening..."
+                      : startMethodIntent === "focus"
+                        ? "Focusing..."
+                        : "Preparing..."
+                    : method.label,
                 ),
               );
               if (method.badge) {

@@ -12,6 +12,7 @@ import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -1477,19 +1478,47 @@ class E5EmbeddingFunction:
             return [input_value]
         return list(input_value)
 
+    @staticmethod
+    def _native_finite_query_vectors(output: Any) -> List[List[float]]:
+        """Normalize model output at the Chroma API boundary.
+
+        SentenceTransformer returns NumPy float32 scalars. Chroma's public
+        embedding contract accepts native Python floats and rejects the NumPy
+        scalars before querying an otherwise healthy collection.
+        """
+        vectors: List[List[float]] = []
+        for vector_index, vector in enumerate(output):
+            normalized: List[float] = []
+            for value_index, value in enumerate(vector):
+                try:
+                    native_value = float(value)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError(
+                        "embedding value must be numeric "
+                        f"(vector={vector_index}, value={value_index})"
+                    ) from error
+                if not math.isfinite(native_value):
+                    raise ValueError(
+                        "embedding value must be finite "
+                        f"(vector={vector_index}, value={value_index})"
+                    )
+                normalized.append(native_value)
+            vectors.append(normalized)
+        return vectors
+
     def embed_documents(self, input: Any = None, **kwargs: Any) -> List[List[float]]:  # noqa: A002
         if input is None:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "passage")
         out = self._model_or_default().encode(prepared)
-        return [list(v) for v in out]
+        return [list(vector) for vector in out]
 
     def embed_query(self, input: Any = None, **kwargs: Any) -> List[List[float]]:  # noqa: A002
         if input is None:
             input = kwargs.get("input")  # noqa: A001
         prepared = self._prefix(self._to_list(input), "query")
         out = self._model_or_default().encode(prepared)
-        return [list(v) for v in out]
+        return self._native_finite_query_vectors(out)
 
     # Chroma EmbeddingFunction protocol: callable on a sequence of strings.
     # Default to passage mode (used during indexing).
@@ -3097,11 +3126,7 @@ def _load_discussion_documents(
         return [], manifest_entries
 
     discussions: List[Dict[str, Any]] = []
-    grouped: Dict[tuple[str, str, int], int] = {}
-    dated_occurrences: Dict[tuple[str, str], int] = {}
-    bare_occurrences: Dict[str, int] = {}
-    current_dated_parent: Optional[tuple[str, str, int, str]] = None
-    current_bare_section: Optional[tuple[str, int]] = None
+    grouped: Dict[tuple[str, str], int] = {}
     for chunk in chunks:
         heading = chunk["heading"]
         body = chunk["body"]
@@ -3109,77 +3134,10 @@ def _load_discussion_documents(
             continue
 
         date, title = _parse_memory_heading(heading)
-        cleaned_heading = _MEMORY_HEADING_CHUNK_SUFFIX_RE.sub("", heading)
-        suffix_match = re.search(r"\s+\[(\d+)\]\s*$", heading)
-        chunk_part = int(suffix_match.group(1)) if suffix_match else None
-        if date:
-            continues_parent = (
-                chunk_part is not None
-                and chunk_part > 1
-                and current_dated_parent is not None
-                and current_dated_parent[0] == date
-                and current_dated_parent[1] == title
-            )
-            if not continues_parent:
-                occurrence_key = (date, title)
-                occurrence = dated_occurrences.get(occurrence_key, 0)
-                dated_occurrences[occurrence_key] = occurrence + 1
-                parent_digest = hashlib.sha1(
-                    f"{heading}\n{body}".encode("utf-8")
-                ).hexdigest()[:12]
-                current_dated_parent = (date, title, occurrence, parent_digest)
-            assert current_dated_parent is not None
-            parent_date, parent_title, occurrence, parent_digest = current_dated_parent
-            key = (parent_date, parent_title, occurrence)
-            scoped_nested_chunk = False
-            current_bare_section = None
-        elif title == "Discussion TODO" and current_dated_parent is not None:
-            # discussion.update allows the proposal ledger to remain as an H2
-            # inside a dated entry.  Chroma's generic H2 chunker loses that
-            # hierarchy, so restore it only for this canonical nested surface.
-            parent_date, parent_title, occurrence, parent_digest = current_dated_parent
-            key = (parent_date, parent_title, occurrence)
-            scoped_nested_chunk = True
-            current_bare_section = None
-        else:
-            continues_bare = (
-                chunk_part is not None
-                and chunk_part > 1
-                and current_bare_section is not None
-                and current_bare_section[0] == title
-            )
-            if continues_bare:
-                assert current_bare_section is not None
-                _, occurrence = current_bare_section
-            else:
-                occurrence = bare_occurrences.get(title, 0)
-                bare_occurrences[title] = occurrence + 1
-                current_bare_section = (title, occurrence)
-            key = ("", title, occurrence)
-            scoped_nested_chunk = False
-            if (
-                title == "Legacy gwt-discussion state"
-                or bool(_extract_discussion_field(body, "Status"))
-            ):
-                # Legacy migration wraps its former document in a bare H2
-                # carrying its own Status field.  That is an explicit entry
-                # boundary, so a following Discussion TODO belongs to the
-                # legacy entry rather than to an earlier dated discussion.
-                current_dated_parent = None
-
+        key = (date, title)
         chunk_idx = grouped.get(key, 0)
         grouped[key] = chunk_idx + 1
-        if scoped_nested_chunk:
-            digest_source = (
-                f"parent:{parent_digest}\n{heading}\n{body}"
-            )
-        else:
-            # Preserve the historical content-derived ID for every top-level
-            # chunk.  Duplicate content is disambiguated only when records are
-            # materialized, so inserting a different same-title legacy H2 does
-            # not renumber an existing record.
-            digest_source = f"{heading}\n{body}"
-        digest_input = digest_source.encode("utf-8")
+        digest_input = f"{heading}\n{body}".encode("utf-8")
         discussion_id = hashlib.sha1(digest_input).hexdigest()[:12]
         discussions.append(
             {
@@ -3201,12 +3159,11 @@ def _load_discussion_documents(
                 "body": body,
                 "chunk_idx": chunk_idx,
                 "total_chunks": 0,
-                "_group_key": key,
             }
         )
 
     for entry in discussions:
-        key = entry.pop("_group_key")
+        key = (entry["date"], entry["title"])
         entry["total_chunks"] = grouped[key]
 
     return discussions, manifest_entries
@@ -3217,24 +3174,14 @@ def _build_discussion_records(
 ) -> List[Dict[str, Any]]:
     """Materialize Chroma upsert records for the discussions scope."""
     records: List[Dict[str, Any]] = []
-    record_id_occurrences: Dict[str, int] = {}
     for entry in discussions:
         title = entry.get("title", "")
         heading = entry.get("heading", "")
         body = entry.get("body", "")
         document = f"{title}\n{heading}\n{body}".strip()
-        chunk_idx = int(entry.get("chunk_idx", 0))
-        total_chunks = int(entry.get("total_chunks", 1))
-        record_id = f"discussion-{entry.get('discussion_id', '')}"
-        if total_chunks > 1:
-            record_id = f"{record_id}-{chunk_idx}"
-        duplicate_index = record_id_occurrences.get(record_id, 0)
-        record_id_occurrences[record_id] = duplicate_index + 1
-        if duplicate_index > 0:
-            record_id = f"{record_id}-duplicate-{duplicate_index}"
         records.append(
             {
-                "id": record_id,
+                "id": f"discussion-{entry.get('discussion_id', '')}",
                 "document": document,
                 "metadata": {
                     "discussion_id": entry.get("discussion_id", ""),
@@ -3246,8 +3193,8 @@ def _build_discussion_records(
                     "related_works": ",".join(entry.get("related_works", [])),
                     "promoted_to": ",".join(entry.get("promoted_to", [])),
                     "heading": heading,
-                    "chunk_idx": chunk_idx,
-                    "total_chunks": total_chunks,
+                    "chunk_idx": int(entry.get("chunk_idx", 0)),
+                    "total_chunks": int(entry.get("total_chunks", 1)),
                 },
             }
         )
@@ -5004,6 +4951,25 @@ def _search_scope_collection(
     return payload
 
 
+def _search_failed_payload(
+    affected_scopes: Sequence[str],
+    stage: str,
+    error: Exception,
+) -> Dict[str, Any]:
+    error_type = type(error).__name__[:64] or "Error"
+    scopes = list(dict.fromkeys(affected_scopes))
+    return {
+        "ok": False,
+        "error_code": "SEARCH_FAILED",
+        "retryable": False,
+        "error": (
+            f"semantic search {stage} failed for scopes "
+            f"[{', '.join(scopes)}] ({error_type})"
+        ),
+        "affected_scopes": scopes,
+    }
+
+
 def action_search_multi_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
@@ -5056,7 +5022,17 @@ def action_search_multi_v2(
             }
             continue
         if query_embedding is None:
-            query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+            try:
+                query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+            except Exception as error:
+                affected_scopes = [
+                    candidate for candidate in scopes if candidate in valid_scopes
+                ]
+                return _search_failed_payload(
+                    affected_scopes,
+                    "query embedding",
+                    error,
+                )
         try:
             result = _search_scope_collection(
                 repo_hash,
@@ -5068,9 +5044,24 @@ def action_search_multi_v2(
                 db_root,
                 query_embedding,
             )
-        except Exception as error:  # store broke between classify and query
-            scope_states[scope] = {"state": "corrupt", "reason": str(error)}
-            continue
+        except Exception as error:
+            # Phase 70a FR-400: query-contract failures (for example an
+            # unsupported embedding scalar type) do not prove the verified
+            # store is corrupt. Re-check the same canonical health source used
+            # by status; only an actually missing/corrupt store enters repair.
+            try:
+                current_state, current_health = _classify_scope_for_search(
+                    repo_hash, scope_worktree, scope, db_root=db_root
+                )
+            except Exception:
+                current_state, current_health = state, health
+            if current_state in ("missing", "corrupt"):
+                scope_states[scope] = {
+                    "state": current_state,
+                    "reason": current_health.get("reason", current_state),
+                }
+                continue
+            return _search_failed_payload([scope], "query", error)
         scope_states[scope] = {"state": state}
         if state == "stale":
             stale_scopes.append(scope)

@@ -172,6 +172,53 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 verdict_raw: required_string(params, "verdict_raw")?,
             })
         }
+        "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
+            CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                position: issue_monitor_priority_position(params)?,
+            })
+        }
+        "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
+            CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                project_root: optional_path(params, "project_root")?,
+                issue_numbers: required_u64_vec(params, "issue_numbers")?,
+            })
+        }
+        "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            let enabled = optional_bool(params, "enabled")?;
+            let autonomous_mode = optional_bool(params, "autonomous_mode")?;
+            let max_active = optional_usize(params, "max_active")?;
+            if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+                return Err(CliParseError::MissingFlag(
+                    "enabled|autonomous_mode|max_active",
+                ));
+            }
+            if enabled == Some(true) {
+                return Err(CliParseError::InvalidJson(
+                    "enabled=true requires an explicit GUI action".to_string(),
+                ));
+            }
+            if autonomous_mode == Some(true) {
+                return Err(CliParseError::InvalidJson(
+                    "autonomous_mode=true requires an explicit GUI action".to_string(),
+                ));
+            }
+            if max_active == Some(0) {
+                return Err(CliParseError::InvalidJson(
+                    "max_active must be greater than zero".to_string(),
+                ));
+            }
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: optional_path(params, "project_root")?,
+                enabled,
+                autonomous_mode,
+                max_active,
+            })
+        }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
@@ -271,21 +318,37 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
-            if commands.is_empty() {
-                return Err(CliParseError::MissingFlag("commands"));
-            }
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
         }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
+            let generated_outputs = optional_string_vec(params, "generated_outputs")?;
             if commands.is_empty() && !derive {
                 return Err(CliParseError::MissingFlag("commands"));
             }
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
-                commands,
-                derive,
-            })
+            if generated_outputs.is_empty() {
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands,
+                    derive,
+                })
+            } else {
+                CliCommand::Verify(
+                    crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                        commands,
+                        derive,
+                        generated_outputs,
+                    },
+                )
+            }
+        }
+        "execution.status" => {
+            if !params.is_empty() {
+                return Err(CliParseError::InvalidJson(
+                    "execution.status accepts no params".to_string(),
+                ));
+            }
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -294,12 +357,27 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
                 reason: required_string(params, "reason")?,
                 missing_verification: optional_string(params, "missing_verification")?,
-                required_recovery_commands: required_recovery_commands(params)?,
             })
         }
         "execution.adopt" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Adopt {
                 reason: required_string(params, "reason")?,
+            })
+        }
+        "execution.repair" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair {
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "execution.continue" => {
+            let operation_id = required_string(params, "operation_id")?;
+            if params.len() != 1 || !params.contains_key("operation_id") {
+                return Err(CliParseError::InvalidJson(
+                    "execution.continue only accepts params.operation_id".to_string(),
+                ));
+            }
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Continue {
+                operation_id,
             })
         }
         "execution.reopen" => {
@@ -1046,6 +1124,44 @@ fn optional_u64_vec(
     }
 }
 
+fn required_u64_vec(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<Vec<u64>, CliParseError> {
+    if !params.contains_key(key) {
+        return Err(CliParseError::MissingFlag(key));
+    }
+    if !params.get(key).is_some_and(Value::is_array) {
+        return Err(CliParseError::InvalidJson(format!(
+            "{key} must be an array of u64 values"
+        )));
+    }
+    optional_u64_vec(params, key)
+}
+
+fn issue_monitor_priority_position(
+    params: &Map<String, Value>,
+) -> Result<super::IssueMonitorPriorityPosition, CliParseError> {
+    let Some(value) = params.get("position") else {
+        return Ok(super::IssueMonitorPriorityPosition::Head);
+    };
+    match value {
+        Value::String(value) if value == "head" => Ok(super::IssueMonitorPriorityPosition::Head),
+        Value::Number(value) => value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .map(super::IssueMonitorPriorityPosition::Index)
+            .ok_or_else(|| {
+                CliParseError::InvalidJson(
+                    "position must be \"head\" or a non-negative numeric index".to_string(),
+                )
+            }),
+        _ => Err(CliParseError::InvalidJson(
+            "position must be \"head\" or a non-negative numeric index".to_string(),
+        )),
+    }
+}
+
 fn optional_bool(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1087,37 +1203,6 @@ fn optional_string_vec(
     }
 }
 
-fn required_recovery_commands(
-    params: &Map<String, Value>,
-) -> Result<Option<Vec<crate::cli::execution_state::RequiredRecoveryCommand>>, CliParseError> {
-    const KEY: &str = "required_recovery_commands";
-    let Some(value) = params.get(KEY) else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let Value::Array(items) = value else {
-        return Err(CliParseError::InvalidJson(format!(
-            "{KEY} must be a non-empty array of command objects"
-        )));
-    };
-    if items.is_empty() {
-        return Err(CliParseError::InvalidJson(format!(
-            "{KEY} must not be empty when supplied"
-        )));
-    }
-    items
-        .iter()
-        .cloned()
-        .map(|item| {
-            serde_json::from_value(item)
-                .map_err(|err| CliParseError::InvalidJson(format!("invalid {KEY} entry: {err}")))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
-}
-
 fn optional_json_array(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1141,6 +1226,7 @@ mod tests {
         IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
         WorkflowCommand, WorkspaceCommand,
     };
+    use crate::cli::IssueMonitorPriorityPosition;
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -1619,6 +1705,93 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_queue_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.status", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorStatus { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.status",
+                json!({"project_root": "/tmp/project"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorStatus {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+            })
+        );
+        assert_eq!(
+            ok("issue.monitor.priority.move", json!({"number": 42})),
+            CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                project_root: None,
+                number: 42,
+                position: IssueMonitorPriorityPosition::Head,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.priority.move",
+                json!({"project_root": "/tmp/project", "number": 42, "position": 3})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorPriorityMove {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 42,
+                position: IssueMonitorPriorityPosition::Index(3),
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.priority.set",
+                json!({"issue_numbers": [9, 4, 7]})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorPrioritySet {
+                project_root: None,
+                issue_numbers: vec![9, 4, 7],
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"enabled": false, "autonomous_mode": false, "max_active": 3})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: Some(false),
+                autonomous_mode: Some(false),
+                max_active: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn issue_monitor_queue_operations_reject_unsafe_or_incomplete_params() {
+        for params in [
+            json!({}),
+            json!({"enabled": true}),
+            json!({"max_active": 0}),
+        ] {
+            assert!(matches!(
+                err("issue.monitor.config.set", params),
+                CliParseError::InvalidJson(_) | CliParseError::MissingFlag(_)
+            ));
+        }
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({"autonomous_mode": true})),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.priority.move",
+                json!({"number": 42, "position": "tail"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err("issue.monitor.priority.set", json!({})),
+            CliParseError::MissingFlag("issue_numbers")
+        ));
+    }
+
+    #[test]
     fn board_operations_parse() {
         assert!(matches!(
             ok("board.show", json!({"workspace": "w", "all": true})),
@@ -1756,55 +1929,38 @@ mod tests {
     #[test]
     fn execution_settlement_variants() {
         assert!(matches!(
+            ok("execution.status", json!({})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"unexpected": true})),
+            CliParseError::InvalidJson(message)
+                if message.contains("accepts no params")
+        ));
+        assert!(matches!(
             ok("execution.complete", json!({})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
         ));
-        let blocked = ok(
-            "execution.blocked",
-            json!({
-                "reason": "E2E runner unavailable",
-                "missing_verification": "lifecycle E2E",
-                "required_recovery_commands": [
-                    {"execution_root": "worktree", "command": "cargo test -p gwt --lib"}
-                ]
-            }),
-        );
-        let CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
-            required_recovery_commands,
-            ..
-        }) = blocked
-        else {
-            panic!("expected execution.blocked");
-        };
-        let required_recovery_commands = required_recovery_commands.unwrap();
-        assert_eq!(required_recovery_commands.len(), 1);
-        assert_eq!(
-            required_recovery_commands[0].execution_root,
-            crate::cli::execution_state::RecoveryExecutionRoot::Worktree
-        );
-        assert_eq!(
-            required_recovery_commands[0].command,
-            "cargo test -p gwt --lib"
-        );
         assert!(matches!(
             ok(
                 "execution.blocked",
-                json!({"reason": "audit-only terminal blocker"})
+                json!({"reason": "E2E runner unavailable", "missing_verification": "lifecycle E2E"})
             ),
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
-                required_recovery_commands: None,
-                ..
-            })
-        ));
-        assert!(matches!(
-            err(
-                "execution.blocked",
-                json!({"reason": "invalid recovery set", "required_recovery_commands": []})
-            ),
-            CliParseError::InvalidJson(_)
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked { .. })
         ));
         assert!(matches!(
             err("execution.blocked", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            ok(
+                "execution.repair",
+                json!({"reason": "trusted authority is corrupt"})
+            ),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Repair { .. })
+        ));
+        assert!(matches!(
+            err("execution.repair", json!({})),
             CliParseError::MissingFlag("reason")
         ));
         assert!(matches!(
@@ -1814,6 +1970,46 @@ mod tests {
         assert!(matches!(
             err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            ok(
+                "execution.continue",
+                json!({"operation_id": "continue-operation-1"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::Continue { operation_id }
+            ) if operation_id == "continue-operation-1"
+        ));
+        assert!(matches!(
+            err("execution.continue", json!({})),
+            CliParseError::MissingFlag("operation_id")
+        ));
+        assert!(matches!(
+            err(
+                "execution.continue",
+                json!({"operation_id": "continue-operation-1", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("only accepts params.operation_id")
+        ));
+    }
+
+    #[test]
+    fn verification_plan_generated_output_allowlist_is_typed() {
+        assert!(matches!(
+            ok(
+                "verify.plan",
+                json!({
+                    "commands": ["cargo test -p gwt --lib"],
+                    "generated_outputs": ["artifacts/report.json"]
+                })
+            ),
+            CliCommand::Verify(
+                crate::cli::verification_record::VerifyCommand::PlanWithOutputs {
+                    generated_outputs,
+                    ..
+                }
+            ) if generated_outputs == vec!["artifacts/report.json"]
         ));
     }
 
