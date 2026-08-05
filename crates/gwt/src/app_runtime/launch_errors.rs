@@ -242,6 +242,13 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
+        if let Some(events) = self.startup_auto_resume_launch_failed_events(&window_id) {
+            return events;
+        }
+        // A failed ordinary/Open Project resume never retires its source
+        // Session. Clear the launch-scoped correlation so a recycled window
+        // id cannot stop an unrelated source after a later successful launch.
+        self.pending_auto_resume_sources.remove(&window_id);
         let user_detail = Self::user_facing_launch_error_detail(&detail);
         let issue_monitor_issue_number = launch_feedback_context
             .as_ref()

@@ -25,10 +25,11 @@ use std::{
 };
 
 use super::{
-    combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
-    plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
-    workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
-    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
+    close_window_from_workspace, combined_window_id, execute_orphan_intake_worktree_prune,
+    launch_config_from_persisted_session, plan_orphan_intake_worktree_prune, same_worktree_path,
+    should_auto_start_restored_window, workspace_resume_context_for_work_item,
+    AgentCapabilityIssuer, AppRuntime, OrphanIntakePrunePlan, OutboundEvent,
+    PendingStartupAutoResumeSession, StartupAutoResumeLaunchContext, WindowAddress, WindowGeometry,
     WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
 };
 
@@ -38,6 +39,141 @@ const MAX_STARTUP_INTAKE_PRUNE: usize = 32;
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
+const STARTUP_AUTHORITY_RECOVERY_DETAIL: &str = "Paused — Needs recovery";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartupRestoreDisposition {
+    Unlinked,
+    CurrentBound(gwt::cli::execution_state::ExecutionOwnerKey),
+    Recoverable(gwt::cli::execution_state::ExecutionOwnerKey),
+    NeedsRecovery,
+}
+
+pub(super) fn select_startup_restore_candidate_indices(
+    dispositions: &[StartupRestoreDisposition],
+    native_session_ids: &[&str],
+) -> Vec<usize> {
+    debug_assert_eq!(dispositions.len(), native_session_ids.len());
+    let mut selected = dispositions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, disposition)| {
+            matches!(disposition, StartupRestoreDisposition::Unlinked).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let mut owners = Vec::new();
+    for disposition in dispositions {
+        let owner = match disposition {
+            StartupRestoreDisposition::CurrentBound(owner)
+            | StartupRestoreDisposition::Recoverable(owner) => *owner,
+            StartupRestoreDisposition::Unlinked | StartupRestoreDisposition::NeedsRecovery => {
+                continue;
+            }
+        };
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+    for owner in owners {
+        let current = dispositions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, disposition)| {
+                matches!(
+                    disposition,
+                    StartupRestoreDisposition::CurrentBound(candidate) if *candidate == owner
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if current.len() == 1 {
+            selected.push(current[0]);
+            continue;
+        }
+        if !current.is_empty() {
+            continue;
+        }
+        let recoverable = dispositions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, disposition)| {
+                matches!(
+                    disposition,
+                    StartupRestoreDisposition::Recoverable(candidate) if *candidate == owner
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if recoverable.len() == 1 {
+            selected.push(recoverable[0]);
+        }
+    }
+    // Authority selection must precede provider-native conversation dedup.
+    // Otherwise an older recoverable candidate encountered first can erase a
+    // later current-bound candidate for the same conversation.
+    let mut by_native_id = std::collections::HashMap::<&str, usize>::new();
+    for index in selected {
+        let native_id = native_session_ids[index];
+        let candidate_rank = match dispositions[index] {
+            StartupRestoreDisposition::CurrentBound(_) => 3,
+            StartupRestoreDisposition::Recoverable(_) => 2,
+            StartupRestoreDisposition::Unlinked => 1,
+            StartupRestoreDisposition::NeedsRecovery => 0,
+        };
+        match by_native_id.get(native_id).copied() {
+            Some(existing) => {
+                let existing_rank = match dispositions[existing] {
+                    StartupRestoreDisposition::CurrentBound(_) => 3,
+                    StartupRestoreDisposition::Recoverable(_) => 2,
+                    StartupRestoreDisposition::Unlinked => 1,
+                    StartupRestoreDisposition::NeedsRecovery => 0,
+                };
+                if candidate_rank > existing_rank {
+                    by_native_id.insert(native_id, index);
+                }
+            }
+            None => {
+                by_native_id.insert(native_id, index);
+            }
+        }
+    }
+    let mut selected = by_native_id.into_values().collect::<Vec<_>>();
+    selected.sort_unstable();
+    selected
+}
+
+pub(super) fn startup_restore_disposition(
+    session: &gwt_agent::Session,
+) -> StartupRestoreDisposition {
+    let project_state_root = session
+        .project_state_root
+        .as_deref()
+        .unwrap_or(&session.worktree_path);
+    if !gwt::probe_startup_session_scope(project_state_root, session) {
+        return StartupRestoreDisposition::NeedsRecovery;
+    }
+    let (owner, recovery) =
+        gwt::probe_startup_authenticated_execution_continuation(project_state_root, &session.id);
+    match (owner, recovery.state) {
+        (Some(owner), gwt::cli::governance::RecoveryProbeState::Satisfied) => {
+            StartupRestoreDisposition::CurrentBound(owner)
+        }
+        (Some(owner), gwt::cli::governance::RecoveryProbeState::Available) => {
+            StartupRestoreDisposition::Recoverable(owner)
+        }
+        (None, gwt::cli::governance::RecoveryProbeState::Unavailable)
+            if session.linked_issue_number.is_none()
+                && session.execution_binding.is_none()
+                && matches!(
+                    gwt::cli::execution_state::load(&session.worktree_path),
+                    Ok(None)
+                ) =>
+        {
+            StartupRestoreDisposition::Unlinked
+        }
+        _ => StartupRestoreDisposition::NeedsRecovery,
+    }
+}
 
 pub(super) fn spawn_startup_orphan_intake_prune_with<T, F>(
     jobs: Vec<T>,
@@ -325,7 +461,7 @@ impl AppRuntime {
         });
 
         let now = chrono::Utc::now();
-        let mut resumed_native_sessions = std::collections::HashSet::new();
+        let mut candidates = Vec::new();
         for session in sessions {
             // The startup prune plan is the authoritative fixed snapshot of
             // detached intake paths that are about to be removed. Exclude
@@ -372,12 +508,10 @@ impl AppRuntime {
                     continue;
                 }
             }
-            let Some(native_session_id) = session.exact_resume_session_id() else {
+            let Some(native_session_id) = session.exact_resume_session_id().map(str::to_string)
+            else {
                 continue;
             };
-            if !resumed_native_sessions.insert(native_session_id.to_string()) {
-                continue;
-            }
             if self
                 .active_agent_sessions
                 .values()
@@ -409,12 +543,43 @@ impl AppRuntime {
                 Some(session.branch.as_str()),
                 &session.worktree_path,
             ));
-            self.pending_startup_auto_resume_sessions
-                .push(PendingStartupAutoResumeSession {
+            let disposition = startup_restore_disposition(&session);
+            candidates.push((
+                PendingStartupAutoResumeSession {
                     tab_id,
                     session,
                     workspace_resume_context,
-                });
+                    requires_execution_continuation: matches!(
+                        disposition,
+                        StartupRestoreDisposition::CurrentBound(_)
+                            | StartupRestoreDisposition::Recoverable(_)
+                    ),
+                },
+                disposition,
+                native_session_id,
+            ));
+        }
+        let dispositions = candidates
+            .iter()
+            .map(|(_, disposition, _)| *disposition)
+            .collect::<Vec<_>>();
+        let native_session_ids = candidates
+            .iter()
+            .map(|(_, _, native_id)| native_id.as_str())
+            .collect::<Vec<_>>();
+        let selected = select_startup_restore_candidate_indices(&dispositions, &native_session_ids);
+        for (index, (candidate, disposition, _)) in candidates.into_iter().enumerate() {
+            if selected.contains(&index) {
+                self.pending_startup_auto_resume_sessions.push(candidate);
+                continue;
+            }
+            tracing::info!(
+                session_id = %candidate.session.id,
+                ?disposition,
+                "startup auto-resume kept a linked Session paused after authority preflight"
+            );
+            let _ =
+                self.mark_startup_auto_resume_needs_recovery(&candidate.tab_id, &candidate.session);
         }
     }
 
@@ -430,11 +595,60 @@ impl AppRuntime {
         let total = pending.len();
         let mut events = Vec::new();
         for (index, pending_session) in pending.into_iter().enumerate() {
+            let config = launch_config_from_persisted_session(&pending_session.session);
+            let duplicate_live_work = self
+                .live_agent_window_for_work(
+                    &pending_session.tab_id,
+                    config.branch.as_deref(),
+                    config.working_dir.as_deref(),
+                )
+                .is_some();
+            let duplicate_inflight_work =
+                super::launch::inflight_launch_key(&pending_session.tab_id, &config)
+                    .is_some_and(|key| self.inflight_launches.contains_key(&key));
+            if self.tab(&pending_session.tab_id).is_none()
+                || self.profile_config_path().is_err()
+                || duplicate_live_work
+                || duplicate_inflight_work
+            {
+                let mut recovery_events = self.mark_startup_auto_resume_needs_recovery(
+                    &pending_session.tab_id,
+                    &pending_session.session,
+                );
+                events.append(&mut recovery_events);
+                continue;
+            }
+            let mut config = config;
+            if pending_session.requires_execution_continuation {
+                let project_state_root = pending_session
+                    .session
+                    .project_state_root
+                    .as_deref()
+                    .unwrap_or(&pending_session.session.worktree_path);
+                let Some((_receipt, binding)) = gwt::prepare_resume_producing_authority(
+                    project_state_root,
+                    &pending_session.session.id,
+                ) else {
+                    let mut recovery_events = self.mark_startup_auto_resume_needs_recovery(
+                        &pending_session.tab_id,
+                        &pending_session.session,
+                    );
+                    events.append(&mut recovery_events);
+                    tracing::warn!(
+                        session_id = %pending_session.session.id,
+                        "startup auto-resume authority changed after preflight; keeping the placeholder paused"
+                    );
+                    continue;
+                };
+                config.execution_intent =
+                    gwt_agent::ExecutionLaunchIntent::ActivatedContinuation(binding);
+            }
             let fallback_geometry =
                 startup_auto_resume_window_geometry(index, total, bounds.clone());
-            let mut spawned = self.spawn_restored_agent_session(
+            let mut spawned = self.spawn_startup_restored_agent_session(
                 &pending_session.tab_id,
                 pending_session.session,
+                config,
                 pending_session.workspace_resume_context,
                 fallback_geometry,
             );
@@ -457,33 +671,95 @@ impl AppRuntime {
         fallback_geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         let config = launch_config_from_persisted_session(&session);
+        self.spawn_restored_agent_session_with_config(
+            tab_id,
+            session,
+            config,
+            workspace_resume_context,
+            fallback_geometry,
+            false,
+        )
+    }
+
+    fn spawn_startup_restored_agent_session(
+        &mut self,
+        tab_id: &str,
+        session: gwt_agent::Session,
+        config: gwt_agent::LaunchConfig,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        self.spawn_restored_agent_session_with_config(
+            tab_id,
+            session,
+            config,
+            workspace_resume_context,
+            fallback_geometry,
+            true,
+        )
+    }
+
+    fn spawn_restored_agent_session_with_config(
+        &mut self,
+        tab_id: &str,
+        session: gwt_agent::Session,
+        config: gwt_agent::LaunchConfig,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+        startup_auto_resume: bool,
+    ) -> Vec<OutboundEvent> {
         let geometry = self
-            .remove_stale_paused_agent_window(tab_id, &session.id)
+            .paused_placeholder_geometry(tab_id, &session.id)
             .unwrap_or(fallback_geometry);
-        // Snapshot the window registry *after* the paused placeholder is
-        // removed: the freshly spawned window may reuse the placeholder's id
-        // (ids are assigned lowest-free), so a pre-removal snapshot would fail
-        // to detect it and the source session would never be retired.
+        // Keep the placeholder until synchronous launch acceptance. A failed
+        // profile/configuration check must not erase the only contextual
+        // recovery surface.
         let existing_windows = self
             .window_lookup
             .keys()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
+        let source_session_id = session.id.clone();
+        let worktree_path = session.worktree_path.clone();
+        let placeholder = self.paused_placeholder_address(tab_id, &source_session_id);
+        let reuses_source_session = matches!(
+            config.execution_intent,
+            gwt_agent::ExecutionLaunchIntent::ActivatedContinuation(_)
+        );
         match self.spawn_agent_window_at_geometry(
             tab_id,
             config,
             geometry,
             workspace_resume_context,
         ) {
-            Ok(events) => {
+            Ok(mut events) => {
                 if let Some(window_id) = self
                     .window_lookup
                     .keys()
                     .find(|window_id| !existing_windows.contains(*window_id))
                     .cloned()
                 {
-                    self.pending_auto_resume_sources
-                        .insert(window_id, session.id);
+                    if startup_auto_resume {
+                        self.pending_startup_auto_resume_launches.insert(
+                            window_id,
+                            StartupAutoResumeLaunchContext {
+                                source_session_id: source_session_id.clone(),
+                                worktree_path: worktree_path.clone(),
+                                placeholder,
+                                reuses_source_session,
+                                materialized_session_id: None,
+                            },
+                        );
+                    } else {
+                        self.pending_auto_resume_sources
+                            .insert(window_id, source_session_id.clone());
+                        let _ = self.remove_stale_paused_agent_window(tab_id, &source_session_id);
+                        events.push(self.workspace_state_broadcast());
+                    }
+                    return events;
+                }
+                if startup_auto_resume {
+                    return self.mark_startup_auto_resume_needs_recovery(tab_id, &session);
                 }
                 events
             }
@@ -493,6 +769,9 @@ impl AppRuntime {
                     error = %error,
                     "failed to spawn restored agent window"
                 );
+                if startup_auto_resume {
+                    return self.mark_startup_auto_resume_needs_recovery(tab_id, &session);
+                }
                 Vec::new()
             }
         }
@@ -641,6 +920,194 @@ impl AppRuntime {
                 })
             })
             .map(|tab| tab.id.clone())
+    }
+
+    fn paused_placeholder_geometry(
+        &self,
+        tab_id: &str,
+        session_id: &str,
+    ) -> Option<WindowGeometry> {
+        self.tab(tab_id)?
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| {
+                crate::runtime_support::window_is_agent_pane(window)
+                    && window.status == WindowProcessStatus::Stopped
+                    && window.session_id.as_deref() == Some(session_id)
+            })
+            .map(|window| window.geometry.clone())
+    }
+
+    fn paused_placeholder_address(&self, tab_id: &str, session_id: &str) -> Option<WindowAddress> {
+        self.tab(tab_id)?
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| {
+                crate::runtime_support::window_is_agent_pane(window)
+                    && window.status == WindowProcessStatus::Stopped
+                    && window.session_id.as_deref() == Some(session_id)
+            })
+            .map(|window| WindowAddress {
+                tab_id: tab_id.to_string(),
+                raw_id: window.id.clone(),
+            })
+    }
+
+    fn mark_startup_auto_resume_needs_recovery(
+        &mut self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+    ) -> Vec<OutboundEvent> {
+        let session_id = session.id.as_str();
+        let raw_id = self.tab(tab_id).and_then(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| {
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && window.status == WindowProcessStatus::Stopped
+                        && window.session_id.as_deref() == Some(session_id)
+                })
+                .map(|window| window.id.clone())
+        });
+        if let Some(raw_id) = raw_id {
+            let window_id = combined_window_id(tab_id, &raw_id);
+            self.window_details.insert(
+                window_id.clone(),
+                STARTUP_AUTHORITY_RECOVERY_DETAIL.to_string(),
+            );
+            let mut events = vec![self.workspace_state_broadcast()];
+            events.extend(Self::status_events(
+                window_id,
+                WindowProcessStatus::Stopped,
+                Some(STARTUP_AUTHORITY_RECOVERY_DETAIL.to_string()),
+            ));
+            events
+        } else {
+            self.startup_recovery_worktrees
+                .insert(session.worktree_path.clone());
+            self.active_work_projection_broadcast_for_active_tab()
+                .into_iter()
+                .collect()
+        }
+    }
+
+    pub(super) fn complete_startup_auto_resume_launch(
+        &mut self,
+        window_id: &str,
+        launched_session_id: &str,
+    ) {
+        let Some(context) = self.pending_startup_auto_resume_launches.remove(window_id) else {
+            return;
+        };
+        self.startup_recovery_worktrees
+            .retain(|path| !same_worktree_path(path, &context.worktree_path));
+        if let Some(placeholder) = context.placeholder {
+            let combined = combined_window_id(&placeholder.tab_id, &placeholder.raw_id);
+            if close_window_from_workspace(
+                &mut self.tabs,
+                &mut self.window_lookup,
+                &mut self.window_details,
+                &combined,
+            ) {
+                self.remove_window_state_tracking(&combined);
+            }
+        }
+        if context.source_session_id != launched_session_id {
+            mark_auto_resume_source_completed(&self.sessions_dir, &context.source_session_id);
+        }
+    }
+
+    /// Settle a startup-only asynchronous launch failure without leaking raw
+    /// terminal output, a Launch Wizard dialog, or Issue Monitor delivery.
+    /// A persisted placeholder remains the recovery surface; orphan restores
+    /// keep the transient pane stopped and also mark the matching Work.
+    pub(super) fn startup_auto_resume_launch_failed_events(
+        &mut self,
+        window_id: &str,
+    ) -> Option<Vec<OutboundEvent>> {
+        let context = self
+            .pending_startup_auto_resume_launches
+            .remove(window_id)?;
+        self.pending_auto_resume_sources.remove(window_id);
+        self.pending_workspace_resume_contexts.remove(window_id);
+        self.pending_launch_feedback_contexts.remove(window_id);
+        self.inflight_launches
+            .retain(|_, (pending_window_id, _)| pending_window_id != window_id);
+        let materialized_session_id = self
+            .active_agent_sessions
+            .remove(window_id)
+            .map(|active| active.session_id)
+            .or(context.materialized_session_id.clone())
+            .or_else(|| {
+                context
+                    .reuses_source_session
+                    .then(|| context.source_session_id.clone())
+            });
+        self.revoke_agent_capability_for_window(window_id);
+        self.stop_window_runtime_without_session_projection(window_id);
+
+        if let Some(materialized_session_id) = materialized_session_id {
+            let reuses_source_session = materialized_session_id == context.source_session_id;
+            if let Err(error) =
+                gwt_agent::update_session(&self.sessions_dir, &materialized_session_id, |session| {
+                    session.update_status(if reuses_source_session {
+                        gwt_agent::AgentStatus::Interrupted
+                    } else {
+                        gwt_agent::AgentStatus::Stopped
+                    });
+                    session.restore_window_on_startup = reuses_source_session;
+                    Ok(())
+                })
+            {
+                tracing::warn!(
+                    session_id = %materialized_session_id,
+                    error = %error,
+                    "failed startup launch retained a materialized Session requiring reconciliation"
+                );
+            }
+        }
+
+        let detail = STARTUP_AUTHORITY_RECOVERY_DETAIL.to_string();
+        if let Some(placeholder) = context.placeholder {
+            let _ = close_window_from_workspace(
+                &mut self.tabs,
+                &mut self.window_lookup,
+                &mut self.window_details,
+                window_id,
+            );
+            self.window_lookup.remove(window_id);
+            self.window_details.remove(window_id);
+            self.remove_window_state_tracking(window_id);
+            let placeholder_id = combined_window_id(&placeholder.tab_id, &placeholder.raw_id);
+            self.window_details
+                .insert(placeholder_id.clone(), detail.clone());
+            let mut events = vec![self.workspace_state_broadcast()];
+            events.extend(Self::status_events(
+                placeholder_id,
+                WindowProcessStatus::Stopped,
+                Some(detail),
+            ));
+            return Some(events);
+        }
+
+        self.startup_recovery_worktrees
+            .insert(context.worktree_path);
+        self.launch_error_terminal_details.remove(window_id);
+        self.window_details
+            .insert(window_id.to_string(), detail.clone());
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(self.handle_runtime_status(
+            window_id.to_string(),
+            WindowProcessStatus::Stopped,
+            Some(detail),
+        ));
+        Some(events)
     }
 
     fn remove_stale_paused_agent_window(

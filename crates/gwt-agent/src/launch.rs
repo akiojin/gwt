@@ -511,6 +511,11 @@ pub enum ExecutionLaunchIntent {
     /// Launch a producing continuation already authorized by the execution
     /// coordinator. The binding is installed atomically at Session bootstrap.
     PreparedContinuation(SessionExecutionBinding),
+    /// Launch a continuation whose binding was already activated and
+    /// validated by the coordinator before asynchronous launch dispatch.
+    /// Startup recovery uses this to carry the exact authority through the
+    /// preflight-to-spawn gap without invoking the coordinator a second time.
+    ActivatedContinuation(SessionExecutionBinding),
 }
 
 /// Reuse a fresh Bun-created package executable for a host launch.
@@ -999,6 +1004,11 @@ impl AgentLaunchBuilder {
     /// that the Continue Work coordinator has already prepared.
     pub fn prepared_continuation(mut self, binding: SessionExecutionBinding) -> Self {
         self.execution_intent = ExecutionLaunchIntent::PreparedContinuation(binding);
+        self
+    }
+
+    pub fn activated_continuation(mut self, binding: SessionExecutionBinding) -> Self {
+        self.execution_intent = ExecutionLaunchIntent::ActivatedContinuation(binding);
         self
     }
 
@@ -2619,6 +2629,34 @@ mod tests {
             config.execution_intent,
             ExecutionLaunchIntent::Automatic,
             "an ordinary Resume stays Automatic: producing authority is recovered by the continuation coordinator, or the launch proceeds unbound with input enabled"
+        );
+    }
+
+    #[test]
+    fn startup_resume_can_carry_an_already_activated_continuation() {
+        let binding = crate::SessionExecutionBinding {
+            schema_version: crate::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-activated".to_string(),
+            repo_hash: "repo-hash".to_string(),
+            owner_kind: "spec".to_string(),
+            owner_number: 3393,
+            identity: crate::ExecutionBindingIdentity {
+                generation_id: "generation-current".to_string(),
+                binding_id: "binding-current".to_string(),
+                ledger_head_hash: "current-head".to_string(),
+            },
+            capability_generation: 3,
+        };
+
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("conversation-existing")
+            .activated_continuation(binding.clone())
+            .build();
+
+        assert_eq!(
+            config.execution_intent,
+            ExecutionLaunchIntent::ActivatedContinuation(binding)
         );
     }
 

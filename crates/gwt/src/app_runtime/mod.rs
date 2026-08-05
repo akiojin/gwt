@@ -273,6 +273,16 @@ pub(crate) struct PendingStartupAutoResumeSession {
     pub(crate) tab_id: String,
     pub(crate) session: gwt_agent::Session,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) requires_execution_continuation: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StartupAutoResumeLaunchContext {
+    pub(crate) source_session_id: String,
+    pub(crate) worktree_path: PathBuf,
+    pub(crate) placeholder: Option<WindowAddress>,
+    pub(crate) reuses_source_session: bool,
+    pub(crate) materialized_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -702,7 +712,12 @@ pub struct AppRuntime {
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    pub(crate) pending_startup_auto_resume_launches:
+        HashMap<String, StartupAutoResumeLaunchContext>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
+    /// Display-only recovery markers for startup candidates that have no
+    /// persisted pane placeholder to carry the contextual status.
+    pub(crate) startup_recovery_worktrees: HashSet<PathBuf>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
@@ -1320,7 +1335,9 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_startup_auto_resume_launches: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
+            startup_recovery_worktrees: HashSet::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
             work_dirty_branches: HashMap::new(),

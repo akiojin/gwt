@@ -2918,6 +2918,7 @@ impl AppRuntime {
                 &sessions,
                 live_process_branches,
             );
+            self.apply_startup_recovery_worktree_status(&mut view.active_works);
             self.active_work_projection_cache
                 .borrow_mut()
                 .insert(tab_id.to_string(), view.clone());
@@ -2936,6 +2937,7 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &sessions,
             );
+            self.apply_startup_recovery_worktree_status(&mut view.active_works);
         }
         let mut cache = self.active_work_projection_cache.borrow_mut();
         if let Some(view) = view.as_ref() {
@@ -2944,6 +2946,28 @@ impl AppRuntime {
             cache.remove(tab_id);
         }
         view
+    }
+
+    pub(super) fn apply_startup_recovery_worktree_status(
+        &self,
+        active_works: &mut [gwt::ActiveWorkItemView],
+    ) {
+        for workspace in active_works {
+            let needs_recovery = workspace.worktree_path.as_deref().is_some_and(|path| {
+                self.startup_recovery_worktrees
+                    .iter()
+                    .any(|candidate| projection_worktree_paths_match(candidate, Path::new(path)))
+            });
+            if !needs_recovery {
+                continue;
+            }
+            workspace.status_category = "idle".to_string();
+            workspace.status_text = "Paused — Needs recovery".to_string();
+            for work in &mut workspace.works {
+                work.status_category = "idle".to_string();
+                work.status_text = "Paused — Needs recovery".to_string();
+            }
+        }
     }
 
     pub(crate) fn handle_workspace_projection_changed_events(

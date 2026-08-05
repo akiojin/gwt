@@ -420,6 +420,14 @@ pub(crate) fn resolve_execution_recovery_context(
             session.id
         )));
     }
+    resolve_execution_recovery_context_for_session(invocation_scope, session)
+}
+
+fn resolve_execution_recovery_context_for_session(
+    invocation_scope: &Path,
+    session: Session,
+) -> Result<ExecutionRecoveryContext> {
+    let session_id = session.id.clone();
     let worktree = canonicalize_mutation_path(&session.worktree_path, "recovery worktree")?;
     let worktree_git_root = git_toplevel(&worktree, "recovery worktree")?;
     if worktree_git_root != worktree {
@@ -468,6 +476,14 @@ pub(crate) fn resolve_execution_recovery_context(
         worktree,
         exact_unbound_host,
     })
+}
+
+/// Validate the durable identity carried by a startup candidate without
+/// publishing or repairing execution authority.
+#[doc(hidden)]
+pub fn probe_startup_session_scope(invocation_scope: &Path, session: &Session) -> bool {
+    gwt_agent::validate_session_id_path_component(&session.id).is_ok()
+        && resolve_execution_recovery_context_for_session(invocation_scope, session.clone()).is_ok()
 }
 
 fn evaluate_authenticated_execution_continuation(
@@ -615,66 +631,98 @@ pub(crate) fn probe_authenticated_execution_continuation(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
 ) -> crate::cli::governance::RecoveryProbe {
-    use crate::cli::governance::{
-        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
-    };
     match evaluate_authenticated_execution_continuation(
         authenticated_project_root,
         authenticated_session_id,
     ) {
-        Ok(authority) => {
-            let governance = GovernanceMetadata {
-                effect: Some(GovernanceEffect::Protected),
-                fingerprint: Some(format!(
-                    "execution.continue:{}:{}:{}",
-                    authority.owner.number,
-                    authority.session.id,
-                    authority.current_binding.generation_id
-                )),
-                retryable: Some(true),
-                repository_target: authority.session.repo_hash.clone(),
-                target_state: Some(format!("{:?}", authority.record.status).to_ascii_lowercase()),
-                execution_generation: Some(authority.current_binding.generation_id.clone()),
-                ..GovernanceMetadata::default()
-            };
-            if authority.record.status
-                == crate::cli::execution_state::ExecutionControlStatus::Blocked
-            {
-                return RecoveryProbe::unavailable(
-                    "execution.continue",
-                    GovernanceMetadata {
-                        cause: Some(GovernanceCause::NotReady),
-                        ..governance
-                    },
-                    "blocked_execution_requires_reopen",
-                );
-            }
-            let current_bound = authority.record.status
-                == crate::cli::execution_state::ExecutionControlStatus::Active
-                && authority.record.primary_session_id == authority.session.id
-                && authority.session.linked_issue_number == Some(authority.owner.number)
-                && authority
-                    .session
-                    .execution_binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.identity == authority.current_binding);
-            if current_bound {
-                RecoveryProbe::satisfied("execution.continue", governance)
-            } else {
-                RecoveryProbe::available("execution.continue", governance)
-            }
-        }
-        Err(error) => RecoveryProbe::unavailable(
+        Ok(authority) => continuation_recovery_probe(&authority),
+        Err(error) => unavailable_continuation_recovery_probe(error.message),
+    }
+}
+
+/// Side-effect-free startup projection of the authenticated continuation
+/// evaluator. Startup needs the trusted owner key for candidate coalescing,
+/// while the public diagnosis contract remains the existing `RecoveryProbe`.
+#[doc(hidden)]
+pub fn probe_startup_authenticated_execution_continuation(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+) -> (
+    Option<crate::cli::execution_state::ExecutionOwnerKey>,
+    crate::cli::governance::RecoveryProbe,
+) {
+    match evaluate_authenticated_execution_continuation(
+        authenticated_project_root,
+        authenticated_session_id,
+    ) {
+        Ok(authority) => (
+            Some(authority.owner),
+            continuation_recovery_probe(&authority),
+        ),
+        Err(error) => (None, unavailable_continuation_recovery_probe(error.message)),
+    }
+}
+
+fn continuation_recovery_probe(
+    authority: &ExecutionContinuationAuthority,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let governance = GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        fingerprint: Some(format!(
+            "execution.continue:{}:{}:{}",
+            authority.owner.number, authority.session.id, authority.current_binding.generation_id
+        )),
+        retryable: Some(true),
+        repository_target: authority.session.repo_hash.clone(),
+        target_state: Some(format!("{:?}", authority.record.status).to_ascii_lowercase()),
+        execution_generation: Some(authority.current_binding.generation_id.clone()),
+        ..GovernanceMetadata::default()
+    };
+    if authority.record.status == crate::cli::execution_state::ExecutionControlStatus::Blocked {
+        return RecoveryProbe::unavailable(
             "execution.continue",
             GovernanceMetadata {
-                effect: Some(GovernanceEffect::Protected),
-                cause: Some(GovernanceCause::Authority),
-                retryable: Some(false),
-                ..GovernanceMetadata::default()
+                cause: Some(GovernanceCause::NotReady),
+                ..governance
             },
-            error.message,
-        ),
+            "blocked_execution_requires_reopen",
+        );
     }
+    let current_bound = authority.record.status
+        == crate::cli::execution_state::ExecutionControlStatus::Active
+        && authority.record.primary_session_id == authority.session.id
+        && authority.session.linked_issue_number == Some(authority.owner.number)
+        && authority
+            .session
+            .execution_binding
+            .as_ref()
+            .is_some_and(|binding| binding.identity == authority.current_binding);
+    if current_bound {
+        RecoveryProbe::satisfied("execution.continue", governance)
+    } else {
+        RecoveryProbe::available("execution.continue", governance)
+    }
+}
+
+fn unavailable_continuation_recovery_probe(
+    reason: impl Into<String>,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    RecoveryProbe::unavailable(
+        "execution.continue",
+        GovernanceMetadata {
+            effect: Some(GovernanceEffect::Protected),
+            cause: Some(GovernanceCause::Authority),
+            retryable: Some(false),
+            ..GovernanceMetadata::default()
+        },
+        reason,
+    )
 }
 
 pub fn continue_authenticated_execution(
@@ -5548,6 +5596,14 @@ mod tests {
                 crate::cli::governance::RecoveryProbeState::Available
             );
             assert_eq!(probe.operation, "execution.continue");
+            let (startup_owner, startup_probe) =
+                probe_startup_authenticated_execution_continuation(repo, &session.id);
+            assert_eq!(startup_owner, Some(owner));
+            assert_eq!(
+                startup_probe.state,
+                crate::cli::governance::RecoveryProbeState::Available,
+                "startup must recognize an exact-unbound Session as recoverable even before its owner projection is installed"
+            );
             assert_eq!(
                 std::fs::read(&session_path).expect("read Session bytes after probe"),
                 session_before_probe,
@@ -5616,6 +5672,19 @@ mod tests {
     fn resume_producing_helper_recovers_authority_for_linked_session() {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
+            let (startup_owner, startup_probe) =
+                probe_startup_authenticated_execution_continuation(repo, &session.id);
+            assert_eq!(
+                startup_owner,
+                Some(crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 2359,
+                })
+            );
+            assert_eq!(
+                startup_probe.state,
+                crate::cli::governance::RecoveryProbeState::Satisfied
+            );
             let (receipt, rebound) = prepare_resume_producing_authority(repo, &session.id)
                 .expect("linked durable session must recover producing authority");
             assert_eq!(

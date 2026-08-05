@@ -678,10 +678,10 @@ struct FinalizedAgentCapabilityLaunch<'a> {
     worktree: &'a Path,
     producing_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     prepared_continuation: Option<&'a gwt_agent::SessionExecutionBinding>,
-    /// Issue #3423: a `ReboundCurrent` continuation re-validated the current
-    /// generation for the predecessor Session. It carries no Prepared attempt,
-    /// so it installs as Active authority instead of the Prepared path.
-    rebound_continuation: Option<&'a gwt_agent::SessionExecutionBinding>,
+    /// The continuation coordinator returns only after either outcome has
+    /// installed and validated the current generation. Neither outcome may
+    /// re-enter the Prepared activation path.
+    activated_continuation: Option<&'a gwt_agent::SessionExecutionBinding>,
     execution_entrypoint: &'a str,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
@@ -697,7 +697,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             worktree,
             producing_owner,
             prepared_continuation,
-            rebound_continuation,
+            activated_continuation,
             execution_entrypoint,
             runtime_target,
             container_runtime,
@@ -770,22 +770,19 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 endpoints,
             );
         }
-        if let Some(binding) = rebound_continuation {
-            // Issue #3423: the continuation coordinator re-validated and
-            // persisted this binding for the predecessor Session
-            // (`ReboundCurrent`). There is no Prepared attempt to activate —
-            // re-check the binding against the live owner ledger and issue
-            // Active authority for the in-place relaunch.
+        if let Some(binding) = activated_continuation {
+            // Re-check the already-activated binding against the live owner
+            // ledger and issue Active authority for the relaunch.
             if producing_owner.is_some() {
                 return Err(
-                    "Rebound continuation cannot enter the genesis execution launch path"
+                    "Activated continuation cannot enter the genesis execution launch path"
                         .to_string(),
                 );
             }
             let owner_kind = match binding.owner_kind.as_str() {
                 "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
                 "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-                _ => return Err("Rebound continuation owner kind is not canonical".to_string()),
+                _ => return Err("Activated continuation owner kind is not canonical".to_string()),
             };
             let owner = gwt::cli::execution_state::ExecutionOwnerKey {
                 kind: owner_kind,
@@ -797,13 +794,13 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 != Some(&binding.identity)
             {
                 return Err(
-                    "Rebound continuation no longer matches the current execution generation"
+                    "Activated continuation no longer matches the current execution generation"
                         .to_string(),
                 );
             }
             if session.execution_binding.as_ref() != Some(binding) {
                 return Err(
-                    "Rebound continuation Session binding changed before capability issuance"
+                    "Activated continuation Session binding changed before capability issuance"
                         .to_string(),
                 );
             }
@@ -1216,6 +1213,34 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthenticatedContinuationLaunchAuthority {
+    Active,
+}
+
+fn authenticated_continuation_launch_authority(
+    outcome: gwt::AgentExecutionContinuationOutcome,
+) -> AuthenticatedContinuationLaunchAuthority {
+    match outcome {
+        gwt::AgentExecutionContinuationOutcome::ReboundCurrent
+        | gwt::AgentExecutionContinuationOutcome::SuccessorCreated => {
+            AuthenticatedContinuationLaunchAuthority::Active
+        }
+    }
+}
+
+fn install_activated_continuation_binding(
+    session: &mut gwt_agent::Session,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> Result<(), String> {
+    session.id = binding.session_id.clone();
+    // Session binding validation requires the trusted owner projection. Set
+    // it before installing the already-activated binding, especially for an
+    // exact-unbound predecessor recovered at startup.
+    session.linked_issue_number = Some(binding.owner_number);
+    session.set_execution_binding(Some(binding.clone()))
 }
 
 fn interrupt_exact_running_session_after_persistence_error(
@@ -1674,7 +1699,10 @@ const CONTINUE_WORK_READY_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// allowed — only a re-request of the *same* launch dedupes. `None` when the
 /// config carries neither a branch nor a working dir: such launches have no
 /// stable Work identity and must never dedup against each other.
-fn inflight_launch_key(tab_id: &str, config: &gwt_agent::LaunchConfig) -> Option<String> {
+pub(super) fn inflight_launch_key(
+    tab_id: &str,
+    config: &gwt_agent::LaunchConfig,
+) -> Option<String> {
     let branch = config
         .branch
         .as_deref()
@@ -2013,7 +2041,8 @@ impl AppRuntime {
         let is_continue_work = self.pending_continue_work.contains_key(&window_id);
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
-        let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        let auto_resume_source_session_id =
+            self.pending_auto_resume_sources.get(&window_id).cloned();
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -2031,6 +2060,12 @@ impl AppRuntime {
                 had_prepared_execution,
                 agent_project_root,
             )) => {
+                if let Some(context) = self
+                    .pending_startup_auto_resume_launches
+                    .get_mut(&window_id)
+                {
+                    context.materialized_session_id = Some(session_id.clone());
+                }
                 let issued_capability_token = process_launch
                     .env
                     .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
@@ -2228,9 +2263,6 @@ impl AppRuntime {
                     let _ = tab
                         .workspace
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
-                }
-                if let Some(source_session_id) = auto_resume_source_session_id {
-                    mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
                 }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
@@ -2439,6 +2471,20 @@ impl AppRuntime {
                                     launch_feedback_context,
                                 );
                             }
+                        }
+                        self.complete_startup_auto_resume_launch(
+                            &window_id,
+                            &active_session.session_id,
+                        );
+                        self.startup_recovery_worktrees.retain(|path| {
+                            !same_worktree_path(path, &active_session.worktree_path)
+                        });
+                        if let Some(source_session_id) = auto_resume_source_session_id {
+                            self.pending_auto_resume_sources.remove(&window_id);
+                            mark_auto_resume_source_completed(
+                                &self.sessions_dir,
+                                &source_session_id,
+                            );
                         }
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
@@ -3313,12 +3359,11 @@ impl AppRuntime {
             // coordinator before spawn. Failure degrades to an unbound,
             // input-capable launch — a resume must degrade, never block.
             //
-            // Issue #3423: the coordinator answers with two distinct shapes.
-            // Only `SuccessorCreated` carries a Prepared attempt and may
-            // launch as a PreparedContinuation. `ReboundCurrent` re-validated
-            // the predecessor Session's current-generation binding — the
-            // relaunch continues that Session in place with Active authority.
-            let mut rebound_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
+            // Both authenticated continuation outcomes return only after the
+            // coordinator has activated and validated the binding. The launch
+            // path must install Active authority and must never attempt to
+            // activate the same successor as Prepared a second time.
+            let mut activated_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
             if matches!(
                 config.execution_intent,
                 gwt_agent::ExecutionLaunchIntent::Automatic
@@ -3331,13 +3376,9 @@ impl AppRuntime {
                         Path::new(&project_root),
                         &predecessor,
                     ) {
-                        match receipt.outcome {
-                            gwt::AgentExecutionContinuationOutcome::SuccessorCreated => {
-                                config.execution_intent =
-                                    gwt_agent::ExecutionLaunchIntent::PreparedContinuation(binding);
-                            }
-                            gwt::AgentExecutionContinuationOutcome::ReboundCurrent => {
-                                rebound_continuation = Some(binding);
+                        match authenticated_continuation_launch_authority(receipt.outcome) {
+                            AuthenticatedContinuationLaunchAuthority::Active => {
+                                activated_continuation = Some(binding);
                             }
                         }
                     }
@@ -3350,10 +3391,14 @@ impl AppRuntime {
                     session.set_execution_binding(Some(binding.clone()))?;
                     Some(binding.clone())
                 }
+                gwt_agent::ExecutionLaunchIntent::ActivatedContinuation(binding) => {
+                    activated_continuation = Some(binding.clone());
+                    None
+                }
             };
-            if let Some(binding) = rebound_continuation.as_ref() {
-                session.id = binding.session_id.clone();
-                session.set_execution_binding(Some(binding.clone()))?;
+            if let Some(binding) = activated_continuation.as_ref() {
+                install_activated_continuation_binding(&mut session, binding)?;
+                config.linked_issue_number = Some(binding.owner_number);
             }
 
             let session_id = session.id.clone();
@@ -3429,7 +3474,7 @@ impl AppRuntime {
                 worktree: &worktree_path,
                 producing_owner,
                 prepared_continuation: prepared_continuation.as_ref(),
-                rebound_continuation: rebound_continuation.as_ref(),
+                activated_continuation: activated_continuation.as_ref(),
                 execution_entrypoint: &execution_entrypoint,
                 runtime_target,
                 container_runtime: container_runtime.as_ref(),
@@ -4438,7 +4483,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4494,7 +4539,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4536,7 +4581,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4575,7 +4620,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4654,7 +4699,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: None,
             prepared_continuation: None,
-            rebound_continuation: Some(&binding),
+            activated_continuation: Some(&binding),
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4676,7 +4721,50 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
-    fn rebound_continuation_rejects_stale_generation_binding() {
+    fn activated_continuation_sets_trusted_owner_before_session_binding() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let project = home.path().join("project");
+        init_execution_repo(&project, "work/issue-2359");
+        let mut resumed =
+            gwt_agent::Session::new(&project, "work/issue-2359", gwt_agent::AgentId::Codex);
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "successor-session".to_string(),
+            repo_hash: resumed.repo_hash.clone().expect("repo hash"),
+            owner_kind: "spec".to_string(),
+            owner_number: 2359,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-successor".to_string(),
+                binding_id: "binding-successor".to_string(),
+                ledger_head_hash: "ledger-successor".to_string(),
+            },
+            capability_generation: 1,
+        };
+
+        install_activated_continuation_binding(&mut resumed, &binding)
+            .expect("install activated continuation binding");
+
+        assert_eq!(resumed.id, binding.session_id);
+        assert_eq!(resumed.linked_issue_number, Some(binding.owner_number));
+        assert_eq!(resumed.execution_binding.as_ref(), Some(&binding));
+    }
+
+    #[test]
+    fn both_authenticated_continuation_outcomes_use_active_launch_authority() {
+        for outcome in [
+            gwt::AgentExecutionContinuationOutcome::ReboundCurrent,
+            gwt::AgentExecutionContinuationOutcome::SuccessorCreated,
+        ] {
+            assert_eq!(
+                authenticated_continuation_launch_authority(outcome),
+                AuthenticatedContinuationLaunchAuthority::Active,
+                "{outcome:?} is already activated by the continuation coordinator"
+            );
+        }
+    }
+
+    #[test]
+    fn activated_continuation_rejects_stale_generation_binding() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4708,27 +4796,27 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: None,
             prepared_continuation: None,
-            rebound_continuation: Some(&stale),
+            activated_continuation: Some(&stale),
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
         }
         .install(&mut env)
-        .expect_err("a stale rebound binding must fail closed");
+        .expect_err("a stale activated binding must fail closed");
         assert!(
             error.contains(
-                "Rebound continuation no longer matches the current execution generation"
+                "Activated continuation no longer matches the current execution generation"
             ),
             "{error}"
         );
         assert!(
             !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
-            "a rejected rebound install must not issue a capability"
+            "a rejected activated install must not issue a capability"
         );
     }
 
     #[test]
-    fn rebound_continuation_cannot_enter_genesis_launch_path() {
+    fn activated_continuation_cannot_enter_genesis_launch_path() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4754,15 +4842,15 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: Some(&binding),
+            activated_continuation: Some(&binding),
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
         }
         .install(&mut env)
-        .expect_err("rebound continuation must not mint genesis authority");
+        .expect_err("activated continuation must not mint genesis authority");
         assert!(
-            error.contains("Rebound continuation cannot enter the genesis execution launch path"),
+            error.contains("Activated continuation cannot enter the genesis execution launch path"),
             "{error}"
         );
     }
@@ -4790,7 +4878,7 @@ mod agent_endpoint_env_tests {
             worktree: &predecessor.project,
             producing_owner: Some(predecessor.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4870,7 +4958,7 @@ mod agent_endpoint_env_tests {
             worktree: &predecessor.project,
             producing_owner: None,
             prepared_continuation: Some(&binding),
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "resume",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -4932,7 +5020,7 @@ mod agent_endpoint_env_tests {
             worktree: &predecessor.project,
             producing_owner: Some(predecessor.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5014,7 +5102,7 @@ mod agent_endpoint_env_tests {
             worktree: &predecessor.project,
             producing_owner: None,
             prepared_continuation: Some(&binding),
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "resume",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5108,7 +5196,7 @@ mod agent_endpoint_env_tests {
             worktree: &project,
             producing_owner: Some(owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #1974",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5198,7 +5286,7 @@ mod agent_endpoint_env_tests {
             worktree: &predecessor.project,
             producing_owner: Some(predecessor.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5250,7 +5338,7 @@ mod agent_endpoint_env_tests {
             worktree: &predecessor.project,
             producing_owner: Some(predecessor.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5315,7 +5403,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
             container_runtime: Some(&runtime),
@@ -5371,7 +5459,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5431,7 +5519,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5488,7 +5576,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
@@ -5552,7 +5640,7 @@ mod agent_endpoint_env_tests {
             worktree: &launch.project,
             producing_owner: Some(launch.owner),
             prepared_continuation: None,
-            rebound_continuation: None,
+            activated_continuation: None,
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
