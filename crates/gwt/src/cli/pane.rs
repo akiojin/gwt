@@ -500,6 +500,48 @@ fn project_root_for_pane(default: &Path) -> String {
 }
 
 fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<PersistedWindowState>> {
+    parse_workspace_windows_scoped(value, project_root, |root| {
+        gwt_core::paths::project_scope_hash(Path::new(root))
+            .as_str()
+            .to_string()
+    })
+}
+
+/// Whether `tab_root` is the project that owns the caller sitting at
+/// `caller_root`.
+///
+/// Every launch sets `GWT_PROJECT_ROOT` to the agent's working dir, so a
+/// caller's root is always a worktree and never equals a tab's project root.
+/// Path equality alone therefore never matched for anyone, and the no-match
+/// fallback in [`parse_workspace_windows_scoped`] handed back every window
+/// from every open project.
+///
+/// Ownership has three shapes because gwt materializes worktrees in three
+/// places: inside the project container (`work/`, `.intake*`), outside it
+/// under `~/.gwt/projects/` (the resident PM), and — when the project root is
+/// itself a git repo — anywhere that shares its repo identity.
+fn tab_owns_caller(tab_root: &str, caller_root: &str, scope_key: &impl Fn(&str) -> String) -> bool {
+    if tab_root == caller_root {
+        return true;
+    }
+    let tab_path = Path::new(tab_root);
+    if Path::new(caller_root).starts_with(tab_path) {
+        return true;
+    }
+    if crate::pm_registry::pm_worktree_path_for_repo_path(tab_path) == Path::new(caller_root) {
+        return true;
+    }
+    scope_key(tab_root) == scope_key(caller_root)
+}
+
+/// Select the windows the caller is allowed to see, scoped to the project that
+/// owns it. `scope_key` maps a path to its repo identity; it is injected so the
+/// selection stays testable without real repositories.
+fn parse_workspace_windows_scoped(
+    value: &Value,
+    project_root: &str,
+    scope_key: impl Fn(&str) -> String,
+) -> Option<Vec<PersistedWindowState>> {
     if value.get("kind")?.as_str()? != "workspace_state" {
         return None;
     }
@@ -517,7 +559,11 @@ fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<Pers
         if let Ok(mut parsed) =
             serde_json::from_value::<Vec<PersistedWindowState>>(tab_windows.clone())
         {
-            if tab.get("project_root").and_then(Value::as_str) == Some(project_root) {
+            let owns_caller = tab
+                .get("project_root")
+                .and_then(Value::as_str)
+                .is_some_and(|root| tab_owns_caller(root, project_root, &scope_key));
+            if owns_caller {
                 matched_project = true;
                 matching_windows.append(&mut parsed);
             } else {
@@ -941,6 +987,80 @@ mod tests {
         let windows = parse_workspace_windows(&value, "/repo/empty").unwrap();
 
         assert!(windows.is_empty());
+    }
+
+    /// Every agent's `GWT_PROJECT_ROOT` is its own worktree, never the tab's
+    /// project root, so exact-path matching never matched for anyone and the
+    /// no-match fallback handed back every window from every open project.
+    /// Verified live: this session's `GWT_PROJECT_ROOT` is a worktree that
+    /// matches none of the three open tabs.
+    ///
+    /// Scoping by project ownership is what makes `pane.list` / `pane.read`
+    /// safe to hand to an agent — a worktree resolves to the project that
+    /// owns it, and unrelated projects stay invisible.
+    #[test]
+    fn workspace_windows_from_a_worktree_resolve_to_the_owning_project() {
+        // Distinct identities: ownership must come from the path shapes below,
+        // never from an accidental hash collision.
+        let scope_key = |root: &str| format!("hash-of-{root}");
+        let value = two_project_workspace_state();
+
+        // gwt materializes work/intake worktrees inside the project container.
+        let windows =
+            parse_workspace_windows_scoped(&value, "/repo/two/work/issue-1", scope_key).unwrap();
+        assert_eq!(windows.len(), 1, "only the owning project's windows");
+        assert_eq!(windows[0].id, "two::agent-1");
+
+        // The resident PM's worktree lives outside the checkout entirely.
+        let pm_worktree =
+            crate::pm_registry::pm_worktree_path_for_repo_path(Path::new("/repo/two"));
+        let windows =
+            parse_workspace_windows_scoped(&value, &pm_worktree.to_string_lossy(), scope_key)
+                .unwrap();
+        assert_eq!(windows.len(), 1, "the PM sees only its own project");
+        assert_eq!(windows[0].id, "two::agent-1");
+    }
+
+    /// When the project root is itself a git repo, a worktree elsewhere on
+    /// disk is still the same project.
+    #[test]
+    fn workspace_windows_match_a_worktree_sharing_the_project_repo_identity() {
+        let scope_key = |root: &str| match root {
+            "/repo/two" | "/elsewhere/wt" => "same-repo".to_string(),
+            other => format!("hash-of-{other}"),
+        };
+
+        let windows = parse_workspace_windows_scoped(
+            &two_project_workspace_state(),
+            "/elsewhere/wt",
+            scope_key,
+        )
+        .unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, "two::agent-1");
+    }
+
+    fn two_project_workspace_state() -> Value {
+        json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "tabs": [
+                    {
+                        "project_root": "/repo/one",
+                        "workspace": {
+                            "windows": [window("one::agent-1", WindowPreset::Agent, Some("one"))],
+                        },
+                    },
+                    {
+                        "project_root": "/repo/two",
+                        "workspace": {
+                            "windows": [window("two::agent-1", WindowPreset::Agent, Some("two"))],
+                        },
+                    },
+                ],
+            },
+        })
     }
 
     #[test]
