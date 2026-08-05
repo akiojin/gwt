@@ -300,21 +300,180 @@ pub fn prepare_resume_producing_authority(
     }
 }
 
-pub fn continue_authenticated_execution(
+struct ExecutionContinuationAuthority {
+    session: Session,
+    project_state_root: PathBuf,
+    worktree: PathBuf,
+    record: crate::cli::execution_state::ExecutionControlRecord,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    exact_unbound: bool,
+    current_binding: ExecutionBindingIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionRecoveryContext {
+    session: Session,
+    project_state_root: PathBuf,
+    worktree: PathBuf,
+    exact_unbound_host: bool,
+}
+
+impl ExecutionRecoveryContext {
+    pub(crate) fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub(crate) fn project_state_root(&self) -> &Path {
+        &self.project_state_root
+    }
+
+    pub(crate) fn worktree(&self) -> &Path {
+        &self.worktree
+    }
+
+    pub(crate) fn exact_unbound_host(&self) -> bool {
+        self.exact_unbound_host
+    }
+}
+
+pub(crate) fn session_requires_execution_continuation(session_id: &str) -> bool {
+    if gwt_agent::validate_session_id_path_component(session_id).is_err() {
+        return false;
+    }
+    load_session_for_mutation(session_id)
+        .is_ok_and(|session| session.id == session_id && is_exact_unbound_host_session(&session))
+}
+
+fn is_exact_unbound_host_session(session: &Session) -> bool {
+    session.linked_issue_number.is_none()
+        && session.execution_binding.is_none()
+        && session.runtime_target == LaunchRuntimeTarget::Host
+        && session.docker_runtime_binding.is_none()
+}
+
+pub(crate) fn resolve_execution_recovery_context_if_session_exists(
+    invocation_scope: &Path,
+    session_id: &str,
+) -> Option<Result<ExecutionRecoveryContext>> {
+    if let Err(error) = gwt_agent::validate_session_id_path_component(session_id) {
+        return Some(Err(mutation_error(format!(
+            "invalid or unsafe Session id: {error}"
+        ))));
+    }
+    let ledger_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    match ledger_path.try_exists() {
+        Ok(true) => Some(resolve_execution_recovery_context(
+            invocation_scope,
+            session_id,
+        )),
+        Ok(false) => None,
+        Err(error) => Some(Err(mutation_error(format!(
+            "failed to inspect Session ledger for Session {session_id} at {}: {error}",
+            ledger_path.display()
+        )))),
+    }
+}
+
+pub(crate) fn durable_session_runtime_target_if_session_exists(
+    session_id: &str,
+) -> Option<Result<LaunchRuntimeTarget>> {
+    if let Err(error) = gwt_agent::validate_session_id_path_component(session_id) {
+        return Some(Err(mutation_error(format!(
+            "invalid or unsafe Session id: {error}"
+        ))));
+    }
+    let ledger_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    match ledger_path.try_exists() {
+        Ok(false) => None,
+        Ok(true) => Some(load_session_for_mutation(session_id).and_then(|session| {
+            if session.id != session_id {
+                return Err(mutation_error(format!(
+                    "Session ledger id mismatch: requested {session_id}, loaded {}",
+                    session.id
+                )));
+            }
+            Ok(session.runtime_target)
+        })),
+        Err(error) => Some(Err(mutation_error(format!(
+            "failed to inspect Session ledger for Session {session_id} at {}: {error}",
+            ledger_path.display()
+        )))),
+    }
+}
+
+/// Resolve the operation-local recovery scope without publishing or repairing authority.
+///
+/// A managed workspace may split repository-global Project State from the linked
+/// Session worktree. Recovery diagnosis accepts the validated Project State root,
+/// the exact linked worktree, or a real nested cwd inside that worktree. It never
+/// accepts another worktree merely because it belongs to the same repository.
+pub(crate) fn resolve_execution_recovery_context(
+    invocation_scope: &Path,
+    session_id: &str,
+) -> Result<ExecutionRecoveryContext> {
+    gwt_agent::validate_session_id_path_component(session_id)
+        .map_err(|error| mutation_error(format!("invalid or unsafe Session id: {error}")))?;
+    let session = load_session_for_mutation(session_id)?;
+    if session.id != session_id {
+        return Err(mutation_error(format!(
+            "Session identity mismatch for recovery: expected {session_id}, got {}",
+            session.id
+        )));
+    }
+    let worktree = canonicalize_mutation_path(&session.worktree_path, "recovery worktree")?;
+    let worktree_git_root = git_toplevel(&worktree, "recovery worktree")?;
+    if worktree_git_root != worktree {
+        return Err(mutation_error(format!(
+            "Session event root mismatch for Session {session_id}: worktree {} must be the exact Git toplevel {}",
+            worktree.display(),
+            worktree_git_root.display()
+        )));
+    }
+
+    let project_state_root = validated_project_state_root_for_session_recovery(&session)?;
+    let declared_repo_hash = required_session_repo_hash(&session)?;
+    let branch_identity = required_session_branch(&session)?;
+    validate_runtime_repo_and_branch(&worktree, declared_repo_hash, &branch_identity, &session)?;
+
+    let invocation = canonicalize_mutation_path(invocation_scope, "recovery invocation scope")?;
+    if invocation != project_state_root {
+        if !invocation.starts_with(&worktree) {
+            return Err(mutation_error(format!(
+                "Session cwd mismatch for Session {session_id}: recovery must run from Project State root {} or within exact worktree {}, got {}",
+                project_state_root.display(),
+                worktree.display(),
+                invocation.display()
+            )));
+        }
+        let invocation_git_root = git_toplevel(&invocation, "recovery invocation scope")?;
+        if invocation_git_root != worktree {
+            return Err(mutation_error(format!(
+                "Session worktree mismatch for Session {session_id}: recovery invocation resolves to {}, expected {}",
+                invocation_git_root.display(),
+                worktree.display()
+            )));
+        }
+        validate_runtime_repo_and_branch(
+            &invocation_git_root,
+            declared_repo_hash,
+            &branch_identity,
+            &session,
+        )?;
+    }
+
+    let exact_unbound_host = is_exact_unbound_host_session(&session);
+    Ok(ExecutionRecoveryContext {
+        session,
+        project_state_root,
+        worktree,
+        exact_unbound_host,
+    })
+}
+
+fn evaluate_authenticated_execution_continuation(
     authenticated_project_root: &Path,
     authenticated_session_id: &str,
-    request: AgentExecutionContinuationRequest,
-) -> std::result::Result<
-    (AgentExecutionContinuationReceipt, SessionExecutionBinding),
-    AgentWorkspaceUpdateError,
-> {
-    if request.schema_version != AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION {
-        return Err(AgentWorkspaceUpdateError::new(
-            AgentWorkspaceUpdateErrorCode::InvalidRequest,
-            "unsupported execution continuation schema version",
-        ));
-    }
-    validate_ephemeral_probe_identifier(&request.operation_id, "operation id")?;
+) -> std::result::Result<ExecutionContinuationAuthority, AgentWorkspaceUpdateError> {
     let session = load_session_for_mutation(authenticated_session_id).map_err(|_| {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::RelaunchRequired,
@@ -356,13 +515,196 @@ pub fn continue_authenticated_execution(
     };
     let repo_hash = repo_hash_for_mutation(&worktree, "repo hash")
         .map_err(|_| execution_binding_error("execution_continuation_repo_hash_unavailable"))?;
-    if session.linked_issue_number != Some(owner.number)
+    let exact_unbound = is_exact_unbound_host_session(&session);
+    let activated_publication_repair = (!crate::cli::execution_state::integrity_ok(&record)
+        && exact_unbound)
+        .then(|| {
+            crate::cli::execution_state::activated_continuation_binding_for_session(
+                &worktree,
+                owner,
+                &session.id,
+            )
+        })
+        .transpose()
+        .map_err(|_| execution_binding_error("execution_continuation_record_integrity_failure"))?
+        .flatten();
+    if !crate::cli::execution_state::integrity_ok(&record) && activated_publication_repair.is_none()
+    {
+        return Err(execution_binding_error(
+            "execution_continuation_record_integrity_failure",
+        ));
+    }
+    if session.runtime_target != LaunchRuntimeTarget::Host
+        || session.docker_runtime_binding.is_some()
+        || (session.linked_issue_number != Some(owner.number) && !exact_unbound)
         || session.repo_hash.as_deref() != Some(repo_hash.as_str())
     {
         return Err(execution_binding_error(
             "execution_continuation_session_scope_mismatch",
         ));
     }
+    let identity = validate_host_session_identity(&worktree, &session)
+        .map_err(|_| execution_binding_error("execution_continuation_host_identity_mismatch"))?;
+    if identity.project_state_root != project_state_root
+        || identity.worktree_identity != worktree
+        || identity.work_event_root != worktree
+    {
+        return Err(execution_binding_error(
+            "execution_continuation_host_identity_mismatch",
+        ));
+    }
+    let current_binding = match activated_publication_repair {
+        Some(binding) => binding,
+        None => match crate::cli::execution_state::current_execution_binding(&worktree, owner) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => {
+                return Err(execution_binding_error(
+                    "execution_continuation_binding_missing",
+                ))
+            }
+            Err(_) if exact_unbound => {
+                crate::cli::execution_state::activated_continuation_binding_for_session(
+                    &worktree,
+                    owner,
+                    &session.id,
+                )
+                .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
+                .ok_or_else(|| {
+                    execution_binding_error("execution_continuation_binding_unreadable")
+                })?
+            }
+            Err(_) => {
+                return Err(execution_binding_error(
+                    "execution_continuation_binding_unreadable",
+                ))
+            }
+        },
+    };
+    if !exact_unbound {
+        let exact_bound = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .map_err(|_| execution_binding_error("execution_continuation_binding_invalid"))?
+            .is_some_and(|identity| {
+                record.primary_session_id == session.id
+                    && crate::cli::execution_state::session_binding_authorizes_current_lifecycle_descendant(
+                        &worktree,
+                        owner,
+                        &session.id,
+                        &identity.execution_binding.identity,
+                    )
+                    .unwrap_or(false)
+            });
+        if !exact_bound {
+            return Err(execution_binding_error(
+                "execution_continuation_binding_not_exact",
+            ));
+        }
+    }
+    Ok(ExecutionContinuationAuthority {
+        session,
+        project_state_root,
+        worktree,
+        record,
+        owner,
+        exact_unbound,
+        current_binding,
+    })
+}
+
+/// Side-effect-free prerequisite evaluator shared by diagnosis and execution.
+pub(crate) fn probe_authenticated_execution_continuation(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    match evaluate_authenticated_execution_continuation(
+        authenticated_project_root,
+        authenticated_session_id,
+    ) {
+        Ok(authority) => {
+            let governance = GovernanceMetadata {
+                effect: Some(GovernanceEffect::Protected),
+                fingerprint: Some(format!(
+                    "execution.continue:{}:{}:{}",
+                    authority.owner.number,
+                    authority.session.id,
+                    authority.current_binding.generation_id
+                )),
+                retryable: Some(true),
+                repository_target: authority.session.repo_hash.clone(),
+                target_state: Some(format!("{:?}", authority.record.status).to_ascii_lowercase()),
+                execution_generation: Some(authority.current_binding.generation_id.clone()),
+                ..GovernanceMetadata::default()
+            };
+            if authority.record.status
+                == crate::cli::execution_state::ExecutionControlStatus::Blocked
+            {
+                return RecoveryProbe::unavailable(
+                    "execution.continue",
+                    GovernanceMetadata {
+                        cause: Some(GovernanceCause::NotReady),
+                        ..governance
+                    },
+                    "blocked_execution_requires_reopen",
+                );
+            }
+            let current_bound = authority.record.status
+                == crate::cli::execution_state::ExecutionControlStatus::Active
+                && authority.record.primary_session_id == authority.session.id
+                && authority.session.linked_issue_number == Some(authority.owner.number)
+                && authority
+                    .session
+                    .execution_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.identity == authority.current_binding);
+            if current_bound {
+                RecoveryProbe::satisfied("execution.continue", governance)
+            } else {
+                RecoveryProbe::available("execution.continue", governance)
+            }
+        }
+        Err(error) => RecoveryProbe::unavailable(
+            "execution.continue",
+            GovernanceMetadata {
+                effect: Some(GovernanceEffect::Protected),
+                cause: Some(GovernanceCause::Authority),
+                retryable: Some(false),
+                ..GovernanceMetadata::default()
+            },
+            error.message,
+        ),
+    }
+}
+
+pub fn continue_authenticated_execution(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+    request: AgentExecutionContinuationRequest,
+) -> std::result::Result<
+    (AgentExecutionContinuationReceipt, SessionExecutionBinding),
+    AgentWorkspaceUpdateError,
+> {
+    if request.schema_version != AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "unsupported execution continuation schema version",
+        ));
+    }
+    validate_ephemeral_probe_identifier(&request.operation_id, "operation id")?;
+    let authority = evaluate_authenticated_execution_continuation(
+        authenticated_project_root,
+        authenticated_session_id,
+    )?;
+    let ExecutionContinuationAuthority {
+        session,
+        project_state_root,
+        worktree,
+        record,
+        owner,
+        exact_unbound,
+        current_binding,
+    } = authority;
 
     if let Some(audit) = crate::cli::execution_state::continuation_validation_for_operation(
         &worktree,
@@ -430,12 +772,29 @@ pub fn continue_authenticated_execution(
             let activated = existing.activated_generation.as_ref().ok_or_else(|| {
                 execution_binding_error("execution_continuation_activation_receipt_missing")
             })?;
-            let binding = rebind_session_to_current_execution(
+            let (_, binding) = crate::cli::execution_state::activate_successor_with_session_rebind(
                 &worktree,
                 owner,
+                &existing.request,
+                existing.predecessor_status,
+                &current_binding,
+                &gwt_core::paths::gwt_sessions_dir(),
                 &session,
-                Some(activated.generation_id.as_str()),
-            )?;
+            )
+            .map_err(|_| {
+                execution_binding_error("execution_continuation_activation_repair_failed")
+            })?
+            .ok_or_else(|| {
+                AgentWorkspaceUpdateError::new(
+                    AgentWorkspaceUpdateErrorCode::IdentityConflict,
+                    "Activated continuation no longer matches current authority",
+                )
+            })?;
+            if binding.identity.generation_id != activated.generation_id {
+                return Err(execution_binding_error(
+                    "execution_continuation_activation_repair_mismatch",
+                ));
+            }
             validate_continuation_binding(
                 &project_state_root,
                 &session.id,
@@ -464,7 +823,8 @@ pub fn continue_authenticated_execution(
         }
     }
 
-    if record.status == crate::cli::execution_state::ExecutionControlStatus::Active
+    if !exact_unbound
+        && record.status == crate::cli::execution_state::ExecutionControlStatus::Active
         && record.primary_session_id == session.id
     {
         let superseded = session
@@ -534,34 +894,23 @@ pub fn continue_authenticated_execution(
         },
         |attempt| attempt.request,
     );
-    let predecessor_binding =
-        crate::cli::execution_state::current_execution_binding(&worktree, owner)
-            .map_err(|_| execution_binding_error("execution_continuation_binding_unreadable"))?
-            .ok_or_else(|| execution_binding_error("execution_continuation_binding_missing"))?;
-    let prepared = match record.status {
+    let predecessor_binding = current_binding;
+    let predecessor_status = match record.status {
         crate::cli::execution_state::ExecutionControlStatus::Active => {
-            crate::cli::execution_state::prepare_active_continuation_successor(
-                &worktree,
-                owner,
-                &successor_request,
-            )
+            crate::cli::execution_state::SuccessorPredecessorStatus::Active
         }
         crate::cli::execution_state::ExecutionControlStatus::Completed => {
-            crate::cli::execution_state::prepare_successor(&worktree, owner, &successor_request)
+            crate::cli::execution_state::SuccessorPredecessorStatus::Completed
         }
         crate::cli::execution_state::ExecutionControlStatus::Blocked => unreachable!(),
-    }
-    .map_err(|_| {
-        AgentWorkspaceUpdateError::new(
-            AgentWorkspaceUpdateErrorCode::TransactionConflict,
-            "continuation successor preparation lost a concurrent authority race",
-        )
-    })?;
+    };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let (_, binding) = crate::cli::execution_state::activate_successor_with_session_rebind(
         &worktree,
         owner,
         &successor_request,
+        predecessor_status,
+        &predecessor_binding,
         &sessions_dir,
         &session,
     )
@@ -588,7 +937,7 @@ pub fn continue_authenticated_execution(
             schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
             operation_id: request.operation_id,
             outcome: AgentExecutionContinuationOutcome::SuccessorCreated,
-            predecessor_generation_id: Some(prepared.predecessor.generation_id),
+            predecessor_generation_id: Some(predecessor_binding.generation_id.clone()),
             generation_id: binding.identity.generation_id.clone(),
             execution_binding: binding.identity.clone(),
             capability_generation: binding.capability_generation,
@@ -1983,6 +2332,7 @@ pub(crate) fn validated_workspace_recovery_session(
     })? {
         return Ok(None);
     }
+    let recovery_context = resolve_execution_recovery_context(invocation_cwd, session_id)?;
     let session = load_session_for_mutation(session_id)?;
     if session.id != session_id {
         return Err(mutation_error(format!(
@@ -2006,7 +2356,7 @@ pub(crate) fn validated_workspace_recovery_session(
             "durable Session {session_id} has no execution binding"
         ))
     })?;
-    let identity = validate_host_session_identity(invocation_cwd, &session)?;
+    let identity = validate_host_session_identity(recovery_context.worktree(), &session)?;
     validate_current_execution_binding_authority(&identity.project_state_root, session_id, binding)
         .map_err(|error| {
             mutation_error(format!(
@@ -2107,6 +2457,55 @@ pub(crate) fn diagnose_session_work_mutation_target(
             };
             WorkspaceUpdateApplicabilityFailure { reason, message }
         })
+}
+
+pub(crate) fn probe_session_work_mutation_target(
+    invocation_cwd: &Path,
+    session_id: &str,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    match diagnose_session_work_mutation_target(invocation_cwd, session_id) {
+        Ok(()) => RecoveryProbe::available(
+            "workspace.update",
+            GovernanceMetadata {
+                effect: Some(GovernanceEffect::Reversible),
+                retryable: Some(true),
+                target_state: Some("workspace_update".to_string()),
+                ..GovernanceMetadata::default()
+            },
+        ),
+        Err(failure) => {
+            let cause = match failure.reason {
+                WorkspaceUpdateApplicabilityReason::WorkspaceEnsureRequired => {
+                    GovernanceCause::NotReady
+                }
+                WorkspaceUpdateApplicabilityReason::InvalidSession
+                | WorkspaceUpdateApplicabilityReason::SessionUnavailable => {
+                    GovernanceCause::ManagedIdentity
+                }
+                WorkspaceUpdateApplicabilityReason::HostBridgeRequired
+                | WorkspaceUpdateApplicabilityReason::CwdMismatch
+                | WorkspaceUpdateApplicabilityReason::RepositoryMismatch
+                | WorkspaceUpdateApplicabilityReason::BranchMismatch
+                | WorkspaceUpdateApplicabilityReason::AuthorityUnknown => {
+                    GovernanceCause::Authority
+                }
+            };
+            RecoveryProbe::unavailable(
+                "workspace.update",
+                GovernanceMetadata {
+                    effect: Some(GovernanceEffect::Reversible),
+                    cause: Some(cause),
+                    retryable: Some(matches!(cause, GovernanceCause::NotReady)),
+                    target_state: Some("workspace_update".to_string()),
+                    ..GovernanceMetadata::default()
+                },
+                failure.message,
+            )
+        }
+    }
 }
 
 fn resolve_host_session_work_mutation_target(
@@ -2727,6 +3126,12 @@ fn resolve_unique_existing_work(
                 ),
             ));
         }
+        if other.is_terminal()
+            || other.status_category
+                == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+        {
+            continue;
+        }
         if other.execution_containers.iter().any(|container| {
             mutation_container_matches(
                 container,
@@ -3308,7 +3713,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct ExecutionBindingAuthoritySnapshot {
-        session: Vec<u8>,
+        session: Option<Vec<u8>>,
         execution_control_mirror: Option<Vec<u8>>,
         generation_pointer_mirror: Option<Vec<u8>>,
         trusted_files: Vec<(PathBuf, Vec<u8>)>,
@@ -3326,7 +3731,7 @@ mod tests {
                 session: std::fs::read(
                     gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
                 )
-                .expect("read Session binding projection"),
+                .ok(),
                 execution_control_mirror: std::fs::read(crate::cli::execution_state::state_path(
                     work_event_root,
                 ))
@@ -3452,6 +3857,126 @@ mod tests {
         let session = session_fixture("strict-target-session", &repo, branch);
         save_session_fixture(&session);
         test(&repo, &session);
+    }
+
+    fn with_split_root_exact_unbound_fixture(
+        test: impl FnOnce(&Path, &Path, &Path, &Path, &Session),
+    ) {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("workspace-home");
+        let bare_repo = workspace_home.join("gwt.git");
+        std::fs::create_dir_all(&workspace_home).expect("workspace home");
+        run_git(
+            &[
+                "init",
+                "--bare",
+                bare_repo.to_str().expect("bare repo path"),
+            ],
+            temp.path(),
+        );
+        run_git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/split-root-recovery.git",
+            ],
+            &bare_repo,
+        );
+
+        let bootstrap = temp.path().join("bootstrap");
+        run_git(
+            &["init", bootstrap.to_str().expect("bootstrap path")],
+            temp.path(),
+        );
+        run_git(&["config", "user.email", "test@example.com"], &bootstrap);
+        run_git(&["config", "user.name", "Test User"], &bootstrap);
+        run_git(&["checkout", "-b", "develop"], &bootstrap);
+        run_git(&["commit", "--allow-empty", "-m", "initial"], &bootstrap);
+        run_git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                bare_repo.to_str().expect("bare repo path"),
+            ],
+            &bootstrap,
+        );
+        run_git(&["push", "origin", "develop"], &bootstrap);
+
+        let worktree = workspace_home.join("work").join("issue-3415");
+        let sibling = workspace_home.join("work").join("issue-sibling");
+        std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
+            .expect("worktree parent");
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/issue-3415",
+                worktree.to_str().expect("worktree path"),
+                "develop",
+            ],
+            &bare_repo,
+        );
+        run_git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/issue-sibling",
+                sibling.to_str().expect("sibling path"),
+                "develop",
+            ],
+            &bare_repo,
+        );
+        let workspace_home = dunce::canonicalize(workspace_home).expect("workspace home");
+        let worktree = dunce::canonicalize(worktree).expect("linked worktree");
+        let sibling = dunce::canonicalize(sibling).expect("sibling worktree");
+        let nested = worktree.join("nested").join("cwd");
+        std::fs::create_dir_all(&nested).expect("nested cwd");
+
+        let mut session = Session::new(&worktree, "work/issue-3415", gwt_agent::AgentId::Codex);
+        session.id = "split-root-exact-unbound".to_string();
+        session.project_state_root = Some(workspace_home.clone());
+        session.linked_issue_number = None;
+        session.execution_binding = None;
+        session.runtime_target = LaunchRuntimeTarget::Host;
+        session.docker_runtime_binding = None;
+        save_session_fixture(&session);
+
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3393,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            &worktree,
+            owner.kind,
+            owner.number,
+            "split-root-foreign-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize split-root predecessor");
+        crate::cli::execution_state::ensure_generation_ledger(
+            &worktree,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize split-root generation ledger");
+        seed_work_mutation_surfaces(&workspace_home, &worktree);
+        save_mutation_work_items(
+            &workspace_home,
+            &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+        );
+
+        test(&workspace_home, &worktree, &nested, &sibling, &session);
     }
 
     fn bind_session_to_current_execution(
@@ -3674,6 +4199,1420 @@ mod tests {
     }
 
     #[test]
+    fn split_root_exact_unbound_status_matches_host_continuation_from_all_invocation_shapes() {
+        with_split_root_exact_unbound_fixture(
+            |project_state_root, worktree, nested, _sibling, session| {
+                let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 3393,
+                };
+                let predecessor =
+                    crate::cli::execution_state::current_execution_binding(worktree, owner)
+                        .expect("read split-root predecessor")
+                        .expect("split-root predecessor binding");
+                let before = ExecutionBindingAuthoritySnapshot::capture(
+                    project_state_root,
+                    worktree,
+                    &session.id,
+                );
+                let _session_env = gwt_core::test_support::ScopedEnvVar::set(
+                    gwt_agent::GWT_SESSION_ID_ENV,
+                    &session.id,
+                );
+                let _forward_url = gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+                );
+                let _forward_token = gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                );
+                let _runtime_path = gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                );
+
+                for invocation in [project_state_root, worktree, nested] {
+                    let diagnosis = crate::cli::execution_state::diagnose(
+                        invocation,
+                        Some(session.id.as_str()),
+                    );
+                    assert_eq!(
+                        diagnosis.ecr_status,
+                        crate::cli::execution_state::ExecutionDiagnosisState::Active,
+                        "{} must resolve the linked Session worktree",
+                        invocation.display()
+                    );
+                    assert_eq!(diagnosis.owner_number, Some(owner.number));
+                    assert_eq!(
+                        diagnosis.generation_id.as_deref(),
+                        Some(predecessor.generation_id.as_str())
+                    );
+                    let continuation = diagnosis
+                        .recovery_probes
+                        .iter()
+                        .find(|probe| probe.operation == "execution.continue")
+                        .expect("continuation probe");
+                    assert_eq!(
+                        continuation.state,
+                        crate::cli::governance::RecoveryProbeState::Available,
+                        "{}: {:?}",
+                        invocation.display(),
+                        continuation.reason
+                    );
+                    assert!(diagnosis
+                        .available_recoveries
+                        .contains(&"execution.continue".to_string()));
+                    assert!(!diagnosis
+                        .available_recoveries
+                        .contains(&"execution.adopt".to_string()));
+
+                    let mut env = crate::cli::TestEnv::new(invocation.to_path_buf());
+                    let (code, out) = crate::cli::run_collect(
+                        &mut env,
+                        crate::cli::CliCommand::Execution(
+                            crate::cli::execution_state::ExecutionCommand::Status,
+                        ),
+                    )
+                    .expect("run execution.status");
+                    assert_eq!(code, 0, "{out}");
+                    let status: serde_json::Value =
+                        serde_json::from_str(&out).expect("parse execution.status output");
+                    assert_eq!(status["ecr_status"], "active");
+                    assert_eq!(status["owner_number"], owner.number);
+                    assert_eq!(status["generation_id"], predecessor.generation_id.as_str());
+                    assert!(status["available_recoveries"]
+                        .as_array()
+                        .expect("available recoveries")
+                        .contains(&serde_json::json!("execution.continue")));
+                    assert!(!status["available_recoveries"]
+                        .as_array()
+                        .expect("available recoveries")
+                        .contains(&serde_json::json!("execution.adopt")));
+                }
+
+                assert_eq!(
+                    ExecutionBindingAuthoritySnapshot::capture(
+                        project_state_root,
+                        worktree,
+                        &session.id,
+                    ),
+                    before,
+                    "status and operation-local probes must be completely read-only"
+                );
+
+                let (receipt, _binding) = continue_authenticated_execution(
+                    project_state_root,
+                    &session.id,
+                    AgentExecutionContinuationRequest {
+                        schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                        operation_id: "split-root-status-host-parity".to_string(),
+                    },
+                )
+                .expect("the Host evaluator must execute the continuation advertised by status");
+                assert_eq!(
+                    receipt.outcome,
+                    AgentExecutionContinuationOutcome::SuccessorCreated
+                );
+
+                let after_continue =
+                    crate::cli::execution_state::diagnose(nested, Some(session.id.as_str()));
+                assert!(after_continue
+                    .available_recoveries
+                    .contains(&"workspace.ensure".to_string()));
+                assert!(!after_continue
+                    .available_recoveries
+                    .contains(&"execution.adopt".to_string()));
+
+                let mut ensure_env = crate::cli::TestEnv::new(nested.to_path_buf());
+                let (ensure_code, ensure_out) = crate::cli::run_collect(
+                    &mut ensure_env,
+                    crate::cli::CliCommand::Workspace(crate::cli::WorkspaceCommand::Ensure {
+                        agent_session: session.id.clone(),
+                        title_summary: "Split-root recovery".to_string(),
+                        current_focus: Some(
+                            "Continue exact authority into Workspace mutation".to_string(),
+                        ),
+                        spec: None,
+                        issue: Some(owner.number),
+                        topic: Some("recovery".to_string()),
+                        boundary: Some("split-root continuation".to_string()),
+                    }),
+                )
+                .expect("execute advertised split-root workspace.ensure");
+                assert_eq!(ensure_code, 0, "{ensure_out}");
+                let ensured_work_id = ensure_out
+                    .strip_prefix("workspace ensured: ")
+                    .and_then(|value| value.split_once(" (").map(|(work_id, _)| work_id))
+                    .expect("workspace.ensure output contains Work id");
+                let after_ensure =
+                    crate::cli::execution_state::diagnose(nested, Some(session.id.as_str()));
+                assert!(after_ensure
+                    .available_recoveries
+                    .contains(&"workspace.update".to_string()));
+                assert!(!after_ensure
+                    .available_recoveries
+                    .contains(&"workspace.ensure".to_string()));
+
+                let mut update_env = crate::cli::TestEnv::new(project_state_root.to_path_buf());
+                let (update_code, update_out) = crate::cli::run_collect(
+                    &mut update_env,
+                    crate::cli::CliCommand::Workspace(crate::cli::WorkspaceCommand::Update {
+                        title: None,
+                        status: None,
+                        status_text: None,
+                        summary: Some("Split-root recovery reached Workspace update".to_string()),
+                        progress_summary: None,
+                        next_action: None,
+                        owner: None,
+                        agent_session: Some(session.id.clone()),
+                        current_focus: None,
+                        title_summary: None,
+                    }),
+                )
+                .expect("execute advertised split-root workspace.update");
+                assert_eq!(update_code, 0, "{update_out}");
+                let projection =
+                    gwt_core::workspace_projection::load_workspace_projection(project_state_root)
+                        .expect("load split-root Workspace projection")
+                        .expect("split-root Workspace projection exists");
+                assert_eq!(
+                    projection.summary.as_deref(),
+                    Some("Split-root recovery reached Workspace update")
+                );
+                assert!(projection.agents.iter().any(|agent| {
+                    agent.session_id == session.id
+                        && agent.workspace_id.as_deref() == Some(ensured_work_id)
+                }));
+            },
+        );
+    }
+
+    #[test]
+    fn split_root_exact_unbound_adopt_is_rejected_byte_identically() {
+        with_split_root_exact_unbound_fixture(
+            |project_state_root, worktree, nested, _sibling, session| {
+                let before = ExecutionBindingAuthoritySnapshot::capture(
+                    project_state_root,
+                    worktree,
+                    &session.id,
+                );
+                let diagnosis =
+                    crate::cli::execution_state::diagnose(nested, Some(session.id.as_str()));
+                assert_eq!(
+                    diagnosis
+                        .recovery_probes
+                        .iter()
+                        .find(|probe| probe.operation == "execution.adopt")
+                        .and_then(|probe| probe.reason.as_deref()),
+                    Some("exact_unbound_session_requires_execution_continue")
+                );
+                let _session_env = gwt_core::test_support::ScopedEnvVar::set(
+                    gwt_agent::GWT_SESSION_ID_ENV,
+                    &session.id,
+                );
+                let mut env = crate::cli::TestEnv::new(nested.to_path_buf());
+                let (code, out) = crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Execution(
+                        crate::cli::execution_state::ExecutionCommand::Adopt {
+                            reason: "must use canonical continuation".to_string(),
+                        },
+                    ),
+                )
+                .expect("run execution.adopt");
+                assert_eq!(code, 2, "{out}");
+                assert!(out.contains("execution.continue"), "{out}");
+                assert_eq!(
+                    ExecutionBindingAuthoritySnapshot::capture(
+                        project_state_root,
+                        worktree,
+                        &session.id,
+                    ),
+                    before,
+                    "rejected adoption must preserve Session, ECR, pointer, ledger, capability, and Work bytes"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn split_root_recovery_scope_drift_fails_closed_byte_identically() {
+        with_split_root_exact_unbound_fixture(
+            |project_state_root, worktree, _nested, sibling, session| {
+                let assert_read_only_refusal = |invocation: &Path, label: &str| {
+                    let before = ExecutionBindingAuthoritySnapshot::capture(
+                        project_state_root,
+                        worktree,
+                        &session.id,
+                    );
+                    resolve_execution_recovery_context(invocation, &session.id)
+                        .expect_err(&format!("{label}: recovery scope must be rejected"));
+                    let diagnosis = crate::cli::execution_state::diagnose(
+                        invocation,
+                        Some(session.id.as_str()),
+                    );
+                    for operation in ["execution.continue", "execution.adopt"] {
+                        let probe = diagnosis
+                            .recovery_probes
+                            .iter()
+                            .find(|probe| probe.operation == operation)
+                            .unwrap_or_else(|| panic!("{label}: missing {operation} probe"));
+                        assert_eq!(
+                            probe.state,
+                            crate::cli::governance::RecoveryProbeState::Unavailable,
+                            "{label}: {operation} must fail closed"
+                        );
+                    }
+                    assert_eq!(
+                        ExecutionBindingAuthoritySnapshot::capture(
+                            project_state_root,
+                            worktree,
+                            &session.id,
+                        ),
+                        before,
+                        "{label}: failed diagnosis must preserve every authority byte"
+                    );
+                };
+
+                assert_read_only_refusal(sibling, "sibling-worktree");
+
+                let foreign_temp = tempfile::tempdir().expect("foreign tempdir");
+                let foreign = init_git_repo(
+                    foreign_temp.path(),
+                    "foreign",
+                    "https://example.invalid/acme/foreign-recovery.git",
+                    "work/issue-3415",
+                );
+                assert_read_only_refusal(&foreign, "foreign-repository");
+
+                #[cfg(unix)]
+                {
+                    let escape = worktree.join("symlink-escape");
+                    std::os::unix::fs::symlink(&foreign, &escape).expect("symlink escape");
+                    assert_read_only_refusal(&escape, "symlink-escape");
+                }
+
+                let mut wrong_branch = session.clone();
+                wrong_branch.branch = "work/wrong-branch".to_string();
+                save_session_fixture(&wrong_branch);
+                assert_read_only_refusal(worktree, "wrong-branch");
+                save_session_fixture(session);
+
+                let mut wrong_repo_hash = session.clone();
+                wrong_repo_hash.repo_hash = Some("foreign-repository-hash".to_string());
+                save_session_fixture(&wrong_repo_hash);
+                assert_read_only_refusal(worktree, "repo-hash-mismatch");
+                save_session_fixture(session);
+
+                let before = ExecutionBindingAuthoritySnapshot::capture(
+                    project_state_root,
+                    worktree,
+                    &session.id,
+                );
+                let _session_env = gwt_core::test_support::ScopedEnvVar::set(
+                    gwt_agent::GWT_SESSION_ID_ENV,
+                    &session.id,
+                );
+                let mut env = crate::cli::TestEnv::new(sibling.to_path_buf());
+                let (code, out) = crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Execution(
+                        crate::cli::execution_state::ExecutionCommand::Continue {
+                            operation_id: "reject-sibling-before-bridge".to_string(),
+                        },
+                    ),
+                )
+                .expect("local continuation preflight");
+                assert_eq!(code, 2, "{out}");
+                assert!(out.contains("recovery scope is invalid"), "{out}");
+                assert_eq!(
+                    ExecutionBindingAuthoritySnapshot::capture(
+                        project_state_root,
+                        worktree,
+                        &session.id,
+                    ),
+                    before,
+                    "CLI continuation scope rejection must happen before authority mutation"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn protected_recovery_negative_matrix_keeps_probe_execute_parity() {
+        with_split_root_exact_unbound_fixture(
+            |project_state_root, worktree, nested, sibling, session| {
+                let assert_refused = |label: &str, invocation: &Path, caller: Option<&str>| {
+                    let tracked_session_id = caller.unwrap_or(session.id.as_str());
+                    let before = ExecutionBindingAuthoritySnapshot::capture(
+                        project_state_root,
+                        worktree,
+                        tracked_session_id,
+                    );
+                    let diagnosis = crate::cli::execution_state::diagnose(invocation, caller);
+                    for operation in [
+                        "execution.adopt",
+                        "execution.repair",
+                        "execution.reopen",
+                        "execution.continue",
+                        "workspace.update",
+                        "workspace.ensure",
+                    ] {
+                        let probe = diagnosis
+                            .recovery_probes
+                            .iter()
+                            .find(|probe| probe.operation == operation)
+                            .unwrap_or_else(|| panic!("{label}: missing {operation} probe"));
+                        assert_eq!(
+                            probe.state,
+                            crate::cli::governance::RecoveryProbeState::Unavailable,
+                            "{label}: {operation} probe must fail closed"
+                        );
+                        assert_eq!(
+                            probe.reason.as_deref(),
+                            Some("execution_recovery_scope_invalid"),
+                            "{label}: {operation} must use the canonical scope refusal"
+                        );
+                    }
+
+                    let _ambient = caller.map_or_else(
+                        || {
+                            gwt_core::test_support::ScopedEnvVar::unset(
+                                gwt_agent::GWT_SESSION_ID_ENV,
+                            )
+                        },
+                        |caller| {
+                            gwt_core::test_support::ScopedEnvVar::set(
+                                gwt_agent::GWT_SESSION_ID_ENV,
+                                caller,
+                            )
+                        },
+                    );
+                    let _forward_url = gwt_core::test_support::ScopedEnvVar::unset(
+                        gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+                    );
+                    let _forward_token = gwt_core::test_support::ScopedEnvVar::unset(
+                        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                    );
+                    for command in [
+                        crate::cli::execution_state::ExecutionCommand::Adopt {
+                            reason: format!("reject {label}"),
+                        },
+                        crate::cli::execution_state::ExecutionCommand::Repair {
+                            reason: format!("reject {label}"),
+                        },
+                        crate::cli::execution_state::ExecutionCommand::Reopen {
+                            reason: format!("reject {label}"),
+                        },
+                        crate::cli::execution_state::ExecutionCommand::Continue {
+                            operation_id: format!("reject-{label}"),
+                        },
+                    ] {
+                        let mut env = crate::cli::TestEnv::new(invocation.to_path_buf());
+                        let (code, out) = crate::cli::run_collect(
+                            &mut env,
+                            crate::cli::CliCommand::Execution(command),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{label}: protected execution must return typed refusal: {error}"
+                            )
+                        });
+                        assert_eq!(code, 2, "{label}: {out}");
+                        assert!(out.contains("recovery scope is invalid"), "{label}: {out}");
+                    }
+
+                    // workspace.update and workspace.ensure can contact a
+                    // Host bridge on valid input. Exercise their shared
+                    // canonical execute evaluators directly so every
+                    // negative row remains pure and cannot escape the
+                    // local authority fence.
+                    let caller = caller.unwrap_or("");
+                    resolve_session_work_mutation_target(invocation, caller)
+                        .expect_err(&format!("{label}: workspace.update must refuse"));
+                    assert!(
+                        !matches!(
+                            validated_workspace_recovery_session(invocation, caller),
+                            Ok(Some(_))
+                        ),
+                        "{label}: workspace.ensure must refuse"
+                    );
+                    assert_eq!(
+                        ExecutionBindingAuthoritySnapshot::capture(
+                            project_state_root,
+                            worktree,
+                            tracked_session_id,
+                        ),
+                        before,
+                        "{label}: probes and refused execution must preserve all authority bytes"
+                    );
+                };
+
+                assert_refused("no-ambient", nested, None);
+                assert_refused(
+                    "missing-session",
+                    nested,
+                    Some("protected-matrix-missing-session"),
+                );
+
+                let session_path =
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+                let session_bytes = std::fs::read(&session_path).expect("read durable Session");
+                std::fs::write(&session_path, "broken = [").expect("corrupt durable Session");
+                assert_refused("corrupt-session", nested, Some(session.id.as_str()));
+                std::fs::write(&session_path, &session_bytes).expect("restore durable Session");
+
+                assert_refused("sibling-worktree", sibling, Some(session.id.as_str()));
+
+                let foreign_temp = tempfile::tempdir().expect("foreign tempdir");
+                let foreign = init_git_repo(
+                    foreign_temp.path(),
+                    "foreign-matrix",
+                    "https://example.invalid/acme/foreign-matrix.git",
+                    "work/issue-3415",
+                );
+                assert_refused("foreign-repository", &foreign, Some(session.id.as_str()));
+
+                let mut wrong_branch = session.clone();
+                wrong_branch.branch = "work/foreign-branch".to_string();
+                save_session_fixture(&wrong_branch);
+                assert_refused("branch-mismatch", worktree, Some(session.id.as_str()));
+                save_session_fixture(session);
+
+                #[cfg(unix)]
+                {
+                    let escape = worktree.join("protected-matrix-symlink");
+                    std::os::unix::fs::symlink(&foreign, &escape)
+                        .expect("create protected recovery symlink escape");
+                    assert_refused("symlink-escape", &escape, Some(session.id.as_str()));
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn recovery_context_rejects_unsafe_session_id_before_path_lookup() {
+        with_strict_target_fixture(|repo, _session| {
+            let unsafe_id = "../escaped-session";
+            let error = resolve_execution_recovery_context_if_session_exists(repo, unsafe_id)
+                .expect("invalid Session ids must fail closed even when no escaped file exists")
+                .expect_err("path traversal must be rejected");
+            assert!(
+                error.to_string().contains("invalid or unsafe Session id"),
+                "{error}"
+            );
+            let direct = resolve_execution_recovery_context(repo, unsafe_id)
+                .expect_err("direct resolver must reject traversal before loading a ledger");
+            assert!(
+                direct.to_string().contains("invalid or unsafe Session id"),
+                "{direct}"
+            );
+            assert!(!session_requires_execution_continuation(unsafe_id));
+            let diagnosis = crate::cli::execution_state::diagnose(repo, Some(unsafe_id));
+            assert_eq!(
+                diagnosis
+                    .recovery_probes
+                    .iter()
+                    .find(|probe| probe.operation == "execution.continue")
+                    .and_then(|probe| probe.reason.as_deref()),
+                Some("execution_recovery_scope_invalid")
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_missing_session_nested_diagnosis_keeps_worktree_ecr_visibility() {
+        with_strict_target_fixture(|repo, _session| {
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 3393,
+            };
+            crate::cli::execution_state::materialize_at_launch(
+                repo,
+                owner.kind,
+                owner.number,
+                "legacy-predecessor",
+                "gwt-execute",
+                false,
+            )
+            .expect("materialize legacy predecessor");
+            crate::cli::execution_state::ensure_generation_ledger(
+                repo,
+                owner,
+                crate::cli::execution_state::LegacyActiveDisposition::Live,
+            )
+            .expect("materialize legacy ledger");
+            let expected = crate::cli::execution_state::current_execution_binding(repo, owner)
+                .expect("read legacy binding")
+                .expect("legacy binding");
+            let nested = repo.join("nested").join("legacy-cwd");
+            std::fs::create_dir_all(&nested).expect("legacy nested cwd");
+            seed_work_mutation_surfaces(repo, repo);
+
+            let diagnosis = crate::cli::execution_state::diagnose(
+                &nested,
+                Some("legacy-session-without-ledger"),
+            );
+            assert_eq!(
+                diagnosis.ecr_status,
+                crate::cli::execution_state::ExecutionDiagnosisState::Active
+            );
+            assert_eq!(diagnosis.owner_number, Some(owner.number));
+            assert_eq!(
+                diagnosis.generation_id.as_deref(),
+                Some(expected.generation_id.as_str())
+            );
+            for operation in [
+                "execution.adopt",
+                "execution.repair",
+                "execution.reopen",
+                "execution.continue",
+                "workspace.update",
+                "workspace.ensure",
+            ] {
+                assert_eq!(
+                    diagnosis
+                        .recovery_probes
+                        .iter()
+                        .find(|probe| probe.operation == operation)
+                        .and_then(|probe| probe.reason.as_deref()),
+                    Some("execution_recovery_scope_invalid"),
+                    "{operation} must fail closed without a durable Session"
+                );
+            }
+
+            let _session_env = gwt_core::test_support::ScopedEnvVar::set(
+                gwt_agent::GWT_SESSION_ID_ENV,
+                "legacy-session-without-ledger",
+            );
+            let commands = [
+                crate::cli::execution_state::ExecutionCommand::Adopt {
+                    reason: "must not recover without durable Session".to_string(),
+                },
+                crate::cli::execution_state::ExecutionCommand::Repair {
+                    reason: "must not recover without durable Session".to_string(),
+                },
+                crate::cli::execution_state::ExecutionCommand::Reopen {
+                    reason: "must not recover without durable Session".to_string(),
+                },
+                crate::cli::execution_state::ExecutionCommand::Continue {
+                    operation_id: "must-not-recover-without-durable-session".to_string(),
+                },
+            ];
+            for command in commands {
+                let before = ExecutionBindingAuthoritySnapshot::capture(
+                    repo,
+                    repo,
+                    "legacy-session-without-ledger",
+                );
+                let mut env = crate::cli::TestEnv::new(nested.clone());
+                let (code, out) =
+                    crate::cli::run_collect(&mut env, crate::cli::CliCommand::Execution(command))
+                        .expect("missing-Session recovery must return a typed refusal");
+                assert_eq!(code, 2, "{out}");
+                assert!(out.contains("recovery scope is invalid"), "{out}");
+                assert_eq!(
+                    ExecutionBindingAuthoritySnapshot::capture(
+                        repo,
+                        repo,
+                        "legacy-session-without-ledger",
+                    ),
+                    before,
+                    "missing-Session recovery refusal must preserve every authority byte"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn corrupt_durable_session_blocks_all_recovery_commands_byte_identically() {
+        with_split_root_exact_unbound_fixture(
+            |project_state_root, worktree, nested, _sibling, session| {
+                let ledger_path =
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+                std::fs::write(&ledger_path, "broken = [").expect("corrupt durable Session ledger");
+                let _session_env = gwt_core::test_support::ScopedEnvVar::set(
+                    gwt_agent::GWT_SESSION_ID_ENV,
+                    &session.id,
+                );
+                let diagnosis =
+                    crate::cli::execution_state::diagnose(nested, Some(session.id.as_str()));
+                for operation in [
+                    "execution.adopt",
+                    "execution.repair",
+                    "execution.reopen",
+                    "execution.continue",
+                    "workspace.update",
+                    "workspace.ensure",
+                ] {
+                    assert_eq!(
+                        diagnosis
+                            .recovery_probes
+                            .iter()
+                            .find(|probe| probe.operation == operation)
+                            .and_then(|probe| probe.reason.as_deref()),
+                        Some("execution_recovery_scope_invalid"),
+                        "{operation} diagnosis must match its mutation refusal"
+                    );
+                }
+                let commands = [
+                    crate::cli::execution_state::ExecutionCommand::Adopt {
+                        reason: "must not bypass corrupt Session".to_string(),
+                    },
+                    crate::cli::execution_state::ExecutionCommand::Repair {
+                        reason: "must not bypass corrupt Session".to_string(),
+                    },
+                    crate::cli::execution_state::ExecutionCommand::Reopen {
+                        reason: "must not bypass corrupt Session".to_string(),
+                    },
+                    crate::cli::execution_state::ExecutionCommand::Continue {
+                        operation_id: "must-not-bypass-corrupt-session".to_string(),
+                    },
+                ];
+                for command in commands {
+                    let before = ExecutionBindingAuthoritySnapshot::capture(
+                        project_state_root,
+                        worktree,
+                        &session.id,
+                    );
+                    let mut env = crate::cli::TestEnv::new(nested.to_path_buf());
+                    let (code, out) = crate::cli::run_collect(
+                        &mut env,
+                        crate::cli::CliCommand::Execution(command),
+                    )
+                    .expect("recovery command must return a typed refusal");
+                    assert_eq!(code, 2, "{out}");
+                    assert!(out.contains("recovery scope is invalid"), "{out}");
+                    assert_eq!(
+                        ExecutionBindingAuthoritySnapshot::capture(
+                            project_state_root,
+                            worktree,
+                            &session.id,
+                        ),
+                        before,
+                        "corrupt durable Session refusal must preserve every authority byte"
+                    );
+                }
+            },
+        );
+    }
+
+    fn assert_continuation_refused_byte_identically(
+        repo: &Path,
+        baseline: &Session,
+        label: &str,
+        mutate: impl FnOnce(&mut Session),
+    ) {
+        let mut candidate = baseline.clone();
+        mutate(&mut candidate);
+        save_session_fixture(&candidate);
+        let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &candidate.id);
+        let probe = probe_authenticated_execution_continuation(repo, &candidate.id);
+        assert_eq!(
+            probe.state,
+            crate::cli::governance::RecoveryProbeState::Unavailable,
+            "{label}: invalid continuation must be unavailable"
+        );
+        let request = AgentExecutionContinuationRequest {
+            schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+            operation_id: format!("reject-{label}"),
+        };
+        continue_authenticated_execution(repo, &candidate.id, request).expect_err(&format!(
+            "{label}: invalid continuation unexpectedly executed"
+        ));
+        assert_eq!(
+            ExecutionBindingAuthoritySnapshot::capture(repo, repo, &candidate.id),
+            before,
+            "{label}: rejection must preserve Session, ECR, pointer, ledger, capability, and Work bytes"
+        );
+    }
+
+    #[test]
+    fn execution_continuation_bootstraps_only_exact_unbound_host_identity() {
+        with_strict_target_fixture(|repo, session| {
+            let (bound, _) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &bound, "work-continuation-rejection");
+
+            assert_continuation_refused_byte_identically(repo, &bound, "owner-only", |session| {
+                session.execution_binding = None;
+            });
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "legacy-owner-only",
+                |session| {
+                    session.schema_version = Session::CURRENT_SCHEMA_VERSION - 1;
+                    session.execution_binding = None;
+                },
+            );
+            assert_continuation_refused_byte_identically(repo, &bound, "binding-only", |session| {
+                session.linked_issue_number = None;
+            });
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "foreign-binding",
+                |session| {
+                    session.execution_binding.as_mut().unwrap().owner_number += 1;
+                },
+            );
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "legacy-foreign-binding",
+                |session| {
+                    session.schema_version = Session::CURRENT_SCHEMA_VERSION - 1;
+                    session.execution_binding.as_mut().unwrap().owner_number += 1;
+                },
+            );
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "stale-binding",
+                |session| {
+                    session
+                        .execution_binding
+                        .as_mut()
+                        .unwrap()
+                        .identity
+                        .generation_id = "generation-stale".to_string();
+                },
+            );
+            assert_continuation_refused_byte_identically(repo, &bound, "wrong-repo", |session| {
+                session.repo_hash = Some("foreign-repository".to_string());
+            });
+            assert_continuation_refused_byte_identically(repo, &bound, "wrong-root", |session| {
+                session.project_state_root = Some(repo.join("foreign-root"));
+            });
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "wrong-worktree",
+                |session| {
+                    session.worktree_path = repo.join("foreign-worktree");
+                },
+            );
+            assert_continuation_refused_byte_identically(repo, &bound, "wrong-branch", |session| {
+                session.branch = "work/foreign".to_string();
+            });
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "wrong-session",
+                |session| {
+                    session.execution_binding.as_mut().unwrap().session_id =
+                        "foreign-session".to_string();
+                },
+            );
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "docker-target",
+                |session| {
+                    session.runtime_target = LaunchRuntimeTarget::Docker;
+                },
+            );
+            assert_continuation_refused_byte_identically(
+                repo,
+                &bound,
+                "docker-binding",
+                |session| {
+                    session.docker_runtime_binding = Some(gwt_agent::DockerRuntimeBinding {
+                        runtime_worktree_path: PathBuf::from("/workspace"),
+                        project_state_scope_hash: "foreign-scope".to_string(),
+                    });
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn execution_continuation_refuses_a_takeover_suffix_byte_identically() {
+        with_strict_target_fixture(|repo, session| {
+            let (bound, _) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &bound, "work-takeover-suffix");
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 2359,
+            };
+            let takeover = crate::cli::execution_state::GenerationTakeoverRequest {
+                operation_id: "takeover-suffix-continuation".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: Some("work-takeover-suffix-continuation".to_string()),
+                source: Some("continue-work:handoff".to_string()),
+                from_session_id: bound.id.clone(),
+                to_session_id: "session-adopting".to_string(),
+                reason: "explicit handoff".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
+                .expect("prepare takeover suffix");
+            crate::cli::execution_state::activate_generation_takeover(repo, owner, &takeover)
+                .expect("activate takeover suffix");
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &bound.id);
+
+            let probe = probe_authenticated_execution_continuation(repo, &bound.id);
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            let error = continue_authenticated_execution(
+                repo,
+                &bound.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-after-takeover-suffix".to_string(),
+                },
+            )
+            .expect_err("the predecessor Session must not continue after a takeover suffix");
+            assert_eq!(probe.reason.as_deref(), Some(error.message.as_str()));
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &bound.id),
+                before,
+                "takeover-suffix refusal must preserve Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+        });
+    }
+
+    fn seed_foreign_active_exact_unbound(
+        repo: &Path,
+        session: &Session,
+    ) -> (
+        Session,
+        crate::cli::execution_state::ExecutionOwnerKey,
+        gwt_agent::ExecutionBindingIdentity,
+    ) {
+        let mut exact_unbound = session.clone();
+        exact_unbound.linked_issue_number = None;
+        exact_unbound.execution_binding = None;
+        exact_unbound.runtime_target = LaunchRuntimeTarget::Host;
+        exact_unbound.docker_runtime_binding = None;
+        save_session_fixture(&exact_unbound);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 2359,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            repo,
+            owner.kind,
+            owner.number,
+            "foreign-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize foreign predecessor");
+        crate::cli::execution_state::ensure_generation_ledger(
+            repo,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize foreign predecessor ledger");
+        let predecessor = crate::cli::execution_state::current_execution_binding(repo, owner)
+            .expect("read predecessor")
+            .expect("predecessor binding");
+        seed_work_mutation_surfaces(repo, repo);
+        seed_unique_mutation_target(repo, repo, &exact_unbound, "work-exact-unbound-race");
+        (exact_unbound, owner, predecessor)
+    }
+
+    #[test]
+    fn execution_continuation_prepare_failure_preserves_all_authority_bytes() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, _, _) = seed_foreign_active_exact_unbound(repo, session);
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            crate::cli::execution_state::set_continuation_rebind_failure_before_prepare_commit();
+
+            continue_authenticated_execution(
+                repo,
+                &session.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-fail-before-prepare-commit".to_string(),
+                },
+            )
+            .expect_err("injected prepare failure");
+
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before,
+                "prepare failure must not publish Session, ECR, pointer, ledger, capability, or Work bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn execution_continuation_activation_failure_rolls_back_prepared_authority() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, _, _) = seed_foreign_active_exact_unbound(repo, session);
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            crate::cli::execution_state::set_continuation_rebind_failure_before_activation_commit();
+
+            continue_authenticated_execution(
+                repo,
+                &session.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-fail-before-activation-commit".to_string(),
+                },
+            )
+            .expect_err("injected activation failure");
+
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before,
+                "pre-commit activation failure must roll back Prepared and Session authority bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn execution_continuation_post_ledger_failure_is_retryable_without_ghost_session_authority() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, owner, predecessor) = seed_foreign_active_exact_unbound(repo, session);
+            crate::cli::execution_state::set_generation_write_failure_after_ledger();
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-post-ledger-retry".to_string(),
+            };
+
+            continue_authenticated_execution(repo, &session.id, request.clone())
+                .expect_err("injected post-ledger response loss");
+            let after_failure = Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+            )
+            .expect("load Session after response loss");
+            assert_eq!(after_failure.linked_issue_number, None);
+            assert_eq!(after_failure.execution_binding, None);
+            let committed = crate::cli::execution_state::load_owner_generation_ledger(repo, owner)
+                .unwrap()
+                .unwrap();
+            assert_ne!(committed.current_generation_id, predecessor.generation_id);
+            assert_eq!(
+                committed
+                    .continuation_attempts
+                    .last()
+                    .map(|attempt| attempt.status),
+                Some(crate::cli::execution_state::ContinuationAttemptStatus::Activated)
+            );
+
+            let (receipt, binding) = continue_authenticated_execution(repo, &session.id, request)
+                .expect("exact retry repairs publication and Session binding");
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::SuccessorCreated
+            );
+            assert_eq!(receipt.execution_binding, binding.identity);
+            assert!(
+                crate::cli::execution_state::current_active_execution_binding_matches(
+                    repo,
+                    owner,
+                    &session.id,
+                    &binding.identity,
+                )
+                .unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn activated_response_loss_retry_refuses_a_legal_takeover_suffix_byte_identically() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, owner, _) = seed_foreign_active_exact_unbound(repo, session);
+            crate::cli::execution_state::set_generation_write_failure_after_ledger();
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-post-ledger-takeover-suffix".to_string(),
+            };
+
+            continue_authenticated_execution(repo, &session.id, request.clone())
+                .expect_err("inject response loss after the Activated ledger commit");
+            let attempt = crate::cli::execution_state::continuation_attempt_for_operation(
+                repo,
+                owner,
+                &request.operation_id,
+            )
+            .expect("read Activated response-loss attempt")
+            .expect("Activated response-loss attempt");
+            assert_eq!(
+                attempt.status,
+                crate::cli::execution_state::ContinuationAttemptStatus::Activated
+            );
+            crate::cli::execution_state::activate_successor(repo, owner, &attempt.request)
+                .expect("canonical Activated retry republishes only projection and pointer");
+
+            let takeover = crate::cli::execution_state::GenerationTakeoverRequest {
+                operation_id: "takeover-post-ledger-successor".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: Some("work-post-ledger-takeover".to_string()),
+                source: Some("continue-work:handoff".to_string()),
+                from_session_id: session.id.clone(),
+                to_session_id: "post-ledger-takeover-winner".to_string(),
+                reason: "legal handoff after response-loss publication".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
+                .expect("prepare legal takeover suffix");
+            let planned =
+                crate::cli::execution_state::prepared_generation_takeover_execution_binding(
+                    repo, owner, &takeover,
+                )
+                .expect("planned takeover binding");
+            let mut winner = session.clone();
+            winner.id.clone_from(&takeover.to_session_id);
+            winner.linked_issue_number = Some(owner.number);
+            winner
+                .set_execution_binding(Some(SessionExecutionBinding {
+                    schema_version: SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: winner.id.clone(),
+                    repo_hash: winner.repo_hash.clone().expect("winner repo hash"),
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity: planned.clone(),
+                    capability_generation: 1,
+                }))
+                .expect("project Prepared takeover capability into winner Session");
+            save_session_fixture(&winner);
+            let winner_identity = gwt_agent::SessionExecutionIdentity::from_session(&winner)
+                .expect("validate winner Session")
+                .expect("winner execution identity");
+            let activated =
+                crate::cli::execution_state::with_prepared_generation_takeover_exact_session_activation(
+                    repo,
+                    owner,
+                    &takeover,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &winner_identity,
+                    |activate| activate(),
+                )
+                .expect("activate legal takeover transaction")
+                .expect("winner Session retains exact Prepared identity");
+            assert_eq!(activated, planned);
+
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let winner_before = std::fs::read(
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", winner.id)),
+            )
+            .expect("read winner Session bytes");
+            let error = continue_authenticated_execution(repo, &session.id, request)
+                .expect_err("historical Activated operation must not repair across a takeover");
+
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before,
+                "historical retry must preserve old Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+            assert_eq!(
+                std::fs::read(
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", winner.id)),
+                )
+                .expect("read winner Session after historical retry"),
+                winner_before,
+                "historical retry must preserve winner Session bytes"
+            );
+            assert!(
+                matches!(
+                    error.code,
+                    AgentWorkspaceUpdateErrorCode::TransactionConflict
+                        | AgentWorkspaceUpdateErrorCode::IdentityConflict
+                ),
+                "unexpected historical retry refusal: {error:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn stale_exact_unbound_loser_preserves_winner_authority_bytes() {
+        with_strict_target_fixture(|repo, session| {
+            let (stale_unbound, owner, predecessor) =
+                seed_foreign_active_exact_unbound(repo, session);
+            continue_authenticated_execution(
+                repo,
+                &stale_unbound.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-byte-winner".to_string(),
+                },
+            )
+            .expect("commit winner");
+            let winner = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &stale_unbound.id);
+            let loser = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "continue-byte-loser".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "execution-continue-byte-loser".to_string(),
+                initial_session_id: stale_unbound.id.clone(),
+                entrypoint: "execution.continue".to_string(),
+                requested_at: Utc::now(),
+            };
+
+            assert!(
+                crate::cli::execution_state::activate_successor_with_session_rebind(
+                    repo,
+                    owner,
+                    &loser,
+                    crate::cli::execution_state::SuccessorPredecessorStatus::Active,
+                    &predecessor,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &stale_unbound,
+                )
+                .expect("stale predecessor is a transaction miss")
+                .is_none(),
+                "stale loser must lose the Session CAS before ledger publication"
+            );
+
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(
+                    repo,
+                    repo,
+                    &stale_unbound.id,
+                ),
+                winner,
+                "loser must preserve winner Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn distinct_stale_exact_unbound_session_loses_predecessor_cas_byte_identically() {
+        with_strict_target_fixture(|repo, session| {
+            let (session_a, owner, predecessor) = seed_foreign_active_exact_unbound(repo, session);
+            let mut session_b = session_a.clone();
+            session_b.id = "exact-unbound-session-b".to_string();
+            save_session_fixture(&session_b);
+
+            let observed_a = evaluate_authenticated_execution_continuation(repo, &session_a.id)
+                .expect("Session A observes predecessor P");
+            let observed_b = evaluate_authenticated_execution_continuation(repo, &session_b.id)
+                .expect("Session B observes predecessor P");
+            assert_eq!(observed_a.current_binding, predecessor);
+            assert_eq!(observed_b.current_binding, predecessor);
+
+            let winner_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "continue-distinct-session-winner".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "execution-continue-distinct-session-winner".to_string(),
+                initial_session_id: session_b.id.clone(),
+                entrypoint: "execution.continue".to_string(),
+                requested_at: Utc::now(),
+            };
+            crate::cli::execution_state::activate_successor_with_session_rebind(
+                repo,
+                owner,
+                &winner_request,
+                crate::cli::execution_state::SuccessorPredecessorStatus::Active,
+                &observed_b.current_binding,
+                &gwt_core::paths::gwt_sessions_dir(),
+                &observed_b.session,
+            )
+            .expect("winner activation transaction")
+            .expect("Session B must commit its observed predecessor");
+            let winner_a = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session_a.id);
+            let winner_b = std::fs::read(
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session_b.id)),
+            )
+            .expect("read winner Session B bytes");
+
+            let loser_request = crate::cli::execution_state::SuccessorRequest {
+                operation_id: "continue-distinct-session-loser".to_string(),
+                principal_id: "gwt-host-continuation".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "execution-continue-distinct-session-loser".to_string(),
+                initial_session_id: session_a.id.clone(),
+                entrypoint: "execution.continue".to_string(),
+                requested_at: Utc::now(),
+            };
+            let loser = crate::cli::execution_state::activate_successor_with_session_rebind(
+                repo,
+                owner,
+                &loser_request,
+                crate::cli::execution_state::SuccessorPredecessorStatus::Active,
+                &observed_a.current_binding,
+                &gwt_core::paths::gwt_sessions_dir(),
+                &observed_a.session,
+            )
+            .expect("stale predecessor is a transaction miss");
+            assert!(
+                loser.is_none(),
+                "Session A must not activate from a predecessor superseded by Session B"
+            );
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session_a.id),
+                winner_a,
+                "stale Session A must preserve its Session, ECR, pointer, ledger, capability, and Work bytes"
+            );
+            assert_eq!(
+                std::fs::read(
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session_b.id)),
+                )
+                .expect("read Session B after stale loss"),
+                winner_b,
+                "stale Session A must preserve winner Session B bytes"
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_exact_unbound_session_migrates_and_binds_in_one_continuation() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut legacy, owner, predecessor) = seed_foreign_active_exact_unbound(repo, session);
+            legacy.schema_version = Session::CURRENT_SCHEMA_VERSION - 1;
+            save_session_fixture(&legacy);
+
+            let (receipt, binding) = continue_authenticated_execution(
+                repo,
+                &legacy.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "continue-legacy-exact-unbound".to_string(),
+                },
+            )
+            .expect("legacy exact-unbound Session must migrate and activate atomically");
+
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::SuccessorCreated
+            );
+            assert_eq!(
+                receipt.predecessor_generation_id.as_deref(),
+                Some(predecessor.generation_id.as_str())
+            );
+            let durable = Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", legacy.id)),
+            )
+            .expect("read migrated successor Session");
+            assert_eq!(durable.schema_version, Session::CURRENT_SCHEMA_VERSION);
+            assert_eq!(durable.linked_issue_number, Some(owner.number));
+            assert_eq!(durable.execution_binding.as_ref(), Some(&binding));
+            assert_eq!(binding.capability_generation, 1);
+            assert_eq!(receipt.execution_binding, binding.identity);
+            assert_eq!(
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read current successor binding")
+                    .as_ref(),
+                Some(&binding.identity)
+            );
+            assert!(
+                crate::cli::execution_state::current_active_execution_binding_matches(
+                    repo,
+                    owner,
+                    &legacy.id,
+                    &binding.identity,
+                )
+                .expect("validate migrated active binding readback")
+            );
+        });
+    }
+
+    #[test]
+    fn unbound_session_continuation_creates_exact_active_successor() {
+        with_strict_target_fixture(|repo, session| {
+            let mut session = session.clone();
+            session.linked_issue_number = None;
+            session.execution_binding = None;
+            save_session_fixture(&session);
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 2359,
+            };
+            crate::cli::execution_state::materialize_at_launch(
+                repo,
+                owner.kind,
+                owner.number,
+                &session.id,
+                "gwt-execute",
+                false,
+            )
+            .expect("materialize live predecessor");
+            crate::cli::execution_state::ensure_generation_ledger(
+                repo,
+                owner,
+                crate::cli::execution_state::LegacyActiveDisposition::Live,
+            )
+            .expect("materialize valid predecessor ledger");
+            let predecessor = crate::cli::execution_state::current_execution_binding(repo, owner)
+                .expect("read predecessor binding")
+                .expect("predecessor binding");
+            let session_path =
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+            let session_before_probe = std::fs::read(&session_path).expect("read Session bytes");
+            let ledger_before_probe =
+                crate::cli::execution_state::load_generation_ledger(repo, owner)
+                    .expect("read ledger before probe");
+            let probe = probe_authenticated_execution_continuation(repo, &session.id);
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Available
+            );
+            assert_eq!(probe.operation, "execution.continue");
+            assert_eq!(
+                std::fs::read(&session_path).expect("read Session bytes after probe"),
+                session_before_probe,
+                "the recovery probe must not mutate Session bytes"
+            );
+            assert_eq!(
+                crate::cli::execution_state::load_generation_ledger(repo, owner)
+                    .expect("read ledger after probe"),
+                ledger_before_probe,
+                "the recovery probe must not mutate execution authority"
+            );
+            let before = crate::cli::execution_state::diagnose(repo, Some(session.id.as_str()));
+            assert!(before
+                .available_recoveries
+                .contains(&"execution.continue".to_string()));
+            assert!(!before
+                .available_recoveries
+                .contains(&"workspace.ensure".to_string()));
+            assert!(!before
+                .available_recoveries
+                .contains(&"execution.repair".to_string()));
+
+            let request = AgentExecutionContinuationRequest {
+                schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                operation_id: "continue-exact-unbound-successor".to_string(),
+            };
+            let (receipt, binding) = continue_authenticated_execution(repo, &session.id, request)
+                .expect("exact unbound Host Session must create one successor");
+
+            assert_eq!(
+                receipt.outcome,
+                AgentExecutionContinuationOutcome::SuccessorCreated
+            );
+            assert_eq!(
+                receipt.predecessor_generation_id.as_deref(),
+                Some(predecessor.generation_id.as_str())
+            );
+            assert_ne!(receipt.execution_binding, predecessor);
+            assert_eq!(receipt.execution_binding, binding.identity);
+            assert_eq!(binding.owner_kind, owner.kind.as_str());
+            assert_eq!(binding.owner_number, owner.number);
+            assert_eq!(binding.session_id, session.id);
+            let durable = Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+            )
+            .expect("read successor-bound Session");
+            assert_eq!(durable.linked_issue_number, Some(owner.number));
+            assert_eq!(durable.execution_binding.as_ref(), Some(&binding));
+            assert_eq!(
+                crate::cli::execution_state::current_execution_binding(repo, owner)
+                    .expect("read successor authority")
+                    .as_ref(),
+                Some(&binding.identity)
+            );
+            let after = crate::cli::execution_state::diagnose(repo, Some(session.id.as_str()));
+            assert!(after
+                .available_recoveries
+                .contains(&"workspace.ensure".to_string()));
+            assert!(!after
+                .available_recoveries
+                .contains(&"execution.repair".to_string()));
+        });
+    }
+
+    #[test]
     fn resume_producing_helper_recovers_authority_for_linked_session() {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
@@ -3700,9 +5639,7 @@ mod tests {
     #[test]
     fn execution_continuation_retries_validation_write_without_double_rebind() {
         with_strict_target_fixture(|repo, session| {
-            let (mut session, _) = bind_session_to_current_execution(repo, session);
-            session.set_execution_binding(None).unwrap();
-            save_session_fixture(&session);
+            let (session, _) = bind_session_to_current_execution(repo, session);
             crate::cli::execution_state::set_continuation_validation_write_failure();
             let request = AgentExecutionContinuationRequest {
                 schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
@@ -3829,7 +5766,8 @@ mod tests {
                 bind_session_to_current_execution(repo, session);
             let mut successor_session =
                 session_fixture("foreign-active-successor", repo, &session.branch);
-            successor_session.linked_issue_number = predecessor.linked_issue_number;
+            successor_session.linked_issue_number = None;
+            successor_session.execution_binding = None;
             save_session_fixture(&successor_session);
             let repo = repo.to_path_buf();
             let session_id = successor_session.id.clone();
@@ -3886,6 +5824,41 @@ mod tests {
                 durable_successor.execution_binding.as_ref(),
                 Some(&successes[0].1)
             );
+            assert_eq!(
+                durable_successor
+                    .execution_binding
+                    .as_ref()
+                    .map(|binding| binding.capability_generation),
+                Some(1),
+                "the losing exact-unbound continuation must not rotate capability authority",
+            );
+            let ledger = crate::cli::execution_state::load_generation_ledger(
+                &repo,
+                crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 2359,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                ledger.continuation_attempts.len(),
+                2,
+                "the losing continuation must not publish a Prepared ledger suffix: {:?}",
+                ledger.continuation_attempts
+            );
+            assert_eq!(
+                ledger.continuation_attempts[0].status,
+                crate::cli::execution_state::ContinuationAttemptStatus::Prepared
+            );
+            assert_eq!(
+                ledger.continuation_attempts[1].status,
+                crate::cli::execution_state::ContinuationAttemptStatus::Activated
+            );
+            assert!(ledger
+                .continuation_attempts
+                .iter()
+                .all(|attempt| { attempt.request.operation_id == successes[0].0.operation_id }));
             seed_work_mutation_surfaces(&repo, &repo);
             seed_unique_mutation_target(
                 &repo,
@@ -5386,6 +7359,83 @@ mod tests {
                 "ambiguous",
             );
         });
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_ignores_terminal_and_paused_foreign_history() {
+        for (label, status) in [
+            (
+                "terminal",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            ),
+            (
+                "paused",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+            ),
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let work_id = "work-current";
+                seed_unique_mutation_target(repo, repo, session, work_id);
+
+                let mut work_items = mutation_work_items(repo, session, work_id);
+                let mut history = work_items.work_items[0].clone();
+                history.id = format!("work-{label}-history");
+                history.status_category = status;
+                history.completed_at = (status
+                    == gwt_core::workspace_projection::WorkspaceStatusCategory::Done)
+                    .then(Utc::now);
+                history.agents[0].session_id = "historical-session".to_string();
+                work_items.work_items.push(history);
+                save_mutation_work_items(repo, &work_items);
+
+                let target = resolve_session_work_mutation_target(repo, &session.id)
+                    .expect("historical foreign Work must not shadow exact current authority");
+                assert_eq!(target.work_id, work_id);
+            });
+        }
+    }
+
+    #[test]
+    fn strict_session_work_mutation_target_rejects_nonhistorical_or_current_paused_shadow() {
+        for (label, status, shadow_is_current) in [
+            (
+                "blocked",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked,
+                false,
+            ),
+            (
+                "unknown",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown,
+                false,
+            ),
+            (
+                "paused-current",
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+                true,
+            ),
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let work_id = "work-current";
+                seed_unique_mutation_target(repo, repo, session, work_id);
+
+                let mut work_items = mutation_work_items(repo, session, work_id);
+                let mut shadow = work_items.work_items[0].clone();
+                shadow.id = format!("work-{label}-shadow");
+                shadow.status_category = status;
+                shadow.completed_at = None;
+                if !shadow_is_current {
+                    shadow.agents[0].session_id = "historical-session".to_string();
+                }
+                work_items.work_items.push(shadow);
+                save_mutation_work_items(repo, &work_items);
+
+                assert_workspace_ensure_error(
+                    resolve_session_work_mutation_target(repo, &session.id)
+                        .expect_err("unsafe container shadow must fail closed"),
+                    "ambiguous",
+                );
+            });
+        }
     }
 
     #[test]

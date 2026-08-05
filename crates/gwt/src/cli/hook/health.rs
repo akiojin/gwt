@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const SLOW_HANDLER_THRESHOLD_MS: f64 = 1000.0;
+const SELF_HEALED_MARKER: &str = ".gwt/managed-hook-self-healed";
 const MANAGED_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -71,7 +72,9 @@ impl ManagedHookHealthInput {
             runtime_state_path: std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
                 .map(PathBuf::from),
             profile_path: None,
-            expected_hook_bin: None,
+            expected_hook_bin: std::env::var("GWT_HOOK_BIN")
+                .ok()
+                .filter(|value| !value.is_empty()),
         }
     }
 
@@ -135,6 +138,7 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         if health.status == ManagedHookHealthStatus::Ready {
             health.status = ManagedHookHealthStatus::Inactive;
         }
+        apply_self_healed_marker(input, &mut health);
         return health;
     };
 
@@ -142,6 +146,7 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         if health.status == ManagedHookHealthStatus::Ready {
             health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
         }
+        apply_self_healed_marker(input, &mut health);
         return health;
     }
 
@@ -167,7 +172,29 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         }
     }
 
+    apply_self_healed_marker(input, &mut health);
     health
+}
+
+fn apply_self_healed_marker(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
+    if input.worktree_root.join(SELF_HEALED_MARKER).is_file()
+        && matches!(
+            health.status,
+            ManagedHookHealthStatus::Ready
+                | ManagedHookHealthStatus::Inactive
+                | ManagedHookHealthStatus::WaitingForFirstHookEvent
+        )
+    {
+        health.status = ManagedHookHealthStatus::SelfHealed;
+    }
+}
+
+pub fn record_managed_hook_self_healed(worktree_root: &Path) -> io::Result<()> {
+    let marker = worktree_root.join(SELF_HEALED_MARKER);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(marker, chrono::Utc::now().to_rfc3339())
 }
 
 fn audit_hook_profile(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
@@ -248,11 +275,28 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
     let claude_settings = worktree.join(".claude/settings.local.json");
     let codex_dir = worktree.join(".codex");
     let codex_hooks = worktree.join(".codex/hooks.json");
+    let provider_hooks = [
+        (
+            worktree.join(".gwt/opencode"),
+            worktree.join(".gwt/opencode/plugins/gwt-hooks.js"),
+        ),
+        (
+            worktree.join(".gwt/openclaw"),
+            worktree.join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+        ),
+        (
+            worktree.join(".gwt/hermes"),
+            worktree.join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
+        ),
+    ];
 
     let has_surface = claude_dir.exists()
         || claude_settings.exists()
         || codex_dir.exists()
-        || codex_hooks.exists();
+        || codex_hooks.exists()
+        || provider_hooks
+            .iter()
+            .any(|(root, artifact)| root.exists() || artifact.exists());
     if !has_surface {
         health.status = ManagedHookHealthStatus::Inactive;
         return;
@@ -273,6 +317,17 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
     }
     if codex_hooks.exists() {
         audit_hook_json_config(&codex_hooks, input.expected_hook_bin.as_deref(), health);
+    }
+
+    for (root, artifact) in provider_hooks {
+        if artifact.exists() {
+            audit_provider_hook_config(&artifact, input.expected_hook_bin.as_deref(), health);
+        } else if root.exists() {
+            needs_attention(
+                health,
+                format!("managed hook config missing: {}", artifact.display()),
+            );
+        }
     }
 }
 
@@ -311,27 +366,126 @@ fn audit_hook_json_config(
                 ),
             );
         }
+        for command in &commands {
+            if is_managed_event_command(command, event) && !command.contains("GWT_BIN_PATH") {
+                needs_attention(
+                    health,
+                    format!("managed hook runtime resolver missing: {}", path.display()),
+                );
+            }
+        }
         if let Some(expected) = expected_hook_bin {
             for command in commands {
                 if !is_managed_event_command(&command, event) {
                     continue;
                 }
-                let Some(actual) = hook_command_binary_prefix(&command) else {
+                let Some(actual) = hook_command_binary_fallback(&command) else {
                     continue;
                 };
-                if actual != expected {
-                    degraded(
-                        health,
-                        format!(
-                            "managed hook binary skew: {} uses {}, expected {}",
-                            path.display(),
-                            actual,
-                            expected
-                        ),
-                    );
+                audit_hook_binary(path, &actual, Some(expected), health);
+            }
+        } else {
+            for command in commands {
+                if !is_managed_event_command(&command, event) {
+                    continue;
+                }
+                if let Some(actual) = hook_command_binary_fallback(&command) {
+                    audit_hook_binary(path, &actual, None, health);
                 }
             }
         }
+    }
+}
+
+fn audit_provider_hook_config(
+    path: &Path,
+    expected_hook_bin: Option<&str>,
+    health: &mut ManagedHookHealth,
+) {
+    let Ok(raw) = fs::read_to_string(path) else {
+        degraded(
+            health,
+            format!("managed hook config could not be read: {}", path.display()),
+        );
+        return;
+    };
+    if !raw.contains("GWT_BIN_PATH") {
+        needs_attention(
+            health,
+            format!("managed hook runtime resolver missing: {}", path.display()),
+        );
+    }
+    let Some(actual) = hook_command_binary_fallback(&raw) else {
+        needs_attention(
+            health,
+            format!("managed hook runtime resolver missing: {}", path.display()),
+        );
+        return;
+    };
+    audit_hook_binary(path, &actual, expected_hook_bin, health);
+}
+
+fn audit_hook_binary(
+    path: &Path,
+    actual: &str,
+    expected_hook_bin: Option<&str>,
+    health: &mut ManagedHookHealth,
+) {
+    let actual_path = Path::new(actual);
+    let explicitly_pinned = expected_hook_bin.is_some_and(|expected| expected == actual);
+    if crate::managed_assets::is_worktree_local_build_binary(actual_path) && !explicitly_pinned {
+        degraded(
+            health,
+            format!(
+                "managed hook worktree-local binary: {} uses {}",
+                path.display(),
+                actual
+            ),
+        );
+        return;
+    }
+    if let Some(expected) = expected_hook_bin {
+        if actual != expected {
+            degraded(
+                health,
+                format!(
+                    "managed hook binary skew: {} uses {}, expected {}",
+                    path.display(),
+                    actual,
+                    expected
+                ),
+            );
+        }
+    }
+    if looks_absolute(actual) {
+        if !actual_path.is_file() {
+            degraded(
+                health,
+                format!(
+                    "managed hook binary missing: {} uses {}",
+                    path.display(),
+                    actual
+                ),
+            );
+        } else if which::which(actual).is_err() {
+            degraded(
+                health,
+                format!(
+                    "managed hook binary not executable: {} uses {}",
+                    path.display(),
+                    actual
+                ),
+            );
+        }
+    } else if which::which(actual).is_err() {
+        degraded(
+            health,
+            format!(
+                "managed hook binary missing: {} uses {}",
+                path.display(),
+                actual
+            ),
+        );
     }
 }
 
@@ -357,14 +511,93 @@ fn is_managed_event_command(command: &str, event: &str) -> bool {
     command.contains(&format!("hook event {event}"))
 }
 
-fn hook_command_binary_prefix(command: &str) -> Option<String> {
+fn hook_command_binary_fallback(command: &str) -> Option<String> {
+    if let Some(value) = posix_shell_assignment_value(command, "gwt_fallback") {
+        return Some(value);
+    }
+    if let Some(rest) = command
+        .split_once("gwt_bin=\"${GWT_BIN_PATH:-}\"")
+        .map(|(_, rest)| rest)
+    {
+        if let Some(value) = posix_shell_assignment_value(rest, "gwt_bin") {
+            return Some(value);
+        }
+    }
+    if let Some(rest) = command.split_once("${GWT_BIN_PATH:-").map(|(_, rest)| rest) {
+        let value = rest.split_once('}')?.0;
+        return nonempty_unquoted(value);
+    }
+    if let Some(rest) = command
+        .split_once("process.env.GWT_BIN_PATH ||")
+        .map(|(_, rest)| rest.trim_start())
+    {
+        let value = rest.split_once(';').map_or(rest, |(value, _)| value).trim();
+        if let Ok(value) = serde_json::from_str::<String>(value) {
+            return (!value.is_empty()).then_some(value);
+        }
+        return nonempty_unquoted(value);
+    }
+    if let Some(rest) = command.split_once("else {").map(|(_, rest)| rest) {
+        let value = rest.split_once('}')?.0;
+        return nonempty_powershell_quoted(value);
+    }
     let (prefix, _) = command.split_once(" hook ")?;
-    let prefix = prefix
+    nonempty_unquoted(prefix)
+}
+
+fn posix_shell_assignment_value(command: &str, variable: &str) -> Option<String> {
+    let assignment = format!("{variable}=");
+    let rest = command.split_once(&assignment)?.1.trim_start();
+    posix_shell_word(rest)
+}
+
+fn posix_shell_word(value: &str) -> Option<String> {
+    if value.starts_with('\'') {
+        let mut cursor = 1;
+        loop {
+            let closing = cursor + value.get(cursor..)?.find('\'')?;
+            if value
+                .get(closing + 1..)
+                .is_some_and(|rest| rest.starts_with("\\''"))
+            {
+                cursor = closing + 4;
+                continue;
+            }
+            let token = value.get(..=closing)?;
+            let decoded = token
+                .strip_prefix('\'')?
+                .strip_suffix('\'')?
+                .replace(r"'\''", "'");
+            return (!decoded.is_empty()).then_some(decoded);
+        }
+    }
+
+    let end = value
+        .find(|character: char| character == ';' || character.is_whitespace())
+        .unwrap_or(value.len());
+    nonempty_unquoted(value.get(..end)?)
+}
+
+fn nonempty_powershell_quoted(value: &str) -> Option<String> {
+    nonempty_unquoted(value).map(|value| value.replace("''", "'"))
+}
+
+fn nonempty_unquoted(value: &str) -> Option<String> {
+    let value = value
         .trim()
         .trim_matches('\'')
         .trim_matches('"')
-        .to_string();
-    (!prefix.is_empty()).then_some(prefix)
+        .replace("\\\"", "\"")
+        .replace("\\$", "$")
+        .replace("\\`", "`")
+        .replace("\\\\", "\\");
+    (!value.is_empty()).then_some(value)
+}
+
+fn looks_absolute(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("\\\\")
+        || value.as_bytes().get(1).is_some_and(|byte| *byte == b':')
 }
 
 fn needs_attention(health: &mut ManagedHookHealth, issue: impl Into<String>) {
@@ -374,12 +607,18 @@ fn needs_attention(health: &mut ManagedHookHealth, issue: impl Into<String>) {
     {
         health.status = ManagedHookHealthStatus::NeedsAttention;
     }
-    health.issues.push(issue.into());
+    push_unique_issue(health, issue.into());
 }
 
 fn degraded(health: &mut ManagedHookHealth, issue: impl Into<String>) {
     health.status = ManagedHookHealthStatus::Degraded;
-    health.issues.push(issue.into());
+    push_unique_issue(health, issue.into());
+}
+
+fn push_unique_issue(health: &mut ManagedHookHealth, issue: String) {
+    if !health.issues.contains(&issue) {
+        health.issues.push(issue);
+    }
 }
 
 fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
@@ -392,16 +631,51 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
         || worktree_root.join(".claude/settings.local.json").exists();
     let codex_surface =
         worktree_root.join(".codex").exists() || worktree_root.join(".codex/hooks.json").exists();
+    let provider_surface = worktree_root.join(".gwt/opencode").exists()
+        || worktree_root.join(".gwt/openclaw").exists()
+        || worktree_root.join(".gwt/hermes").exists();
     let mut repaired = false;
 
-    if claude_surface {
-        gwt_skills::generate_settings_local(worktree_root)?;
-        repaired = true;
-    }
-    if codex_surface {
-        gwt_skills::generate_codex_hooks(worktree_root)?;
+    if claude_surface || codex_surface || provider_surface {
+        crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
+        record_managed_hook_self_healed(worktree_root)?;
         repaired = true;
     }
 
     Ok(ManagedHookRepairOutcome { repaired })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_command_binary_fallback;
+
+    #[test]
+    fn posix_two_stage_runtime_fallback_decodes_embedded_apostrophes() {
+        let command = r#"gwt_bin="${GWT_BIN_PATH:-}"; if [ -z "$gwt_bin" ]; then gwt_bin='/opt/GWT O'\''Brien}/gwtd'; fi; if command -v "$gwt_bin" >/dev/null 2>&1; then "$gwt_bin" hook event Stop; else true; fi"#;
+
+        assert_eq!(
+            hook_command_binary_fallback(command).as_deref(),
+            Some("/opt/GWT O'Brien}/gwtd")
+        );
+    }
+
+    #[test]
+    fn posix_named_runtime_fallback_decodes_embedded_apostrophes() {
+        let command = r#"gwt_fallback='/opt/GWT O'\''Brien}/gwtd'; gwt_bin="${GWT_BIN_PATH:-$gwt_fallback}"; "$gwt_bin" hook event Stop"#;
+
+        assert_eq!(
+            hook_command_binary_fallback(command).as_deref(),
+            Some("/opt/GWT O'Brien}/gwtd")
+        );
+    }
+
+    #[test]
+    fn powershell_runtime_fallback_decodes_embedded_apostrophes() {
+        let command = "powershell -NoProfile -Command \"& { $gwtBin = if ($env:GWT_BIN_PATH) { $env:GWT_BIN_PATH } else { 'C:\\Users\\O''Brien\\GWT\\gwtd.exe' }; & $gwtBin hook event Stop }\"";
+
+        assert_eq!(
+            hook_command_binary_fallback(command).as_deref(),
+            Some("C:\\Users\\O'Brien\\GWT\\gwtd.exe")
+        );
+    }
 }
