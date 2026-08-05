@@ -65,8 +65,13 @@ confirmation questions for work the user already asked for.
 - Read the queue with `issue.monitor.status`.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
-  A user's manual GUI reorder always wins; re-read status before
-  overwriting the order.
+  Your ordering decision takes precedence over a GUI reorder: the GUI
+  is an observation and emergency surface, and the user's ordering
+  intent reaches you through conversation. Re-read status before every
+  write so you never clobber an order you have not seen.
+- You must be able to explain the current order whenever the user asks.
+  Record why you placed each issue where you did in your session notes
+  at the time you set it. An ordering you cannot explain is not allowed.
 - "Do #N now": run `issue.monitor.launch_now` with `params.number`.
   It only moves the issue to the priority head and triggers an
   immediate scan; the launch itself still goes through the Monitor
@@ -94,6 +99,17 @@ confirmation questions for work the user already asked for.
   situation and concrete options to the user in conversation, then
   apply the answer through existing operations (requeue via priority
   operations, hold via labels, or propose closing).
+
+## Reporting cadence
+
+- Report on your own initiative only at milestones: an Issue registered,
+  an implementation agent launched, a PR opened, a merge landed, a
+  `needs_human` escalation, and a fatal failure. Collapse a run of
+  milestones into one digest instead of narrating each one.
+- `needs_human` and fatal failures are always presented immediately and
+  are never held for a digest.
+- Fine-grained progress is answered when the user asks for it, not
+  volunteered.
 
 ## Auxiliary agents
 
@@ -175,11 +191,46 @@ mod tests {
             "snapshots are the\n  truth",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            // FR-015: the PM must be able to account for its own ordering.
+            "explain the current order",
+            // FR-016: PM ordering beats a GUI reorder (後勝ち).
+            "takes precedence over a GUI reorder",
+            // FR-017: milestone-only digest, escalations never batched.
+            "one digest",
+            "never held for a digest",
             // FR-007: auxiliary agents never touch production.
             "must not\n  modify production code",
             // FR-013: stopping story.
             "closing the PM pane",
         ]
+    }
+
+    /// SPEC-3431 FR-016: the PM's autonomous ordering takes precedence over a
+    /// manual GUI reorder (後勝ち), and #3165 FR-054 is exempted while the PM
+    /// is active. The first contract shipped the opposite rule, which would
+    /// have made the PM defer to a stale GUI order forever.
+    #[test]
+    fn contract_states_pm_ordering_precedence_over_the_gui() {
+        assert!(
+            !SKILL_BODY_EN.contains("manual GUI reorder always wins"),
+            "the contract must not restore the pre-FR-016 rule"
+        );
+        assert!(SKILL_BODY_EN.contains("takes precedence over a GUI reorder"));
+    }
+
+    /// FR-015: autonomous ordering is allowed only if the PM can account for
+    /// it. An ordering it cannot explain is not permitted.
+    #[test]
+    fn contract_requires_explainable_ordering() {
+        assert!(SKILL_BODY_EN.contains("explain the current order"));
+    }
+
+    /// FR-017: unsolicited reporting is milestone-only and collapses runs of
+    /// events into one digest; NeedsHuman and fatal failures are never held.
+    #[test]
+    fn contract_defines_milestone_digest_reporting() {
+        assert!(SKILL_BODY_EN.contains("one digest"));
+        assert!(SKILL_BODY_EN.contains("never held for a digest"));
     }
 
     #[test]
