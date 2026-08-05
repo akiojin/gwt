@@ -1057,6 +1057,41 @@ pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementSta
 /// the configured upstream. Repositories that have never materialized the
 /// event log (and have no trusted settlement receipt) remain outside this
 /// contract so legacy/unmanaged command surfaces continue to work.
+/// #3426: the receipt is written only by a terminal Work update, but a Work
+/// that is *already* terminal cannot receive one — `workspace.ensure` refuses a
+/// terminal canonical Work and `workspace.update` requires that authority, and
+/// no operation reopens it. Telling the operator to "complete its terminal Work
+/// update" in that state names an instruction they cannot carry out, so point
+/// at the escape that actually exists. The gate itself is unchanged.
+fn missing_generation_receipt_refusal(worktree: &Path) -> String {
+    if canonical_work_for_worktree_is_terminal(worktree) {
+        return "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt, and its canonical Work is already terminal — a terminal Work cannot accept the settling update. Run Start Work for this owner to revive the Work, then settle and push its terminal Work update before retrying.".to_string();
+    }
+    "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying.".to_string()
+}
+
+fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
+    let branch = gwt_git::Repository::open(worktree)
+        .ok()
+        .and_then(|repository| repository.current_branch().ok().flatten());
+    let Some(work_id) = gwt_core::workspace_projection::canonical_work_id(
+        worktree,
+        branch.as_deref(),
+        Some(worktree),
+    ) else {
+        return false;
+    };
+    gwt_core::workspace_projection::load_workspace_work_items(worktree)
+        .ok()
+        .flatten()
+        .is_some_and(|items| {
+            items
+                .work_items
+                .iter()
+                .any(|item| item.id == work_id && item.is_terminal())
+        })
+}
+
 #[must_use]
 pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
     let receipt = match load_work_event_settlement_record(worktree) {
@@ -1101,10 +1136,7 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             );
         }
         None if current_binding.is_some() => {
-            return Some(
-                "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying."
-                    .to_string(),
-            );
+            return Some(missing_generation_receipt_refusal(worktree));
         }
         _ => {}
     }
@@ -4285,6 +4317,80 @@ pub(crate) mod tests {
         assert!(
             refusal.contains("generation") && refusal.contains("predecessor"),
             "generation mismatch must be actionable without leaking secrets: {refusal}"
+        );
+    }
+
+    // #3426: terminalizing the canonical Work without writing the settlement
+    // receipt locks the PR gate for good — workspace.ensure refuses a terminal
+    // Work and workspace.update requires ensure, so "complete its terminal Work
+    // update" is not an instruction the operator can carry out. The refusal
+    // must name the escape that actually exists instead.
+    #[test]
+    fn missing_receipt_for_terminal_work_names_the_reachable_escape() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+
+        initialize_generation_scoped_execution(&fixture.repo, "session-terminal-work");
+        assert!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("read receipt")
+                .is_none(),
+            "the fixture must model a generation that never settled a Work event"
+        );
+
+        // A live, non-terminal Work still gets the ordinary instruction.
+        let work_id = gwt_core::workspace_projection::canonical_work_id(
+            &fixture.repo,
+            Some("main"),
+            Some(fixture.repo.as_path()),
+        )
+        .expect("canonical Work id");
+        let now = chrono::Utc::now();
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            &work_id,
+            now,
+        );
+        start.title = Some("Terminal trap".to_string());
+        start.agent_session_id = Some("session-terminal-work".to_string());
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start)
+            .expect("record live Work");
+        let live = work_event_settlement_refusal(&fixture.repo)
+            .expect("a generation without a receipt must still refuse");
+        assert!(
+            live.contains("terminal Work update"),
+            "a live Work keeps the ordinary instruction: {live}"
+        );
+
+        // Once the Work is terminal that instruction is unreachable.
+        gwt_core::workspace_projection::record_workspace_work_event(
+            &fixture.repo,
+            gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Done,
+                &work_id,
+                now + chrono::Duration::seconds(1),
+            ),
+        )
+        .expect("terminalize the canonical Work");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a terminal Work without a receipt must still refuse");
+        assert!(
+            refusal.contains("terminal"),
+            "the refusal must state that the Work is already terminal: {refusal}"
+        );
+        assert!(
+            refusal.contains("Start Work"),
+            "the refusal must name the escape that is actually reachable: {refusal}"
+        );
+        assert!(
+            !refusal.contains("Complete its terminal Work update"),
+            "the refusal must not advertise an instruction the operator cannot carry out: {refusal}"
         );
     }
 
