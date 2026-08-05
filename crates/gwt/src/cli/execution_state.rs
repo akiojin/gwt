@@ -13212,12 +13212,27 @@ mod tests {
                 .collect()
         }
 
+        /// Compare authority paths the way the trusted store keys them.
+        /// Canonicalize the parent (the file itself may already have been
+        /// quarantined) so a Windows 8.3 short name such as `AKIOJI~1` and its
+        /// long form resolve to the same string, then unify separators and
+        /// case-fold where the filesystem does. macOS `/private` stays
+        /// stripped for the same reason it always was.
         fn normalized_test_path(path: &Path) -> String {
-            let rendered = path.to_string_lossy();
-            rendered
+            let resolved = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => dunce::canonicalize(parent)
+                    .map(|parent| parent.join(name))
+                    .unwrap_or_else(|_| path.to_path_buf()),
+                _ => path.to_path_buf(),
+            };
+            let rendered = resolved.to_string_lossy().replace('\\', "/");
+            let rendered = rendered
                 .strip_prefix("/private")
                 .unwrap_or(&rendered)
-                .to_string()
+                .to_string();
+            #[cfg(windows)]
+            let rendered = rendered.to_lowercase();
+            rendered
         }
 
         fn mirror_pointer_partial_authority(
