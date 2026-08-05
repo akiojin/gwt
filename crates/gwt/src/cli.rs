@@ -254,6 +254,9 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    /// Issue #3448: settle incomplete Works whose owner Issue is already
+    /// closed. `dry_run` reports the plan without emitting close events.
+    WorkPrune { dry_run: bool, ids: Vec<String> },
 }
 
 /// SPEC-1942 command model for `actions.*` JSON operations.

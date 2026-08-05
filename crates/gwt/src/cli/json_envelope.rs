@@ -100,6 +100,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.work_prune" | "workspace.work-prune" => {
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune {
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+                ids: optional_string_vec(params, "ids")?,
+            })
+        }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
         "board.config.show" | "board.config-show" => {
