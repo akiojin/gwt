@@ -2944,6 +2944,28 @@ mod tests {
     };
 
     #[test]
+    fn knowledge_search_results_retains_the_baseline_rust_shape() {
+        // SPEC #1939 FR-407 — the public Rust event remains source-compatible
+        // with legacy clients. Optional retry metadata belongs to the private
+        // outbound wire envelope, not this public enum variant.
+        let event = BackendEvent::KnowledgeSearchResults {
+            id: "tab-1::issue-1".to_string(),
+            knowledge_kind: crate::knowledge_bridge::KnowledgeKind::Issue,
+            query: "silent recovery".to_string(),
+            request_id: 7,
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: true,
+        };
+        let value = serde_json::to_value(&event).expect("serialize baseline event");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "direct event serialization must retain the baseline wire shape: {value}"
+        );
+    }
+
+    #[test]
     fn pane_send_input_deserializes_session_scoped_injection_contract() {
         let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
             "kind": "pane_send_input",
