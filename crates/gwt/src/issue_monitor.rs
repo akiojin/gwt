@@ -800,6 +800,12 @@ pub struct IssueMonitorIssue {
 #[serde(rename_all = "snake_case")]
 pub enum MonitorInboxState {
     Queued,
+    /// A design-required Issue is missing a usable plan or tasks artifact.
+    /// This is re-evaluated on every scan and is therefore non-terminal.
+    NotReady,
+    /// An operator excluded the Issue from automatic execution with a hold
+    /// label. This is re-evaluated on every scan and is therefore non-terminal.
+    HoldExcluded,
     Launching,
     Launched,
     /// Work PR merged into the base branch — the agent's work is done and the
@@ -847,6 +853,8 @@ pub struct IssueMonitorInboxItem {
     pub launch_plan: Option<IssueMonitorLaunchPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3285,6 +3293,7 @@ impl IssueMonitorState {
             claim_expires_at: None,
             launched_window_id,
             error_message,
+            exclusion_reason: None,
         };
         self.upsert_inbox(item);
         if state == MonitorInboxState::Queued
@@ -3371,6 +3380,7 @@ impl IssueMonitorState {
                     .and_then(|item| item.launched_window_id.clone())
             }),
             error_message,
+            exclusion_reason: None,
         };
         self.upsert_inbox(item);
         if state == MonitorInboxState::Queued
@@ -3399,6 +3409,7 @@ impl IssueMonitorState {
             claim_expires_at: Some(expires_at.into()),
             launched_window_id: None,
             error_message: None,
+            exclusion_reason: None,
         });
         self.apply_priority_order_to_inbox();
     }
@@ -4197,6 +4208,7 @@ impl IssueMonitorState {
             item.state = state;
             item.launched_window_id = None;
             item.error_message = None;
+            item.exclusion_reason = None;
         }
     }
 
