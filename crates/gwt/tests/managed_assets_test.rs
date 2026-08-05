@@ -3,6 +3,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+#[cfg(unix)]
+use std::{path::PathBuf, process::Output};
+
 use gwt::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
@@ -306,6 +309,183 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     assert!(exclude.contains(".codex/skills/gwt-*"));
 }
 
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_lock();
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
+
+    let stable_hook_bin = dir.path().join("installed/gwtd'${stable}");
+    std::fs::create_dir_all(stable_hook_bin.parent().expect("stable bin parent"))
+        .expect("create stable bin parent");
+    std::fs::write(&stable_hook_bin, "#!/bin/sh\nexit 0\n").expect("write stable hook bin");
+    std::fs::set_permissions(&stable_hook_bin, std::fs::Permissions::from_mode(0o755))
+        .expect("make stable hook bin executable");
+    let _hook_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &stable_hook_bin);
+
+    let claude_settings = dir.path().join(".claude/settings.local.json");
+    std::fs::create_dir_all(claude_settings.parent().expect("Claude settings parent"))
+        .expect("create Claude settings parent");
+    std::fs::write(
+        &claude_settings,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "customSetting": true,
+            "hooks": {
+                "Stop": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "echo keep-user-hook"
+                    }]
+                }, {
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/old/worktree/target/debug/gwtd hook event Stop"
+                    }]
+                }]
+            }
+        }))
+        .expect("serialize Claude settings"),
+    )
+    .expect("seed Claude settings");
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let hook_artifacts = [
+        ".claude/settings.local.json",
+        ".codex/hooks.json",
+        ".gwt/opencode/plugins/gwt-hooks.js",
+        ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+        ".gwt/hermes/agent-hooks/gwt-hook.sh",
+    ];
+    for artifact in hook_artifacts {
+        assert!(
+            dir.path().join(artifact).is_file(),
+            "missing managed hook surface: {artifact}"
+        );
+    }
+
+    let before = hook_artifacts
+        .iter()
+        .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
+        .collect::<Vec<_>>();
+    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, None);
+    assert!(
+        output.status.success(),
+        "browser-check audit failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = hook_artifacts
+        .iter()
+        .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
+        .collect::<Vec<_>>();
+    assert_eq!(before, after, "hook.health audit must be read-only");
+
+    let rendered_claude =
+        std::fs::read_to_string(&claude_settings).expect("read refreshed Claude settings");
+    assert!(rendered_claude.contains("echo keep-user-hook"));
+    assert!(!rendered_claude.contains("/old/worktree/target/debug/gwtd"));
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_audit_blocks_exact_fallback_mismatch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_lock();
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
+    let _hook_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let opencode_hook = dir.path().join(".gwt/opencode/plugins/gwt-hooks.js");
+    let rendered = std::fs::read_to_string(&opencode_hook).expect("read OpenCode hook");
+    let mismatched = rendered.replacen(
+        "process.env.GWT_BIN_PATH || \"gwtd\"",
+        "process.env.GWT_BIN_PATH || \"/wrong/stable/gwtd\"",
+        1,
+    );
+    assert_ne!(
+        rendered, mismatched,
+        "OpenCode fallback fixture must change"
+    );
+    std::fs::write(&opencode_hook, mismatched).expect("write mismatched OpenCode hook");
+
+    let path_dir = tempdir().expect("PATH tempdir");
+    let path_gwtd = path_dir.path().join("gwtd");
+    std::fs::write(&path_gwtd, "#!/bin/sh\nexit 0\n").expect("write PATH gwtd");
+    std::fs::set_permissions(&path_gwtd, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH gwtd executable");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let audit_path = std::env::join_paths(
+        std::iter::once(path_dir.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose audit PATH");
+
+    let output = run_browser_check_hook_audit(dir.path(), Path::new("gwtd"), Some(&audit_path));
+    assert!(
+        !output.status.success(),
+        "browser-check audit unexpectedly accepted mismatched fallback"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("managed hook surfaces did not converge"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("managed hook binary skew")
+            && stderr.contains("/wrong/stable/gwtd")
+            && stderr.contains("expected gwtd"),
+        "audit must report the exact fallback mismatch even though the file contains other gwtd tokens:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_audit_allows_missing_logical_fallback() {
+    let _env_guard = env_lock();
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
+    let _hook_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let tools = tempdir().expect("isolated tool PATH");
+    for name in ["bash", "env", "jq", "rg"] {
+        let source = which::which(name).unwrap_or_else(|error| panic!("resolve {name}: {error}"));
+        std::os::unix::fs::symlink(&source, tools.path().join(name))
+            .unwrap_or_else(|error| panic!("link {name} from {}: {error}", source.display()));
+    }
+    assert!(
+        which::which_in("gwtd", Some(tools.path().as_os_str()), dir.path()).is_err(),
+        "isolated audit PATH must not contain gwtd"
+    );
+
+    let output = run_browser_check_hook_audit(
+        dir.path(),
+        Path::new("gwtd"),
+        Some(tools.path().as_os_str()),
+    );
+    assert!(
+        output.status.success(),
+        "a missing logical fallback is fail-open\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
     let dir = tempdir().expect("tempdir");
@@ -528,6 +708,58 @@ fn run_git(repo: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(unix)]
+fn browser_check_shell_block(name: &str) -> String {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let skill = std::fs::read_to_string(&skill_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
+    let begin = format!("# browser-check-{name}-begin");
+    let end = format!("# browser-check-{name}-end");
+    let body = skill
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {begin}"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {end}"))
+        .0;
+    body.lines()
+        .map(|line| line.strip_prefix("     ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(unix)]
+fn run_browser_check_hook_audit(
+    worktree: &Path,
+    expected_hook_bin: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Output {
+    let script = format!(
+        "{}\n{}",
+        browser_check_shell_block("hook-authority"),
+        browser_check_shell_block("hook-audit")
+    );
+    let mut command = hidden_command("bash");
+    command
+        .args(["-c", &script])
+        .current_dir(worktree)
+        .env("REPO_ROOT", worktree)
+        .env("CHECK_HOME", worktree)
+        .env("CHECKOUT_GWTD", env!("CARGO_BIN_EXE_gwtd"))
+        .env("GWT_HOOK_BIN", expected_hook_bin)
+        .env("GWT_BIN_PATH", "/ambient/stale/target/debug/gwtd")
+        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove("GWT_HOOK_FORWARD_TOKEN")
+        .env_remove("GWT_HOOK_FORWARD_URL")
+        .env_remove("GWT_PROJECT_ROOT")
+        .env_remove("GWT_SESSION_ID");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    command.output().expect("run browser-check hook audit")
 }
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {

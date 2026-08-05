@@ -50,6 +50,27 @@ fn first_inline_code(line: &str) -> &str {
         .unwrap_or_else(|| panic!("missing inline code in {line:?}"))
 }
 
+#[cfg(unix)]
+fn browser_check_shell_block(name: &str) -> String {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let skill = fs::read_to_string(&skill_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+    let begin = format!("# browser-check-{name}-begin");
+    let end = format!("# browser-check-{name}-end");
+    let body = skill
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {begin}"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {end}"))
+        .0;
+    body.lines()
+        .map(|line| line.strip_prefix("     ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -103,6 +124,82 @@ fn repo_keeps_managed_claude_and_codex_skill_assets_in_parity() {
             "managed gwt-* skill asset must be byte-identical between .claude and .codex: {relative:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let claude_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let codex_path = workspace_root.join(".codex/skills/browser-check/SKILL.md");
+    let claude = fs::read_to_string(&claude_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", claude_path.display()));
+    let codex = fs::read_to_string(&codex_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", codex_path.display()));
+
+    assert_eq!(
+        claude, codex,
+        "browser-check must stay byte-identical across Claude and Codex"
+    );
+    assert!(
+        claude.contains("cargo build -p gwt --bin gwt --bin gwtd"),
+        "browser-check must build the exact GUI and audit binaries together"
+    );
+
+    let script = format!(
+        "{}\nfor candidate in \"$@\"; do if is_checkout_local_hook_bin \"$candidate\"; then printf 'reject\\n'; else printf 'allow\\n'; fi; done",
+        browser_check_shell_block("hook-authority")
+    );
+    let output = hidden_command("bash")
+        .args([
+            "-c",
+            &script,
+            "browser-check-test",
+            "/repo/target/debug/gwtd",
+            "/repo/target/aarch64-apple-darwin/debug/gwtd",
+            r"C:\repo\TARGET\x86_64-pc-windows-msvc\RELEASE\GWTD.EXE",
+            "/Applications/GWT.app/Contents/MacOS/gwtd",
+        ])
+        .env("GWT_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run executable authority resolver");
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "reject\nreject\nreject\nallow\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_launch_script_unsets_ambient_runtime_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwt = dir.path().join("target/debug/gwt");
+    fs::create_dir_all(fake_gwt.parent().expect("fake gwt parent")).unwrap();
+    fs::write(
+        &fake_gwt,
+        "#!/bin/sh\nprintf '%s\\n' \"${GWT_BIN_PATH-unset}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gwt, fs::Permissions::from_mode(0o755)).unwrap();
+    let log = dir.path().join("launch.log");
+    let script = format!(
+        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}",
+        browser_check_shell_block("launch")
+    );
+    let output = hidden_command("bash")
+        .args(["-c", &script])
+        .env("CHECKOUT_GWT", &fake_gwt)
+        .env("LOG_FILE", &log)
+        .env("GWT_BIN_PATH", "/ambient/stale/gwtd")
+        .output()
+        .expect("run executable fresh GUI launch block");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset\n");
+    assert_eq!(fs::read_to_string(log).unwrap(), "unset\n");
 }
 
 #[test]
