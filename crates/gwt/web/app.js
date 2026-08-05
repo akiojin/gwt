@@ -71,6 +71,9 @@
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
       import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
+      // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
+      // Settings window — the PM is configured where it is seen.
+      import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
@@ -4631,6 +4634,16 @@
         focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
       });
 
+      // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
+      // `pm_status` hydration that arrives with the initial sync has somewhere
+      // to land.
+      const pmSettingsPanel = createPmSettingsPanel({
+        document,
+        send,
+        confirm: (message) => window.confirm(message),
+      });
+      pmSettingsPanel.mount();
+
       // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
       // scrollable side-toast stack so nothing is missed while the operator is
       // away. Mounted to the body so it is visible regardless of which window
@@ -5585,6 +5598,7 @@
         logsSurface,
         agentKanbanSurface,
         issueMonitorSurface,
+        pmSettingsPanel,
         autonomousNotifications,
         knowledgeSettingsSurface,
       });
@@ -5685,6 +5699,10 @@
             break;
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
+            break;
+          case "pm_status":
+            // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
+            frontendUnits.pmSettingsPanel.applyStatus(event);
             break;
           case "issue_monitor_status":
             frontendUnits.issueMonitorSurface.applyStatus(event.status || {});
@@ -6955,6 +6973,11 @@
             return;
           case "stop-all-windows":
             requestStopAllWindows();
+            return;
+          case "pm-settings":
+            // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
+            // is the keyboard-only path to the same panel.
+            frontendUnits.pmSettingsPanel.open();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;

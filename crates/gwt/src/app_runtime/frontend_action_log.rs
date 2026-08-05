@@ -704,6 +704,21 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // SPEC-3431 FR-018: the PM launcher is a deliberate user action worth
         // logging; its payload is only optional canvas bounds.
         FrontendEvent::OpenPmAgent { .. } => FrontendUserActionLog::new("open_pm_agent", "pm"),
+        // SPEC-3431 FR-026: PM settings changes are deliberate, low-frequency
+        // user actions; the agent/model they select is not sensitive.
+        FrontendEvent::SetPmAutoStart { enabled } => {
+            FrontendUserActionLog::new("set_pm_auto_start", "pm").mode(if *enabled {
+                "on"
+            } else {
+                "off"
+            })
+        }
+        FrontendEvent::SetPmLaunchProfile {
+            agent_id, model, ..
+        } => FrontendUserActionLog::new("set_pm_launch_profile", "pm")
+            .agent(agent_id)
+            .target(model.as_deref().unwrap_or_default()),
+        FrontendEvent::RestartPmAgent => FrontendUserActionLog::new("restart_pm_agent", "pm"),
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }

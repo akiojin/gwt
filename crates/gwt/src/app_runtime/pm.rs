@@ -23,9 +23,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
-use gwt::pm_registry::{self, PmRegistration};
+use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
+use gwt::PmAgentOption;
 
-use super::{AppRuntime, OutboundEvent};
+use super::{AppRuntime, BackendEvent, OutboundEvent};
 
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
@@ -38,15 +39,34 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
 /// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
 const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
+/// Who asked for the PM.
+///
+/// SPEC-3431 FR-002's `auto_start` opt-out scopes to "opening a project starts
+/// the PM automatically". It is not a lock on the user: FR-021 requires the PM
+/// launcher to start a stopped PM when clicked, and FR-003 promises a crash
+/// resumes. Collapsing both into one gate leaves the launcher and the Restart
+/// button silently dead with no way back short of editing pm.json by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PmEnsureTrigger {
+    /// Project open / startup restore. Honours the opt-out.
+    Automatic,
+    /// Launcher click, Restart, crash recovery. Ignores the opt-out.
+    Explicit,
+}
+
 impl AppRuntime {
     /// SPEC-3431 FR-001/FR-002: ensure the resident PM pane for `tab_id`.
     ///
-    /// Respects the `auto_start` opt-out, focuses a live PM instead of
-    /// spawning a duplicate, resumes a stale registration's conversation
-    /// when the durable session is still materializable, and otherwise
-    /// performs a fresh silent spawn. Never spawns implementation agents.
-    pub(crate) fn ensure_pm_agent_for_tab(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        self.ensure_pm_agent_for_tab_with_bounds(tab_id, None)
+    /// Focuses a live PM instead of spawning a duplicate, resumes a stale
+    /// registration's conversation when the durable session is still
+    /// materializable, and otherwise performs a fresh silent spawn. Never
+    /// spawns implementation agents.
+    pub(crate) fn ensure_pm_agent_for_tab(
+        &mut self,
+        tab_id: &str,
+        trigger: PmEnsureTrigger,
+    ) -> Vec<OutboundEvent> {
+        self.ensure_pm_agent_for_tab_with_bounds(tab_id, None, trigger)
     }
 
     /// [`Self::ensure_pm_agent_for_tab`] with the caller's visible canvas
@@ -55,11 +75,29 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         canvas_bounds: Option<WindowGeometry>,
+        trigger: PmEnsureTrigger,
     ) -> Vec<OutboundEvent> {
         #[cfg(test)]
         if !test_gate::PM_ENSURE_ENABLED.with(|cell| cell.get()) {
             return Vec::new();
         }
+        let mut events = self.ensure_pm_agent_events(tab_id, canvas_bounds, trigger);
+        // FR-026: the ensure gate is where the PM's live state changes, so it
+        // is also where the settings panel learns about it. Skipped ensures
+        // (opt-out, non-Git tab, backoff floor) still report — "not running"
+        // is exactly the state the panel has to show.
+        if self.active_tab_id.as_deref() == Some(tab_id) {
+            events.extend(self.pm_status_broadcast_events());
+        }
+        events
+    }
+
+    fn ensure_pm_agent_events(
+        &mut self,
+        tab_id: &str,
+        canvas_bounds: Option<WindowGeometry>,
+        trigger: PmEnsureTrigger,
+    ) -> Vec<OutboundEvent> {
         let Some(tab) = self.tab(tab_id) else {
             tracing::info!(tab_id, "PM ensure skipped: no such tab");
             return Vec::new();
@@ -86,7 +124,7 @@ impl AppRuntime {
             }
         };
         self.sync_pm_session_cache(&project_root, prefs.registration.as_ref());
-        if !prefs.settings.auto_start {
+        if trigger == PmEnsureTrigger::Automatic && !prefs.settings.auto_start {
             tracing::info!(
                 project_root = %project_root.display(),
                 "PM ensure skipped: auto_start is opted out for this project"
@@ -128,6 +166,162 @@ impl AppRuntime {
             }
         }
         self.spawn_pm_agent(tab_id, &project_root)
+    }
+
+    /// SPEC-3431 FR-026: the PM settings snapshot for the active project tab.
+    ///
+    /// `None` when there is no Git project to configure — the panel then keeps
+    /// showing whatever it last had rather than being fed an empty project's
+    /// defaults as if they were this one's.
+    pub(crate) fn pm_status_event(&self) -> Option<BackendEvent> {
+        let project_root = self.active_pm_project_root()?;
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        let prefs = pm_registry::load_pm_prefs(&prefs_path).unwrap_or_default();
+        let configured = prefs.settings.launch_profile_or_default();
+        // Liveness is the pane registry's answer, not the file's: a
+        // registration whose pane is gone is a stale record, and reporting it
+        // as running would make the panel offer a restart for nothing.
+        let running = prefs
+            .registration
+            .as_ref()
+            .filter(|registration| self.pm_registration_is_live(registration));
+        Some(BackendEvent::PmStatus {
+            auto_start: prefs.settings.auto_start,
+            agent_options: Self::pm_agent_options(&configured.agent_id),
+            configured_agent_id: configured.agent_id,
+            configured_model: configured.model,
+            running_agent_id: running.map(|registration| registration.agent_id.clone()),
+            is_running: running.is_some(),
+        })
+    }
+
+    /// The PM settings snapshot as a broadcast, for the call sites that change
+    /// PM state. Every PM state transition must pass through here — the panel
+    /// has no other source of truth, so a silent transition leaves it stale.
+    pub(crate) fn pm_status_broadcast_events(&self) -> Vec<OutboundEvent> {
+        self.pm_status_event()
+            .map(OutboundEvent::broadcast)
+            .into_iter()
+            .collect()
+    }
+
+    /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
+    /// what is actually installed.
+    ///
+    /// `configured` is always offered even when it is not on PATH, so the
+    /// picker can still show (and keep) the project's current choice instead of
+    /// silently presenting a different agent as the configured one.
+    fn pm_agent_options(configured: &str) -> Vec<PmAgentOption> {
+        pm_registry::PM_SUPPORTED_AGENTS
+            .iter()
+            .filter(|id| **id == configured || which::which(id).is_ok())
+            .map(|id| PmAgentOption {
+                id: (*id).to_string(),
+                name: gwt_agent::builtin_agent_descriptor_for_command(id)
+                    .map_or_else(|| (*id).to_string(), |d| d.id.display_name().to_string()),
+            })
+            .collect()
+    }
+
+    fn active_pm_project_root(&self) -> Option<PathBuf> {
+        let tab_id = self.active_tab_id.clone()?;
+        self.tab(&tab_id).map(|tab| tab.project_root.clone())
+    }
+
+    /// SPEC-3431 FR-026/FR-002: persist the auto-start opt-out.
+    ///
+    /// Deliberately does not touch the running pane. The flag decides whether
+    /// opening the project starts a PM; treating it as a stop switch would end
+    /// a conversation the user only meant to stop auto-starting next time.
+    pub(crate) fn set_pm_auto_start_events(&mut self, enabled: bool) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_pm_project_root() else {
+            return Vec::new();
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.auto_start = enabled;
+        }) {
+            tracing::warn!(%error, "failed to persist the PM auto-start setting");
+            return Vec::new();
+        }
+        self.pm_status_broadcast_events()
+    }
+
+    /// SPEC-3431 FR-026: persist what the next PM start runs as.
+    ///
+    /// An agent without a managed `gwt-pm` skills mirror is refused rather than
+    /// stored: `PmSettings::launch_profile_or_default` would silently fall back
+    /// at launch time, leaving the panel claiming a configuration the PM never
+    /// actually uses. The running pane is untouched — applying the change is
+    /// [`Self::restart_pm_agent_events`].
+    pub(crate) fn set_pm_launch_profile_events(
+        &mut self,
+        agent_id: &str,
+        model: Option<String>,
+        reasoning: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_pm_project_root() else {
+            return Vec::new();
+        };
+        if !pm_registry::pm_agent_is_supported(agent_id) {
+            tracing::warn!(
+                agent_id,
+                "rejected PM launch profile: the agent cannot resolve the gwt-pm skill"
+            );
+            return Vec::new();
+        }
+        let empty_to_none = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+        let profile = PmLaunchProfile {
+            agent_id: agent_id.to_string(),
+            model: empty_to_none(model),
+            reasoning: empty_to_none(reasoning),
+            version: None,
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.launch_profile = Some(profile.clone());
+        }) {
+            tracing::warn!(%error, "failed to persist the PM launch profile");
+            return Vec::new();
+        }
+        self.pm_status_broadcast_events()
+    }
+
+    /// SPEC-3431 FR-026: apply the configured profile by restarting the PM.
+    ///
+    /// Deregisters first, on purpose: the close path treats a registered PM's
+    /// close as an intentional stop and reaps a clean PM worktree with it
+    /// (T-016). A restart is not a stop — the worktree holds the PM's own
+    /// notes — so clearing the registration up front makes that reap a no-op
+    /// and leaves the worktree for the successor.
+    pub(crate) fn restart_pm_agent_events(&mut self) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return Vec::new();
+        };
+        let Some(project_root) = self.tab(&tab_id).map(|tab| tab.project_root.clone()) else {
+            return Vec::new();
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        let registration = pm_registry::load_pm_prefs(&prefs_path)
+            .ok()
+            .and_then(|prefs| prefs.registration);
+        let mut events = Vec::new();
+        if let Some(registration) = registration {
+            match pm_registry::deregister_pm(&prefs_path, &registration.session_id) {
+                Ok(_) => self.sync_pm_session_cache(&project_root, None),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to clear the PM registration for a restart");
+                    return Vec::new();
+                }
+            }
+            if let Some(window_id) = self.live_pm_window_id(&registration.session_id) {
+                events.extend(self.close_window_events(&window_id));
+            }
+        }
+        // The ensure gate broadcasts the post-restart pm_status itself, so the
+        // panel is refreshed exactly once rather than twice per restart.
+        events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Explicit));
+        events
     }
 
     /// Authoritative liveness for a stored PM registration (FR-001): the
@@ -218,21 +412,26 @@ impl AppRuntime {
     /// nothing auto-restarts it. Settings (auto_start) survive. A clean PM
     /// worktree is reaped with the registration (T-016); local work keeps it
     /// for reuse by the next PM.
+    ///
+    /// Returns whether this close actually deregistered a PM, so the caller can
+    /// refresh the settings panel only for the close that changed PM state.
     pub(super) fn deregister_pm_for_closed_window(
         &mut self,
         project_root: &Path,
         session_id: &str,
-    ) {
+    ) -> bool {
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         match pm_registry::deregister_pm(&prefs_path, session_id) {
             Ok((_, true)) => {
                 tracing::info!(%session_id, "PM pane closed; registration cleared");
                 self.sync_pm_session_cache(project_root, None);
                 Self::cleanup_pm_worktree(project_root);
+                true
             }
-            Ok((_, false)) => {}
+            Ok((_, false)) => false,
             Err(error) => {
                 tracing::warn!(%error, "failed to deregister PM on window close");
+                false
             }
         }
     }
@@ -293,7 +492,7 @@ impl AppRuntime {
         if !respawn_now {
             return Vec::new();
         }
-        self.ensure_pm_agent_for_tab(tab_id)
+        self.ensure_pm_agent_for_tab(tab_id, PmEnsureTrigger::Explicit)
     }
 
     fn pm_window_ids(&self, tab_id: &str) -> HashSet<String> {

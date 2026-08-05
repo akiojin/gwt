@@ -375,7 +375,10 @@ impl AppRuntime {
         tracing::info!(tabs = tabs.len(), "PM ensure: canvas ready, draining queue");
         let mut events = Vec::new();
         for tab_id in tabs {
-            events.extend(self.ensure_pm_agent_for_tab(&tab_id));
+            events.extend(self.ensure_pm_agent_for_tab(
+                &tab_id,
+                crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+            ));
         }
         events
     }

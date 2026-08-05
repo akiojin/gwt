@@ -53,6 +53,8 @@ const ROOT_MODULES = new Set([
   "index-settings-panel.js",
   // SPEC-3165 — Issue Monitor surface.
   "issue-monitor-surface.js",
+  // SPEC-3431 FR-026 — PM settings panel.
+  "pm-settings-panel.js",
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",

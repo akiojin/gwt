@@ -459,14 +459,23 @@ impl AppRuntime {
         ) {
             return Vec::new();
         }
-        if let (Some(session_id), Some(project_root)) = (
+        let pm_deregistered = match (
             closing_session_id.as_deref(),
             issue_monitor_project_root.as_ref(),
         ) {
-            self.deregister_pm_for_closed_window(project_root, session_id);
-        }
+            (Some(session_id), Some(project_root)) => {
+                self.deregister_pm_for_closed_window(project_root, session_id)
+            }
+            _ => false,
+        };
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
+        // SPEC-3431 FR-026: closing the PM is a PM state change, so the
+        // settings panel has to hear about it or it keeps offering a restart
+        // for a pane that is already gone.
+        if pm_deregistered {
+            events.extend(self.pm_status_broadcast_events());
+        }
         if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }

@@ -2205,6 +2205,10 @@ impl AppRuntime {
                 if let Some(source_session_id) = auto_resume_source_session_id {
                     mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
                 }
+                // SPEC-3431 FR-026: a completed PM launch is the moment
+                // "running as" becomes true, so the settings panel is
+                // refreshed from the post-spawn state below.
+                let pm_launch_registered = pm_registration_root.is_some();
                 if let Some(pm_project_root) = pm_registration_root {
                     self.register_pm_after_launch(
                         &pm_project_root,
@@ -2424,6 +2428,9 @@ impl AppRuntime {
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
+                        if pm_launch_registered {
+                            events.extend(self.pm_status_broadcast_events());
+                        }
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {

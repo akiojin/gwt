@@ -3582,8 +3582,21 @@ impl AppRuntime {
                 let Some(tab_id) = self.active_tab_id.clone() else {
                     return Vec::new();
                 };
-                self.ensure_pm_agent_for_tab_with_bounds(&tab_id, bounds)
+                self.ensure_pm_agent_for_tab_with_bounds(
+                    &tab_id,
+                    bounds,
+                    pm::PmEnsureTrigger::Explicit,
+                )
             }
+            // SPEC-3431 FR-026: PM settings. The two writes never touch the
+            // running pane; only the explicit restart does.
+            FrontendEvent::SetPmAutoStart { enabled } => self.set_pm_auto_start_events(enabled),
+            FrontendEvent::SetPmLaunchProfile {
+                agent_id,
+                model,
+                reasoning,
+            } => self.set_pm_launch_profile_events(&agent_id, model, reasoning),
+            FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
             FrontendEvent::SelectCloneProjectParent => {
                 self.select_clone_project_parent_events(&client_id)
@@ -4776,6 +4789,12 @@ impl AppRuntime {
         );
         if let Some(event) = self.active_work_projection_reply(client_id) {
             events.insert(1, event);
+        }
+        // SPEC-3431 FR-026: hydrate the PM settings panel on connect. Without
+        // this a freshly loaded page shows the panel's built-in defaults until
+        // some unrelated PM transition happens to broadcast.
+        if let Some(event) = self.pm_status_event() {
+            events.push(OutboundEvent::reply(client_id.to_string(), event));
         }
         self.schedule_active_improvement_candidates_refresh();
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected

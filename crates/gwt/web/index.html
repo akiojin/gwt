@@ -118,20 +118,39 @@
                  group. One click always lands on the PM — an existing pane is
                  framed in the viewport, a missing one is started first. The
                  state dot reports running / stopped / not started. -->
-            <button
-              class="op-rail__item op-rail__item--pm"
-              type="button"
-              id="op-pm-entry"
-              data-pm-state="absent"
-              aria-label="Project Manager"
-              title="Project Manager"
-            >
-              <span class="op-rail__icon" aria-hidden="true">◎</span>
-              <span class="op-rail__pm-dot" aria-hidden="true"></span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">PM</span>
-              </span>
-            </button>
+            <!-- SPEC-3431 FR-026: the settings gear is a SIBLING of the PM
+                 button, never a child. Nested, its click would bubble into the
+                 launcher and start/frame the PM every time the user only
+                 wanted to configure it. It stays hidden until the shell is
+                 hovered or focused so the rail keeps one icon per row. -->
+            <div class="pm-launcher-shell">
+              <button
+                class="op-rail__item op-rail__item--pm"
+                type="button"
+                id="op-pm-entry"
+                data-pm-state="absent"
+                aria-label="Project Manager"
+                title="Project Manager"
+              >
+                <span class="op-rail__icon" aria-hidden="true">◎</span>
+                <span class="op-rail__pm-dot" aria-hidden="true"></span>
+                <span class="op-rail__flyout" aria-hidden="true">
+                  <span class="op-rail__flyout-label">PM</span>
+                </span>
+              </button>
+              <button
+                class="pm-launcher-gear"
+                type="button"
+                id="op-pm-settings-button"
+                aria-label="Project Manager settings"
+                aria-expanded="false"
+                aria-controls="pm-settings-panel"
+                title="Project Manager settings"
+              >
+                <span aria-hidden="true">⚙</span>
+              </button>
+              <div class="pm-settings-panel" id="pm-settings-panel" hidden></div>
+            </div>
             <!-- SPEC-3245 Phase 3/4: the primary "start new work" rail action is the
                  Curate lane, labeled "Intake" (the "session" suffix is dropped to
                  avoid colliding with the Session domain term) — a branchless,

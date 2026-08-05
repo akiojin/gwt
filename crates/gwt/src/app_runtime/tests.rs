@@ -39929,7 +39929,7 @@ fn pm_ensure_focuses_live_pm_instead_of_spawning() {
         .windows
         .len();
 
-    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+    let events = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
 
     let windows_after = runtime
         .tab("tab-1")
@@ -39967,9 +39967,17 @@ fn pm_ensure_respects_auto_start_opt_out() {
 
     disable_pm_auto_start(&repo);
 
-    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+    let events = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
 
-    assert!(events.is_empty(), "opt-out must be a no-op");
+    // FR-026: the opt-out still owes the settings panel the current state, so
+    // the one permitted event is the pm_status snapshot — never a spawn.
+    assert!(
+        events
+            .iter()
+            .all(|outbound| matches!(outbound.event, BackendEvent::PmStatus { .. })),
+        "opt-out must emit nothing but the PM status snapshot"
+    );
+    assert_eq!(events.len(), 1);
     assert!(runtime
         .tab("tab-1")
         .expect("tab")
@@ -39996,7 +40004,7 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+    let events = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
 
     assert!(!events.is_empty(), "fresh spawn emits workspace events");
     let windows = runtime
@@ -40030,6 +40038,59 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         pm_worktree.join(".git").exists(),
         "the PM must spawn in its canonical worktree at {}",
         pm_worktree.display()
+    );
+}
+
+/// SPEC-3431 FR-021: "停止中・未起動でもボタンは押下可能で、押下すると起動
+/// （または resume）する" — an explicit click must start the PM even when
+/// auto-start is opted out. `auto_start` governs the automatic ensure on
+/// project open (FR-002); it is not a lock on the user's own actions, and
+/// treating it as one leaves the launcher and the Restart button silently
+/// dead with no way back short of editing pm.json by hand.
+#[test]
+fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    disable_pm_auto_start(&repo);
+
+    // The project-open path stays suppressed (FR-002).
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "the automatic ensure must still honour the opt-out"
+    );
+
+    // The launcher click does not.
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenPmAgent { bounds: None },
+    );
+
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1,
+        "an explicit PM launcher click must start the PM"
     );
 }
 
@@ -40092,7 +40153,7 @@ fn pm_ensure_resumes_stale_registration_conversation() {
     )
     .expect("seed stale registration");
 
-    let events = runtime.ensure_pm_agent_for_tab("tab-1");
+    let events = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
 
     assert!(!events.is_empty(), "stale PM resumes");
     let windows = runtime
@@ -40494,4 +40555,256 @@ fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
     assert_eq!(windows.len(), 1, "the launcher started the PM pane");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
     assert_eq!(runtime.pending_pm_launches.len(), 1);
+}
+
+/// SPEC-3431 FR-026: the auto-start opt-out governs the NEXT project open, not
+/// the session that is running right now. Stopping the live PM as a side
+/// effect of unticking a checkbox would destroy a conversation the user never
+/// asked to end.
+#[test]
+fn set_pm_auto_start_persists_and_does_not_stop_a_live_pm() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetPmAutoStart { enabled: false },
+    );
+
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
+    assert!(!prefs.settings.auto_start, "the opt-out must persist");
+    assert!(
+        prefs.registration.is_some(),
+        "the live PM keeps its registration"
+    );
+    assert!(
+        runtime.live_pm_window_id("pm-session-live").is_some(),
+        "the live PM pane must keep running"
+    );
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .any(|window| window.id == "agent-1"),
+        "the PM window must not be closed by a settings write"
+    );
+
+    // The panel is driven by pm_status; a write that does not broadcast leaves
+    // the UI showing the old value until some unrelated event arrives.
+    let status = events
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+            BackendEvent::PmStatus {
+                auto_start,
+                is_running,
+                ..
+            } => Some((*auto_start, *is_running)),
+            _ => None,
+        })
+        .expect("the settings write must broadcast pm_status");
+    assert_eq!(status, (false, true), "status mirrors prefs + live pane");
+}
+
+/// SPEC-3431 FR-026: only agents with a `gwt-pm` skills mirror can resolve the
+/// `$gwt-pm` bootstrap prompt. Persisting an unsupported one would hand the PM
+/// a prompt that resolves to nothing, so the write is refused outright rather
+/// than silently falling back at launch time.
+#[test]
+fn set_pm_launch_profile_rejects_an_unsupported_agent() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetPmLaunchProfile {
+            agent_id: "gemini".to_string(),
+            model: Some("gemini-3-pro".to_string()),
+            reasoning: None,
+        },
+    );
+
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
+    assert_eq!(
+        prefs.settings.launch_profile, None,
+        "an agent without a gwt-pm mirror must never be persisted"
+    );
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetPmLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.1-codex-max".to_string()),
+            reasoning: Some("high".to_string()),
+        },
+    );
+
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
+    let profile = prefs
+        .settings
+        .launch_profile
+        .expect("a supported agent is persisted");
+    assert_eq!(profile.agent_id, "codex");
+    assert_eq!(profile.model.as_deref(), Some("gpt-5.1-codex-max"));
+    assert_eq!(profile.reasoning.as_deref(), Some("high"));
+    // A profile change is not a stop: the running conversation continues until
+    // the user explicitly restarts.
+    assert!(
+        runtime.live_pm_window_id("pm-session-live").is_some(),
+        "changing the profile must not touch the running pane"
+    );
+}
+
+/// SPEC-3431 FR-026: a restart swaps the agent, so it must end the old pane and
+/// bring a new one up — but the PM worktree holds the PM's own notes, and an
+/// intentional close reaps a clean one. The restart path must keep it.
+#[test]
+fn restart_pm_agent_keeps_the_worktree_and_respawns() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(pm_worktree.parent().expect("parent")).expect("pm dir");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            pm_worktree.to_str().expect("pm worktree path"),
+        ],
+    );
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-1".to_string();
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.session_id = "pm-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &pm_worktree),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::RestartPmAgent);
+
+    assert!(!events.is_empty(), "restart must produce events");
+    assert!(
+        pm_worktree.exists(),
+        "the PM worktree (and its notes) must survive a restart"
+    );
+    assert!(
+        runtime.live_pm_window_id("pm-session-live").is_none(),
+        "the old PM pane is gone"
+    );
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "exactly one PM pane after the restart");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "the respawn registers the successor session at launch completion"
+    );
+    // The surviving pane is the freshly spawned one, not the closed pane left
+    // behind: it is the window the pending PM launch is tracking.
+    assert!(
+        runtime
+            .pending_pm_launches
+            .contains_key(&crate::runtime_support::combined_window_id(
+                "tab-1",
+                &windows[0].id
+            )),
+        "the pane on the canvas must be the restart's new spawn"
+    );
+    // FR-026: the panel is told the PM came back.
+    assert!(
+        events
+            .iter()
+            .any(|outbound| matches!(outbound.event, BackendEvent::PmStatus { .. })),
+        "the restart must broadcast pm_status"
+    );
 }
