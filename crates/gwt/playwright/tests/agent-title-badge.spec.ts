@@ -174,33 +174,175 @@ test.describe("Agent title role and worktree badges", () => {
       "Unknown worktree form",
     );
 
-    await expectWorktreeChromeNotToOverflow(page);
+    await expectWorktreeChromeNotToOverflow(page, false);
     await page.setViewportSize({ width: 640, height: 720 });
-    await expectWorktreeChromeNotToOverflow(page);
+    await expectWorktreeChromeNotToOverflow(page, true);
   });
 });
 
-async function expectWorktreeChromeNotToOverflow(page) {
-  await expect
-    .poll(() =>
-      page.locator(".workspace-window .window-titlebar").evaluateAll((nodes) =>
-        nodes.every((node) => node.scrollWidth <= node.clientWidth + 1),
-      ),
-    )
-    .toBe(true);
-  await expect
-    .poll(() =>
-      page.locator("#window-list-panel .window-list-row").evaluateAll((nodes) =>
-        nodes.every((node) => node.scrollWidth <= node.clientWidth + 1),
-      ),
-    )
-    .toBe(true);
-  const panelBox = await page.locator("#window-list-panel").boundingBox();
+async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
   const viewport = page.viewportSize();
-  expect(panelBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  expect(panelBox.x).toBeGreaterThanOrEqual(0);
-  expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width + 1);
+  if (!viewport) {
+    throw new Error("page viewport is unavailable");
+  }
+  const viewportBox = {
+    x: 0,
+    y: 0,
+    width: viewport.width,
+    height: viewport.height,
+  };
+
+  const titlebars = page.locator(".workspace-window .titlebar");
+  await expect(titlebars).toHaveCount(3);
+  for (let index = 0; index < 3; index += 1) {
+    const titlebar = titlebars.nth(index);
+    const container = titlebar.locator("xpath=..");
+    const badge = titlebar.locator(".window-worktree-badge");
+    const actions = titlebar.locator(".window-actions");
+    await expect(titlebar).toBeVisible();
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toBeVisible();
+    await expect(actions).toHaveCount(1);
+    await expect(actions).toBeVisible();
+    expect(await actions.locator("button:not([hidden])").count()).toBeGreaterThan(0);
+
+    const titlebarBox = await requiredBoundingBox(titlebar, `titlebar ${index}`);
+    const containerBox = await requiredBoundingBox(container, `window ${index}`);
+    const badgeBox = await requiredBoundingBox(badge, `worktree badge ${index}`);
+    const actionsBox = await requiredBoundingBox(actions, `window actions ${index}`);
+    expectBoxInside(titlebarBox, containerBox, `titlebar ${index} in window`);
+    expectBoxInside(titlebarBox, viewportBox, `titlebar ${index} in viewport`);
+    expectBoxInside(badgeBox, titlebarBox, `worktree badge ${index} in titlebar`);
+    expectBoxInside(actionsBox, titlebarBox, `window actions ${index} in titlebar`);
+    expect(
+      badgeBox.x + badgeBox.width,
+      `worktree badge ${index} must not overlap window actions`,
+    ).toBeLessThanOrEqual(actionsBox.x + 1);
+    const titlebarWidths = await titlebar.evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
+    expect(titlebarWidths.clientWidth).toBeGreaterThan(0);
+    expect(
+      titlebarWidths.scrollWidth,
+      `titlebar ${index} must not overflow horizontally`,
+    ).toBeLessThanOrEqual(titlebarWidths.clientWidth + 1);
+  }
+
+  const rows = page.locator("#window-list-panel .window-list-row");
+  await expect(rows).toHaveCount(3);
+  for (let index = 0; index < 3; index += 1) {
+    const rowWidths = await rows.nth(index).evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
+    expect(rowWidths.clientWidth).toBeGreaterThan(0);
+    expect(
+      rowWidths.scrollWidth,
+      `window list row ${index} must not overflow horizontally`,
+    ).toBeLessThanOrEqual(rowWidths.clientWidth + 1);
+  }
+  const panelBox = await requiredBoundingBox(
+    page.locator("#window-list-panel"),
+    "window list panel",
+  );
+  expectBoxInside(panelBox, viewportBox, "window list panel in viewport");
+
+  if (!expectMinimapMarkers) {
+    return;
+  }
+  const minimap = page.locator("#fleet-minimap");
+  await expect(minimap).toBeVisible();
+  const minimapBox = await requiredBoundingBox(minimap, "fleet minimap");
+  expectBoxInside(minimapBox, viewportBox, "fleet minimap in viewport");
+  const expectedMarkers = [
+    { form: "ephemeral", label: "Ephemeral", symbol: "Ø" },
+    { form: "branch-backed", label: "Branch-backed", symbol: "B" },
+    { form: "unknown", label: "Unknown worktree form", symbol: "?" },
+  ];
+  for (const expectedMarker of expectedMarkers) {
+    const marker = minimap.locator(
+      `.fleet-minimap__cell[data-worktree-form="${expectedMarker.form}"][data-worktree-symbol="${expectedMarker.symbol}"]`,
+    );
+    await expect(marker).toHaveCount(1);
+    await expect(marker).toBeVisible();
+    await expect(marker).toHaveAttribute(
+      "data-worktree-label",
+      expectedMarker.label,
+    );
+    const markerBox = await requiredBoundingBox(
+      marker,
+      `${expectedMarker.form} minimap marker`,
+    );
+    expectBoxInside(
+      markerBox,
+      minimapBox,
+      `${expectedMarker.form} minimap marker in minimap`,
+    );
+    expectBoxInside(
+      markerBox,
+      viewportBox,
+      `${expectedMarker.form} minimap marker in viewport`,
+    );
+    const pseudo = await marker.evaluate((element) => {
+      const style = getComputedStyle(element, "::before");
+      const pixels = (value) => Number.parseFloat(value) || 0;
+      const contentWidth = Math.max(pixels(style.width), pixels(style.minWidth));
+      const contentHeight = Math.max(pixels(style.height), pixels(style.minHeight));
+      return {
+        content: style.content,
+        bottom: pixels(style.bottom),
+        left: pixels(style.left),
+        outerHeight:
+          contentHeight +
+          pixels(style.paddingTop) +
+          pixels(style.paddingBottom) +
+          pixels(style.borderTopWidth) +
+          pixels(style.borderBottomWidth),
+        outerWidth:
+          contentWidth +
+          pixels(style.paddingLeft) +
+          pixels(style.paddingRight) +
+          pixels(style.borderLeftWidth) +
+          pixels(style.borderRightWidth),
+      };
+    });
+    expect(pseudo.content).toContain(expectedMarker.symbol);
+    expect(pseudo.outerWidth).toBeGreaterThan(0);
+    expect(pseudo.outerHeight).toBeGreaterThan(0);
+    expect(
+      pseudo.left + pseudo.outerWidth,
+      `${expectedMarker.form} marker must fit its minimap cell horizontally`,
+    ).toBeLessThanOrEqual(markerBox.width + 1);
+    expect(
+      pseudo.bottom + pseudo.outerHeight,
+      `${expectedMarker.form} marker must fit its minimap cell vertically`,
+    ).toBeLessThanOrEqual(markerBox.height + 1);
+  }
+}
+
+async function requiredBoundingBox(locator, label) {
+  const box = await locator.boundingBox();
+  expect(box, `${label} must have a bounding box`).not.toBeNull();
+  if (!box) {
+    throw new Error(`${label} has no bounding box`);
+  }
+  expect(box.width, `${label} width`).toBeGreaterThan(0);
+  expect(box.height, `${label} height`).toBeGreaterThan(0);
+  return box;
+}
+
+function expectBoxInside(inner, outer, label) {
+  const tolerance = 1;
+  expect(inner.x, `${label} left`).toBeGreaterThanOrEqual(outer.x - tolerance);
+  expect(inner.y, `${label} top`).toBeGreaterThanOrEqual(outer.y - tolerance);
+  expect(inner.x + inner.width, `${label} right`).toBeLessThanOrEqual(
+    outer.x + outer.width + tolerance,
+  );
+  expect(inner.y + inner.height, `${label} bottom`).toBeLessThanOrEqual(
+    outer.y + outer.height + tolerance,
+  );
 }
 
 async function installAgentTitleBadgeBackend(page) {
@@ -210,7 +352,7 @@ async function installAgentTitleBadgeBackend(page) {
         id: "agent-1",
         title: "Codex",
         preset: "agent",
-        geometry: { x: 180, y: 120, width: 720, height: 360 },
+        geometry: { x: 20, y: 640, width: 520, height: 280 },
         geometry_revision: 0,
         z_index: 1,
         status: "idle",
@@ -231,7 +373,7 @@ async function installAgentTitleBadgeBackend(page) {
         id: "agent-2",
         title: "Intake Agent",
         preset: "agent",
-        geometry: { x: 940, y: 120, width: 600, height: 320 },
+        geometry: { x: 30, y: 680, width: 500, height: 280 },
         geometry_revision: 0,
         z_index: 2,
         status: "idle",
@@ -252,7 +394,7 @@ async function installAgentTitleBadgeBackend(page) {
         id: "agent-3",
         title: "Restored Agent",
         preset: "agent",
-        geometry: { x: 180, y: 520, width: 720, height: 300 },
+        geometry: { x: 40, y: 720, width: 480, height: 280 },
         geometry_revision: 0,
         z_index: 3,
         status: "idle",
