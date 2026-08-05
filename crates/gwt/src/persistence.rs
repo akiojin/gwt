@@ -94,11 +94,13 @@ impl WindowState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowLaneKind {
-    Intake,
-    Execution,
+pub enum WindowWorktreeForm {
+    #[serde(rename = "intake")]
+    Ephemeral,
+    #[serde(rename = "execution")]
+    BranchBacked,
     #[default]
+    #[serde(rename = "unknown")]
     Unknown,
 }
 
@@ -133,11 +135,12 @@ pub struct PersistedWindowState {
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub agent_color: Option<AgentColor>,
-    /// Wire/view-model lane identity for agent windows. This is computed for
-    /// frontend chrome and defaults to `unknown` for restored windows where no
-    /// live launch/session signal is available.
-    #[serde(default)]
-    pub lane_kind: WindowLaneKind,
+    /// Worktree form for agent windows. This is computed for frontend chrome
+    /// and defaults to `unknown` for restored windows where no live
+    /// launch/session signal is available. The legacy wire field name remains
+    /// stable for downgrade compatibility.
+    #[serde(default, rename = "lane_kind")]
+    pub worktree_form: WindowWorktreeForm,
     /// Canvas-local tab group id. Windows with the same group id render as
     /// tabs in one floating chrome; ungrouped windows keep legacy behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +242,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
@@ -264,7 +267,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
@@ -651,7 +654,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -676,7 +679,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -742,6 +745,83 @@ mod tests {
         assert!(loaded.windows[0].tab_group_id.is_none());
         assert!(!loaded.windows[0].tab_group_active);
         assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+    }
+
+    #[test]
+    fn load_workspace_state_maps_legacy_lane_wire_to_worktree_form() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-intake",
+      "title": "Ephemeral Agent",
+      "preset": "agent",
+      "geometry": { "x": 0.0, "y": 0.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true,
+      "lane_kind": "intake"
+    },
+    {
+      "id": "agent-execution",
+      "title": "Branch-backed Agent",
+      "preset": "agent",
+      "geometry": { "x": 20.0, "y": 20.0, "width": 640.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true,
+      "lane_kind": "execution"
+    },
+    {
+      "id": "agent-unknown",
+      "title": "Restored Agent",
+      "preset": "agent",
+      "geometry": { "x": 40.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 3,
+      "status": "stopped",
+      "persist": true,
+      "lane_kind": "unknown"
+    }
+  ],
+  "next_z_index": 4
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("legacy lane wire load");
+        assert_eq!(
+            loaded
+                .windows
+                .iter()
+                .map(|window| window.worktree_form)
+                .collect::<Vec<_>>(),
+            vec![
+                WindowWorktreeForm::Ephemeral,
+                WindowWorktreeForm::BranchBacked,
+                WindowWorktreeForm::Unknown,
+            ]
+        );
+
+        let serialized = serde_json::to_value(&loaded).expect("reserialize workspace");
+        let windows = serialized["windows"]
+            .as_array()
+            .expect("serialized windows");
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window["lane_kind"].as_str().expect("legacy lane value"))
+                .collect::<Vec<_>>(),
+            vec!["intake", "execution", "unknown"]
+        );
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.get("worktree_form").is_none()),
+            "canonical Rust field name must not leak into the legacy wire format"
+        );
     }
 
     // SPEC-2008 FR-097: the canvas window model dropped manual
@@ -946,7 +1026,7 @@ mod tests {
                 dynamic_title_detail: None,
                 agent_id: Some("claude".into()),
                 agent_color: None,
-                lane_kind: WindowLaneKind::Unknown,
+                worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
@@ -1036,7 +1116,7 @@ mod tests {
             dynamic_title_detail: None,
             agent_id: Some("claude".into()),
             agent_color: Some(AgentColor::Yellow),
-            lane_kind: WindowLaneKind::Unknown,
+            worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
@@ -1109,7 +1189,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -1134,7 +1214,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -1347,7 +1427,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -1372,7 +1452,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
-                    lane_kind: WindowLaneKind::Unknown,
+                    worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,

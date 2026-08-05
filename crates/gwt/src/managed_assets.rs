@@ -82,7 +82,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
 /// worktrees keep the embedded-bundle override (#3374). (The launch path does
 /// NOT use this: it passes `config.is_ephemeral` directly.)
 fn worktree_is_ephemeral(worktree: &Path) -> bool {
-    crate::worktree_form::is_ephemeral_intake_worktree(worktree)
+    crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
 fn materialize_managed_gwt_assets_for_targets(

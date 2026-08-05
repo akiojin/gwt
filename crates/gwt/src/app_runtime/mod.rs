@@ -4875,17 +4875,17 @@ impl AppRuntime {
                 .map(|mut window| {
                     let raw_id = window.id.clone();
                     window.id = combined_window_id(&tab.id, &raw_id);
-                    window.lane_kind = self
+                    window.worktree_form = self
                         .active_agent_sessions
                         .get(&window.id)
                         .map(|session| {
-                            if self.is_ephemeral_intake_session(session) {
-                                gwt::WindowLaneKind::Intake
+                            if self.session_uses_ephemeral_worktree(session) {
+                                gwt::WindowWorktreeForm::Ephemeral
                             } else {
-                                gwt::WindowLaneKind::Execution
+                                gwt::WindowWorktreeForm::BranchBacked
                             }
                         })
-                        .unwrap_or(gwt::WindowLaneKind::Unknown);
+                        .unwrap_or(gwt::WindowWorktreeForm::Unknown);
                     if let gwt::WindowPlacement::AgentKanban {
                         board_id,
                         lane_id,
