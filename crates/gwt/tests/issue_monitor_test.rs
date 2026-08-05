@@ -136,6 +136,89 @@ fn monitor_config_defaults_to_disabled_and_accepts_all_open_issues() {
 }
 
 #[test]
+fn legacy_issue_monitor_state_without_exclusion_reason_preserves_runtime_contract() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    monitor.record_candidate(issue(42, &["bug"]));
+    monitor.record_candidate(issue(43, &["enhancement"]));
+    assert!(monitor.queued_issue_numbers().iter().all(|number| monitor
+        .inbox_item(*number)
+        .is_some_and(|item| {
+            item.state == MonitorInboxState::Queued && item.exclusion_reason.is_none()
+        })));
+
+    let first = monitor
+        .next_launch_request("2026-08-05T00:00:00Z")
+        .expect("first candidate launches");
+    assert_eq!(first.issue_number, 42);
+    monitor.complete_active_launch(42, "tab::agent-42");
+
+    let legacy_value = serde_json::to_value(&monitor).expect("serialize legacy state shape");
+    assert!(legacy_value["inbox"]
+        .as_array()
+        .expect("inbox array")
+        .iter()
+        .all(|item| item.get("exclusion_reason").is_none()));
+
+    let mut restored: IssueMonitorState =
+        serde_json::from_value(legacy_value).expect("legacy state must deserialize");
+    assert_eq!(restored.active_count(), 1);
+    assert_eq!(restored.queue_len(), 1);
+    assert_eq!(
+        restored
+            .inbox_item(42)
+            .expect("restored launched item")
+            .exclusion_reason,
+        None
+    );
+    assert!(restored
+        .next_launch_request("2026-08-05T00:01:00Z")
+        .is_none());
+
+    assert_eq!(restored.requeue_window("tab::agent-42"), Some(42));
+    assert_eq!(restored.active_count(), 0);
+    let second = restored
+        .next_launch_request("2026-08-05T00:02:00Z")
+        .expect("next queued candidate launches after requeue frees the slot");
+    assert_eq!(second.issue_number, 43);
+}
+
+#[test]
+fn exclusion_states_are_snake_case_and_non_terminal_for_requeue() {
+    for (state, wire_state) in [
+        (MonitorInboxState::NotReady, "not_ready"),
+        (MonitorInboxState::HoldExcluded, "hold_excluded"),
+    ] {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42, &["bug"]));
+        monitor
+            .next_launch_request("2026-08-05T00:00:00Z")
+            .expect("candidate launches");
+        monitor.complete_active_launch(42, "tab::agent-42");
+
+        let mut value = serde_json::to_value(&monitor).expect("serialize monitor state");
+        value["inbox"][0]["state"] = serde_json::json!(wire_state);
+        let mut restored: IssueMonitorState =
+            serde_json::from_value(value).expect("new exclusion state must deserialize");
+
+        assert_eq!(restored.inbox_item(42).map(|item| item.state), Some(state));
+        assert_eq!(restored.requeue_window("tab::agent-42"), Some(42));
+        assert_eq!(
+            restored.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+    }
+}
+
+#[test]
 fn monitor_maps_gwt_spec_label_to_spec_launch_kind() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
