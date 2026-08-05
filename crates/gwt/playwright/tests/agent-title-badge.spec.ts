@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Agent title role badge", () => {
+test.describe("Agent title role and worktree badges", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
@@ -30,7 +30,7 @@ test.describe("Agent title role badge", () => {
     });
   });
 
-  test("Intake and Execution lane badges render across agent chrome", async ({
+  test("legacy wire forms render semantic badges across agent chrome", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -38,49 +38,170 @@ test.describe("Agent title role badge", () => {
 
     await page.goto(APP_URL);
 
-    const executionWindow = page.locator(".workspace-window[data-id='agent-1']");
-    const intakeWindow = page.locator(".workspace-window[data-id='agent-2']");
-    await expect(executionWindow).toBeVisible({ timeout: 10_000 });
-    await expect(intakeWindow).toBeVisible();
+    const branchBackedWindow = page.locator(
+      ".workspace-window[data-id='agent-1']",
+    );
+    const ephemeralWindow = page.locator(".workspace-window[data-id='agent-2']");
+    const unknownWindow = page.locator(".workspace-window[data-id='agent-3']");
+    await expect(branchBackedWindow).toBeVisible({ timeout: 10_000 });
+    await expect(ephemeralWindow).toBeVisible();
+    await expect(unknownWindow).toBeVisible();
 
-    const executionBadge = executionWindow.locator(".window-lane-badge");
-    await expect(executionBadge).toBeVisible();
-    await expect(executionBadge).toHaveText("Execution");
-    await expect(executionBadge).toHaveAttribute("data-lane-kind", "execution");
-    await expect(executionBadge).toHaveAttribute("aria-label", "Execution lane");
+    const branchBackedBadge = branchBackedWindow.locator(
+      ".window-worktree-badge",
+    );
+    await expect(branchBackedBadge).toBeVisible();
+    await expect(branchBackedBadge).toHaveText("Branch-backed");
+    await expect(branchBackedBadge).toHaveAttribute(
+      "data-worktree-form",
+      "branch-backed",
+    );
+    await expect(branchBackedBadge).toHaveAttribute(
+      "data-worktree-label",
+      "Branch-backed",
+    );
+    await expect(branchBackedBadge).toHaveAttribute("data-worktree-symbol", "B");
+    await expect(branchBackedBadge).toHaveAttribute(
+      "aria-label",
+      "Branch-backed worktree",
+    );
+    await expect(branchBackedBadge).toHaveAttribute(
+      "title",
+      "Branch-backed worktree",
+    );
 
-    const intakeBadge = intakeWindow.locator(".window-lane-badge");
-    await expect(intakeBadge).toBeVisible();
-    await expect(intakeBadge).toHaveText("Intake");
-    await expect(intakeBadge).toHaveAttribute("data-lane-kind", "intake");
-    await expect(intakeBadge).toHaveAttribute("aria-label", "Intake lane");
+    const ephemeralBadge = ephemeralWindow.locator(".window-worktree-badge");
+    await expect(ephemeralBadge).toBeVisible();
+    await expect(ephemeralBadge).toHaveText("Ephemeral");
+    await expect(ephemeralBadge).toHaveAttribute(
+      "data-worktree-form",
+      "ephemeral",
+    );
+    await expect(ephemeralBadge).toHaveAttribute(
+      "data-worktree-label",
+      "Ephemeral",
+    );
+    await expect(ephemeralBadge).toHaveAttribute("data-worktree-symbol", "Ø");
+    await expect(ephemeralBadge).toHaveAttribute(
+      "aria-label",
+      "Ephemeral branchless worktree",
+    );
+
+    const unknownBadge = unknownWindow.locator(".window-worktree-badge");
+    await expect(unknownBadge).toBeVisible();
+    await expect(unknownBadge).toHaveText("?");
+    await expect(unknownBadge).toHaveAttribute("data-worktree-form", "unknown");
+    await expect(unknownBadge).toHaveAttribute(
+      "data-worktree-label",
+      "Unknown worktree form",
+    );
+    await expect(unknownBadge).toHaveAttribute("data-worktree-symbol", "?");
+    await expect(unknownBadge).toHaveAttribute(
+      "aria-label",
+      "Unknown worktree form",
+    );
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible();
-    await expect(
-      minimap.locator('.fleet-minimap__cell[data-window-id="agent-1"]'),
-    ).toHaveAttribute("data-lane-symbol", "E");
-    await expect(
-      minimap.locator('.fleet-minimap__cell[data-window-id="agent-2"]'),
-    ).toHaveAttribute("data-lane-symbol", "I");
+    const minimapBranchBacked = minimap.locator(
+      '.fleet-minimap__cell[data-window-id="agent-1"]',
+    );
+    const minimapEphemeral = minimap.locator(
+      '.fleet-minimap__cell[data-window-id="agent-2"]',
+    );
+    const minimapUnknown = minimap.locator(
+      '.fleet-minimap__cell[data-window-id="agent-3"]',
+    );
+    await expect(minimapBranchBacked).toHaveAttribute(
+      "data-worktree-form",
+      "branch-backed",
+    );
+    await expect(minimapBranchBacked).toHaveAttribute(
+      "data-worktree-label",
+      "Branch-backed",
+    );
+    await expect(minimapBranchBacked).toHaveAttribute(
+      "data-worktree-symbol",
+      "B",
+    );
+    await expect(minimapEphemeral).toHaveAttribute(
+      "data-worktree-form",
+      "ephemeral",
+    );
+    await expect(minimapEphemeral).toHaveAttribute(
+      "data-worktree-label",
+      "Ephemeral",
+    );
+    await expect(minimapEphemeral).toHaveAttribute(
+      "data-worktree-symbol",
+      "Ø",
+    );
+    await expect(minimapUnknown).toHaveAttribute("data-worktree-form", "unknown");
+    await expect(minimapUnknown).toHaveAttribute(
+      "data-worktree-label",
+      "Unknown worktree form",
+    );
+    await expect(minimapUnknown).toHaveAttribute("data-worktree-symbol", "?");
 
     await page.locator("#window-list-button").click();
     const panel = page.locator("#window-list-panel");
     await expect(panel).toBeVisible();
-    await expect(
-      panel
-        .locator(".window-list-row", { hasText: "Codex" })
-        .first()
-        .locator(".window-list-lane"),
-    ).toHaveText("Execution");
-    await expect(
-      panel
-        .locator(".window-list-row", { hasText: "Intake Agent" })
-        .first()
-        .locator(".window-list-lane"),
-    ).toHaveText("Intake");
+    const branchBackedListBadge = panel
+      .locator(".window-list-row", { hasText: "Codex" })
+      .first()
+      .locator(".window-list-worktree");
+    const ephemeralListBadge = panel
+      .locator(".window-list-row", { hasText: "Intake Agent" })
+      .first()
+      .locator(".window-list-worktree");
+    const unknownListBadge = panel
+      .locator(".window-list-row", { hasText: "Restored Agent" })
+      .first()
+      .locator(".window-list-worktree");
+    await expect(branchBackedListBadge).toHaveText("Branch-backed");
+    await expect(branchBackedListBadge).toHaveAttribute(
+      "data-worktree-form",
+      "branch-backed",
+    );
+    await expect(ephemeralListBadge).toHaveText("Ephemeral");
+    await expect(ephemeralListBadge).toHaveAttribute(
+      "data-worktree-form",
+      "ephemeral",
+    );
+    await expect(unknownListBadge).toHaveText("?");
+    await expect(unknownListBadge).toHaveAttribute(
+      "data-worktree-label",
+      "Unknown worktree form",
+    );
+
+    await expectWorktreeChromeNotToOverflow(page);
+    await page.setViewportSize({ width: 640, height: 720 });
+    await expectWorktreeChromeNotToOverflow(page);
   });
 });
+
+async function expectWorktreeChromeNotToOverflow(page) {
+  await expect
+    .poll(() =>
+      page.locator(".workspace-window .window-titlebar").evaluateAll((nodes) =>
+        nodes.every((node) => node.scrollWidth <= node.clientWidth + 1),
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      page.locator("#window-list-panel .window-list-row").evaluateAll((nodes) =>
+        nodes.every((node) => node.scrollWidth <= node.clientWidth + 1),
+      ),
+    )
+    .toBe(true);
+  const panelBox = await page.locator("#window-list-panel").boundingBox();
+  const viewport = page.viewportSize();
+  expect(panelBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(panelBox.x).toBeGreaterThanOrEqual(0);
+  expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width + 1);
+}
 
 async function installAgentTitleBadgeBackend(page) {
   await page.addInitScript(() => {
@@ -121,9 +242,30 @@ async function installAgentTitleBadgeBackend(page) {
         purpose_title: null,
         dynamic_title: null,
         dynamic_title_detail: null,
-        agent_id: "codex",
+        agent_id: "claude",
         agent_color: "cyan",
         lane_kind: "intake",
+        tab_group_id: null,
+        tab_group_active: false,
+      },
+      {
+        id: "agent-3",
+        title: "Restored Agent",
+        preset: "agent",
+        geometry: { x: 180, y: 520, width: 720, height: 300 },
+        geometry_revision: 0,
+        z_index: 3,
+        status: "idle",
+        minimized: false,
+        maximized: false,
+        pre_maximize_geometry: null,
+        persist: true,
+        purpose_title: null,
+        dynamic_title: null,
+        dynamic_title_detail: null,
+        agent_id: "claude",
+        agent_color: "cyan",
+        lane_kind: "unknown",
         tab_group_id: null,
         tab_group_active: false,
       },

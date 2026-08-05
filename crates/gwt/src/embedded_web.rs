@@ -167,9 +167,9 @@ root_js_modules! {
     "protocol-enums.js" => "WINDOW_RUNTIME_STATES",
     // SPEC-3015 — window runtime state normalization extracted from app.js.
     "window-runtime-state.js" => "normalizeWindowRuntimeState",
-    // SPEC-3214 — Intake/Execution lane identity shared by window
+    // SPEC-3245 — semantic worktree form presentation shared by window
     // titlebar, window list, and fleet minimap.
-    "window-lane-identity.js" => "windowLaneKind",
+    "window-worktree-form.js" => "windowWorktreeForm",
     // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface
     // (SPEC-2970) extracted from app.js.
     "provider-usage-surface.js" => "createProviderUsageSurface",

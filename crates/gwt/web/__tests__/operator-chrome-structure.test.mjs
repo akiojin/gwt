@@ -62,6 +62,11 @@ const projectShellSurfaceSource = readFileSync(
   resolve(here, "../project-shell-surface.js"),
   "utf8",
 );
+const fleetMinimapSource = readFileSync(resolve(here, "../fleet-minimap.js"), "utf8");
+const windowWorktreeFormPath = resolve(here, "../window-worktree-form.js");
+const windowWorktreeFormSource = existsSync(windowWorktreeFormPath)
+  ? readFileSync(windowWorktreeFormPath, "utf8")
+  : "";
 const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
@@ -560,46 +565,75 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
   );
 });
 
-test("workspace windows expose lane badges as a separate contract from agent color", () => {
-  assert.match(
-    appSource,
-    /from "\/window-lane-identity\.js"/,
-    "app.js must import lane identity helpers",
+test("workspace windows expose semantic worktree badges separately from agent color", () => {
+  assert.ok(
+    existsSync(windowWorktreeFormPath),
+    "semantic worktree form adapter must exist as its own module",
   );
   assert.match(
     appSource,
-    /class="window-lane-badge"/,
-    "titlebar template must include a lane badge separate from the role badge",
+    /from "\/window-worktree-form\.js"/,
+    "app.js must import worktree form helpers",
   );
   assert.match(
     appSource,
-    /applyWindowLaneData\(element,\s*windowData\)/,
-    "window root must carry data-lane-kind",
+    /class="window-worktree-badge"/,
+    "titlebar template must include a worktree badge separate from the role badge",
   );
   assert.match(
     appSource,
-    /appendRenderKeyPart\(parts,\s*windowLaneKind\(windowData\)\)/,
-    "workspace window render keys must use the same lane normalization as the badge",
+    /applyWindowWorktreeData\(element,\s*windowData\)/,
+    "window root must carry data-worktree-form",
+  );
+  assert.match(
+    appSource,
+    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(windowData\)\)/,
+    "workspace window render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     projectShellSurfaceSource,
-    /window-list-lane/,
-    "window list rows must include the same lane badge contract",
+    /window-list-worktree/,
+    "window list rows must include the same worktree badge contract",
   );
   assert.match(
     projectShellSurfaceSource,
-    /appendRenderKeyPart\(parts,\s*windowLaneKind\(entry\)\)/,
-    "window list render keys must use the same lane normalization as the badge",
+    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(entry\)\)/,
+    "window list render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     inlineStyle,
-    /\.window-lane-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
-    "lane badges must use Operator tokens, not raw colors",
+    /\.window-worktree-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
+    "worktree badges must use Operator tokens, not raw colors",
   );
   assert.match(
     frontendStyle,
-    /\.fleet-minimap__cell\[data-lane-symbol\]::before/,
-    "minimap cells must render a compact lane marker",
+    /\.fleet-minimap__cell\[data-worktree-symbol\]::before/,
+    "minimap cells must render a compact worktree marker",
+  );
+  assert.match(
+    windowWorktreeFormSource,
+    /lane_kind[\s\S]*laneKind[\s\S]*"intake"[\s\S]*"execution"/,
+    "only the adapter must understand the legacy backend wire vocabulary",
+  );
+});
+
+test("old lane identity vocabulary is absent from production presentation wiring", () => {
+  const consumerSource = `${appSource}\n${projectShellSurfaceSource}\n${fleetMinimapSource}`;
+  const presentationSource = `${consumerSource}\n${frontendStyle}`;
+  assert.doesNotMatch(
+    consumerSource,
+    /window-lane-identity|WindowLane|windowLane|cellLane|lane_kind|laneKind/,
+    "legacy lane wiring must be confined to the worktree-form adapter",
+  );
+  assert.doesNotMatch(
+    presentationSource,
+    /window-lane-badge|window-list-lane|data-lane-(?:kind|label|symbol)/,
+    "old lane classes and data attributes must leave production presentation wiring",
+  );
+  assert.doesNotMatch(
+    presentationSource,
+    /Intake lane|Execution lane|Unknown lane/,
+    "old user-facing lane copy must leave production presentation wiring",
   );
 });
 
