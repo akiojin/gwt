@@ -80,6 +80,32 @@ pub fn pm_prefs_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm.json")
 }
 
+/// Canonical worktree for the project's resident PM session.
+pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
+}
+
+/// Whether `path` is some project's canonical PM worktree.
+///
+/// Gates PM-only managed assets, so it anchors on the full shape
+/// `<gwt projects dir>/<repo hash>/pm/worktree` rather than the trailing two
+/// segments alone — a production branch literally named `pm/worktree` would
+/// otherwise be handed the PM operating contract.
+pub fn is_pm_worktree(path: &Path) -> bool {
+    let Some(pm_dir) = path.parent() else {
+        return false;
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || pm_dir.file_name() != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
+    pm_dir
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|projects_dir| projects_dir == gwt_core::paths::gwt_projects_dir())
+}
+
 /// Per-writer-unique scratch path in the same directory as `path` so the
 /// final `rename` stays on one filesystem and is atomic. A fixed scratch name
 /// would let concurrent GUI/gwtd writers truncate the same file and tear the
@@ -568,6 +594,36 @@ mod tests {
         assert!(
             !prefs.settings.auto_start,
             "FR-002 settings must survive deregistration"
+        );
+    }
+
+    /// SPEC-3431 T-052: `is_pm_worktree` gates who receives the PM operating
+    /// contract, so it must match the canonical location and nothing else.
+    #[test]
+    fn pm_worktree_path_is_canonical_and_predicate_matches_only_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+        let repo = Path::new("/tmp/some-repo");
+        let worktree = pm_worktree_path_for_repo_path(repo);
+        assert_eq!(
+            worktree,
+            gwt_core::paths::gwt_project_dir_for_repo_path(repo).join("pm/worktree")
+        );
+        assert!(is_pm_worktree(&worktree));
+
+        let pm_dir = worktree.parent().expect("pm dir");
+        assert!(
+            !is_pm_worktree(pm_dir),
+            "the `pm` directory itself is not the worktree"
+        );
+        assert!(
+            !is_pm_worktree(&pm_dir.join("worktree-2")),
+            "a sibling directory must not match"
+        );
+        assert!(
+            !is_pm_worktree(Path::new("/tmp/elsewhere/pm/worktree")),
+            "a branch named pm/worktree outside ~/.gwt/projects must not match"
         );
     }
 

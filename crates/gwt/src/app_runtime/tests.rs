@@ -40017,18 +40017,19 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         .pending_pm_launches
         .values()
         .all(|project_root| project_root == &repo));
-    // T-052: the $gwt-pm bootstrap prompt must resolve — the guidance skill
-    // is materialized into the PM worktree at spawn time (both mirrors).
-    let pm_worktree = gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
-        .join("pm")
-        .join("worktree");
+    // T-052: the spawn targets the canonical PM worktree, which is what makes
+    // the $gwt-pm bootstrap prompt resolvable — materialization keys on that
+    // path. The materialization contract itself is owned by
+    // crates/gwt/tests/managed_assets_test.rs
+    // (pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution); asserting
+    // the skill file here would only observe the state before the launch
+    // thread's asset refresh runs, which is exactly how the prune regression
+    // stayed invisible.
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
     assert!(
-        pm_worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
-        "gwt-pm guidance must be materialized for Claude Code"
-    );
-    assert!(
-        pm_worktree.join(".codex/skills/gwt-pm/SKILL.md").exists(),
-        "gwt-pm guidance must be materialized for Codex"
+        pm_worktree.join(".git").exists(),
+        "the PM must spawn in its canonical worktree at {}",
+        pm_worktree.display()
     );
 }
 

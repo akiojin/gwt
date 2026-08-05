@@ -7,6 +7,12 @@
 //! nothing registered → fresh silent spawn (branchless, explicit PM
 //! worktree, `$gwt-pm` bootstrap prompt).
 //!
+//! The gwt-pm guidance skill that prompt resolves against is written by
+//! `managed_assets::materialize_managed_gwt_assets_for_targets` — the single
+//! writer, keyed on the canonical PM worktree path. Fresh spawn, resume,
+//! crash respawn, and every later refresh funnel through it, so this module
+//! never materializes the skill itself.
+//!
 //! Fresh spawns deliberately avoid the Launch Wizard profile machinery:
 //! a silent-launch profile does not exist on a fresh project (the Issue
 //! Monitor bootstrap trap), so the PM uses a fixed default agent instead.
@@ -234,8 +240,7 @@ impl AppRuntime {
     /// touched — a corrupted registration cannot direct the reaper at an
     /// arbitrary path. Fail-closed: any uncertainty keeps the worktree.
     fn cleanup_pm_worktree(project_root: &Path) {
-        let worktree =
-            gwt_core::paths::gwt_project_dir_for_repo_path(project_root).join("pm/worktree");
+        let worktree = pm_registry::pm_worktree_path_for_repo_path(project_root);
         if !worktree.exists() {
             return;
         }
@@ -336,10 +341,9 @@ impl AppRuntime {
             }
         };
         // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
-        // skill materialized in the PM worktree (both provider mirrors).
-        if let Err(error) = gwt_skills::pm_guidance::generate_pm_guidance(&worktree) {
-            tracing::warn!(%error, "failed to materialize gwt-pm guidance");
-        }
+        // skill that managed-asset materialization writes into this worktree.
+        // Writing it here instead would be futile — the launch's own asset
+        // refresh prunes unbundled `gwt-*` skills right after.
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir(worktree)
             .extra_arg(PM_BOOTSTRAP_PROMPT)
@@ -361,7 +365,7 @@ impl AppRuntime {
     /// Dedicated detached worktree for the PM session (research R-10). Its
     /// lifecycle is bound to the PM registration; T-016 adds GC.
     fn ensure_pm_worktree(project_root: &Path) -> Result<PathBuf, String> {
-        let path = gwt_core::paths::gwt_project_dir_for_repo_path(project_root).join("pm/worktree");
+        let path = pm_registry::pm_worktree_path_for_repo_path(project_root);
         if path.join(".git").exists() {
             return Ok(path);
         }
