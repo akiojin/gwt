@@ -104,6 +104,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Workspace(WorkspaceCommand::WorkPrune {
                 dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
                 ids: optional_string_vec(params, "ids")?,
+                project_root: optional_string(params, "project_root")?,
             })
         }
         "board.show" => board_show(params)?,

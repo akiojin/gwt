@@ -255,8 +255,15 @@ pub enum WorkspaceCommand {
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
     /// Issue #3448: settle incomplete Works whose owner Issue is already
-    /// closed. `dry_run` reports the plan without emitting close events.
-    WorkPrune { dry_run: bool, ids: Vec<String> },
+    /// closed, and discard orphaned worktree-scan placeholders. `dry_run`
+    /// reports the plan without emitting close events. `project_root` targets
+    /// a project other than the current one (the GUI opens the layout root,
+    /// which resolves to a different store than a linked worktree — #3466).
+    WorkPrune {
+        dry_run: bool,
+        ids: Vec<String>,
+        project_root: Option<String>,
+    },
 }
 
 /// SPEC-1942 command model for `actions.*` JSON operations.
