@@ -276,6 +276,7 @@ fn active_work_projection_from_live_sessions(
         blocked_agents: 0,
         branch: Some(first.branch_name.clone()),
         worktree_path: Some(first.worktree_path.display().to_string()),
+        managed_hook_health: None,
         pr_number: None,
         pr_url: None,
         pr_state: None,
@@ -337,12 +338,35 @@ fn managed_hook_health_view_for_project(
     sessions_dir: &Path,
     sessions: &[&ActiveAgentSession],
 ) -> Option<gwt::ManagedHookHealthView> {
-    let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(project_root);
-    if let Some(session) = sessions.iter().min_by_key(|session| &session.session_id) {
-        input = input.with_runtime_state_path(gwt_agent::runtime_state_path(
-            sessions_dir,
-            &session.session_id,
-        ));
+    managed_hook_health_view_for_worktree(project_root, sessions_dir, sessions)
+}
+
+pub(super) fn managed_hook_health_view_for_worktree(
+    worktree: &Path,
+    sessions_dir: &Path,
+    sessions: &[&ActiveAgentSession],
+) -> Option<gwt::ManagedHookHealthView> {
+    let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(worktree);
+    input.runtime_state_path = None;
+    let selected_runtime_state = sessions
+        .iter()
+        .map(|session| {
+            let path = gwt_agent::runtime_state_path(sessions_dir, &session.session_id);
+            let updated_at = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| {
+                    value
+                        .get("updated_at")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                });
+            (updated_at, session.session_id.as_str(), path)
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+        .map(|(_, _, path)| path);
+    if let Some(runtime_state_path) = selected_runtime_state {
+        input = input.with_runtime_state_path(runtime_state_path);
     }
     let health = gwt::cli::hook::health::read_managed_hook_health(&input);
     let should_show = health.status != gwt::cli::hook::health::ManagedHookHealthStatus::Inactive
@@ -351,6 +375,25 @@ fn managed_hook_health_view_for_project(
         || !health.slow_handlers.is_empty()
         || !health.issues.is_empty();
     should_show.then(|| managed_hook_health_view_from_health(health))
+}
+
+fn attach_managed_hook_health_to_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    sessions_dir: &Path,
+    sessions: &[&ActiveAgentSession],
+) {
+    for work in active_works {
+        let Some(worktree) = work.worktree_path.as_deref().map(Path::new) else {
+            continue;
+        };
+        let matching_sessions = sessions
+            .iter()
+            .copied()
+            .filter(|session| projection_worktree_paths_match(&session.worktree_path, worktree))
+            .collect::<Vec<_>>();
+        work.managed_hook_health =
+            managed_hook_health_view_for_worktree(worktree, sessions_dir, &matching_sessions);
+    }
 }
 
 fn managed_hook_health_status_wire(
@@ -910,6 +953,7 @@ fn active_work_items_from_projection(
                 blocked_agents,
                 branch: branch_value,
                 worktree_path: worktree_value,
+                managed_hook_health: None,
                 pr_number: if is_current_projection {
                     projection
                         .git_details
@@ -1039,6 +1083,7 @@ fn append_paused_work_items(
             blocked_agents: 0,
             branch,
             worktree_path,
+            managed_hook_health: None,
             pr_number: container.and_then(|value| value.pr_number),
             pr_url: container.and_then(|value| value.pr_url.clone()),
             pr_state: container.and_then(|value| value.pr_state.clone()),
@@ -1352,7 +1397,7 @@ fn workspace_execution_container_view_from_ref(
         pr_url: container.pr_url.clone(),
         pr_state: container.pr_state.clone(),
         diagnosis: container.worktree_path.as_deref().map(|worktree| {
-            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose(
+            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose_for_projection(
                 worktree, session_id,
             ))
         }),
@@ -2195,7 +2240,7 @@ fn active_workspace_child_work(work: &gwt::ActiveWorkItemView) -> gwt::ActiveWor
         close_blocked_reason,
         agents: work.agents.clone(),
         execution_diagnosis: work.worktree_path.as_deref().map(|worktree| {
-            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose(
+            workspace_execution_diagnosis_view(gwt::cli::execution_state::diagnose_for_projection(
                 Path::new(worktree),
                 work.agents.first().map(|agent| agent.session_id.as_str()),
             ))
@@ -2833,6 +2878,11 @@ impl AppRuntime {
                 &session_index,
                 &tab.project_root,
             );
+            attach_managed_hook_health_to_active_works(
+                &mut view.active_works,
+                &self.sessions_dir,
+                &sessions,
+            );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background merge-scan cache plus the recorded PR state.
             let dirty_branches = self.work_dirty_branches.get(&tab.project_root);
@@ -2877,12 +2927,19 @@ impl AppRuntime {
             return Some(view);
         }
 
-        let view = active_work_projection_from_live_sessions(
+        let mut view = active_work_projection_from_live_sessions(
             tab_id,
             tab,
             &sessions,
             managed_hook_health_view_for_project(&tab.project_root, &self.sessions_dir, &sessions),
         );
+        if let Some(view) = view.as_mut() {
+            attach_managed_hook_health_to_active_works(
+                &mut view.active_works,
+                &self.sessions_dir,
+                &sessions,
+            );
+        }
         let mut cache = self.active_work_projection_cache.borrow_mut();
         if let Some(view) = view.as_ref() {
             cache.insert(tab_id.to_string(), view.clone());

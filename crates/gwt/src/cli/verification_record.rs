@@ -1129,12 +1129,19 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         return None;
     }
     match receipt.as_ref() {
-        Some(record) if record.execution_binding != current_binding => {
-            return Some(
-                "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation. Settle and push the current generation's own Work event before retrying."
-                    .to_string(),
-            );
-        }
+        Some(record) => match work_event_receipt_authorizes_current_generation(worktree, record) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Some(
+                    "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation. Settle and push the current generation's own Work event before retrying."
+                        .to_string(),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "work event settlement receipt authority is unreadable");
+                return None;
+            }
+        },
         None if current_binding.is_some() => {
             return Some(missing_generation_receipt_refusal(worktree));
         }
@@ -1172,6 +1179,33 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         WorkEventSettlementStatus::Blocked(blocker) => {
             Some(work_event_settlement_blocker_description(&blocker))
         }
+    }
+}
+
+/// Authenticate a Work settlement receipt against the authoritative current
+/// generation. A receipt may name the exact current binding or an authentic
+/// same-Session lifecycle prefix (for example, the Active head immediately
+/// before that generation settled as Completed). Generation successors,
+/// takeovers, foreign Sessions, and arbitrary heads remain unauthorized.
+pub(crate) fn work_event_receipt_authorizes_current_generation(
+    worktree: &Path,
+    receipt: &WorkEventSettlementRecord,
+) -> io::Result<bool> {
+    let Some(execution) = execution_state::load(worktree)? else {
+        return Ok(receipt.execution_binding.is_none());
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    match receipt.execution_binding.as_ref() {
+        Some(binding) => execution_state::execution_binding_authorizes_current_generation(
+            worktree,
+            owner,
+            &receipt.session_id,
+            binding,
+        ),
+        None => Ok(execution_state::current_execution_binding(worktree, owner)?.is_none()),
     }
 }
 
@@ -4269,6 +4303,126 @@ pub(crate) mod tests {
             EvidenceStatus::WrongGeneration,
             "legacy unbound evidence must not authorize a generation-aware completion gate"
         );
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_accepts_completed_lifecycle_prefix() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let session_id = "session-settlement-completed";
+
+        let active = initialize_generation_scoped_execution(&fixture.repo, session_id);
+        let receipt = save_work_event_settlement_record(&fixture.repo, session_id, true)
+            .expect("persist Active-head Work settlement receipt");
+        assert!(receipt.status.is_settled());
+        assert_eq!(receipt.execution_binding.as_ref(), Some(&active));
+
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &fixture.repo,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Completed,
+            )
+            .expect("settle the receipt-owning generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let completed =
+            crate::cli::execution_state::current_execution_binding(&fixture.repo, owner)
+                .expect("load Completed binding")
+                .expect("Completed binding exists");
+        assert_eq!(completed.generation_id, active.generation_id);
+        assert_eq!(completed.binding_id, active.binding_id);
+        assert_ne!(completed.ledger_head_hash, active.ledger_head_hash);
+
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "an authentic same-Session lifecycle prefix must authorize Completed PR handoff",
+        );
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_rejects_foreign_or_tampered_receipt_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let session_id = "session-settlement-owner";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        let mut receipt = save_work_event_settlement_record(&fixture.repo, session_id, true)
+            .expect("persist owning Session Work settlement receipt");
+        assert!(receipt.status.is_settled());
+        receipt.session_id = "session-settlement-foreign".to_string();
+        persist_work_event_settlement_record(&fixture.repo, &receipt)
+            .expect("persist foreign-provenance receipt fixture");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a foreign receipt Session must fail closed");
+        assert!(refusal.contains("generation"), "{refusal}");
+
+        receipt.session_id = session_id.to_string();
+        receipt
+            .execution_binding
+            .as_mut()
+            .expect("receipt is generation-bound")
+            .ledger_head_hash = "arbitrary-ledger-head".to_string();
+        persist_work_event_settlement_record(&fixture.repo, &receipt)
+            .expect("persist arbitrary-head receipt fixture");
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("an arbitrary same-generation receipt head must fail closed");
+        assert!(refusal.contains("generation"), "{refusal}");
+    }
+
+    #[test]
+    fn generation_scoped_work_settlement_rejects_takeover_suffix() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let session_id = "session-settlement-before-takeover";
+
+        initialize_generation_scoped_execution(&fixture.repo, session_id);
+        let receipt = save_work_event_settlement_record(&fixture.repo, session_id, false)
+            .expect("persist pre-takeover Work settlement receipt");
+        assert!(receipt.status.is_settled());
+        let request = crate::cli::execution_state::GenerationTakeoverRequest {
+            operation_id: "operation-settlement-takeover".to_string(),
+            principal_id: "principal-settlement-takeover".to_string(),
+            work_id: Some("work-settlement-takeover".to_string()),
+            source: Some("continue-work:handoff".to_string()),
+            from_session_id: session_id.to_string(),
+            to_session_id: "session-settlement-after-takeover".to_string(),
+            reason: "verified stale owner".to_string(),
+            requested_at: Utc::now(),
+        };
+        crate::cli::execution_state::prepare_generation_takeover(&fixture.repo, owner, &request)
+            .expect("prepare same-generation takeover");
+        crate::cli::execution_state::activate_generation_takeover(&fixture.repo, owner, &request)
+            .expect("activate same-generation takeover");
+
+        assert_eq!(
+            crate::cli::execution_state::diagnose(&fixture.repo, None)
+                .work_event_receipt_matches_current_generation,
+            Some(false),
+            "a takeover is not a same-Session lifecycle descendant",
+        );
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("a pre-takeover receipt must not authorize the new owner");
+        assert!(refusal.contains("generation"), "{refusal}");
     }
 
     #[test]
