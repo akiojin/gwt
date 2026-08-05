@@ -112,17 +112,17 @@ pub fn generate_codex_hooks_for_mode(
     mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
     for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
-        generate_hook_config_at_path(&hooks_path, ManagedHookTarget::Codex)?;
+        generate_hook_config_at_path(&hooks_path)?;
     }
     Ok(())
 }
 
 fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Result<()> {
     let settings_path = target.config_path(worktree);
-    generate_hook_config_at_path(&settings_path, target)
+    generate_hook_config_at_path(&settings_path)
 }
 
-fn generate_hook_config_at_path(settings_path: &Path, target: ManagedHookTarget) -> io::Result<()> {
+fn generate_hook_config_at_path(settings_path: &Path) -> io::Result<()> {
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -137,7 +137,6 @@ fn generate_hook_config_at_path(settings_path: &Path, target: ManagedHookTarget)
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
             managed_hook_shell(),
-            target,
         )),
     );
 
@@ -343,9 +342,8 @@ pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
 fn merge_managed_and_user_hooks(
     user_hooks: Map<String, Value>,
     shell: HookShell,
-    target: ManagedHookTarget,
 ) -> Map<String, Value> {
-    let managed_hooks = managed_hooks(shell, target);
+    let managed_hooks = managed_hooks(shell);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -448,23 +446,23 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
         .any(|suffix| command.contains(suffix))
 }
 
-fn managed_hooks(shell: HookShell, target: ManagedHookTarget) -> Map<String, Value> {
+fn managed_hooks(shell: HookShell) -> Map<String, Value> {
     let mut hooks = Map::new();
     for event in MANAGED_EVENT_ORDER {
         hooks.insert(
             event.to_string(),
-            Value::Array(vec![event_hook(event, shell, target)]),
+            Value::Array(vec![event_hook(event, shell)]),
         );
     }
     hooks
 }
 
-fn event_hook(event: &str, shell: HookShell, target: ManagedHookTarget) -> Value {
+fn event_hook(event: &str, shell: HookShell) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": event_hook_command(event, shell, target),
+                "command": event_hook_command(event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -479,30 +477,13 @@ fn event_hook(event: &str, shell: HookShell, target: ManagedHookTarget) -> Value
 /// regenerator.
 const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 
-/// Return the binary path that every generated hook command should
-/// invoke. SPEC #1942 amendment: instead of relying on a literal `gwt`
-/// resolved via `$PATH`, the generator embeds an absolute path so
-/// that hooks work even when the user has not installed gwt globally
-/// (dev worktrees, CI sandboxes, fresh clones).
+/// Return the stable fallback used by every generated runtime selector.
+/// Managed hooks resolve `GWT_BIN_PATH` first and use this value only when
+/// the launch did not provide an explicit runtime binary.
 ///
-/// Resolution order:
-///
-/// 1. `$GWT_HOOK_BIN` environment variable (explicit override, used
-///    by the regenerate-settings example when it knows the gwt
-///    binary path but its own `current_exe()` points elsewhere).
-/// 2. The sibling `gwtd` binary when the GUI `gwt` binary calls
-///    `generate_settings_local` at startup.
-/// 3. A PATH-resolved `gwtd` when available.
-/// 4. Literal `"gwtd"` fallback (PATH-dependent behaviour).
-///
-/// Platform notes:
-///
-/// - macOS: `current_exe()` preserves the invocation path, so a
-///   `~/.bun/bin/gwt` GUI launch resolves to the sibling
-///   `~/.bun/bin/gwtd` path and survives bun upgrades.
-/// - Linux: `/proc/self/exe` resolves to the real binary, which may
-///   land inside bun's per-version cache. The generator is re-run on
-///   every gwt startup so staleness self-heals on the next launch.
+/// Public materialization sets `GWT_HOOK_BIN` from the stable managed-assets
+/// resolver. The `current_exe` / PATH fallback remains for direct library use
+/// and tests that do not enter through that materialization boundary.
 pub(crate) fn gwt_hook_bin_path() -> String {
     if let Ok(v) = std::env::var(GWT_HOOK_BIN_ENV) {
         if !v.is_empty() {
@@ -583,25 +564,14 @@ fn managed_hook_shell() -> HookShell {
     }
 }
 
-fn event_hook_command(event: &str, shell: HookShell, target: ManagedHookTarget) -> String {
-    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell, target)
+fn event_hook_command(event: &str, shell: HookShell) -> String {
+    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
 }
 
-fn event_hook_command_with_bin(
-    bin: &str,
-    event: &str,
-    shell: HookShell,
-    target: ManagedHookTarget,
-) -> String {
+fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> String {
     match shell {
-        HookShell::Posix => match target {
-            ManagedHookTarget::Claude => posix_event_hook_command_with_bin(bin, event),
-            ManagedHookTarget::Codex => posix_codex_event_hook_command_with_bin(bin, event),
-        },
-        HookShell::PowerShell => match target {
-            ManagedHookTarget::Claude => powershell_event_hook_command_with_bin(bin, event),
-            ManagedHookTarget::Codex => powershell_codex_event_hook_command_with_bin(bin, event),
-        },
+        HookShell::Posix => posix_codex_event_hook_command_with_bin(bin, event),
+        HookShell::PowerShell => powershell_codex_event_hook_command_with_bin(bin, event),
     }
 }
 
@@ -656,22 +626,11 @@ fn workflow_policy_hook_command_with_bin(bin: &str, shell: HookShell) -> String 
 /// Emit the POSIX-shell form of the runtime-state hook. The previous
 /// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
 /// by a single `gwtd hook runtime-state <event>` dispatch.
-fn posix_event_hook_command_with_bin(bin: &str, event: &str) -> String {
-    let bin = posix_shell_quote(bin);
-    format!("{bin} hook event {event}")
-}
-
 fn posix_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
-    let fallback = posix_double_quoted_parameter_default(bin);
-    format!("gwt_bin=\"${{GWT_BIN_PATH:-{fallback}}}\"; \"$gwt_bin\" hook event {event}")
-}
-
-fn posix_double_quoted_parameter_default(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
+    let fallback = posix_shell_quote(bin);
+    format!(
+        "gwt_bin=\"${{GWT_BIN_PATH:-}}\"; if [ -z \"$gwt_bin\" ]; then gwt_bin={fallback}; fi; if command -v \"$gwt_bin\" >/dev/null 2>&1; then \"$gwt_bin\" hook event {event}; else true; fi"
+    )
 }
 
 #[cfg(test)]
@@ -702,15 +661,10 @@ fn posix_coordination_hook_command(event: &str) -> String {
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
 /// keep that wrapper, then invoke the gwtd binary via `& '...'` call
 /// operator.
-fn powershell_event_hook_command_with_bin(bin: &str, event: &str) -> String {
-    let bin = powershell_quote(bin);
-    format!("powershell -NoProfile -Command \"& {{ & {bin} hook event {event} }}\"")
-}
-
 fn powershell_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
     let bin = powershell_quote(bin);
     format!(
-        "powershell -NoProfile -Command \"& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ {bin} }}; & $gwtBin hook event {event} }}\""
+        "powershell -NoProfile -Command \"& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ {bin} }}; try {{ & $gwtBin hook event {event}; exit $LASTEXITCODE }} catch {{ exit 0 }} }}\""
     )
 }
 
@@ -890,6 +844,116 @@ mod tests {
                 commands[0]
             );
         }
+    }
+
+    #[test]
+    fn managed_event_commands_are_runtime_indirect_on_every_shell() {
+        for shell in [HookShell::Posix, HookShell::PowerShell] {
+            let command = event_hook_command_with_bin(
+                "/Applications/GWT.app/Contents/MacOS/gwtd",
+                "SessionStart",
+                shell,
+            );
+            assert!(
+                command.contains("GWT_BIN_PATH"),
+                "managed hooks must resolve the runtime override first: {command}"
+            );
+            assert!(command.contains(" hook event SessionStart"), "{command}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_managed_event_command_fails_open_when_binary_is_missing() {
+        let command = event_hook_command_with_bin(
+            "/definitely/missing/gwtd",
+            "SessionStart",
+            HookShell::Posix,
+        );
+
+        let status = hidden_command("sh")
+            .args(["-c", &command])
+            .env_remove("GWT_BIN_PATH")
+            .status()
+            .expect("run managed event command");
+
+        assert!(
+            status.success(),
+            "missing managed binary must fail open: {command}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_managed_event_command_preserves_existing_binary_block_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("gwtd");
+        fs::write(&bin, "#!/bin/sh\nexit 2\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let command =
+            event_hook_command_with_bin(&bin.display().to_string(), "PreToolUse", HookShell::Posix);
+
+        let status = hidden_command("sh")
+            .args(["-c", &command])
+            .env_remove("GWT_BIN_PATH")
+            .status()
+            .expect("run managed event command");
+
+        assert_eq!(status.code(), Some(2), "{command}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_managed_event_command_invokes_brace_paths_for_runtime_and_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_hook_bin(path: &Path, marker: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_bin = dir.path().join("runtime}").join("gwtd");
+        let fallback_bin = dir.path().join("fallback}").join("gwtd");
+        write_hook_bin(&runtime_bin, "runtime");
+        write_hook_bin(&fallback_bin, "fallback");
+
+        let command = event_hook_command_with_bin(
+            &fallback_bin.to_string_lossy(),
+            "SessionStart",
+            HookShell::Posix,
+        );
+        let runtime = hidden_command("sh")
+            .args(["-c", &command])
+            .env("GWT_BIN_PATH", &runtime_bin)
+            .output()
+            .expect("run runtime-selected hook command");
+        assert!(runtime.status.success(), "{command}");
+        assert_eq!(String::from_utf8_lossy(&runtime.stdout), "runtime");
+
+        let fallback = hidden_command("sh")
+            .args(["-c", &command])
+            .env_remove("GWT_BIN_PATH")
+            .output()
+            .expect("run fallback-selected hook command");
+        assert!(fallback.status.success(), "{command}");
+        assert_eq!(String::from_utf8_lossy(&fallback.stdout), "fallback");
+    }
+
+    #[test]
+    fn powershell_managed_event_command_contains_fail_open_boundary() {
+        let command = event_hook_command_with_bin(
+            r"C:\definitely\missing\gwtd.exe",
+            "SessionStart",
+            HookShell::PowerShell,
+        );
+
+        assert!(command.contains("try {"), "{command}");
+        assert!(command.contains("catch { exit 0 }"), "{command}");
+        assert!(command.contains("exit $LASTEXITCODE"), "{command}");
     }
 
     #[test]
@@ -2036,11 +2100,7 @@ mod tests {
         let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("session start command");
-        let expected = event_hook_command(
-            "SessionStart",
-            managed_hook_shell(),
-            ManagedHookTarget::Codex,
-        );
+        let expected = event_hook_command("SessionStart", managed_hook_shell());
         assert_eq!(session_start_command, expected);
     }
 

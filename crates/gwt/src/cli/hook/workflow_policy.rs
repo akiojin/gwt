@@ -22,7 +22,7 @@ use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_pro
 
 use crate::discussion_resume::PendingDiscussionGoal;
 
-use super::{block_bash_policy, HookError, HookEvent, HookOutput};
+use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutput};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowContext {
@@ -54,7 +54,8 @@ pub fn evaluate_with_context(
     worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
-    let safety = block_bash_policy::evaluate(event, worktree_root)?;
+    effect_classifier::observe_event(event, worktree_root);
+    let safety = block_bash_policy::evaluate_without_observation(event, worktree_root)?;
     if safety != HookOutput::Silent {
         return Ok(safety);
     }
@@ -255,7 +256,7 @@ Use the canonical JSON operations instead: `execution.complete` / `execution.blo
     ))
 }
 
-fn event_target_paths(event: &HookEvent) -> Vec<String> {
+pub(crate) fn event_target_paths(event: &HookEvent) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(path) = event
         .tool_input
@@ -462,7 +463,15 @@ fn is_read_only_json_envelope_command(command: &str) -> bool {
         .is_some_and(is_read_only_json_envelope_operation)
 }
 
-fn json_envelope_operation(command: &str) -> Option<String> {
+pub(crate) fn json_envelope_operation(command: &str) -> Option<String> {
+    let value = json_envelope(command)?;
+    value
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
     let segments = super::segments::split_command_segments(command);
     if segments.len() != 1
         || !segments
@@ -472,14 +481,10 @@ fn json_envelope_operation(command: &str) -> Option<String> {
         return None;
     }
     let json = extract_json_object(command)?;
-    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    value
-        .get("operation")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
+    serde_json::from_str::<serde_json::Value>(json).ok()
 }
 
-fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     matches!(
         operation,
         "workspace.candidates"
@@ -552,7 +557,7 @@ fn has_file_output_redirection(command: &str) -> bool {
     !super::segments::output_redirect_file_targets(command).is_empty()
 }
 
-fn is_read_only_segment(segment: &str) -> bool {
+pub(crate) fn is_read_only_segment(segment: &str) -> bool {
     let tokens = segment_tokens(segment);
     let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
         return true;
@@ -578,8 +583,8 @@ fn is_read_only_segment(segment: &str) -> bool {
     }
 }
 
-/// Read-only `gh` queries used by release monitoring. Everything else stays
-/// owner-gated (`gh run rerun`, `gh release create`, ...); note that a
+/// Read-only `gh` queries used by release monitoring. Everything else remains
+/// classified as mutating (`gh run rerun`, `gh release create`, ...); note that a
 /// separate block-bash policy independently restricts `gh pr` / `gh issue` /
 /// `gh run view` regardless of owner state.
 fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
@@ -589,7 +594,7 @@ fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
     )
 }
 
-fn segment_tokens(segment: &str) -> Vec<&str> {
+pub(crate) fn segment_tokens(segment: &str) -> Vec<&str> {
     let raw = segment.split_whitespace().collect::<Vec<_>>();
     let mut start = 0;
     while raw
@@ -645,7 +650,7 @@ fn is_env_assignment(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn normalize_command_name(token: &str) -> String {
+pub(crate) fn normalize_command_name(token: &str) -> String {
     let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
     // Skills resolve gwtd through `resolve_gwt_bin` and invoke it as
     // `"$GWT_BIN"`; treat that documented convention as the gwtd command so
@@ -1018,10 +1023,9 @@ mod tests {
         );
     }
 
-    // SPEC-3248 P7A (T-076): the intake lane still blocks production code
-    // edits while the standalone gwtd JSON envelope operations that settle
-    // curation — Issue/SPEC ops, `intake.outcome.record`,
-    // `improvement.capture`, and `memory.add` — pass the lane guard.
+    // SPEC-3248 P7A (T-076), amended by SPEC #3245: standalone gwtd JSON
+    // envelope operations that settle curation and execution remain silent
+    // after the lane/owner guards were removed.
     #[test]
     fn stop_gate_settlement_operations_pass_ownerless() {
         let bash_event = |command: &str| HookEvent {
@@ -1085,8 +1089,8 @@ mod tests {
         }
     }
 
-    // #3356: read-only loops and sanctioned bookkeeping writes must not
-    // require an owner; production source stays owner-gated.
+    // #3356 / SPEC #3245: read-only loops, bookkeeping writes, and production
+    // writes all stay silent after the owner guard removal.
     #[test]
     fn ownerless_read_only_loops_and_bookkeeping_writes_pass() {
         let repo = tempfile::tempdir().expect("repo");
