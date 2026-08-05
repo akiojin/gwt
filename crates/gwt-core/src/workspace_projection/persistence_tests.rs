@@ -3933,6 +3933,28 @@ fn t812_inject_authority_ambiguity(fixture: &T812Fixture, ambiguity: T812Authori
     }
 }
 
+fn t812_inject_container_shadow(
+    fixture: &T812Fixture,
+    shadow_id: &str,
+    status: WorkspaceStatusCategory,
+    session_id: &str,
+    discarded: bool,
+) {
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems for container shadow")
+        .expect("WorkItems for container shadow");
+    let mut shadow = work_items.work_items[0].clone();
+    shadow.id = shadow_id.to_string();
+    shadow.status_category = status;
+    shadow.events.clear();
+    shadow.agents[0].session_id = session_id.to_string();
+    shadow.discarded = discarded;
+    shadow.discarded_at = discarded.then_some(shadow.updated_at);
+    work_items.work_items.push(shadow);
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+        .expect("seed container shadow");
+}
+
 #[test]
 fn legacy_reconciliation_assigned_target_scope_ignores_unresolvable_unrelated_agent() {
     let _guard = lock_test_env();
@@ -4047,7 +4069,230 @@ fn session_bound_work_authority_uniqueness_rejects_unresolvable_authoritative_ta
 }
 
 #[test]
-fn session_bound_update_rejects_conflicting_current_and_terminal_authority_shadows() {
+fn session_bound_update_ignores_terminal_and_paused_foreign_container_history() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for (label, status, discarded) in [
+        ("terminal", WorkspaceStatusCategory::Done, false),
+        ("paused", WorkspaceStatusCategory::Idle, false),
+        ("discarded", WorkspaceStatusCategory::Active, true),
+    ] {
+        let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+        t812_inject_container_shadow(
+            &fixture,
+            "work-foreign-container-history",
+            status,
+            "foreign-shadow-session",
+            discarded,
+        );
+
+        t812_apply_resolved_workspace_update(
+            &fixture.target,
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: Some(format!("accepted beside {label} foreign history")),
+                progress_summary: None,
+                agent_session_id: Some(T812_SESSION_ID.to_string()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+        )
+        .expect("foreign terminal/paused history must not shadow exact current authority");
+
+        let after = load_workspace_work_items_from_path(&fixture.work_items_path)
+            .expect("reload WorkItems")
+            .expect("reloaded WorkItems");
+        let historical = after
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-foreign-container-history")
+            .expect("historical Work remains auditable");
+        assert_eq!(historical.status_category, status);
+        assert_eq!(historical.discarded, discarded);
+        assert_eq!(
+            historical.agents[0].session_id, "foreign-shadow-session",
+            "the transaction must not rewrite historical authority"
+        );
+    }
+}
+
+#[test]
+fn session_bound_terminalization_ignores_terminal_and_paused_foreign_container_history() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for (label, status, discarded) in [
+        ("terminal", WorkspaceStatusCategory::Done, false),
+        ("paused", WorkspaceStatusCategory::Idle, false),
+        ("discarded", WorkspaceStatusCategory::Active, true),
+    ] {
+        let fixture = t812_seed_session_bound_fixture(&temp.path().join(format!("close-{label}")));
+        t812_inject_container_shadow(
+            &fixture,
+            "work-foreign-container-history",
+            status,
+            "foreign-shadow-session",
+            discarded,
+        );
+
+        let target = SessionBoundWorkspaceTerminalTarget {
+            project_state_root: fixture.target.project_state_root.clone(),
+            work_event_root: fixture.target.work_event_root.clone(),
+            session_id: fixture.target.session_id.clone(),
+            branch_identity: fixture.target.branch_identity.clone(),
+            worktree_identity: fixture.target.worktree_identity.clone(),
+            owner: fixture.target.owner.clone(),
+            agent_id: fixture.target.agent_id.clone(),
+        };
+        assert_eq!(
+            emit_workspace_terminal_event_for_resolved_work_target(
+                &target,
+                WorkCloseKind::Done,
+                Utc::now(),
+                |_, _| Ok(()),
+            )
+            .expect("foreign terminal/paused history must not block terminalization"),
+            WorkspaceTerminalEventOutcome::Emitted
+        );
+
+        let after = load_workspace_work_items_from_path(&fixture.work_items_path)
+            .expect("reload WorkItems")
+            .expect("reloaded WorkItems");
+        assert_eq!(
+            after
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-foreign-container-history")
+                .expect("historical Work remains auditable")
+                .status_category,
+            status
+        );
+        assert_eq!(
+            after
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-foreign-container-history")
+                .expect("historical Work remains auditable")
+                .discarded,
+            discarded
+        );
+    }
+}
+
+#[test]
+fn session_bound_update_rejects_nonhistorical_or_current_paused_container_shadows() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for (label, status, current_session) in [
+        ("foreign-active", WorkspaceStatusCategory::Active, false),
+        ("foreign-blocked", WorkspaceStatusCategory::Blocked, false),
+        ("foreign-unknown", WorkspaceStatusCategory::Unknown, false),
+        ("current-paused", WorkspaceStatusCategory::Idle, true),
+    ] {
+        let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+        t812_inject_container_shadow(
+            &fixture,
+            &format!("work-{label}-shadow"),
+            status,
+            if current_session {
+                T812_SESSION_ID
+            } else {
+                "foreign-shadow-session"
+            },
+            false,
+        );
+        let before = fixture.state_bytes();
+        let result = t812_apply_resolved_workspace_update(
+            &fixture.target,
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: Some("must not cross nonhistorical authority".to_string()),
+                progress_summary: None,
+                agent_session_id: Some(T812_SESSION_ID.to_string()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+            },
+        );
+        let after = fixture.state_bytes();
+
+        t812_assert_rejected_without_mutation(&result, &before, &after, label);
+    }
+}
+
+#[test]
+fn session_bound_terminalization_rejects_nonhistorical_or_current_paused_container_shadows() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for (label, status, current_session) in [
+        ("foreign-active", WorkspaceStatusCategory::Active, false),
+        ("foreign-blocked", WorkspaceStatusCategory::Blocked, false),
+        ("foreign-unknown", WorkspaceStatusCategory::Unknown, false),
+        ("current-paused", WorkspaceStatusCategory::Idle, true),
+    ] {
+        let fixture = t812_seed_session_bound_fixture(&temp.path().join(format!("close-{label}")));
+        t812_inject_container_shadow(
+            &fixture,
+            &format!("work-{label}-shadow"),
+            status,
+            if current_session {
+                T812_SESSION_ID
+            } else {
+                "foreign-shadow-session"
+            },
+            false,
+        );
+        let target = SessionBoundWorkspaceTerminalTarget {
+            project_state_root: fixture.target.project_state_root.clone(),
+            work_event_root: fixture.target.work_event_root.clone(),
+            session_id: fixture.target.session_id.clone(),
+            branch_identity: fixture.target.branch_identity.clone(),
+            worktree_identity: fixture.target.worktree_identity.clone(),
+            owner: fixture.target.owner.clone(),
+            agent_id: fixture.target.agent_id.clone(),
+        };
+        let close_ledger =
+            gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root);
+        let before = fixture.state_bytes();
+        let close_before = t812_optional_file_bytes(&close_ledger);
+        let result = emit_workspace_terminal_event_for_resolved_work_target(
+            &target,
+            WorkCloseKind::Done,
+            Utc::now(),
+            |_, _| Ok(()),
+        );
+        let after = fixture.state_bytes();
+
+        assert!(result.is_err(), "{label} must fail closed");
+        assert_eq!(after, before, "{label} changed Work state");
+        assert_eq!(
+            t812_optional_file_bytes(&close_ledger),
+            close_before,
+            "{label} changed the close ledger"
+        );
+    }
+}
+
+#[test]
+fn session_bound_update_rejects_conflicting_current_authority_shadows() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -4056,7 +4301,6 @@ fn session_bound_update_rejects_conflicting_current_and_terminal_authority_shado
     for ambiguity in [
         T812AuthorityAmbiguity::ConflictingCurrentAgent,
         T812AuthorityAmbiguity::TerminalSessionShadow,
-        T812AuthorityAmbiguity::TerminalContainerShadow,
     ] {
         let fixture =
             t812_seed_session_bound_fixture(&temp.path().join(ambiguity.label().replace(' ', "-")));
@@ -4085,7 +4329,7 @@ fn session_bound_update_rejects_conflicting_current_and_terminal_authority_shado
 }
 
 #[test]
-fn session_bound_terminalization_rejects_conflicting_current_and_terminal_authority_shadows() {
+fn session_bound_terminalization_rejects_conflicting_current_authority_shadows() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -4094,7 +4338,6 @@ fn session_bound_terminalization_rejects_conflicting_current_and_terminal_author
     for ambiguity in [
         T812AuthorityAmbiguity::ConflictingCurrentAgent,
         T812AuthorityAmbiguity::TerminalSessionShadow,
-        T812AuthorityAmbiguity::TerminalContainerShadow,
     ] {
         let fixture = t812_seed_session_bound_fixture(
             &temp
