@@ -4,8 +4,8 @@ use gwt::issue_monitor::{
     save_issue_monitor_prefs, scan_issue_monitor_candidates,
     scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
     IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorIssue,
-    IssueMonitorIssueState, IssueMonitorPrefs, IssueMonitorState, MonitorInboxState,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorIssueState, IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorState,
+    MonitorInboxState, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 use gwt::issue_monitor_worker::{
     scan_loaded_issue_monitor_candidates, LoadedIssueMonitorCandidates,
@@ -26,6 +26,7 @@ fn issue(number: u64, labels: &[&str]) -> IssueMonitorIssue {
         title: format!("Issue {number}"),
         labels: labels.iter().map(|label| (*label).to_string()).collect(),
         state: IssueMonitorIssueState::Open,
+        readiness: IssueMonitorReadiness::NotApplicable,
         body: Some(format!("Body {number}")),
         url: Some(format!("https://github.com/example/repo/issues/{number}")),
     }
@@ -120,7 +121,7 @@ fn legacy_failed_prefs(project_root: &Path, issue_number: u64) -> IssueMonitorPr
 }
 
 #[test]
-fn monitor_config_defaults_to_disabled_and_accepts_all_open_issues() {
+fn monitor_config_defaults_to_disabled_and_accepts_ordinary_open_issues() {
     let config = IssueMonitorConfig::default();
 
     assert!(!config.enabled);
@@ -216,6 +217,46 @@ fn exclusion_states_are_snake_case_and_non_terminal_for_requeue() {
             Some(MonitorInboxState::Queued)
         );
     }
+}
+
+#[test]
+fn monitor_config_omits_removed_trigger_label_but_reads_legacy_values() {
+    let serialized = serde_json::to_value(IssueMonitorConfig::default())
+        .expect("default monitor config serializes");
+    assert!(
+        serialized.get("trigger_label").is_none(),
+        "dead trigger_label must not remain in the current config schema"
+    );
+
+    let legacy = serde_json::json!({
+        "enabled": false,
+        "trigger_label": "auto-improve",
+        "poll_interval_secs": 300,
+        "claim_heartbeat_secs": 300,
+        "claim_ttl_secs": 1800,
+        "max_active": 1,
+        "queue_when_gui_absent": true
+    });
+    let restored: IssueMonitorConfig =
+        serde_json::from_value(legacy).expect("legacy config remains readable");
+    assert_eq!(restored, IssueMonitorConfig::default());
+}
+
+#[test]
+fn legacy_monitor_issue_without_readiness_defaults_to_not_applicable() {
+    let legacy = serde_json::json!({
+        "number": 42,
+        "title": "Legacy issue",
+        "labels": ["bug"],
+        "state": "open",
+        "body": "Body",
+        "url": "https://github.com/example/repo/issues/42"
+    });
+
+    let restored: IssueMonitorIssue =
+        serde_json::from_value(legacy).expect("legacy issue remains readable");
+
+    assert_eq!(restored.readiness, IssueMonitorReadiness::NotApplicable);
 }
 
 #[test]
@@ -700,12 +741,14 @@ fn blocked_claim_is_visible_in_inbox_without_queueing_launch() {
         enabled: true,
         ..IssueMonitorConfig::default()
     });
+    let candidate = issue(42, &["auto-improve"]);
+    monitor.record_candidate(candidate.clone());
 
-    monitor.record_blocked_by_claim(
-        issue(42, &["auto-improve"]),
+    assert!(monitor.record_blocked_by_claim(
+        candidate,
         "other-host/session",
         "2026-06-23T10:30:00Z",
-    );
+    ));
 
     let item = monitor.inbox_item(42).expect("inbox item");
     assert_eq!(item.state, MonitorInboxState::BlockedByClaim);
@@ -741,6 +784,308 @@ fn scan_candidates_queues_all_open_issues_without_claiming_at_scan_time() {
         monitor.inbox_item(42).expect("inbox item").state,
         MonitorInboxState::Queued
     );
+}
+
+#[test]
+fn scan_candidates_exposes_not_ready_and_exact_hold_without_consuming_queue_slots() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let mut ready_spec = issue(40, &["GWT-SPEC"]);
+    ready_spec.readiness = IssueMonitorReadiness::Ready;
+    let mut not_ready_spec = issue(41, &["gwt-spec"]);
+    not_ready_spec.readiness = IssueMonitorReadiness::NotReady;
+    let mut held_not_ready_spec = issue(42, &["gwt-spec", "HoLd"]);
+    held_not_ready_spec.readiness = IssueMonitorReadiness::NotReady;
+    let hold_family_alias = issue(43, &["hold/manual"]);
+    let unenriched_spec = issue(44, &["gwt-spec"]);
+    let on_hold_alias = issue(45, &["on-hold"]);
+    let blocked_alias = issue(46, &["blocked"]);
+
+    let summary = scan_issue_monitor_candidates(
+        &mut monitor,
+        &[
+            ready_spec,
+            not_ready_spec,
+            held_not_ready_spec,
+            hold_family_alias,
+            unenriched_spec,
+            on_hold_alias,
+            blocked_alias,
+        ],
+        "2026-08-05T10:00:00Z",
+    );
+
+    assert_eq!(summary.scanned, 7);
+    assert_eq!(summary.skipped, 3);
+    assert_eq!(monitor.queue_len(), 4);
+    let not_ready = monitor
+        .inbox_item(41)
+        .expect("not-ready item remains visible");
+    assert_eq!(not_ready.state, MonitorInboxState::NotReady);
+    assert_eq!(
+        not_ready.exclusion_reason.as_deref(),
+        Some("plan/tasks の整備が必要（gwt-plan-spec）")
+    );
+    let held = monitor.inbox_item(42).expect("held item remains visible");
+    assert_eq!(held.state, MonitorInboxState::HoldExcluded);
+    assert!(
+        held.exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("HoLd")),
+        "hold reason must preserve the matched source label"
+    );
+    for number in [43, 45, 46] {
+        assert_eq!(
+            monitor
+                .inbox_item(number)
+                .expect("non-exact hold alias stays eligible")
+                .state,
+            MonitorInboxState::Queued
+        );
+    }
+    let unenriched = monitor
+        .inbox_item(44)
+        .expect("unenriched spec fails closed and remains visible");
+    assert_eq!(unenriched.state, MonitorInboxState::NotReady);
+    assert_eq!(
+        unenriched.exclusion_reason.as_deref(),
+        Some("plan/tasks の整備が必要（gwt-plan-spec）")
+    );
+}
+
+#[test]
+fn scan_candidates_requeues_when_readiness_or_hold_exclusion_is_removed() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let mut candidate = issue(42, &["gwt-spec"]);
+    candidate.readiness = IssueMonitorReadiness::NotReady;
+
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:00:00Z",
+    );
+    assert_eq!(monitor.queue_len(), 0);
+    assert_eq!(
+        monitor.inbox_item(42).expect("not-ready item").state,
+        MonitorInboxState::NotReady
+    );
+
+    candidate.readiness = IssueMonitorReadiness::Ready;
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:01:00Z",
+    );
+    assert_eq!(monitor.queue_len(), 1);
+    let ready = monitor.inbox_item(42).expect("ready item");
+    assert_eq!(ready.state, MonitorInboxState::Queued);
+    assert_eq!(ready.exclusion_reason, None);
+
+    candidate.labels.push("hold".to_string());
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:02:00Z",
+    );
+    assert_eq!(monitor.queue_len(), 0);
+    assert_eq!(
+        monitor.inbox_item(42).expect("held item").state,
+        MonitorInboxState::HoldExcluded
+    );
+
+    candidate.labels.retain(|label| label != "hold");
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:03:00Z",
+    );
+    assert_eq!(monitor.queue_len(), 1);
+    let requeued = monitor.inbox_item(42).expect("requeued item");
+    assert_eq!(requeued.state, MonitorInboxState::Queued);
+    assert_eq!(requeued.exclusion_reason, None);
+
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:04:00Z",
+    );
+    assert_eq!(monitor.queue_len(), 1, "re-evaluation must be idempotent");
+}
+
+#[test]
+fn readiness_and_hold_changes_do_not_cancel_in_flight_or_terminal_work() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let mut candidate = issue(42, &["gwt-spec"]);
+    candidate.readiness = IssueMonitorReadiness::Ready;
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:00:00Z",
+    );
+    assert!(monitor.apply_confirmed_claim(
+        42,
+        "claim-42",
+        "host/session",
+        "effect-42",
+        "2026-08-05T10:00:10Z",
+    ));
+
+    candidate.labels.push("hold".to_string());
+    candidate.readiness = IssueMonitorReadiness::NotReady;
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:01:00Z",
+    );
+    assert_eq!(
+        monitor.inbox_item(42).expect("in-flight item").state,
+        MonitorInboxState::Launching,
+        "a scan-time opt-out must not cancel already claimed work"
+    );
+
+    monitor.complete_active_launch(42, "tab::agent-42");
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:01:30Z",
+    );
+    assert_eq!(
+        monitor.inbox_item(42).expect("launched item").state,
+        MonitorInboxState::Launched,
+        "a scan-time opt-out must not cancel a bound agent window"
+    );
+
+    monitor.record_merged(42);
+    scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&candidate),
+        "2026-08-05T10:02:00Z",
+    );
+    assert_eq!(
+        monitor.inbox_item(42).expect("merged item").state,
+        MonitorInboxState::Merged,
+        "terminal delivery evidence must outrank later scan exclusions"
+    );
+}
+
+#[test]
+fn scan_exclusion_retains_attempting_claim_for_late_result_reconciliation() {
+    for exclusion in ["not-ready", "hold"] {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        let mut candidate = issue(42, &["gwt-spec"]);
+        candidate.readiness = IssueMonitorReadiness::Ready;
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&candidate),
+            "2026-08-05T10:00:00Z",
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-08-05T10:00:01Z",
+                1,
+                |_| false,
+            ),
+            1
+        );
+        let key = monitor.pending_effects()[0].attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let (claim_id, owner) = match &monitor.pending_effects()[0].payload {
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                claim_id, owner, ..
+            } => (claim_id.clone(), owner.clone()),
+            other => panic!("expected acquire claim, got {other:?}"),
+        };
+
+        if exclusion == "hold" {
+            candidate.labels.push("hold".to_string());
+        } else {
+            candidate.readiness = IssueMonitorReadiness::NotReady;
+        }
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&candidate),
+            "2026-08-05T10:01:00Z",
+        );
+
+        assert!(monitor.pending_effects().iter().any(|effect| {
+            effect.state == gwt::IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    gwt::IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: 42,
+                        ..
+                    }
+                )
+        }));
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id: pending_claim,
+                owner: pending_owner,
+            } if pending_claim == &claim_id && pending_owner == &owner
+        )));
+        assert!(!monitor.apply_confirmed_claim(
+            42,
+            claim_id,
+            owner,
+            &key.effect_id,
+            "2026-08-05T10:01:01Z",
+        ));
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.take_pending_launch_requests().is_empty());
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 0);
+    }
+}
+
+#[test]
+fn autonomous_pre_gate_keeps_not_ready_and_hold_exclusions_non_terminal() {
+    let protection = gwt_git::branch_protection::BranchProtectionStatus::Absent;
+    for exclusion in ["not-ready", "hold"] {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let mut candidate = issue(42, &["gwt-spec", "auto-merge"]);
+        candidate.readiness = IssueMonitorReadiness::NotReady;
+        if exclusion == "hold" {
+            candidate.labels.push("hold".to_string());
+        }
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            std::slice::from_ref(&candidate),
+            "2026-08-05T10:00:00Z",
+        );
+
+        let decision =
+            monitor.prepare_autonomous_candidate(&candidate, &protection, "2026-08-05T10:00:01Z");
+
+        assert!(matches!(decision, gwt::EligibilityDecision::HumanGate(_)));
+        assert!(monitor.autonomous_record(42).is_none());
+        assert!(matches!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded)
+        ));
+    }
 }
 
 #[test]

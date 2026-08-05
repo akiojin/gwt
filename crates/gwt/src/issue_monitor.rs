@@ -68,7 +68,6 @@ pub fn git_https_auth_setup_message(original_error: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorConfig {
     pub enabled: bool,
-    pub trigger_label: String,
     pub poll_interval_secs: u64,
     pub claim_heartbeat_secs: u64,
     pub claim_ttl_secs: u64,
@@ -259,6 +258,85 @@ fn complete_attempting_effect(
         effect.state == IssueMonitorEffectState::Attempting && effect_matches_key(effect, key)
     })?;
     Some(pending_effects.remove(index))
+}
+
+fn ensure_claim_release_effect(
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    authority_epoch: u64,
+    source_effect_id: &str,
+    issue_number: u64,
+    claim_id: &str,
+    owner: &str,
+) {
+    if pending_effects.iter().any(|effect| {
+        matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: pending_issue,
+                claim_id: pending_claim,
+                owner: pending_owner,
+            } if *pending_issue == issue_number
+                && pending_claim == claim_id
+                && pending_owner == owner
+        )
+    }) {
+        return;
+    }
+    pending_effects.push(PendingIssueMonitorEffect::prepared(
+        format!("release:{source_effect_id}:ineligible:{authority_epoch}"),
+        authority_epoch,
+        IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number,
+            claim_id: claim_id.to_string(),
+            owner: owner.to_string(),
+        },
+    ));
+}
+
+fn revoke_uncommitted_claims_for_issue(
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    authority_epoch: u64,
+    issue_number: u64,
+) {
+    let attempting = pending_effects
+        .iter()
+        .filter(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: pending_issue,
+                        ..
+                    } if pending_issue == issue_number
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    pending_effects.retain(|effect| {
+        effect.state != IssueMonitorEffectState::Prepared
+            || !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: pending_issue,
+                    ..
+                } if pending_issue == issue_number
+            )
+    });
+    for effect in attempting {
+        if let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        {
+            ensure_claim_release_effect(
+                pending_effects,
+                authority_epoch,
+                &effect.effect_id,
+                issue_number,
+                claim_id,
+                owner,
+            );
+        }
+    }
 }
 
 fn advance_autonomous_effect_authority(
@@ -742,7 +820,6 @@ impl Default for IssueMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            trigger_label: "auto-improve".to_string(),
             poll_interval_secs: 300,
             claim_heartbeat_secs: 300,
             claim_ttl_secs: 1800,
@@ -784,6 +861,15 @@ pub fn is_legacy_git_launch_failure_for_project(message: &str, project_root: &Pa
         == gwt_core::paths::normalize_windows_child_process_path(project_root)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorReadiness {
+    #[default]
+    NotApplicable,
+    Ready,
+    NotReady,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorIssue {
     pub number: u64,
@@ -794,6 +880,8 @@ pub struct IssueMonitorIssue {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default)]
+    pub readiness: IssueMonitorReadiness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -994,6 +1082,35 @@ enum PendingLaunchDeliveryMatch {
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
     let _ = config;
     issue.state == IssueMonitorIssueState::Open
+}
+
+const ISSUE_MONITOR_NOT_READY_REASON: &str = "plan/tasks の整備が必要（gwt-plan-spec）";
+
+fn issue_monitor_candidate_exclusion(
+    issue: &IssueMonitorIssue,
+) -> Option<(MonitorInboxState, String)> {
+    if let Some(label) = issue
+        .labels
+        .iter()
+        .find(|label| label.eq_ignore_ascii_case("hold"))
+    {
+        return Some((
+            MonitorInboxState::HoldExcluded,
+            format!("hold label: {label}"),
+        ));
+    }
+    if issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        && issue.readiness != IssueMonitorReadiness::Ready
+    {
+        return Some((
+            MonitorInboxState::NotReady,
+            ISSUE_MONITOR_NOT_READY_REASON.to_string(),
+        ));
+    }
+    None
 }
 
 /// SPEC #3200 FR-003/004/005: routing decision for whether an open Issue may be
@@ -3063,6 +3180,16 @@ impl IssueMonitorState {
             return EligibilityDecision::HumanGate("not an autonomous candidate".to_string());
         }
         let number = issue.number;
+        if self.inbox_item(number).is_some_and(|item| {
+            matches!(
+                item.state,
+                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+            )
+        }) {
+            return EligibilityDecision::HumanGate(
+                "candidate is excluded from automatic launch".to_string(),
+            );
+        }
         // Idempotency: a candidate already in flight is left alone.
         if self.active_launches.contains(&number) {
             return EligibilityDecision::Eligible;
@@ -3308,6 +3435,7 @@ impl IssueMonitorState {
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         let issue_number = issue.number;
         let existing = self.inbox_item(issue_number).cloned();
+        let exclusion = issue_monitor_candidate_exclusion(&issue);
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
             existing.as_ref().and_then(|item| {
                 if matches!(
@@ -3353,16 +3481,28 @@ impl IssueMonitorState {
             // Issue #3222: a claimed launch whose window is not bound yet stays
             // visibly in-flight; the queue-push guard below then skips it.
             MonitorInboxState::Launching
+        } else if existing
+            .as_ref()
+            .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+        {
+            MonitorInboxState::NeedsHuman
+        } else if let Some((state, _)) = exclusion.as_ref() {
+            *state
         } else {
             match existing.as_ref().map(|item| item.state) {
                 // A reopened Issue previously marked Released/Merged (but no
                 // longer tracked as merged) returns to the queue.
-                Some(MonitorInboxState::Released) | Some(MonitorInboxState::Merged) | None => {
-                    MonitorInboxState::Queued
-                }
+                Some(MonitorInboxState::Released)
+                | Some(MonitorInboxState::Merged)
+                | Some(MonitorInboxState::NotReady)
+                | Some(MonitorInboxState::HoldExcluded)
+                | None => MonitorInboxState::Queued,
                 Some(other) => other,
             }
         };
+        let exclusion_reason = exclusion.as_ref().and_then(|(excluded_state, reason)| {
+            (*excluded_state == state).then(|| reason.clone())
+        });
         let item = IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
@@ -3380,9 +3520,22 @@ impl IssueMonitorState {
                     .and_then(|item| item.launched_window_id.clone())
             }),
             error_message,
-            exclusion_reason: None,
+            exclusion_reason,
         };
+        if matches!(
+            state,
+            MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+        ) {
+            revoke_uncommitted_claims_for_issue(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                issue_number,
+            );
+        }
         self.upsert_inbox(item);
+        if state != MonitorInboxState::Queued {
+            self.queue.retain(|queued| *queued != issue_number);
+        }
         if state == MonitorInboxState::Queued
             && !self.queue.contains(&issue_number)
             && !self.active_launches.contains(&issue_number)
@@ -3398,8 +3551,14 @@ impl IssueMonitorState {
         issue: IssueMonitorIssue,
         owner: impl Into<String>,
         expires_at: impl Into<String>,
-    ) {
+    ) -> bool {
         self.queue.retain(|queued| *queued != issue.number);
+        if !self
+            .inbox_item(issue.number)
+            .is_some_and(|item| item.state == MonitorInboxState::Queued)
+        {
+            return false;
+        }
         self.upsert_inbox(IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
@@ -3412,6 +3571,7 @@ impl IssueMonitorState {
             exclusion_reason: None,
         });
         self.apply_priority_order_to_inbox();
+        true
     }
 
     pub fn reorder_queued_issues(&mut self, issue_numbers: &[u64]) {
@@ -3859,11 +4019,23 @@ impl IssueMonitorState {
         claim_effect_id: &str,
         now: &str,
     ) -> bool {
-        let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
-            return false;
-        };
         let claim_id = claim_id.into();
         let claim_owner = claim_owner.into();
+        let Some(issue) = self
+            .inbox_item(issue_number)
+            .filter(|item| item.state == MonitorInboxState::Queued)
+            .map(|item| item.issue.clone())
+        else {
+            ensure_claim_release_effect(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                claim_effect_id,
+                issue_number,
+                &claim_id,
+                &claim_owner,
+            );
+            return false;
+        };
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
@@ -4426,6 +4598,14 @@ pub fn scan_issue_monitor_candidates(
         }
 
         monitor.record_candidate(issue.clone());
+        if monitor.inbox_item(issue.number).is_some_and(|item| {
+            matches!(
+                item.state,
+                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+            )
+        }) {
+            summary.skipped += 1;
+        }
     }
 
     summary
@@ -4531,6 +4711,7 @@ mod tests {
             state: IssueMonitorIssueState::Open,
             body: None,
             url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
         }
     }
 
@@ -4583,6 +4764,27 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
             }
+        );
+    }
+
+    #[test]
+    fn rejected_blocked_claim_removes_a_stale_nonqueued_queue_entry() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        let candidate = issue(42);
+        monitor.record_candidate(candidate.clone());
+        monitor.set_inbox_state(42, MonitorInboxState::HoldExcluded);
+
+        assert!(!monitor.record_blocked_by_claim(candidate, "other-agent", "2026-08-05T10:30:00Z",));
+        assert!(
+            monitor.queued_issue_numbers().is_empty(),
+            "a rejected late claim result must still guarantee synchronous loop progress"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::HoldExcluded)
         );
     }
 
@@ -7740,6 +7942,7 @@ mod tests {
             state: IssueMonitorIssueState::Open,
             body: Some(body.to_string()),
             url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
         }
     }
 
