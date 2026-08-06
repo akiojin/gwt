@@ -21561,6 +21561,106 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
     )));
 }
 
+/// SPEC-3431 FR-030: a dead agent frees its Issue Monitor slot even while its
+/// pane is kept on screen for diagnosis.
+///
+/// `WindowProcessStatus::Error` on an agent window comes from `try_wait`
+/// (`gwt-terminal/src/pane.rs:175-186`), so the process is gone. Keeping the
+/// session record is a **display** concern (#3274: show the user the final
+/// screen instead of an empty window); the Issue Monitor's slot accounting is
+/// a different question and was wrongly gated on the same flag.
+///
+/// Observed live: an agent hit its provider usage limit and exited. Its last
+/// hook state was `Idle`, so `keep_active_agent_session_for_recovery` was true,
+/// `agent_failed` was never published, and the row stayed `launched` with the
+/// slot held. With the default `max_active = 1` that stops the whole queue —
+/// which is exactly what "the PM registers Issues but nothing ever runs" looks
+/// like from the outside.
+#[test]
+fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.project_root = repo.clone();
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    // A live hook state is what every working agent leaves behind, so this is
+    // the normal case rather than an edge case.
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Idle",
+        "Stop",
+        "session-1",
+    ));
+
+    let kept_for_diagnosis = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("You've hit your usage limit.".to_string()),
+    );
+    assert!(
+        runtime.recoverable_agent_error_windows.contains(&window_id),
+        "precondition: the pane is kept on screen for diagnosis"
+    );
+
+    // Control: the identical death with no live hook state left behind. This
+    // is the path that already notified the Monitor, so it defines what
+    // "notified" looks like without coupling the test to an event variant.
+    let mut control = sample_runtime(
+        temp.path(),
+        vec![{
+            let mut tab = sample_project_tab_with_window(
+                "tab-1",
+                "codex-1",
+                WindowPreset::Agent,
+                WindowProcessStatus::Running,
+            );
+            tab.project_root = repo.clone();
+            tab
+        }],
+        Some("tab-1"),
+    );
+    control.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let notified = control.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("You've hit your usage limit.".to_string()),
+    );
+
+    let kinds = |events: &[OutboundEvent]| {
+        events
+            .iter()
+            .map(|outbound| outbound.event.event_kind().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let missing: Vec<_> = kinds(&notified)
+        .difference(&kinds(&kept_for_diagnosis))
+        .cloned()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "keeping the pane for diagnosis must not swallow the Monitor notification; missing: {missing:?}"
+    );
+}
+
 #[test]
 fn app_runtime_live_hook_recovery_clears_recoverable_pty_error_marker() {
     let _env_lock = env_test_lock()

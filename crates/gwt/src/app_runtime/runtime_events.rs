@@ -280,10 +280,24 @@ impl AppRuntime {
         // exited — drain any intake worktree cleanup queued by the session
         // stop above (or by an earlier explicit stop of this window).
         let mut events = self.take_ephemeral_worktree_cleanup_events();
-        if is_agent_window
-            && composed_status == WindowProcessStatus::Error
-            && !keep_active_agent_session_for_recovery
-        {
+        // SPEC-3431 FR-030: notify the Issue Monitor whenever an agent window
+        // reaches Error, including when the pane is kept on screen.
+        //
+        // `keep_active_agent_session_for_recovery` used to gate this too, but
+        // the two concerns are different. That flag is about **display**
+        // (#3274: hold the pane so the user can read the final screen instead
+        // of an empty Error window); whether the slot is still occupied is
+        // about **accounting**. `WindowProcessStatus::Error` on an agent comes
+        // from `try_wait` (gwt-terminal `Pane::check_status`), so the process
+        // is gone either way and the slot is free either way.
+        //
+        // Conflating them leaked slots permanently: an agent whose last hook
+        // state was `Idle` — which is every agent that ran its Stop hook —
+        // satisfied the guard, so `agent_failed` was never published and the
+        // row stayed `launched` forever. `recoverable_agent_error_windows` is
+        // only cleared by a later hook event, and a dead process sends none.
+        // With the default `max_active = 1` that stops the whole queue.
+        if is_agent_window && composed_status == WindowProcessStatus::Error {
             let message = detail
                 .as_deref()
                 .unwrap_or("Agent entered error state")
