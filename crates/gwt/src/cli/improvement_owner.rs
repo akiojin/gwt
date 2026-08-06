@@ -7927,6 +7927,17 @@ mod tests {
         ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30))
     }
 
+    /// Budget for multi-stage success paths exercised inside the full crate.
+    ///
+    /// These tests own reconciliation semantics, not the production Normal
+    /// wall-clock limit. The complete crate runs thousands of process-heavy
+    /// tests in parallel on Windows, which can consume the 120-second profile
+    /// before a final durable store lock is scheduled. Deadline behavior is
+    /// covered by dedicated tests with deliberately expired deadlines.
+    fn loaded_resolution_deadline() -> ResolutionDeadline {
+        ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(300))
+    }
+
     /// Deadline for assertion-phase readbacks.
     ///
     /// A test's `resolution_deadline` is the budget the code under test spends;
@@ -13114,9 +13125,15 @@ mod tests {
             ],
         );
 
-        let resolved =
-            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
-                .expect("postflight duplicate reconciliation");
+        let deadline = loaded_resolution_deadline();
+        let resolved = resolve_candidate_owner_with_operation_deadline(
+            &mut env,
+            candidate_id,
+            CaptureBudgetProfile::Normal,
+            &deadline,
+            deadline.expires_at(),
+        )
+        .expect("postflight duplicate reconciliation");
 
         assert_eq!(resolved.state, CandidateState::Linked, "{resolved:?}");
         assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(40));
