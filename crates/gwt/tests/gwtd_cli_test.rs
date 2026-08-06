@@ -560,7 +560,11 @@ fn generated_hook_subcommands(corpus: &str) -> BTreeSet<String> {
         .collect();
     let tokens: Vec<&str> = flattened.split_whitespace().collect();
     let references_hook_bin = |token: &str| {
-        token.contains("gwtd") || token.contains("gwt_bin") || token.contains("GWT_HOOK_BIN")
+        let normalized = token.to_ascii_lowercase();
+        normalized.contains("gwtd")
+            || normalized.contains("gwt_bin")
+            || normalized.contains("gwtbin")
+            || normalized.contains("gwt_hook_bin")
     };
     let is_subcommand = |token: &str| {
         let mut chars = token.chars();
@@ -707,6 +711,24 @@ fn committed_self_improvement_stop_commands() -> Vec<String> {
     commands
 }
 
+fn posix_shell_fixture(path: &Path) -> (&'static str, String) {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        let bytes = normalized.as_bytes();
+        assert!(
+            bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/',
+            "Windows fixture path must be drive-absolute: {normalized}"
+        );
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        ("bash", format!("/mnt/{drive}/{}", &normalized[3..]))
+    }
+    #[cfg(not(windows))]
+    {
+        ("sh", normalized)
+    }
+}
+
 /// Regression guard for issue #3178's actual harm: the committed self-improvement
 /// Stop hook command must NOT leak gwtd's legacy-argv rejection into the agent's
 /// Stop loop when the installed gwtd predates the `gwt-self-improvement-stop`
@@ -735,6 +757,7 @@ fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
          exit 2\n",
     )
     .expect("write fake gwtd");
+    let (shell, fake_gwtd_for_shell) = posix_shell_fixture(&fake_gwtd);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -743,10 +766,10 @@ fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
     }
 
     for command in &commands {
-        let output = hidden_command("sh")
+        let output = hidden_command(shell)
             .arg("-c")
             .arg(command)
-            .env("GWT_BIN_PATH", &fake_gwtd)
+            .env("GWT_BIN_PATH", &fake_gwtd_for_shell)
             .stdin(Stdio::null())
             .output()
             .expect("run committed self-improvement stop command");

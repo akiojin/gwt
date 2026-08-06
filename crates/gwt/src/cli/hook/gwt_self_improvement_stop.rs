@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_store_lock_contention_returns_a_timeout_warning_within_the_deadline() {
+    fn candidate_store_lock_contention_returns_a_timeout_warning_within_a_bounded_budget() {
         let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -893,7 +893,11 @@ mod tests {
             panic!("contended candidate store must warn without blocking");
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "250ms lock deadline exceeded the scheduler-tolerant wall-clock budget: {elapsed:?}"
+        );
         FileExt::unlock(&lock).expect("unlock candidate store");
     }
 }

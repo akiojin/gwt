@@ -64,33 +64,6 @@ fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<Outboun
     vec![launch_wizard_open_error(client_id, "Intake", message)]
 }
 
-fn fetch_launch_wizard_origin(git_root: &Path) {
-    // Unit-test repositories use a GitHub-shaped placeholder origin so
-    // repository identity stays realistic. Never let the detached picker
-    // refresh contact that public placeholder: a credential helper can
-    // outlive the test process and retain the verification runner's output
-    // pipe. Local fixture origins still exercise the real fetch path.
-    #[cfg(test)]
-    if launch_wizard_origin_is_test_placeholder(git_root) {
-        return;
-    }
-    let _ = gwt_git::WorktreeManager::new(git_root).fetch_origin();
-}
-
-#[cfg(test)]
-fn launch_wizard_origin_is_test_placeholder(git_root: &Path) -> bool {
-    gwt_core::process::hidden_command("git")
-        .args(["config", "--get", "remote.origin.url"])
-        .current_dir(git_root)
-        .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .starts_with("https://github.com/example/")
-        })
-}
-
 fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     let offset = ((index % 8) as f64) * 24.0;
     WindowGeometry {
@@ -1390,7 +1363,7 @@ impl AppRuntime {
         let active_session_branches = self.active_session_branches_for_tab(tab_id);
         thread::spawn(move || {
             if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&candidates_root) {
-                fetch_launch_wizard_origin(&git_root);
+                crate::repo_browser::fetch_branch_inventory_origin(&git_root);
             }
             let candidates = list_branch_entries_with_active_sessions(
                 &candidates_root,
@@ -3112,53 +3085,6 @@ mod review_dispatch_tests {
             "instructs verdict report-back via the gwtd op"
         );
         assert!(prompt.contains("42"), "names the issue");
-    }
-}
-
-#[cfg(test)]
-mod launch_wizard_fetch_tests {
-    use super::launch_wizard_origin_is_test_placeholder;
-
-    #[test]
-    fn public_placeholder_origin_is_never_fetched_by_unit_tests() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        for args in [
-            ["init", "-q"].as_slice(),
-            [
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/repo-launch-wizard.git",
-            ]
-            .as_slice(),
-        ] {
-            let output = gwt_core::process::hidden_command("git")
-                .args(args)
-                .current_dir(&repo)
-                .output()
-                .expect("run git fixture command");
-            assert!(output.status.success(), "git {args:?}");
-        }
-
-        assert!(launch_wizard_origin_is_test_placeholder(&repo));
-
-        let local_origin = temp.path().join("origin.git");
-        let init_bare = gwt_core::process::hidden_command("git")
-            .args(["init", "--bare", "-q"])
-            .arg(&local_origin)
-            .output()
-            .expect("init local origin");
-        assert!(init_bare.status.success());
-        let set_url = gwt_core::process::hidden_command("git")
-            .args(["remote", "set-url", "origin"])
-            .arg(&local_origin)
-            .current_dir(&repo)
-            .output()
-            .expect("set local origin");
-        assert!(set_url.status.success());
-        assert!(!launch_wizard_origin_is_test_placeholder(&repo));
     }
 }
 

@@ -11,6 +11,33 @@ use gwt::{
     BranchScope,
 };
 
+pub(crate) fn fetch_branch_inventory_origin(git_root: &Path) {
+    // Test repositories use a GitHub-shaped placeholder origin so repository
+    // identity stays realistic. Never let either detached branch-inventory
+    // refresh contact that public placeholder: a credential helper can outlive
+    // the test process and retain the verification runner's output pipe. Local
+    // fixture origins still exercise the real fetch path.
+    #[cfg(test)]
+    if branch_inventory_origin_is_test_placeholder(git_root) {
+        return;
+    }
+    let _ = gwt_git::WorktreeManager::new(git_root).fetch_origin();
+}
+
+#[cfg(test)]
+fn branch_inventory_origin_is_test_placeholder(git_root: &Path) -> bool {
+    gwt_core::process::hidden_command("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(git_root)
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .starts_with("https://github.com/example/")
+        })
+}
+
 pub fn spawn_branch_load_async(
     proxy: AppEventProxy,
     window_id: String,
@@ -54,7 +81,7 @@ pub fn spawn_remote_start_work_branches_async(
 ) {
     thread::spawn(move || {
         if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&project_root) {
-            let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+            fetch_branch_inventory_origin(&git_root);
         }
         let branches =
             list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
@@ -108,7 +135,7 @@ fn dispatch_branch_load_progressive(
     // pushed by teammates or other machines. Best-effort: an offline fetch
     // failure still yields the cached refs below.
     if let Ok(git_root) = gwt_git::worktree::main_worktree_root(project_root) {
-        let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+        fetch_branch_inventory_origin(&git_root);
     }
     // SPEC-2009 FR-067: one load id shared by this load's inventory + hydrated
     // events so the frontend can drop a stale earlier load delivered out of
@@ -159,6 +186,53 @@ fn dispatch_branch_load_progressive(
                 message: error.to_string(),
             })],
         ),
+    }
+}
+
+#[cfg(test)]
+mod branch_inventory_fetch_tests {
+    use super::branch_inventory_origin_is_test_placeholder;
+
+    #[test]
+    fn public_placeholder_origin_is_never_fetched_by_branch_inventory_tests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        for args in [
+            ["init", "-q"].as_slice(),
+            [
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo-branch-inventory.git",
+            ]
+            .as_slice(),
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git fixture command");
+            assert!(output.status.success(), "git {args:?}");
+        }
+
+        assert!(branch_inventory_origin_is_test_placeholder(&repo));
+
+        let local_origin = temp.path().join("origin.git");
+        let init_bare = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&local_origin)
+            .output()
+            .expect("init local origin");
+        assert!(init_bare.status.success());
+        let set_url = gwt_core::process::hidden_command("git")
+            .args(["remote", "set-url", "origin"])
+            .arg(&local_origin)
+            .current_dir(&repo)
+            .output()
+            .expect("set local origin");
+        assert!(set_url.status.success());
+        assert!(!branch_inventory_origin_is_test_placeholder(&repo));
     }
 }
 
