@@ -107,6 +107,7 @@ impl AppRuntime {
         })]
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_runtime_output(
         &mut self,
         id: String,
@@ -115,11 +116,30 @@ impl AppRuntime {
         self.handle_runtime_output_inner(id, data, true)
     }
 
+    pub(crate) fn handle_runtime_output_for_instance(
+        &mut self,
+        id: String,
+        runtime_instance_id: super::RuntimeInstanceId,
+        data: Vec<u8>,
+    ) -> Vec<OutboundEvent> {
+        if !self.runtime_event_is_current(&id, runtime_instance_id) {
+            return Vec::new();
+        }
+        self.handle_runtime_output_inner(id, data, true)
+    }
+
     pub(crate) fn handle_daemon_runtime_output(
         &mut self,
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
+        if self.runtimes.contains_key(&id) {
+            tracing::debug!(
+                window_id = id,
+                "dropping daemon output for a locally owned runtime"
+            );
+            return Vec::new();
+        }
         self.handle_runtime_output_inner(id, data, false)
     }
 
@@ -152,12 +172,51 @@ impl AppRuntime {
         self.handle_runtime_status_inner(id, status, detail, true)
     }
 
+    pub(crate) fn handle_runtime_status_for_instance(
+        &mut self,
+        id: String,
+        runtime_instance_id: super::RuntimeInstanceId,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        if !self.runtime_event_is_current(&id, runtime_instance_id) {
+            return Vec::new();
+        }
+        self.handle_runtime_status_inner(id, status, detail, true)
+    }
+
+    fn runtime_event_is_current(
+        &self,
+        id: &str,
+        runtime_instance_id: super::RuntimeInstanceId,
+    ) -> bool {
+        let current = self
+            .runtimes
+            .get(id)
+            .is_some_and(|runtime| runtime.runtime_instance_id == runtime_instance_id);
+        if !current {
+            tracing::debug!(
+                window_id = id,
+                ?runtime_instance_id,
+                "dropping stale PTY event for a replaced runtime"
+            );
+        }
+        current
+    }
+
     pub(crate) fn handle_daemon_runtime_status(
         &mut self,
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
+        if self.runtimes.contains_key(&id) {
+            tracing::debug!(
+                window_id = id,
+                "dropping daemon status for a locally owned runtime"
+            );
+            return Vec::new();
+        }
         self.handle_runtime_status_inner(id, status, detail, false)
     }
 

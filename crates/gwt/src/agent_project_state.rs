@@ -300,6 +300,53 @@ pub fn prepare_resume_producing_authority(
     }
 }
 
+/// Recover the execution binding for an exact persisted-Session relaunch.
+///
+/// Unlike [`continue_authenticated_execution`], this operation is identity
+/// recovery rather than an execution lifecycle transition. It never creates a
+/// continuation attempt or successor generation, and it accepts terminal
+/// lifecycle heads only when the durable Session is still the exact current
+/// writer for that owner.
+pub fn prepare_exact_relaunch_execution_authority(
+    project_root: &Path,
+    predecessor_session_id: &str,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    let authority =
+        evaluate_authenticated_execution_continuation(project_root, predecessor_session_id)?;
+    if authority.exact_unbound {
+        return Err(execution_binding_error(
+            "exact_relaunch_requires_existing_binding",
+        ));
+    }
+
+    let expected_generation_id = authority.current_binding.generation_id.clone();
+    let binding = rebind_session_to_current_execution(
+        &authority.worktree,
+        authority.owner,
+        &authority.session,
+        Some(&expected_generation_id),
+    )?;
+
+    let revalidated =
+        evaluate_authenticated_execution_continuation(project_root, predecessor_session_id)?;
+    if revalidated.exact_unbound
+        || revalidated.session.execution_binding.as_ref() != Some(&binding)
+        || revalidated.current_binding != binding.identity
+    {
+        return Err(execution_binding_error(
+            "exact_relaunch_binding_readback_mismatch",
+        ));
+    }
+
+    tracing::info!(
+        session_id = predecessor_session_id,
+        generation_id = %binding.identity.generation_id,
+        status = ?revalidated.record.status,
+        "exact relaunch recovered current execution authority"
+    );
+    Ok(binding)
+}
+
 struct ExecutionContinuationAuthority {
     session: Session,
     project_state_root: PathBuf,
@@ -5637,6 +5684,285 @@ mod tests {
     }
 
     #[test]
+    fn exact_relaunch_recovers_current_binding_without_changing_execution_history() {
+        for (lifecycle, settlement, expected_status) in [
+            (
+                "active",
+                None,
+                crate::cli::execution_state::ExecutionControlStatus::Active,
+            ),
+            (
+                "blocked",
+                Some(crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "exact relaunch terminal fixture".to_string(),
+                    missing_verification: Some(
+                        "exact relaunch must preserve recovery requirements".to_string(),
+                    ),
+                }),
+                crate::cli::execution_state::ExecutionControlStatus::Blocked,
+            ),
+            (
+                "completed",
+                Some(crate::cli::execution_state::ExecutionSettlement::Completed),
+                crate::cli::execution_state::ExecutionControlStatus::Completed,
+            ),
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let (session, launch_binding) = bind_session_to_current_execution(repo, session);
+                if let Some(settlement) = settlement {
+                    assert!(matches!(
+                        crate::cli::execution_state::settle(repo, &session.id, settlement)
+                            .expect("settle exact relaunch fixture"),
+                        crate::cli::execution_state::SettleResult::Settled(_)
+                    ));
+                }
+
+                let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: launch_binding.owner_number,
+                };
+                let expected_identity =
+                    crate::cli::execution_state::current_execution_binding(repo, owner)
+                        .expect("read current exact relaunch binding")
+                        .expect("exact relaunch fixture has a current binding");
+                let record_before = crate::cli::execution_state::load(repo)
+                    .expect("read execution record before exact relaunch")
+                    .expect("exact relaunch fixture has an execution record");
+                let ledger_before =
+                    crate::cli::execution_state::load_generation_ledger(repo, owner)
+                        .expect("read generation ledger before exact relaunch")
+                        .expect("exact relaunch fixture has a generation ledger");
+                let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
+                    .expect("exact relaunch fixture has a trusted-store directory");
+                let trusted_root = trusted_dir
+                    .parent()
+                    .expect("worktree trusted directory has a repository trusted root");
+                let trusted_files_before = snapshot_regular_files(trusted_root);
+
+                let recovered = prepare_exact_relaunch_execution_authority(repo, &session.id)
+                    .unwrap_or_else(|error| {
+                        panic!("{lifecycle} exact relaunch must recover authority: {error}")
+                    });
+
+                assert_eq!(recovered.session_id, session.id);
+                assert_eq!(recovered.repo_hash, launch_binding.repo_hash);
+                assert_eq!(recovered.owner_kind, owner.kind.as_str());
+                assert_eq!(recovered.owner_number, owner.number);
+                assert_eq!(
+                    recovered.identity, expected_identity,
+                    "{lifecycle} exact relaunch must reuse the current generation and binding"
+                );
+
+                let record_after = crate::cli::execution_state::load(repo)
+                    .expect("read execution record after exact relaunch")
+                    .expect("execution record must remain present");
+                let ledger_after = crate::cli::execution_state::load_generation_ledger(repo, owner)
+                    .expect("read generation ledger after exact relaunch")
+                    .expect("generation ledger must remain present");
+                assert_eq!(record_after.status, expected_status);
+                assert_eq!(record_after, record_before, "{lifecycle} ECR changed");
+                assert_eq!(
+                    ledger_after.continuation_attempts, ledger_before.continuation_attempts,
+                    "{lifecycle} exact relaunch must not append a continuation attempt"
+                );
+                assert_eq!(
+                    ledger_after.takeover_attempts, ledger_before.takeover_attempts,
+                    "{lifecycle} exact relaunch must not append a takeover attempt"
+                );
+                assert_eq!(
+                    ledger_after.takeovers, ledger_before.takeovers,
+                    "{lifecycle} exact relaunch must not append a transfer audit"
+                );
+                assert_eq!(
+                    ledger_after.lifecycle_events, ledger_before.lifecycle_events,
+                    "{lifecycle} exact relaunch must not change generation lifecycle"
+                );
+                assert_eq!(
+                    ledger_after.continuation_validations, ledger_before.continuation_validations,
+                    "{lifecycle} exact relaunch must not masquerade as continuation validation"
+                );
+                assert_eq!(
+                    ledger_after, ledger_before,
+                    "{lifecycle} exact relaunch must leave the generation ledger byte-equivalent"
+                );
+                assert_eq!(
+                    snapshot_regular_files(trusted_root),
+                    trusted_files_before,
+                    "{lifecycle} exact relaunch must not mutate trusted execution history"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn exact_relaunch_rejects_unbound_and_stale_bindings_without_side_effects() {
+        for authority_case in [
+            "linked-unbound",
+            "legacy-unbound",
+            "foreign-generation",
+            "owner-mismatch",
+            "tampered-ledger-head",
+            "repo-mismatch",
+        ] {
+            with_strict_target_fixture(|repo, session| {
+                let (mut session, binding) = bind_session_to_current_execution(repo, session);
+                match authority_case {
+                    "linked-unbound" => session
+                        .set_execution_binding(None)
+                        .expect("clear exact relaunch binding"),
+                    "legacy-unbound" => {
+                        session.linked_issue_number = None;
+                        session
+                            .set_execution_binding(None)
+                            .expect("clear legacy exact relaunch binding");
+                    }
+                    "foreign-generation" => {
+                        let mut stale = binding.clone();
+                        stale.identity.generation_id =
+                            "foreign-exact-relaunch-generation".to_string();
+                        stale.capability_generation = stale.capability_generation.saturating_add(1);
+                        session
+                            .set_execution_binding(Some(stale))
+                            .expect("install well-formed stale exact relaunch binding");
+                    }
+                    "owner-mismatch" => {
+                        let mut foreign = binding.clone();
+                        foreign.owner_number = binding.owner_number + 1;
+                        foreign.capability_generation =
+                            foreign.capability_generation.saturating_add(1);
+                        session.linked_issue_number = Some(foreign.owner_number);
+                        session
+                            .set_execution_binding(Some(foreign))
+                            .expect("install foreign-owner exact relaunch binding");
+                    }
+                    "tampered-ledger-head" => {
+                        let mut tampered = binding.clone();
+                        tampered.identity.ledger_head_hash =
+                            "tampered-exact-relaunch-ledger-head".to_string();
+                        tampered.capability_generation =
+                            tampered.capability_generation.saturating_add(1);
+                        session
+                            .set_execution_binding(Some(tampered))
+                            .expect("install tampered-head exact relaunch binding");
+                    }
+                    "repo-mismatch" => {
+                        let mut foreign = binding.clone();
+                        foreign.repo_hash = "foreign-exact-relaunch-repo".to_string();
+                        foreign.capability_generation =
+                            foreign.capability_generation.saturating_add(1);
+                        session.repo_hash = Some(foreign.repo_hash.clone());
+                        session
+                            .set_execution_binding(Some(foreign))
+                            .expect("install foreign-repository exact relaunch binding");
+                    }
+                    _ => unreachable!("covered exact relaunch authority case"),
+                }
+                save_session_fixture(&session);
+
+                let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: binding.owner_number,
+                };
+                let session_path =
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+                let session_before =
+                    std::fs::read(&session_path).expect("read rejected exact relaunch Session");
+                let record_before = crate::cli::execution_state::load(repo)
+                    .expect("read rejected exact relaunch ECR")
+                    .expect("rejected exact relaunch fixture has an ECR");
+                let ledger_before =
+                    crate::cli::execution_state::load_generation_ledger(repo, owner)
+                        .expect("read rejected exact relaunch generation ledger")
+                        .expect("rejected exact relaunch fixture has a generation ledger");
+                let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(repo)
+                    .expect("rejected exact relaunch fixture has a trusted-store directory");
+                let trusted_root = trusted_dir
+                    .parent()
+                    .expect("worktree trusted directory has a repository trusted root");
+                let trusted_files_before = snapshot_regular_files(trusted_root);
+
+                let error = prepare_exact_relaunch_execution_authority(repo, &session.id)
+                    .expect_err("unbound or stale exact relaunch authority must fail closed");
+                assert!(
+                    matches!(
+                        error.code,
+                        AgentWorkspaceUpdateErrorCode::RelaunchRequired
+                            | AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+                            | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
+                            | AgentWorkspaceUpdateErrorCode::IdentityConflict
+                    ),
+                    "{authority_case} must fail as an authority error, got {error:?}"
+                );
+                assert_eq!(
+                    std::fs::read(&session_path).expect("reread rejected exact relaunch Session"),
+                    session_before,
+                    "{authority_case} rejection must not synthesize or repair a Session binding"
+                );
+                assert_eq!(
+                    crate::cli::execution_state::load(repo)
+                        .expect("reread rejected exact relaunch ECR")
+                        .expect("rejected exact relaunch ECR remains present"),
+                    record_before,
+                    "{authority_case} rejection must not mutate lifecycle or transfers"
+                );
+                assert_eq!(
+                    crate::cli::execution_state::load_generation_ledger(repo, owner)
+                        .expect("reread rejected exact relaunch generation ledger")
+                        .expect("rejected exact relaunch generation ledger remains present"),
+                    ledger_before,
+                    "{authority_case} rejection must not append attempts, transfers, or lifecycle"
+                );
+                assert_eq!(
+                    snapshot_regular_files(trusted_root),
+                    trusted_files_before,
+                    "{authority_case} rejection must not mutate trusted execution history"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn blocked_exact_relaunch_does_not_turn_explicit_continue_into_a_successor() {
+        with_strict_target_fixture(|repo, session| {
+            let (session, _) = bind_session_to_current_execution(repo, session);
+            seed_work_mutation_surfaces(repo, repo);
+            assert!(matches!(
+                crate::cli::execution_state::settle(
+                    repo,
+                    &session.id,
+                    crate::cli::execution_state::ExecutionSettlement::Blocked {
+                        reason: "exact relaunch requires recovery".to_string(),
+                        missing_verification: Some("verify.run".to_string()),
+                    },
+                )
+                .expect("settle blocked exact relaunch fixture"),
+                crate::cli::execution_state::SettleResult::Settled(_)
+            ));
+            prepare_exact_relaunch_execution_authority(repo, &session.id)
+                .expect("recover blocked exact relaunch identity");
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+
+            let error = continue_authenticated_execution(
+                repo,
+                &session.id,
+                AgentExecutionContinuationRequest {
+                    schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+                    operation_id: "blocked-exact-relaunch-explicit-continue".to_string(),
+                },
+            )
+            .expect_err("Blocked exact relaunch must require reopen before explicit Continue");
+
+            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::RelaunchRequired);
+            assert!(error.message.contains("execution.reopen"), "{error:?}");
+            assert_eq!(
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id),
+                before,
+                "refused explicit Continue must preserve exact relaunch authority"
+            );
+        });
+    }
+
+    #[test]
     fn execution_continuation_retries_validation_write_without_double_rebind() {
         with_strict_target_fixture(|repo, session| {
             let (session, _) = bind_session_to_current_execution(repo, session);
@@ -6319,8 +6645,7 @@ mod tests {
     fn execution_binding_terminal_generation_cannot_authorize_probe_or_work_mutation() {
         for (terminal_label, completed) in [("completed", true), ("blocked", false)] {
             with_strict_target_fixture(|repo, session| {
-                let (mut session, mut terminal_binding) =
-                    bind_session_to_current_execution(repo, session);
+                let (session, _) = bind_session_to_current_execution(repo, session);
                 seed_work_mutation_surfaces(repo, repo);
                 seed_unique_mutation_target(
                     repo,
@@ -6342,19 +6667,9 @@ mod tests {
                         .expect("settle producing generation"),
                     crate::cli::execution_state::SettleResult::Settled(_)
                 ));
-                let owner = crate::cli::execution_state::ExecutionOwnerKey {
-                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
-                    number: terminal_binding.owner_number,
-                };
-                terminal_binding.identity =
-                    crate::cli::execution_state::current_execution_binding(repo, owner)
-                        .expect("read terminal generation identity")
-                        .expect("terminal generation identity");
-                terminal_binding.capability_generation += 1;
-                session
-                    .set_execution_binding(Some(terminal_binding.clone()))
-                    .expect("project terminal generation into durable Session");
-                save_session_fixture(&session);
+                let terminal_binding =
+                    prepare_exact_relaunch_execution_authority(repo, &session.id)
+                        .expect("exact relaunch recovers terminal generation identity");
                 let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
 
                 let probe_error = probe_authenticated_execution_binding(

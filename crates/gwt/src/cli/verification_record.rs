@@ -3543,11 +3543,12 @@ pub(crate) mod tests {
         capability_generation: u64,
     ) -> gwt_agent::SessionExecutionBinding {
         let owner = generation_scoped_owner();
-        let mut session = gwt_agent::Session::new(
-            worktree,
-            "work/verification-authority",
-            gwt_agent::AgentId::Codex,
-        );
+        let branch = gwt_git::Repository::open(worktree)
+            .expect("open generation fixture repository")
+            .current_branch()
+            .expect("read generation fixture branch")
+            .expect("generation fixture has a branch");
+        let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.project_state_root = Some(worktree.to_path_buf());
         session.linked_issue_number = Some(owner.number);
@@ -3850,7 +3851,12 @@ pub(crate) mod tests {
         let terminal = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
             .expect("load completed generation binding")
             .expect("completed generation binding exists");
-        advance_generation_scoped_session_binding(session_id, terminal);
+        let recovered = crate::agent_project_state::prepare_exact_relaunch_execution_authority(
+            dir.path(),
+            session_id,
+        )
+        .expect("recover completed exact-relaunch authority");
+        assert_eq!(recovered.identity, terminal);
 
         let artifacts_before = verification_artifact_bytes(dir.path());
         let plan_error = run_verify_cli_as(
@@ -3915,6 +3921,12 @@ pub(crate) mod tests {
         let blocked = crate::cli::execution_state::current_execution_binding(dir.path(), owner)
             .expect("load blocked generation binding")
             .expect("blocked generation binding exists");
+        let recovered = crate::agent_project_state::prepare_exact_relaunch_execution_authority(
+            dir.path(),
+            session_id,
+        )
+        .expect("recover blocked exact-relaunch authority");
+        assert_eq!(recovered.identity, blocked);
         let commands = vec!["git --version".to_string()];
 
         let (plan_code, _) = run_verify_cli_as(

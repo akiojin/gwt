@@ -788,71 +788,6 @@ impl AppRuntime {
             );
         }
 
-        // Linked Resume is an authority-producing continuation. Route it
-        // through the same coordinator as the Workspace Continue action so
-        // the resumed pane is either rebound to the current generation or
-        // launched with one Prepared successor. Legacy unlinked Sessions keep
-        // the observation-only resume path below.
-        let linked_session = gwt_agent::Session::load_and_migrate(
-            &self.sessions_dir.join(format!("{session_id}.toml")),
-        )
-        .ok()
-        .filter(|session| session.linked_issue_number.is_some());
-        if let Some(linked_session) = linked_session {
-            if agent_session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_some_and(|requested| {
-                    linked_session
-                        .resume_session_id_for(Some(requested))
-                        .as_deref()
-                        != Some(requested)
-                })
-            {
-                return reply_error(
-                    "The requested Session id is not resumable; use the Work Resume picker or start a new Work.".to_string(),
-                );
-            }
-            let work_id =
-                gwt_core::workspace_projection::load_workspace_work_items(&tab.project_root)
-                    .ok()
-                    .flatten()
-                    .and_then(|projection| {
-                        projection
-                            .work_items
-                            .into_iter()
-                            .find(|work| {
-                                work.agents
-                                    .iter()
-                                    .any(|agent| agent.session_id == linked_session.id)
-                            })
-                            .map(|work| work.id)
-                    })
-                    .unwrap_or_else(|| format!("work-session-{}", linked_session.id));
-            let branch =
-                (!linked_session.branch.trim().is_empty()).then(|| linked_session.branch.clone());
-            let mut events =
-                self.continue_work_events(client_id, operation_id.clone(), work_id, bounds);
-            let failure = events.iter().find_map(|outbound| match &outbound.event {
-                BackendEvent::ContinueWorkOutcome {
-                    outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                    message,
-                    ..
-                } => Some(
-                    message
-                        .clone()
-                        .unwrap_or_else(|| "Resume continuation failed".to_string()),
-                ),
-                _ => None,
-            });
-            if let Some(message) = failure {
-                return reply_error(message);
-            }
-            events.push(started_ack(&session_id, branch));
-            return events;
-        }
-
         if let Some((window_id, live_gwt_session)) = self
             .active_agent_sessions
             .iter()
@@ -991,6 +926,7 @@ impl AppRuntime {
                 "No saved conversation is available for this Session; use Continue work to start a linked execution with handoff context.".to_string(),
             );
         }
+        builder = builder.predecessor_session_id(session.id.clone());
 
         let mut config = builder.build();
         // Preserve persisted tool version + display name so the launcher

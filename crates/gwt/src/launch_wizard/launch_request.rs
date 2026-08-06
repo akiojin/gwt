@@ -141,6 +141,27 @@ impl LaunchWizardState {
             builder = builder.docker_service(docker_service.to_string());
         }
         builder = builder.docker_lifecycle_intent(self.docker_lifecycle_intent);
+        let quick_start_predecessor = matches!(self.mode.as_str(), "resume" | "continue")
+            .then(|| {
+                self.selected_quick_start_index
+                    .and_then(|index| self.quick_start_entries.get(index))
+            })
+            .flatten()
+            .filter(|_| self.launch_path == LaunchWizardLaunchPath::QuickStart);
+        let linked_issue_number = if let Some(predecessor) = quick_start_predecessor {
+            match (self.linked_issue_number, predecessor.linked_issue_number) {
+                (Some(context_owner), Some(predecessor_owner))
+                    if context_owner != predecessor_owner =>
+                {
+                    return Err(format!(
+                        "Quick Start Session owner mismatch: context Issue #{context_owner}, predecessor Issue #{predecessor_owner}"
+                    ));
+                }
+                (_, owner) => owner,
+            }
+        } else {
+            self.linked_issue_number
+        };
         // SPEC-2014 2026-05-18 amendment FR-A:
         // Execution Mode `"resume"` always maps to `SessionMode::Resume`.
         // - Quick Start Resume (with id)       → SessionMode::Resume + id
@@ -160,7 +181,11 @@ impl LaunchWizardState {
             _ => builder.session_mode(gwt_agent::SessionMode::Normal),
         };
 
-        if let Some(n) = self.linked_issue_number {
+        if let Some(predecessor) = quick_start_predecessor {
+            builder = builder.predecessor_session_id(predecessor.session_id.clone());
+        }
+
+        if let Some(n) = linked_issue_number {
             builder = builder.linked_issue_number(n);
         }
 
@@ -342,6 +367,167 @@ mod tests {
             "a Resume launch must not carry Codex's dangerous bypass flag"
         );
         assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_resume_and_continue_launches_carry_durable_lineage() {
+        for (mode, provider_session_id) in [
+            ("resume", Some("provider-conversation")),
+            ("continue", None),
+        ] {
+            let mut entry = quick_start_entry(
+                "durable-session-3457",
+                "codex",
+                provider_session_id,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            );
+            entry.linked_issue_number = Some(3457);
+            let mut state = LaunchWizardState::open_with(
+                context(branch("work/issue-3457"), "work/issue-3457"),
+                sample_agent_options(),
+                vec![entry],
+            );
+            state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+            state.apply(LaunchWizardAction::SetAgent {
+                agent_id: "codex".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetModel {
+                model: "gpt-5.4".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetReasoning {
+                reasoning: "high".to_string(),
+            });
+            state.mode = mode.to_string();
+            state.resume_session_id = provider_session_id.map(str::to_string);
+
+            let config = state
+                .build_launch_config()
+                .expect("Quick Start launch config");
+
+            assert_eq!(
+                config.predecessor_session_id.as_deref(),
+                Some("durable-session-3457"),
+                "{mode} must carry the exact durable predecessor"
+            );
+            assert_eq!(
+                config.linked_issue_number,
+                Some(3457),
+                "{mode} must carry the predecessor owner"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_start_lineage_uses_the_durable_selection_after_step_cursor_changes() {
+        let mut first = quick_start_entry(
+            "durable-session-old",
+            "codex",
+            Some("provider-old"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        first.linked_issue_number = Some(1111);
+        let mut selected = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        selected.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![first, selected],
+        );
+
+        // Reuse actions occupy indexes 0 and 2 because each reusable entry is
+        // followed by a Start New action. Advancing the real UI flow then
+        // repurposes `selected` as the next step's cursor.
+        state.apply(LaunchWizardAction::Select { index: 2 });
+        assert_eq!(state.selected_quick_start_index, Some(1));
+        state.step = LaunchWizardStep::ModelSelect;
+        state.apply(LaunchWizardAction::Select { index: 0 });
+        state.step = LaunchWizardStep::ReasoningLevel;
+        state.apply(LaunchWizardAction::Select { index: 0 });
+        state.completion = None;
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+
+        let config = state
+            .build_launch_config()
+            .expect("Quick Start launch config after UI step cursor changes");
+
+        assert_eq!(
+            config.predecessor_session_id.as_deref(),
+            Some("durable-session-3457")
+        );
+        assert_eq!(config.linked_issue_number, Some(3457));
+    }
+
+    #[test]
+    fn quick_start_unlinked_predecessor_stays_observation_only_in_linked_context() {
+        let entry = quick_start_entry(
+            "legacy-unlinked-session",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+        state.linked_issue_number = Some(3457);
+
+        let config = state
+            .build_launch_config()
+            .expect("legacy unlinked Quick Start remains observation-only");
+
+        assert_eq!(
+            config.predecessor_session_id.as_deref(),
+            Some("legacy-unlinked-session")
+        );
+        assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn quick_start_relaunch_rejects_a_conflicting_context_owner() {
+        let mut entry = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("provider-conversation".to_string());
+        state.linked_issue_number = Some(9999);
+
+        let error = state
+            .build_launch_config()
+            .expect_err("conflicting Quick Start owner must fail closed");
+
+        assert!(error.contains("owner mismatch"), "{error}");
+        assert!(error.contains("#9999"), "{error}");
+        assert!(error.contains("#3457"), "{error}");
     }
 
     // SPEC-2014 2026-05-18 amendment FR-A / SC-A / SC-B:

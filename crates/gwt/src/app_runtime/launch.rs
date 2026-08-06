@@ -52,6 +52,10 @@ use super::{
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
+fn should_retire_auto_resume_source(source_session_id: &str, live_session_id: &str) -> bool {
+    source_session_id != live_session_id
+}
+
 #[cfg(test)]
 type FinalizedSessionPostSaveHook = Box<dyn FnOnce() -> std::io::Result<()> + 'static>;
 
@@ -2230,7 +2234,10 @@ impl AppRuntime {
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
                 }
                 if let Some(source_session_id) = auto_resume_source_session_id {
-                    mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                    if should_retire_auto_resume_source(&source_session_id, &session_id_for_restore)
+                    {
+                        mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                    }
                 }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
@@ -2768,9 +2775,16 @@ impl AppRuntime {
         )
         .map_err(|error| error.to_string())?;
         let pane = Arc::new(Mutex::new(pane));
+        let runtime_instance_id = super::RuntimeInstanceId::next();
 
-        let output_thread = self.spawn_output_thread(id.to_string(), pane.clone(), console_kind);
-        let status_thread = self.spawn_status_thread(id.to_string(), pane.clone());
+        let output_thread = self.spawn_output_thread(
+            id.to_string(),
+            runtime_instance_id,
+            pane.clone(),
+            console_kind,
+        );
+        let status_thread =
+            self.spawn_status_thread(id.to_string(), runtime_instance_id, pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.window_pty_statuses
                 .insert(id.to_string(), WindowProcessStatus::Running);
@@ -2794,6 +2808,7 @@ impl AppRuntime {
                 pane,
                 output_thread: Some(output_thread),
                 status_thread: Some(status_thread),
+                runtime_instance_id,
             },
         );
         Ok(())
@@ -3308,16 +3323,12 @@ impl AppRuntime {
                 session.agent_session_id = config.resume_session_id.clone();
             }
             session.update_status(gwt_agent::AgentStatus::Running);
-            // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
-            // recovers producing authority through the continuation
-            // coordinator before spawn. Failure degrades to an unbound,
-            // input-capable launch — a resume must degrade, never block.
-            //
-            // Issue #3423: the coordinator answers with two distinct shapes.
-            // Only `SuccessorCreated` carries a Prepared attempt and may
-            // launch as a PreparedContinuation. `ReboundCurrent` re-validated
-            // the predecessor Session's current-generation binding — the
-            // relaunch continues that Session in place with Active authority.
+            // Issue #3457: provider Resume/Continue is an exact durable-Session
+            // relaunch, not an execution-generation continuation. Recover the
+            // predecessor's current binding without creating successor or
+            // transfer records. Unlinked sessions retain the observation-only
+            // compatibility path; a linked predecessor must validate or the
+            // launch fails closed before persistence and provider spawn.
             let mut rebound_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
             if matches!(
                 config.execution_intent,
@@ -3327,19 +3338,18 @@ impl AppRuntime {
                 gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
             ) {
                 if let Some(predecessor) = config.predecessor_session_id.clone() {
-                    if let Some((receipt, binding)) = gwt::prepare_resume_producing_authority(
-                        Path::new(&project_root),
-                        &predecessor,
-                    ) {
-                        match receipt.outcome {
-                            gwt::AgentExecutionContinuationOutcome::SuccessorCreated => {
-                                config.execution_intent =
-                                    gwt_agent::ExecutionLaunchIntent::PreparedContinuation(binding);
-                            }
-                            gwt::AgentExecutionContinuationOutcome::ReboundCurrent => {
-                                rebound_continuation = Some(binding);
-                            }
-                        }
+                    if config.linked_issue_number.is_some() {
+                        rebound_continuation = Some(
+                            gwt::prepare_exact_relaunch_execution_authority(
+                                Path::new(&project_root),
+                                &predecessor,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "exact Session relaunch authority validation failed: {error}"
+                                )
+                            })?,
+                        );
                     }
                 }
             }
@@ -3676,12 +3686,26 @@ impl AppRuntime {
             return;
         };
         self.revoke_agent_capability_for_window(window_id);
+        let same_session_remains_active = self
+            .active_agent_sessions
+            .values()
+            .any(|active| active.session_id == session.session_id);
+        if same_session_remains_active {
+            tracing::info!(
+                session_id = %session.session_id,
+                stopped_window_id = window_id,
+                "preserving exact relaunched Session while another window remains active"
+            );
+        }
         // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
         // when dirty so uncommitted work is never lost. Skip the Paused-Work /
         // projection persistence entirely.
         if self.is_ephemeral_intake_session(&session) {
+            if same_session_remains_active {
+                return;
+            }
             self.finalize_ephemeral_intake_worktree(&session);
             let _ = gwt_agent::persist_session_status(
                 &self.sessions_dir,
@@ -3695,6 +3719,22 @@ impl AppRuntime {
             .tab(&session.tab_id)
             .map(|tab| tab.project_root.clone())
         {
+            if same_session_remains_active {
+                if let Err(error) = gwt_core::workspace_projection::mark_workspace_agent_stopped(
+                    &project_root,
+                    &session.session_id,
+                    Some(&session.window_id),
+                ) {
+                    tracing::warn!(
+                        error = %error,
+                        project_root = %project_root.display(),
+                        session_id = %session.session_id,
+                        window_id = %session.window_id,
+                        "failed to clean replaced Agent window from Workspace projection"
+                    );
+                }
+                return;
+            }
             // SPEC-2359 Phase W-12 Slice 5a (FR-350): persist a Paused marker
             // before clearing the agent from the live projection so the Work is
             // retained on the Work surface until the user explicitly closes it.
@@ -3712,6 +3752,9 @@ impl AppRuntime {
                     "failed to clean stopped Agent from Workspace projection"
                 );
             }
+        }
+        if same_session_remains_active {
+            return;
         }
         let _ = gwt_agent::persist_session_status(
             &self.sessions_dir,
@@ -4085,6 +4128,23 @@ impl AppRuntime {
 #[cfg(test)]
 #[path = "agent_launch_stage_tests.rs"]
 mod agent_launch_stage_tests;
+
+#[cfg(test)]
+mod exact_relaunch_retirement_tests {
+    use super::should_retire_auto_resume_source;
+
+    #[test]
+    fn same_durable_session_is_not_retired_after_exact_relaunch() {
+        assert!(!should_retire_auto_resume_source(
+            "durable-session-3457",
+            "durable-session-3457"
+        ));
+        assert!(should_retire_auto_resume_source(
+            "legacy-source-session",
+            "replacement-session"
+        ));
+    }
+}
 
 #[cfg(test)]
 mod docker_session_persistence_tests {
@@ -4673,6 +4733,91 @@ mod agent_endpoint_env_tests {
             "a rebound relaunch must recover producing authority"
         );
         assert_eq!(grant.principal().execution_binding(), Some(&binding));
+    }
+
+    #[test]
+    fn exact_relaunch_installs_same_session_capability_for_terminal_generation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for (lifecycle, settlement, expected_status) in [
+            (
+                "blocked",
+                gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "terminal exact relaunch fixture".to_string(),
+                    missing_verification: Some("reverify before reopen".to_string()),
+                },
+                gwt::cli::execution_state::ExecutionControlStatus::Blocked,
+            ),
+            (
+                "completed",
+                gwt::cli::execution_state::ExecutionSettlement::Completed,
+                gwt::cli::execution_state::ExecutionControlStatus::Completed,
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("home tempdir");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let (launch, issuer, _) = rebound_relaunch_fixture(home.path());
+            assert!(matches!(
+                gwt::cli::execution_state::settle(&launch.project, &launch.session.id, settlement,)
+                    .expect("settle terminal exact relaunch fixture"),
+                gwt::cli::execution_state::SettleResult::Settled(_)
+            ));
+            let binding = gwt::prepare_exact_relaunch_execution_authority(
+                &launch.project,
+                &launch.session.id,
+            )
+            .unwrap_or_else(|error| panic!("recover {lifecycle} exact relaunch: {error}"));
+            let record_before = gwt::cli::execution_state::load(&launch.project)
+                .expect("read terminal ECR")
+                .expect("terminal ECR exists");
+
+            let mut resumed = gwt_agent::Session::new(
+                &launch.project,
+                "work/issue-2359",
+                gwt_agent::AgentId::Codex,
+            );
+            resumed.project_state_root = Some(launch.project.clone());
+            resumed.linked_issue_number = Some(launch.owner.number);
+            resumed.id = binding.session_id.clone();
+            resumed
+                .set_execution_binding(Some(binding.clone()))
+                .expect("carry exact relaunch binding");
+            resumed.update_status(gwt_agent::AgentStatus::Running);
+
+            let mut env = HashMap::new();
+            FinalizedAgentCapabilityLaunch {
+                issuer: Some(&issuer),
+                sessions_dir: &launch.sessions_dir,
+                session: &mut resumed,
+                project_root: &launch.project,
+                worktree: &launch.project,
+                producing_owner: None,
+                prepared_continuation: None,
+                rebound_continuation: Some(&binding),
+                execution_entrypoint: "$gwt-execute #2359",
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                container_runtime: None,
+            }
+            .install(&mut env)
+            .unwrap_or_else(|error| panic!("install {lifecycle} exact relaunch: {error}"));
+
+            let token = env
+                .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                .expect("terminal exact relaunch capability token");
+            let grant = issuer
+                .grant_for_test(token)
+                .expect("authenticate terminal exact relaunch capability");
+            assert_eq!(grant.principal().session_id(), launch.session.id);
+            assert_eq!(grant.principal().execution_binding(), Some(&binding));
+            let record_after = gwt::cli::execution_state::load(&launch.project)
+                .expect("reread terminal ECR")
+                .expect("terminal ECR remains present");
+            assert_eq!(record_after, record_before);
+            assert_eq!(record_after.status, expected_status);
+        }
     }
 
     #[test]

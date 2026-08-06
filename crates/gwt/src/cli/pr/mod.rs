@@ -679,8 +679,12 @@ mod tests {
             kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
             number: 42,
         };
-        let mut session =
-            gwt_agent::Session::new(worktree, "work/pr-authority", gwt_agent::AgentId::Codex);
+        let branch = gwt_git::Repository::open(worktree)
+            .expect("open PR fixture repository")
+            .current_branch()
+            .expect("read PR fixture branch")
+            .expect("PR fixture has a branch");
+        let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.project_state_root = Some(worktree.to_path_buf());
         session.linked_issue_number = Some(owner.number);
@@ -989,6 +993,11 @@ mod tests {
             .expect("settle completed PR generation"),
             crate::cli::execution_state::SettleResult::Settled(_)
         ));
+        crate::agent_project_state::prepare_exact_relaunch_execution_authority(
+            worktree.path(),
+            "session-completed",
+        )
+        .expect("recover completed exact-relaunch PR authority");
 
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         env.seed_pr(7, seeded_pr());

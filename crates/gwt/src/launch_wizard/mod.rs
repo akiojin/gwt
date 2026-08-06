@@ -398,6 +398,9 @@ pub struct AgentOption {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickStartEntry {
     pub session_id: String,
+    /// Execution owner persisted with the durable gwt Session. Provider
+    /// resume ids are not sufficient authority lineage on their own.
+    pub linked_issue_number: Option<u64>,
     pub agent_id: String,
     pub tool_label: String,
     pub model: Option<String>,

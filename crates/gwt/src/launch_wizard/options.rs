@@ -1545,6 +1545,7 @@ mod tests {
     fn quick_start_summary_includes_runtime_metadata() {
         let summary = quick_start_summary(&QuickStartEntry {
             session_id: "gwt-session-1".to_string(),
+            linked_issue_number: None,
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
             model: Some("gpt-5.5".to_string()),

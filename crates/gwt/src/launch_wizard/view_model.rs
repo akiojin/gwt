@@ -1567,6 +1567,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1606,6 +1607,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.2-codex".to_string()),
@@ -1657,6 +1659,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1731,6 +1734,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -1772,6 +1776,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2167,6 +2172,7 @@ mod tests {
             ),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "proxy-agent".to_string(),
                 tool_label: "Claude Proxy".to_string(),
                 model: None,

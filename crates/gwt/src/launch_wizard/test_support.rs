@@ -214,6 +214,7 @@ pub(super) fn quick_start_entry(
     };
     QuickStartEntry {
         session_id: session_id.to_string(),
+        linked_issue_number: None,
         agent_id: agent_id.to_string(),
         tool_label: tool_label.to_string(),
         model: model.map(str::to_string),

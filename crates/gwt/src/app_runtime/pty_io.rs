@@ -331,6 +331,7 @@ impl AppRuntime {
     pub(crate) fn spawn_output_thread(
         &self,
         id: String,
+        runtime_instance_id: super::RuntimeInstanceId,
         pane: Arc<Mutex<Pane>>,
         _console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> JoinHandle<()> {
@@ -356,6 +357,7 @@ impl AppRuntime {
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
+                        runtime_instance_id,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
                     });
@@ -394,12 +396,14 @@ impl AppRuntime {
                         }
                         proxy.send(UserEvent::RuntimeOutput {
                             id: id.clone(),
+                            runtime_instance_id,
                             data: chunk,
                         });
                     }
                     Err(error) => {
                         proxy.send(UserEvent::RuntimeStatus {
                             id: id.clone(),
+                            runtime_instance_id,
                             status: WindowProcessStatus::Error,
                             detail: Some(error.to_string()),
                         });
@@ -420,11 +424,17 @@ impl AppRuntime {
             match status {
                 Ok(status) => {
                     let (status, detail) = Self::runtime_status_from_pane_status(&status);
-                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id,
+                        runtime_instance_id,
+                        status,
+                        detail,
+                    });
                 }
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
+                        runtime_instance_id,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
                     });
@@ -433,7 +443,12 @@ impl AppRuntime {
         })
     }
 
-    pub(crate) fn spawn_status_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
+    pub(crate) fn spawn_status_thread(
+        &self,
+        id: String,
+        runtime_instance_id: super::RuntimeInstanceId,
+        pane: Arc<Mutex<Pane>>,
+    ) -> JoinHandle<()> {
         let proxy = self.proxy.clone();
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(100));
@@ -455,12 +470,18 @@ impl AppRuntime {
                         }
                     }
                     let (status, detail) = Self::runtime_status_from_pane_status(&status);
-                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id,
+                        runtime_instance_id,
+                        status,
+                        detail,
+                    });
                     break;
                 }
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
+                        runtime_instance_id,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
                     });

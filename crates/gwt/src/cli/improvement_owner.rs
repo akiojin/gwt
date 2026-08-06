@@ -219,7 +219,7 @@ fn prepare_owner_projection_commit(
     source_repo_root: &Path,
     binding: &ReadbackVerifiedOwnerBinding,
 ) -> Result<OwnerProjectionCommit, gwt_github::SpecOpsError> {
-    let public_context = PublicMutationContext::for_repo(source_repo_root);
+    let public_context = PublicMutationContext::for_repo_with_test_budget(source_repo_root);
     prepare_owner_projection_commit_with_context(source_repo_root, binding, &public_context)
 }
 
@@ -7124,6 +7124,18 @@ impl PublicMutationContext {
             collection_complete: true,
         }
     }
+
+    /// Run the real privacy-context collector without coupling success-path
+    /// tests to the production latency budget. Full-suite load can delay the
+    /// collector's git subprocesses beyond three seconds; timeout behavior is
+    /// covered separately with an explicitly expired deadline.
+    #[cfg(test)]
+    fn for_repo_with_test_budget(repo_root: &Path) -> Self {
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        Self::for_repo_until(repo_root, expires_at)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8196,7 +8208,7 @@ mod tests {
             ],
         );
 
-        let context = PublicMutationContext::for_repo(&worktree);
+        let context = PublicMutationContext::for_repo_with_test_budget(&worktree);
         assert!(context
             .denied_values
             .contains(&"acme/private-repo".to_string()));
@@ -8775,7 +8787,7 @@ mod tests {
         let comment_body = render_occurrence_comment_payload(
             &first_candidate,
             &occurrence_key,
-            &PublicMutationContext::for_repo(source.path()),
+            &PublicMutationContext::for_repo_with_test_budget(source.path()),
         )
         .expect("occurrence payload")
         .body;
@@ -9145,14 +9157,14 @@ mod tests {
             .remove(0);
         render_public_issue_payload(
             &stored_fixture,
-            &PublicMutationContext::for_repo(source.path()),
+            &PublicMutationContext::for_repo_with_test_budget(source.path()),
         )
         .unwrap_or_else(|error| panic!("unsafe fixture issue payload: {error}"));
         for occurrence in &stored_fixture.distinct_occurrences {
             render_occurrence_comment_payload(
                 &stored_fixture,
                 &occurrence.opaque_key,
-                &PublicMutationContext::for_repo(source.path()),
+                &PublicMutationContext::for_repo_with_test_budget(source.path()),
             )
             .unwrap_or_else(|error| panic!("unsafe fixture occurrence payload: {error}"));
         }
@@ -10597,7 +10609,7 @@ mod tests {
             .expect("source store")
             .candidates
             .remove(0);
-        let public_context = PublicMutationContext::for_repo(source.path());
+        let public_context = PublicMutationContext::for_repo_with_test_budget(source.path());
         let comment_body =
             render_occurrence_comment_payload(&candidate, &occurrence_key, &public_context)
                 .expect("occurrence payload")
@@ -12256,7 +12268,7 @@ mod tests {
             &blocked,
             78,
             79,
-            &PublicMutationContext::for_repo(source.path()),
+            &PublicMutationContext::for_repo_with_test_budget(source.path()),
         )
         .expect("reconciliation payload");
         env.owner_client.seed_repository_comments(
@@ -13473,7 +13485,11 @@ mod tests {
         let worker_a = thread::spawn(move || {
             let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home_a);
             let mut env = owner_status_worker_env(&source_a, "cache-worker-a");
-            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+            // Keep the acquired claim alive for the whole worker-B observation
+            // window. A five-second lease can expire under a loaded full-suite
+            // runner after the parent observes it but before worker B reaches
+            // the durable Busy decision, turning B into a second poster.
+            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(60));
             retry_pending_owner_status_with_deadline(&mut env, &candidate_a, &deadline)
         });
 
@@ -13497,7 +13513,11 @@ mod tests {
         let worker_b = thread::spawn(move || {
             let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home_b);
             let mut env = owner_status_worker_env(&source_b, "cache-worker-b");
-            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(2));
+            // The worker must observe the durable busy claim before the Board
+            // lock is released. Keep the operation budget below the 30-second
+            // receive bound, but leave enough headroom for a loaded Windows
+            // test runner to read and repair the candidate store.
+            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(20));
             worker_b_tx
                 .send(
                     retry_pending_owner_status_with_deadline(&mut env, &candidate_b, &deadline)
@@ -14058,7 +14078,7 @@ mod tests {
         let comment_body = render_occurrence_comment_payload(
             &candidate,
             occurrence_key,
-            &PublicMutationContext::for_repo(source.path()),
+            &PublicMutationContext::for_repo_with_test_budget(source.path()),
         )
         .expect("occurrence payload")
         .body;

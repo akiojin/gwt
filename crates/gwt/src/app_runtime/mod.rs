@@ -76,6 +76,17 @@ impl BlockingTaskSpawner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeInstanceId(u64);
+
+impl RuntimeInstanceId {
+    fn next() -> Self {
+        static NEXT_RUNTIME_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 pub struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
@@ -86,6 +97,9 @@ pub struct WindowRuntime {
     /// because some agent exits can leave the terminal reader waiting even
     /// after the direct child has finished.
     status_thread: Option<JoinHandle<()>>,
+    /// Process-local launch incarnation. Window and durable Session IDs are
+    /// intentionally reusable, so delayed PTY events must carry this fence.
+    runtime_instance_id: RuntimeInstanceId,
 }
 
 struct RuntimeStopThreads {
@@ -2886,8 +2900,12 @@ impl AppRuntime {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
+        // The fallback transaction includes a durable replace. On Windows,
+        // antivirus and indexer contention can make that rename exceed 250ms
+        // even though the transaction is healthy. Keep it UI-bounded while
+        // matching the one-second cache/origin fallback budget.
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
@@ -2933,7 +2951,7 @@ impl AppRuntime {
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
         );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(

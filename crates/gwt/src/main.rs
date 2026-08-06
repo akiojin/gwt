@@ -67,7 +67,7 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
-    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    ProjectOpenTarget, ProjectTabRuntime, RuntimeInstanceId, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1039,6 +1039,7 @@ enum UserEvent {
     },
     RuntimeOutput {
         id: String,
+        runtime_instance_id: RuntimeInstanceId,
         data: Vec<u8>,
     },
     DaemonRuntimeOutput {
@@ -1047,6 +1048,7 @@ enum UserEvent {
     },
     RuntimeStatus {
         id: String,
+        runtime_instance_id: RuntimeInstanceId,
         status: WindowProcessStatus,
         detail: Option<String>,
     },
@@ -2794,6 +2796,7 @@ mod tests {
     fn sample_wizard_quick_start_entry(live_window_id: Option<&str>) -> QuickStartEntry {
         QuickStartEntry {
             session_id: "gwt-session-1".to_string(),
+            linked_issue_number: None,
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
             model: Some("gpt-5.5".to_string()),
@@ -5699,8 +5702,20 @@ mod tests {
 
     #[test]
     fn powershell_agent_wrapper_quotes_spaced_path_and_single_quotes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let executable =
+            temp.path()
+                .join("Program Files")
+                .join(if cfg!(windows) { "npx.exe" } else { "npx" });
+        std::fs::create_dir_all(executable.parent().expect("executable parent"))
+            .expect("create executable parent");
+        std::fs::copy(
+            std::env::current_exe().expect("current test executable"),
+            &executable,
+        )
+        .expect("copy executable fixture");
         let mut config = sample_versioned_launch_config();
-        config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
+        config.command = executable.display().to_string();
         config.args = vec!["value's".to_string()];
         config.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
 
@@ -5711,7 +5726,10 @@ mod tests {
         assert_eq!(config.args[1], "-NoProfile");
         assert_eq!(config.args[2], "-Command");
         let script = config.args[3].as_str();
-        assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
+        assert!(
+            script.contains(&format!("& '{}'", executable.display())),
+            "{script}"
+        );
         assert!(script.contains("'value''s'"));
         assert!(script.contains("[gwt] launching agent"));
         assert!(script.contains("[gwt] process exited with status"));
@@ -8108,16 +8126,31 @@ fn main() -> std::io::Result<()> {
                 // `AppRuntime::process_line_events`.
                 clients.dispatch(app.process_line_events(line));
             }
-            Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
-                let events = app.handle_runtime_output(id, data);
+            Event::UserEvent(UserEvent::RuntimeOutput {
+                id,
+                runtime_instance_id,
+                data,
+            }) => {
+                let events =
+                    app.handle_runtime_output_for_instance(id, runtime_instance_id, data);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data }) => {
                 let events = app.handle_daemon_runtime_output(id, data);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
-                let events = app.handle_runtime_status(id, status, detail);
+            Event::UserEvent(UserEvent::RuntimeStatus {
+                id,
+                runtime_instance_id,
+                status,
+                detail,
+            }) => {
+                let events = app.handle_runtime_status_for_instance(
+                    id,
+                    runtime_instance_id,
+                    status,
+                    detail,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {

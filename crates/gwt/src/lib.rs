@@ -59,7 +59,8 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 pub use agent_project_state::{
     apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    continue_authenticated_execution, observe_agent_runtime, prepare_resume_producing_authority,
+    continue_authenticated_execution, observe_agent_runtime,
+    prepare_exact_relaunch_execution_authority, prepare_resume_producing_authority,
     probe_authenticated_execution_binding, probe_authenticated_prepared_execution_binding,
     AgentExecutionBindingProbeReceipt, AgentExecutionBindingProbeRequest,
     AgentExecutionContinuationOutcome, AgentExecutionContinuationReceipt,

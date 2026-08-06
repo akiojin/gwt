@@ -471,13 +471,11 @@ impl WorkspaceProjection {
     ) -> bool {
         let before = self.agents.len();
         self.agents.retain(|agent| {
-            if agent.session_id == session_id {
-                return false;
+            if let Some(expected) = window_id {
+                return !(agent.session_id == session_id
+                    && agent.window_id.as_deref() == Some(expected));
             }
-            if let (Some(expected), Some(actual)) = (window_id, agent.window_id.as_deref()) {
-                return actual != expected;
-            }
-            true
+            agent.session_id != session_id
         });
         let removed = self.agents.len() != before;
         if removed {
@@ -1710,6 +1708,59 @@ mod tests {
         assert_eq!(
             projection.summary.as_deref(),
             Some("Keep this user-facing work summary.")
+        );
+    }
+
+    #[test]
+    fn stopped_window_cleanup_preserves_same_session_replacement() {
+        let now = Utc::now();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut old = us70_agent(
+            "session-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        old.window_id = Some("tab-1::agent-old".to_string());
+        let mut live = old.clone();
+        live.window_id = Some("tab-1::agent-live".to_string());
+        live.updated_at += chrono::Duration::seconds(1);
+        projection.agents.extend([old, live]);
+
+        assert!(projection.remove_agent_session("session-1", Some("tab-1::agent-old"), now));
+
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(
+            projection.agents[0].window_id.as_deref(),
+            Some("tab-1::agent-live")
+        );
+        assert_eq!(
+            projection.effective_status_category(),
+            WorkspaceStatusCategory::Active
+        );
+    }
+
+    #[test]
+    fn stopped_window_cleanup_preserves_new_session_in_reused_window() {
+        let now = Utc::now();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut old = us70_agent(
+            "session-old",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        old.window_id = Some("tab-1::agent-reused".to_string());
+        let mut live = old.clone();
+        live.session_id = "session-live".to_string();
+        live.updated_at += chrono::Duration::seconds(1);
+        projection.agents.extend([old, live]);
+
+        assert!(projection.remove_agent_session("session-old", Some("tab-1::agent-reused"), now));
+
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.agents[0].session_id, "session-live");
+        assert_eq!(
+            projection.effective_status_category(),
+            WorkspaceStatusCategory::Active
         );
     }
 

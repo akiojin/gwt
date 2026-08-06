@@ -14653,7 +14653,8 @@ mod tests {
         }
 
         fn normalized_test_path(path: &Path) -> String {
-            let rendered = path.to_string_lossy();
+            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let rendered = canonical.to_string_lossy();
             rendered
                 .strip_prefix("/private")
                 .unwrap_or(&rendered)
@@ -16052,6 +16053,11 @@ exit 1
                 .expect("current generation binding");
             persist_generation_session_binding(repo.path(), owner, "sess-reopen", binding);
             settle_blocked(repo.path(), "sess-reopen");
+            crate::agent_project_state::prepare_exact_relaunch_execution_authority(
+                repo.path(),
+                "sess-reopen",
+            )
+            .expect("recover blocked exact-relaunch authority before reopen");
             save_covering_evidence(repo.path(), "sess-reopen", true);
 
             let probe = probe_execution_reopen(repo.path(), "sess-reopen");
@@ -18061,19 +18067,50 @@ exit 1
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
 
             let completed = tempfile::tempdir().unwrap();
-            let mut completed_record = active_record("sess-reopen");
-            completed_record.status = ExecutionControlStatus::Completed;
-            completed_record.settled_at = Some(Utc::now());
-            save(completed.path(), &completed_record).unwrap();
-            let (code, out) = run_cmd(
+            crate::cli::trusted_store::init_git_repo_with_origin(completed.path());
+            let completed_owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(completed.path(), &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(
                 completed.path(),
-                ExecutionCommand::Reopen {
-                    reason: "must stay completed".to_string(),
-                },
+                completed_owner,
+                LegacyActiveDisposition::Live,
+            )
+            .unwrap();
+            let completed_binding = current_execution_binding(completed.path(), completed_owner)
+                .unwrap()
+                .expect("completed reopen generation binding");
+            persist_generation_session_binding(
+                completed.path(),
+                completed_owner,
+                "sess-reopen",
+                completed_binding,
+            );
+            settle(
+                completed.path(),
+                "sess-reopen",
+                ExecutionSettlement::Completed,
+            )
+            .unwrap();
+            crate::agent_project_state::prepare_exact_relaunch_execution_authority(
+                completed.path(),
+                "sess-reopen",
+            )
+            .expect("recover completed exact-relaunch authority before reopen refusal");
+            let mut out = String::new();
+            let code = run_reopen(
+                completed.path(),
+                "sess-reopen",
+                "must stay completed",
+                &mut out,
             )
             .unwrap();
             assert_eq!(code, 2, "{out}");
             assert!(out.contains("Completed"), "{out}");
+            std::fs::remove_file(gwt_core::paths::gwt_sessions_dir().join("sess-reopen.toml"))
+                .expect("remove completed exact-relaunch Session before flat-record cases");
 
             let other_owner = tempfile::tempdir().unwrap();
             settle_blocked(other_owner.path(), "sess-owner");

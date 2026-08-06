@@ -2150,6 +2150,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
@@ -2253,6 +2254,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.4".to_string()),
@@ -2300,6 +2302,7 @@ mod tests {
             sample_agent_options(),
             vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.4".to_string()),
@@ -3259,6 +3262,44 @@ mod tests {
     }
 
     #[test]
+    fn quick_start_lineage_survives_model_and_reasoning_selection() {
+        let mut entry = quick_start_entry(
+            "durable-session-3457",
+            "codex",
+            Some("provider-conversation"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.linked_issue_number = Some(3457);
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-3457"), "work/issue-3457"),
+            sample_agent_options(),
+            vec![entry],
+        );
+
+        state.apply(LaunchWizardAction::SelectQuickStart { index: 0 });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetModel {
+            model: "gpt-5.4".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetReasoning {
+            reasoning: "high".to_string(),
+        });
+
+        let selected = state
+            .selected_quick_start_index
+            .and_then(|index| state.quick_start_entries.get(index))
+            .expect("selected durable Quick Start entry");
+        assert_eq!(selected.session_id, "durable-session-3457");
+        assert_eq!(selected.linked_issue_number, Some(3457));
+        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.reasoning, "high");
+    }
+
+    #[test]
     fn continue_last_session_is_unavailable_when_agent_cannot_continue_latest() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/current"), "feature/current"),
@@ -3622,6 +3663,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
+                linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.5".to_string()),

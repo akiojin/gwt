@@ -1092,8 +1092,14 @@ mod tests {
 
     #[test]
     fn checked_host_runner_uses_descriptor_version_argv_for_copilot() {
+        let temp = tempdir().expect("tempdir");
+        let direct_runner = temp
+            .path()
+            .join(if cfg!(windows) { "gh.exe" } else { "gh" })
+            .display()
+            .to_string();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Copilot).build();
-        config.command = "/usr/local/bin/gh".to_string();
+        config.command = direct_runner.clone();
         let original_args = config.args.clone();
         let mut probes = Vec::new();
 
@@ -1111,7 +1117,7 @@ mod tests {
 
         assert!(!report.switched_to_fallback);
         assert_eq!(probes.len(), 1);
-        assert_eq!(probes[0].0, "/usr/local/bin/gh");
+        assert_eq!(probes[0].0, direct_runner);
         assert_eq!(
             probes[0].1,
             vec!["copilot".to_string(), "--version".to_string()]
@@ -1872,30 +1878,39 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
-        let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
-        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        let temp = tempdir().expect("tempdir");
+        let app_bin = temp.path().join("GWT.app").join("Contents").join("MacOS");
+        let current_exe = app_bin.join(if cfg!(windows) { "gwt.exe" } else { "gwt" });
+        let gwtd = app_bin.join(if cfg!(windows) { "gwtd.exe" } else { "gwtd" });
+        let usr_bin = temp.path().join("usr").join("bin");
+        let fallback_bin = temp.path().join("bin");
+        let mut env_vars = HashMap::from([(
+            "PATH".to_string(),
+            std::env::join_paths([usr_bin.as_path(), fallback_bin.as_path()])
+                .expect("join test PATH")
+                .to_string_lossy()
+                .into_owned(),
+        )]);
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
             gwt_agent::LaunchRuntimeTarget::Host,
             &current_exe,
-            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+            |_command| Some(gwtd.clone()),
         )
         .expect("install");
 
         assert_eq!(
-            env_vars
-                .get(gwt_agent::session::GWT_BIN_PATH_ENV)
-                .map(String::as_str),
-            Some("/Applications/GWT.app/Contents/MacOS/gwtd"),
+            env_vars.get(gwt_agent::session::GWT_BIN_PATH_ENV),
+            Some(&gwtd.display().to_string()),
         );
         let entries: Vec<PathBuf> =
             std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
         assert_eq!(
-            entries.first().map(|p| p.as_path()),
-            Some(Path::new("/Applications/GWT.app/Contents/MacOS")),
+            entries.first().map(PathBuf::as_path),
+            Some(app_bin.as_path())
         );
-        assert!(entries.contains(&PathBuf::from("/usr/bin")));
-        assert!(entries.contains(&PathBuf::from("/bin")));
+        assert!(entries.contains(&usr_bin));
+        assert!(entries.contains(&fallback_bin));
     }
 
     #[test]
