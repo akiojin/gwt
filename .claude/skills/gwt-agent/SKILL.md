@@ -141,6 +141,36 @@ Safely stop processing or lower/raise the positive concurrency limit:
 JSON
 ```
 
+## Parked Question Handoffs
+
+An unattended autonomous execution never waits on a confirmation question. A
+question tool call is converted into a structured handoff before it can wait:
+the owner Issue is parked as `NeedsHuman` and its active slot is released for
+the next ready Issue.
+
+List the questions parked executions are waiting on:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.questions","params":{}}
+JSON
+```
+
+Each entry carries the owner Issue, the asking session, the question text, the
+offered options, the rationale, and a machine-readable `reason_code`.
+
+Answer one parked question by its `handoff_id`:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.question.answer","params":{"handoff_id":"<id>","answer":"<decision>"}}
+JSON
+```
+
+An unknown or already-answered `handoff_id` is rejected rather than silently
+accepted. On the next scan the driver un-parks the Issue and resumes the exact
+stored session with the answer as its first prompt — no duplicate launch.
+
 `enabled=true` and `autonomous_mode=true` are intentionally rejected. Enabling
 either capability requires an explicit GUI action. Configuration changes are
 committed atomically to the project preferences source of truth; OFF operations

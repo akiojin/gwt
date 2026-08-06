@@ -1106,7 +1106,8 @@ pub struct AutonomousPendingQuestion {
     pub question: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
-    /// Machine-readable [`AutonomousHandoffReason`] code.
+    /// Machine-readable
+    /// [`AutonomousHandoffReason`](crate::autonomous_handoff::AutonomousHandoffReason) code.
     pub reason_code: String,
     pub session_id: String,
     pub provider: String,
