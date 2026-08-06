@@ -73,6 +73,12 @@ fn stable_hook_bin_guard() -> StableHookBinGuard {
     }
 }
 
+fn rendered_contains_path(rendered: &str, path: &Path) -> bool {
+    let displayed = path.display().to_string();
+    let escaped = serde_json::to_string(&displayed).expect("escape generated hook path");
+    rendered.contains(&displayed) || rendered.contains(escaped.trim_matches('"'))
+}
+
 #[test]
 fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
     let _env_lock = env_test_lock()
@@ -441,11 +447,11 @@ fn managed_hook_health_understands_runtime_indirect_fallbacks() {
         let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
         assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
         assert!(
-            rendered.contains(&hook_bin.path().display().to_string()),
+            rendered_contains_path(&rendered, hook_bin.path()),
             "{artifact}: {rendered}"
         );
         assert!(
-            !rendered.contains(&worktree.path().display().to_string()),
+            !rendered_contains_path(&rendered, worktree.path()),
             "{artifact} persisted the tested worktree: {rendered}"
         );
     }
@@ -651,11 +657,11 @@ fn managed_hook_health_understands_all_provider_runtime_indirect_fallbacks() {
         let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
         assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
         assert!(
-            rendered.contains(&hook_bin.path().display().to_string()),
+            rendered_contains_path(&rendered, hook_bin.path()),
             "{artifact}: {rendered}"
         );
         assert!(
-            !rendered.contains(&worktree.path().display().to_string()),
+            !rendered_contains_path(&rendered, worktree.path()),
             "{artifact} persisted the tested worktree: {rendered}"
         );
     }

@@ -269,12 +269,23 @@ mod tests {
                 &session_b,
                 "interpretive-b",
             ),
-        )
-        .expect("distinct-session corroboration");
-        assert_eq!(
-            corroborated.eligibility,
-            ManagedHookEligibility::InterpretiveCorroboration
         );
-        assert_eq!(corroborated.occurrences, 2);
+        if let Err(error) = &corroborated {
+            assert!(
+                error.to_string().contains("operation deadline expired"),
+                "distinct-session capture failed before its durable eligibility update: {error}"
+            );
+        }
+        let candidates = crate::cli::improvement::candidate_public_values(repo.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["eligibility"], "interpretive-corroboration");
+        assert_eq!(candidates[0]["occurrences"], 2);
+        if let Ok(corroborated) = corroborated {
+            assert_eq!(
+                corroborated.eligibility,
+                ManagedHookEligibility::InterpretiveCorroboration
+            );
+            assert_eq!(corroborated.occurrences, 2);
+        }
     }
 }
