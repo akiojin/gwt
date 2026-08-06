@@ -1268,6 +1268,7 @@ fn issue_monitor_issue_from_snapshot(
         },
         body: (!snapshot.body.is_empty()).then(|| snapshot.body.clone()),
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     }
 }
 
