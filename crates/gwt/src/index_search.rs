@@ -2630,15 +2630,17 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo directory");
         run_git_at(&repo, &["init", "-q", "-b", "develop"]);
-        run_git_at(
-            &repo,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://example.com/deadline-repair.git",
-            ],
-        );
+        // The production coordinator is host-wide and keys repo-shared jobs
+        // by the origin-derived repo hash. Give every fixture invocation its
+        // own identity so an earlier run or another checkout cannot coalesce
+        // this repair before the runner closure reaches the marker.
+        let remote_suffix = temp
+            .path()
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("tempdir name");
+        let remote = format!("https://example.com/deadline-repair-{remote_suffix}.git");
+        run_git_at(&repo, &["remote", "add", "origin", remote.as_str()]);
         let marker = temp.path().join("rebuild-started.marker");
         let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_HANG", "1");
         let _marker = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_MARKER", &marker);
