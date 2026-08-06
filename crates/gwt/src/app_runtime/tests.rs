@@ -827,6 +827,7 @@ fn init_repo(repo_path: &Path) {
     for args in [
         ["init", "-q"].as_slice(),
         ["remote", "add", "origin", remote.as_str()].as_slice(),
+        ["config", "http.proxy", "http://127.0.0.1:9"].as_slice(),
     ] {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
@@ -840,6 +841,36 @@ fn init_repo(repo_path: &Path) {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn app_runtime_repo_fixture_blocks_public_fetch_without_losing_remote_identity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let raw_remote = gwt_core::process::hidden_command("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(&repo)
+        .output()
+        .expect("read raw fixture remote");
+    assert!(raw_remote.status.success());
+    assert!(String::from_utf8_lossy(&raw_remote.stdout)
+        .trim()
+        .starts_with("https://github.com/example/repo-"));
+
+    let started = std::time::Instant::now();
+    let fetch = gwt_git::WorktreeManager::new(&repo).fetch_origin();
+    let elapsed = started.elapsed();
+    assert!(
+        fetch.is_err(),
+        "placeholder remote must not fetch successfully"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "fixture fetch must fail through the loopback proxy without prompting: {elapsed:?}"
+    );
 }
 
 fn init_repo_with_initial_commit(repo_path: &Path) {
