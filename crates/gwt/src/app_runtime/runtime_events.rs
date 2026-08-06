@@ -132,6 +132,11 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             return Vec::new();
         };
+        // Issue #3475: progress evidence for the authenticated SessionStart
+        // readiness deadline. Saturating because the counter only ever needs to
+        // answer "did this pane emit anything since the last deadline".
+        let observed = self.window_output_bytes.entry(id.clone()).or_insert(0);
+        *observed = observed.saturating_add(data.len() as u64);
         if publish_to_daemon {
             if let Some(tab) = self.tab(&address.tab_id) {
                 publish_runtime_output_change(&tab.project_root, &id, &data);
