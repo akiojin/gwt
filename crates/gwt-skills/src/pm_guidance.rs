@@ -49,8 +49,14 @@ confirmation questions for work the user already asked for.
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
 
-## Issue registration
+## Issues: registering, updating, curating
 
+You own the backlog for its whole life, not just at creation.
+
+- Search first. Run `gwt-search` (or `issue.search`) with two or three
+  keyword phrasings before registering anything new. Extending the
+  right existing Issue beats adding a near-duplicate that splits the
+  work and the discussion.
 - Decompose one user request into independently deliverable Issues.
   Record cross-Issue ordering with dependency markers in the body.
 - Registration template: a clear problem statement, acceptance
@@ -59,6 +65,15 @@ confirmation questions for work the user already asked for.
 - Use `issue.create` for plain Issues; use `issue.spec.create` +
   `issue.spec.edit` for design-required Issues, then fill `plan` and
   `tasks` sections to readiness before queueing them.
+- Update Issues as understanding changes: correct a scope that drifted,
+  add acceptance criteria the conversation revealed, record a decision
+  and why it was made. `issue.spec.edit` replaces a whole section, so
+  read the section first and write it back in full — appending blindly
+  loses content.
+- Keep the backlog honest. Fold duplicates into the surviving Issue and
+  close the loser with a pointer, close what the work made obsolete,
+  and flag anything you cannot decide instead of leaving it to rot.
+  Curation is your standing job, not something you wait to be asked for.
 
 ## Priority and launches
 
@@ -130,6 +145,12 @@ Hard limits, no exceptions:
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- Every cycle, also check the agents that are running. Read the Board
+  for what they reported themselves, and use `pane.read` on any launch
+  whose inbox row looks wrong (stuck in the same state, an
+  `error_message`, `blocked_by_owner`) or that has gone quiet far longer
+  than its peers. Watching the queue alone tells you what was started,
+  never what is actually going on inside it.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
@@ -252,6 +273,12 @@ mod tests {
             "relaunches the same issue",
             // FR-010: the strong merge gate stays out of reach.
             "never submit a review verdict",
+            // FR-004: the PM owns Issues for their whole life.
+            "`gwt-search`",
+            "before registering anything new",
+            "Keep the backlog honest",
+            // FR-012: the loop watches the agents, not only the queue.
+            "check the agents that are running",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
             // FR-015: the PM must be able to account for its own ordering.
@@ -266,6 +293,26 @@ mod tests {
             // FR-013: stopping story.
             "closing the PM pane",
         ]
+    }
+
+    /// SPEC-3431 FR-004 (user ruling 2026-08-06): the PM owns Issues for their
+    /// whole life, not just at creation — registering, updating, and keeping
+    /// the backlog tidy. The first contract only described registration, which
+    /// left "correct this Issue" and "these two are duplicates" outside the
+    /// PM's stated job.
+    #[test]
+    fn contract_covers_updating_and_curating_issues_not_only_registering() {
+        let body = body();
+        assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
+        assert!(body.contains("before registering anything new"));
+        assert!(body.contains("Keep the backlog honest"));
+    }
+
+    /// FR-012: the resident loop must actually look at the running agents each
+    /// cycle. Subscribing and reordering alone is not monitoring.
+    #[test]
+    fn contract_makes_the_resident_loop_check_the_running_agents() {
+        assert!(body().contains("check the agents that are running"));
     }
 
     /// Rules the contract must NOT carry. Each one shipped at some point and
