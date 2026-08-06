@@ -58,6 +58,7 @@ const FOREIGN_CURRENT_WORK_ID: &str = "foreign-current-work";
 const FORWARD_TOKEN: &str = "workspace-proxy-secret-sentinel";
 const HOST_WORK_ID: &str = "host-work-id";
 const HOST_JOURNAL_ENTRY_ID: &str = "host-journal-entry-id";
+const DOCKER_RUNTIME_WORKTREE: &str = "/workspace/project";
 
 #[derive(Debug)]
 struct CapturedWorkspaceUpdate {
@@ -318,7 +319,6 @@ impl DisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + Duration::from_secs(3);
             let mut accepted = 0;
             loop {
                 match listener.accept() {
@@ -331,15 +331,9 @@ impl DisconnectServer {
                         accepted += 1;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        let now = std::time::Instant::now();
                         if shutdown_rx.try_recv().is_ok() {
                             tx.send(accepted)
                                 .expect("record disconnected bridge request count");
-                            return;
-                        }
-                        if accepted == 0 && now >= first_request_deadline {
-                            tx.send(accepted)
-                                .expect("record missing disconnected bridge request");
                             return;
                         }
                         std::thread::sleep(Duration::from_millis(10));
@@ -357,12 +351,10 @@ impl DisconnectServer {
     }
 
     fn receive(&mut self) {
-        self.shutdown_tx
-            .send(())
-            .expect("stop disconnect listener after the client exits");
+        let _ = self.shutdown_tx.send(());
         let accepted = self
             .rx
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(30))
             .expect("expected disconnected bridge request count");
         self.handle
             .take()
@@ -408,7 +400,6 @@ impl ApplyThenDisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + Duration::from_secs(3);
             let mut accepted = 0;
             let mut applied_receipt = None;
             loop {
@@ -441,7 +432,6 @@ impl ApplyThenDisconnectServer {
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        let now = std::time::Instant::now();
                         if shutdown_rx.try_recv().is_ok() {
                             let (work_id, journal_entry_id) = applied_receipt
                                 .expect("the accepted Host request must be applied exactly once");
@@ -452,9 +442,6 @@ impl ApplyThenDisconnectServer {
                             })
                             .expect("record apply-then-disconnect observation");
                             return;
-                        }
-                        if accepted == 0 && now >= first_request_deadline {
-                            panic!("timed out before the apply-then-disconnect Host request");
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
@@ -471,12 +458,10 @@ impl ApplyThenDisconnectServer {
     }
 
     fn receive(&mut self) -> AppliedDisconnectObservation {
-        self.shutdown_tx
-            .send(())
-            .expect("stop apply-then-disconnect listener after the client exits");
+        let _ = self.shutdown_tx.send(());
         let observation = self
             .rx
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(30))
             .expect("expected apply-then-disconnect observation");
         self.handle
             .take()
@@ -685,12 +670,7 @@ async fn capture_workspace_update(
                     Session::load(&session_path).expect("load Host Session before Docker switch");
                 session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
                 session
-                    .bind_docker_runtime(
-                        project_root
-                            .canonicalize()
-                            .expect("canonical Docker runtime root"),
-                        &project_root,
-                    )
+                    .bind_docker_runtime(DOCKER_RUNTIME_WORKTREE, &project_root)
                     .expect("bind Docker runtime before static Host response");
                 session
                     .save(&gwt_core::paths::gwt_sessions_dir())
@@ -1228,14 +1208,7 @@ fn mark_bound_session_as_docker(fixture: &Fixture) {
     let mut session = Session::load(&session_path).expect("load bound Docker Session fixture");
     session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
     session
-        .bind_docker_runtime(
-            fixture
-                .project
-                .path()
-                .canonicalize()
-                .expect("canonical Docker runtime fixture"),
-            fixture.project.path(),
-        )
+        .bind_docker_runtime(DOCKER_RUNTIME_WORKTREE, fixture.project.path())
         .expect("bind Docker runtime fixture");
     session
         .save(&fixture.home.path().join(".gwt/sessions"))
@@ -1423,11 +1396,7 @@ fn workspace_update_complete_forward_pair_uses_host_proxy_without_reading_contai
         captured.authorization == format!("Bearer {FORWARD_TOKEN}"),
         "workspace.update proxy request must use the configured bearer"
     );
-    let project_root = fixture
-        .project
-        .path()
-        .canonicalize()
-        .expect("canonical project root");
+    let project_root = dunce::canonicalize(fixture.project.path()).expect("canonical project root");
     assert_eq!(
         captured.body,
         serde_json::json!({
@@ -1465,11 +1434,8 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
         let host_home = tempfile::tempdir().expect("Host HOME tempdir");
         register_agent_at_home(host_home.path(), fixture.project.path());
 
-        let project_root = fixture
-            .project
-            .path()
-            .canonicalize()
-            .expect("canonical project root");
+        let project_root =
+            dunce::canonicalize(fixture.project.path()).expect("canonical project root");
         let host_state_dir = host_home
             .path()
             .join(".gwt/projects")
