@@ -189,7 +189,7 @@
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
         applyRuntimeHealth: (snapshot) =>
           applyRuntimeHealth(document, snapshot, {
-            focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+            focusWindow: (windowId) => requestWindowFrame(windowId),
           }),
       };
 
@@ -2180,6 +2180,49 @@
         scheduleWindowFrameClamp(windowId, { animate });
       }
 
+      // A window the user asked to frame that is not mounted yet (it is being
+      // launched, or lives in a tab that has not rendered). Resolved on the
+      // next workspace render.
+      let pendingFrameWindowId = null;
+
+      // SPEC-2008 camera-focus is LOCAL: `viewport-sync` adopts a server
+      // viewport exactly once per scope (FR-095, per-viewer camera) and
+      // discards every later one, so asking the backend to centre a window and
+      // waiting for the viewport to come back never moves this client's camera.
+      // Every "take me to that window" affordance must go through here.
+      function requestWindowFrame(windowId) {
+        if (!windowId) {
+          return;
+        }
+        if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+          pendingFrameWindowId = null;
+          frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
+          return;
+        }
+        // Not on the canvas yet — frame it as soon as it lands.
+        pendingFrameWindowId = windowId;
+        focusWindowRemotely(windowId);
+      }
+
+      // Called after each workspace render, once `windowMap` reflects the new
+      // state, so a frame requested before the window existed still happens.
+      function resolvePendingWindowFrames() {
+        if (pendingFrameWindowId) {
+          const windowId = pendingFrameWindowId;
+          if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+            pendingFrameWindowId = null;
+            frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
+          }
+        }
+        // FR-019: a freshly launched PM is created at a fixed world position,
+        // so it appears off-screen whenever the camera has been panned. The
+        // click that started it still owes the user a landing.
+        if (pendingPmFrame && pmWindowId && windowMap.has(pmWindowId)) {
+          pendingPmFrame = false;
+          frameWindow(pmWindowId, { animate: shouldAnimateWindowFrame() });
+        }
+      }
+
       let focusedWindowViewportReframeFrame = null;
 
       function frameFocusedWindowAfterViewportResize() {
@@ -3150,15 +3193,18 @@
         );
       }
 
-      // FR-019: one click always lands the user on the PM. An existing pane is
-      // focused and framed; a missing one is started by the backend, which
-      // frames it once the launch completes.
+      // FR-019: one click always lands the user on the PM — an existing pane is
+      // framed now, a missing one is framed as soon as its launch puts it on
+      // the canvas (`resolvePendingWindowFrames`).
+      let pendingPmFrame = false;
+
       function openPmAgent() {
         if (pmWindowId && windowMap.has(pmWindowId)) {
-          focusWindowRemotely(pmWindowId, { center: true });
+          requestWindowFrame(pmWindowId);
           return;
         }
-        send({ kind: "open_pm_agent", bounds: visibleBounds() });
+        pendingPmFrame = true;
+        send({ kind: "open_pm_agent" });
       }
 
       function recomputeOperatorTelemetry() {
@@ -3515,11 +3561,14 @@
         }
       }
 
-      function focusWindowRemotely(windowId, { center = false } = {}) {
+      // Highlight + z-order only. There is deliberately no `center` option:
+      // sending `bounds` asks the backend to compute a viewport that
+      // `viewport-sync` then discards (FR-095, per-viewer camera), which
+      // silently did nothing for three separate affordances. Moving the camera
+      // is `requestWindowFrame`'s job.
+      function focusWindowRemotely(windowId) {
         focusWindowLocally(windowId);
-        const payload = { kind: "focus_window", id: windowId };
-        if (center) payload.bounds = visibleBounds();
-        send(payload);
+        send({ kind: "focus_window", id: windowId });
       }
 
       // SPEC-2008 camera-focus: toggleMinimizeWindow / toggleMaximizeWindow
@@ -4631,7 +4680,7 @@
       const issueMonitorSurface = createIssueMonitorSurface({
         document,
         send,
-        focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+        focusWindow: (windowId) => requestWindowFrame(windowId),
       });
 
       // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
@@ -5614,6 +5663,9 @@
             // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
             // floating CTA in step with every canvas render.
             updatePmLauncher(activeWorkspace());
+            // FR-019: `windowMap` is current now, so a frame requested for a
+            // window that had not been mounted yet can finally run.
+            resolvePendingWindowFrames();
             sendStartupAutoResumeReady();
             break;
           }

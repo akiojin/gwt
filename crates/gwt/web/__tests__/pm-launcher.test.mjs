@@ -160,16 +160,47 @@ test("FR-021: rail の PM 状態は running / stopped / absent を持つ", () =>
   );
 });
 
-test("FR-019: PM クリックは既存なら中央フレーミング、無ければ起動要求", () => {
-  // 既存ウィンドウは camera-focus の center 経路を再利用する。
+test("FR-019: PM クリックはローカルの camera-focus 経路を使う", () => {
+  // 実機検証（2026-08-06）で判明した欠陥の回帰固定。
+  //
+  // 初版は focusWindowRemotely(id, { center: true }) を使っていた。これは
+  // bounds をバックエンドへ送り、バックエンドが計算した viewport が
+  // workspace_state で返ってくるのを待つ「サーバー主導」の契約だが、
+  // SPEC-2008 FR-095 でカメラは per-viewer になり、viewport-sync は
+  // scope ごとに最初の 1 回しかサーバー viewport を採用しなくなった
+  // （それ以降は握り潰す）。PM ボタンが押せる時点でその 1 回は必ず
+  // 使い切られているため、計算結果は 100% 捨てられ、カメラは動かない。
+  //
+  // 動作している他の導線（minimap / Windows リスト / cycleFocus など）は
+  // すべてローカルの frameWindow() を使っている。PM もそちらに揃える。
   assert.match(
     appJs,
-    /function openPmAgent\(\)\s*\{[\s\S]*focusWindowRemotely\(pmWindowId,\s*\{\s*center:\s*true\s*\}\)/,
+    /function openPmAgent\(\)\s*\{[\s\S]*?requestWindowFrame\(pmWindowId\)/,
+    "既存 PM はローカル経路でフレーミングする",
   );
-  // 無ければバックエンドへ起動要求（bounds 付きで中央に開かせる）。
+  // 起動要求に bounds は付けない（バックエンドの center 計算は届かない）。
   assert.match(
     appJs,
-    /function openPmAgent\(\)[\s\S]*send\(\{\s*kind:\s*"open_pm_agent",\s*bounds:\s*visibleBounds\(\)\s*\}\)/,
+    /function openPmAgent\(\)[\s\S]*?send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/,
+  );
+  // 起動後にマウントされた PM を必ずフレーミングする（PM は固定ワールド
+  // 座標に生えるので、カメラをパンしていると画面外に出現する）。
+  assert.match(appJs, /pendingPmFrame/);
+});
+
+test("FR-019: 死んだ server-driven center 契約は残さない", () => {
+  // center オプションが残っている限り 4 つ目の誤用が生まれる。実際、
+  // PM 以外に Runtime Health と Issue Monitor の Focus も同じ理由で
+  // 効いていなかった。
+  assert.doesNotMatch(
+    appJs,
+    /center:\s*true/,
+    "focusWindowRemotely の center 経路は撤去する",
+  );
+  assert.doesNotMatch(
+    appJs,
+    /function focusWindowRemotely\([^)]*center/,
+    "focusWindowRemotely は center を受け取らない",
   );
 });
 

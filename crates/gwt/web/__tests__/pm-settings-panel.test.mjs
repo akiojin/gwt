@@ -105,7 +105,9 @@ test("FR-026: 歯車は PM ボタンの外側にあり、PM クリックを奪�
     /for \(const id of \["op-pm-entry", "canvas-pm-launcher"\]\)/,
     "PM ランチャーの click 配線は維持する",
   );
-  assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent",\s*bounds:\s*visibleBounds\(\)\s*\}\)/);
+  // bounds は付けない。バックエンドの center 計算は viewport-sync に
+  // 捨てられるため、フレーミングはローカルの pendingPmFrame が担う。
+  assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/);
 });
 
 test("FR-026: 歯車でパネルが開閉する", () => {
