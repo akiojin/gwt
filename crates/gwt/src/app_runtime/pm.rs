@@ -568,6 +568,13 @@ impl AppRuntime {
     /// Pure so the resolved agent/model can be asserted without spawning.
     /// `suppress_execution_control` is set because the PM is a conversational
     /// role, not an execution-controlled implementation session.
+    ///
+    /// Permissions are always skipped (FR-012, user ruling 2026-08-06). The PM
+    /// subscribes, reconciles, registers Issues, and instructs launches with no
+    /// user present, so a permission prompt in that loop is a deadlock nobody
+    /// is watching. Same reasoning as the Issue Monitor's
+    /// `force_skip_permissions_for_autonomous`, and likewise not a per-project
+    /// choice — a PM that can be configured into a hang will eventually hang.
     pub(crate) fn pm_launch_config(
         worktree: &Path,
         profile: &pm_registry::PmLaunchProfile,
@@ -576,6 +583,7 @@ impl AppRuntime {
             .unwrap_or(gwt_agent::AgentId::ClaudeCode);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id)
             .working_dir(worktree.to_path_buf())
+            .skip_permissions(true)
             .extra_arg(PM_BOOTSTRAP_PROMPT);
         if let Some(model) = profile.model.as_deref().filter(|value| !value.is_empty()) {
             builder = builder.model(model);

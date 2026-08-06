@@ -40124,6 +40124,41 @@ fn pm_launch_config_resolves_the_configured_agent_and_defaults_on_a_fresh_projec
     assert!(configured.suppress_execution_control);
 }
 
+/// SPEC-3431 FR-012 / FR-026 (2026-08-06 ユーザー裁定): the PM runs unattended
+/// — it subscribes, reconciles, registers Issues, and instructs launches with
+/// no user present. A permission prompt in that loop is a deadlock nobody is
+/// watching, so the PM always launches with permissions skipped. This mirrors
+/// `force_skip_permissions_for_autonomous` on the Issue Monitor's own
+/// unattended launches; it is not a per-project choice, because a PM that can
+/// be configured into a hang is a PM that will eventually hang.
+#[test]
+fn pm_launch_config_always_skips_permissions() {
+    let worktree = std::path::Path::new("/tmp/pm-worktree");
+    // Assert the argv, not just the flag: setting `skip_permissions` without
+    // it reaching the command line would leave the PM prompting anyway.
+    for (agent_id, expected_arg) in [
+        ("claude", "--dangerously-skip-permissions"),
+        ("codex", "--yolo"),
+    ] {
+        let profile = gwt::pm_registry::PmLaunchProfile {
+            agent_id: agent_id.to_string(),
+            model: None,
+            reasoning: None,
+            version: None,
+        };
+        let config = AppRuntime::pm_launch_config(worktree, &profile);
+        assert!(
+            config.skip_permissions,
+            "the resident PM must never stop on a permission prompt ({agent_id})"
+        );
+        assert!(
+            config.args.iter().any(|arg| arg == expected_arg),
+            "{agent_id} must launch with {expected_arg}; got {:?}",
+            config.args
+        );
+    }
+}
+
 #[test]
 fn pm_ensure_resumes_stale_registration_conversation() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
