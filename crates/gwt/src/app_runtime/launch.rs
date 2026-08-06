@@ -31,11 +31,11 @@ use std::thread;
 use gwt_agent::resolve_host_runner_health_checked;
 
 use super::continuation::{
-    clear_durable_launch_recovery, compensate_terminalized_genesis_workspace_projection,
-    durable_launch_recovery_exists, durable_launch_recovery_session_identity,
-    pending_execution_activation_status, pending_fresh_execution_activation_status,
-    persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
-    DurableLaunchRecoveryKind,
+    classify_active_owner_liveness, clear_durable_launch_recovery,
+    compensate_terminalized_genesis_workspace_projection, durable_launch_recovery_exists,
+    durable_launch_recovery_session_identity, pending_execution_activation_status,
+    pending_fresh_execution_activation_status, persist_durable_launch_recovery,
+    persist_durable_launch_recovery_with_identity, ActiveOwnerLiveness, DurableLaunchRecoveryKind,
 };
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
@@ -670,6 +670,67 @@ fn existing_generation_conflict_detail(
     )
 }
 
+/// Issue #3473: a holder Session that dies without settling (process kill,
+/// crash, forced window close) leaves its generation Active forever, so every
+/// later fresh launch collides with the single-writer guard and the owner
+/// becomes unreachable without manual repair. Terminalize that exact
+/// generation here, at the one point where the collision is observed, and let
+/// the existing Blocked-successor path mint the next lifetime.
+///
+/// Reaping is deliberately not eager: staleness is resolved through the shared
+/// [`classify_active_owner_liveness`] predicate, so an undetermined holder
+/// keeps the refusal and a holder that is merely stopped-but-resumable is
+/// never fenced outside a launch that is already colliding with it.
+///
+/// Returns the republished ledger when the reap committed, and `None` when the
+/// generation must stay untouched. A failed reap degrades to the existing
+/// refusal instead of failing the launch differently.
+fn reap_defunct_active_generation(
+    sessions_dir: &Path,
+    worktree: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    ledger: &gwt::cli::execution_state::ExecutionGenerationLedger,
+) -> Option<gwt::cli::execution_state::ExecutionGenerationLedger> {
+    if ledger.current_effective_status()
+        != Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    {
+        return None;
+    }
+    let holder = gwt::cli::execution_state::load(worktree)
+        .ok()
+        .flatten()
+        .filter(|record| record.owner_kind == owner.kind && record.owner_number == owner.number)?
+        .primary_session_id;
+    let ActiveOwnerLiveness::Stale(liveness) =
+        classify_active_owner_liveness(sessions_dir, &holder)
+    else {
+        return None;
+    };
+    if let Err(error) = gwt::cli::execution_state::block_defunct_active_generation(
+        worktree,
+        owner,
+        &holder,
+        &format!("execution holder is defunct: {liveness}"),
+    ) {
+        tracing::warn!(
+            owner = owner.number,
+            session_id = %holder,
+            %error,
+            "retained a defunct Active execution generation after a failed reap"
+        );
+        return None;
+    }
+    tracing::info!(
+        owner = owner.number,
+        session_id = %holder,
+        liveness,
+        "reaped a defunct Active execution generation before a fresh launch"
+    );
+    gwt::cli::execution_state::load_generation_ledger(worktree, owner)
+        .ok()
+        .flatten()
+}
+
 struct FinalizedAgentCapabilityLaunch<'a> {
     issuer: Option<&'a AgentCapabilityIssuer>,
     sessions_dir: &'a Path,
@@ -866,11 +927,16 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 .map_err(|error| error.to_string())?;
         }
         if current_binding.is_some() {
-            let ledger = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
+            let mut ledger = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| {
                     "the current execution binding has no integrity-valid owner ledger".to_string()
                 })?;
+            if let Some(reaped) =
+                reap_defunct_active_generation(sessions_dir, worktree, owner, &ledger)
+            {
+                ledger = reaped;
+            }
             if ledger.current_effective_status()
                 != Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
             {
@@ -4606,6 +4672,138 @@ mod agent_endpoint_env_tests {
         assert!(
             !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
             "a refused genesis launch must not issue a capability"
+        );
+        // Issue #3473: the holder still owns a live runtime sidecar in this
+        // Host, so its liveness is Unknown and the defunct-generation reap
+        // must stay fail-closed instead of terminalizing a live writer.
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read owner ledger")
+                .expect("owner ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+            "an Unknown holder liveness must leave the Active generation untouched"
+        );
+    }
+
+    /// Issue #3473: when the holder Session is durably defunct, the fresh
+    /// launch reaps that Active generation with an audit trail and continues
+    /// into the existing Blocked -> successor path instead of refusing forever.
+    #[test]
+    fn fresh_launch_reaps_a_defunct_active_generation_and_mints_a_successor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut genesis_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut genesis_env)
+        .expect("materialize the first producing generation");
+
+        let holder_id = launch.session.id.clone();
+        let defunct_generation =
+            gwt::cli::execution_state::current_generation_identity(&launch.project, launch.owner)
+                .expect("read current generation")
+                .expect("current generation")
+                .generation_id;
+        // The window stopped without settling: both the durable Session and
+        // this Host's runtime sidecar report a stopped holder.
+        gwt_agent::persist_session_status(
+            &launch.sessions_dir,
+            &holder_id,
+            gwt_agent::AgentStatus::Stopped,
+        )
+        .expect("persist stopped holder");
+
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.update_status(gwt_agent::AgentStatus::Running);
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut relaunch,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("a defunct holder must not block a fresh launch forever");
+
+        let ledger =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read owner ledger")
+                .expect("owner ledger");
+        let reap = ledger
+            .lifecycle_events
+            .iter()
+            .find(|event| event.generation_id == defunct_generation)
+            .expect("the reaped generation keeps an audit trail");
+        assert_eq!(
+            reap.from_status,
+            gwt::cli::execution_state::ExecutionControlStatus::Active
+        );
+        assert_eq!(
+            reap.to_status,
+            gwt::cli::execution_state::ExecutionControlStatus::Blocked
+        );
+        assert_eq!(reap.session_id, holder_id);
+        assert!(
+            reap.operation_id.is_some(),
+            "a Host-owned reap must be distinguishable from an agent settlement"
+        );
+        assert!(
+            env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                && env.contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV),
+            "the reaped owner must launch through the fresh linked-owner successor path"
+        );
+        let prepared = relaunch
+            .execution_binding
+            .as_ref()
+            .expect("fresh successor binding");
+        assert_ne!(
+            prepared.identity.generation_id, defunct_generation,
+            "the successor must be a new generation, not the reaped one"
+        );
+        assert!(
+            gwt::cli::execution_state::prepared_execution_binding_matches(
+                &launch.project,
+                launch.owner,
+                &relaunch.id,
+                &prepared.identity,
+            )
+            .expect("read Prepared authority")
         );
     }
 

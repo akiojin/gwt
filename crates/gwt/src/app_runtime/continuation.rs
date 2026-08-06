@@ -407,6 +407,99 @@ pub(super) enum ActiveOwnerLiveness {
     Unknown,
 }
 
+/// Canonical staleness predicate for the Session that holds an Active
+/// execution generation.
+///
+/// `Stale` means no Host runtime owns the Session any more, so another
+/// coordinator may fence the generation; every ambiguous or unreadable
+/// observation degrades to `Unknown` and the caller must fail closed. Both the
+/// Continue work takeover path and the fresh-launch defunct-generation reap
+/// (Issue #3473) resolve staleness here so they can never disagree about who
+/// still owns a generation.
+pub(super) fn classify_active_owner_liveness(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> ActiveOwnerLiveness {
+    let durable_path = sessions_dir.join(format!("{session_id}.toml"));
+    let durable = match gwt_agent::inspect_session_path(&durable_path) {
+        gwt_agent::SessionPathState::Present(session) => Some(session),
+        gwt_agent::SessionPathState::Missing => None,
+        gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
+    };
+    let durable_is_stopped = |session: &gwt_agent::Session| {
+        matches!(
+            session.status,
+            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+        )
+    };
+    let runtime_root = sessions_dir.join("runtime");
+    let entries = match std::fs::read_dir(&runtime_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if durable.is_none() {
+                return ActiveOwnerLiveness::Stale("durable Session is missing");
+            }
+            return if durable
+                .as_ref()
+                .is_some_and(|session| durable_is_stopped(session))
+            {
+                ActiveOwnerLiveness::Stale("durable Session is stopped")
+            } else {
+                ActiveOwnerLiveness::Unknown
+            };
+        }
+        Err(_) => return ActiveOwnerLiveness::Unknown,
+    };
+    let mut saw_dead_runtime = false;
+    let mut saw_stopped_runtime = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return ActiveOwnerLiveness::Unknown;
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let sidecar = entry.path().join(format!("{session_id}.json"));
+        match sidecar.try_exists() {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(_) => return ActiveOwnerLiveness::Unknown,
+        }
+        if gwt::process::is_process_alive(pid) {
+            match gwt_agent::SessionRuntimeState::load(&sidecar) {
+                Ok(state)
+                    if matches!(
+                        state.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    ) =>
+                {
+                    saw_stopped_runtime = true;
+                    continue;
+                }
+                Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
+            }
+        }
+        saw_dead_runtime = true;
+    }
+    if saw_stopped_runtime {
+        return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
+    }
+    if saw_dead_runtime {
+        return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
+    }
+    let Some(durable) = durable else {
+        return ActiveOwnerLiveness::Stale("durable Session is missing");
+    };
+    if durable_is_stopped(&durable) {
+        return ActiveOwnerLiveness::Stale("durable Session is stopped");
+    }
+    ActiveOwnerLiveness::Unknown
+}
+
 fn canonical_public_id(value: &str, max_len: usize) -> bool {
     value.trim() == value
         && !value.is_empty()
@@ -3657,85 +3750,7 @@ impl AppRuntime {
         &self,
         session_id: &str,
     ) -> ActiveOwnerLiveness {
-        let durable_path = self.sessions_dir.join(format!("{session_id}.toml"));
-        let durable = match gwt_agent::inspect_session_path(&durable_path) {
-            gwt_agent::SessionPathState::Present(session) => Some(session),
-            gwt_agent::SessionPathState::Missing => None,
-            gwt_agent::SessionPathState::Error(_) => return ActiveOwnerLiveness::Unknown,
-        };
-        let runtime_root = self.sessions_dir.join("runtime");
-        let entries = match std::fs::read_dir(&runtime_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if durable.is_none() {
-                    return ActiveOwnerLiveness::Stale("durable Session is missing");
-                }
-                return if durable.as_ref().is_some_and(|session| {
-                    matches!(
-                        session.status,
-                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                    )
-                }) {
-                    ActiveOwnerLiveness::Stale("durable Session is stopped")
-                } else {
-                    ActiveOwnerLiveness::Unknown
-                };
-            }
-            Err(_) => return ActiveOwnerLiveness::Unknown,
-        };
-        let mut saw_dead_runtime = false;
-        let mut saw_stopped_runtime = false;
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return ActiveOwnerLiveness::Unknown;
-            };
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|value| value.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let sidecar = entry.path().join(format!("{session_id}.json"));
-            match sidecar.try_exists() {
-                Ok(false) => continue,
-                Ok(true) => {}
-                Err(_) => return ActiveOwnerLiveness::Unknown,
-            }
-            if gwt::process::is_process_alive(pid) {
-                match gwt_agent::SessionRuntimeState::load(&sidecar) {
-                    Ok(state)
-                        if matches!(
-                            state.status,
-                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                        ) =>
-                    {
-                        saw_stopped_runtime = true;
-                        continue;
-                    }
-                    Ok(_) | Err(_) => return ActiveOwnerLiveness::Unknown,
-                }
-            }
-            saw_dead_runtime = true;
-        }
-        if saw_stopped_runtime {
-            return ActiveOwnerLiveness::Stale("all owning Host runtimes are stopped");
-        }
-        if saw_dead_runtime {
-            return ActiveOwnerLiveness::Stale("all owning Host runtimes are dead");
-        }
-        if durable.is_none() {
-            return ActiveOwnerLiveness::Stale("durable Session is missing");
-        }
-        if durable.as_ref().is_some_and(|session| {
-            matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            )
-        }) {
-            return ActiveOwnerLiveness::Stale("durable Session is stopped");
-        }
-        ActiveOwnerLiveness::Unknown
+        classify_active_owner_liveness(&self.sessions_dir, session_id)
     }
 
     pub(crate) fn stop_pending_continue_work_session_without_projection(

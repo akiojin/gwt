@@ -6058,6 +6058,174 @@ where
     })
 }
 
+/// Stable, opaque provenance bound to one exact defunct-generation reap.
+/// Ordinary `execution.blocked` transitions never carry this identifier.
+#[must_use]
+pub fn defunct_generation_reap_operation_id(
+    generation_id: &str,
+    holder_session_id: &str,
+) -> String {
+    let digest = sha256_hex(
+        serde_json::to_vec(&(
+            "defunct-generation-reap-v1",
+            generation_id,
+            holder_session_id,
+        ))
+        .unwrap_or_default(),
+    );
+    format!("defunct-generation-reap-{}", &digest[..32])
+}
+
+/// Terminalize one exact Active generation whose holder Session is durably
+/// defunct, so the owner can mint a fresh execution lifetime again.
+///
+/// Issue #3473: a holder that dies without settling (process kill, crash,
+/// forced window close) leaves its generation Active forever, and every later
+/// fresh launch collides with the single-writer guard. The caller owns the
+/// staleness decision and must fail closed whenever the holder's liveness is
+/// undetermined; this transaction only enforces that the named holder still
+/// owns an unsettled Active generation, and records the reap as a Host-owned
+/// lifecycle transition. The reaped generation stays immutable audit evidence
+/// and the existing Blocked-successor launch path owns the next lifetime.
+pub fn block_defunct_active_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    holder_session_id: &str,
+    reason: &str,
+) -> io::Result<ExecutionControlRecord> {
+    validate_owner(owner)?;
+    gwt_agent::validate_session_id_path_component(holder_session_id)
+        .map_err(|error| invalid_generation_data(format!("invalid Session id: {error}")))?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "reaping a defunct execution generation requires a non-empty reason",
+        ));
+    }
+    with_generation_owner_lease(worktree, owner, |context| {
+        block_defunct_active_generation_in_context(context, worktree, holder_session_id, reason)
+    })
+}
+
+fn block_defunct_active_generation_in_context(
+    context: &GenerationTransactionContext,
+    worktree: &Path,
+    holder_session_id: &str,
+    reason: &str,
+) -> io::Result<ExecutionControlRecord> {
+    let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "owner generation ledger is not initialized",
+        )
+    })?;
+    let current = ledger
+        .current_generation()
+        .ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?
+        .clone();
+    if current.identity.worktree_binding_hash != context.worktree_binding_hash {
+        return Err(generation_conflict(
+            "a defunct generation reap cannot cross worktree identities",
+        ));
+    }
+    let operation_id =
+        defunct_generation_reap_operation_id(&current.identity.generation_id, holder_session_id);
+    let effective_status = ledger.effective_status_for(&current);
+    if effective_status == ExecutionControlStatus::Blocked {
+        let latest = ledger
+            .lifecycle_events_for(&current.identity.generation_id)
+            .max_by_key(|event| event.sequence)
+            .ok_or_else(|| {
+                invalid_generation_data("Blocked generation has no lifecycle transition")
+            })?;
+        if latest.from_status != ExecutionControlStatus::Active
+            || latest.to_status != ExecutionControlStatus::Blocked
+            || latest.session_id != holder_session_id
+            || latest.reason != reason
+            || latest.operation_id.as_deref() != Some(operation_id.as_str())
+        {
+            return Err(generation_conflict(
+                "the generation was already terminalized by another outcome",
+            ));
+        }
+        let record = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(&current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "reaped generation projection is malformed: {error}"
+            ))
+        })?;
+        // A response-loss retry also repairs a ledger-first partial reap
+        // before reporting success.
+        let projection = ledger.effective_projection_for(&current).to_string();
+        write_activated_generation(context, &ledger, &projection)?;
+        load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("defunct generation reap repair lost generation authority")
+        })?;
+        return Ok(record);
+    }
+    if effective_status != ExecutionControlStatus::Active {
+        return Err(generation_conflict(
+            "only an Active generation can be reaped as defunct",
+        ));
+    }
+
+    let mut record =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(&current))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!("execution snapshot is malformed: {error}"))
+            })?;
+    if !integrity_ok(&record)
+        || record.owner_kind != context.owner.kind
+        || record.owner_number != context.owner.number
+        || record.primary_session_id != holder_session_id
+        || record.status != ExecutionControlStatus::Active
+        || record.settled_at.is_some()
+    {
+        return Err(generation_conflict(
+            "the projection no longer matches the exact Active generation named by its holder",
+        ));
+    }
+    let recorded_at = Utc::now();
+    record.status = ExecutionControlStatus::Blocked;
+    record.blocked_reason = Some(reason.to_string());
+    record.missing_verification = Some("defunct execution holder".to_string());
+    record.settled_at = Some(recorded_at);
+    let projection = serialized_execution_projection(&record)?;
+    append_lifecycle_event(
+        &mut ledger,
+        GenerationLifecycleEvent {
+            sequence: 0,
+            generation_id: current.identity.generation_id,
+            from_status: ExecutionControlStatus::Active,
+            to_status: ExecutionControlStatus::Blocked,
+            session_id: holder_session_id.to_string(),
+            reason: reason.to_string(),
+            operation_id: Some(operation_id),
+            recorded_at,
+            execution_control_json: projection.clone(),
+            previous_event_hash: String::new(),
+            content_hash: String::new(),
+        },
+    );
+    stamp_generation_ledger(&mut ledger);
+    write_activated_generation(context, &ledger, &projection)?;
+    let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+        invalid_generation_data("defunct generation reap lost generation authority")
+    })?;
+    if readback.current_effective_status() != Some(ExecutionControlStatus::Blocked) {
+        return Err(invalid_generation_data(
+            "defunct generation reap readback is not Blocked",
+        ));
+    }
+    load(worktree)?
+        .ok_or_else(|| invalid_generation_data("defunct generation reap lost its ECR projection"))
+}
+
 /// Remove one exact Session under its owner lease without mutating owner
 /// authority. Callers use this only after the authority is already terminal.
 pub fn remove_exact_session_with_owner_lease<F>(
@@ -11894,6 +12062,160 @@ mod tests {
                 ),
             );
         }
+    }
+
+    /// Issue #3473: a holder Session that dies without settling leaves its
+    /// generation Active forever, and every later fresh launch collides with
+    /// the single-writer guard. Reaping terminalizes that exact generation
+    /// with an audit trail so the owner can mint a fresh lifetime again.
+    #[test]
+    fn defunct_active_generation_reap_records_audit_and_reopens_a_fresh_lifetime() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "defunct-active-holder";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let generation_id = current_generation_identity(worktree.path(), owner)
+            .unwrap()
+            .unwrap()
+            .generation_id;
+        let reason = "holder Session is durably defunct";
+
+        let blocked =
+            block_defunct_active_generation(worktree.path(), owner, holder, reason).unwrap();
+
+        assert_eq!(blocked.status, ExecutionControlStatus::Blocked);
+        assert_eq!(blocked.blocked_reason.as_deref(), Some(reason));
+        assert!(blocked.settled_at.is_some());
+        let ledger = load_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Blocked)
+        );
+        let event = ledger.lifecycle_events.last().unwrap();
+        assert_eq!(event.generation_id, generation_id);
+        assert_eq!(event.from_status, ExecutionControlStatus::Active);
+        assert_eq!(event.to_status, ExecutionControlStatus::Blocked);
+        assert_eq!(event.session_id, holder);
+        assert_eq!(event.reason, reason);
+        assert_eq!(
+            event.operation_id.as_deref(),
+            Some(defunct_generation_reap_operation_id(&generation_id, holder).as_str()),
+            "the reap must carry its own opaque Host provenance"
+        );
+
+        prepare_fresh_linked_owner_launch_successor(
+            worktree.path(),
+            owner,
+            &successor_request(
+                "fresh-after-reap",
+                "gwt-host-launch",
+                FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+            ),
+        )
+        .expect("a reaped owner must accept a fresh linked-owner lifetime");
+    }
+
+    /// A response-loss retry must repair the same terminalization instead of
+    /// appending a second transition or failing closed on its own write.
+    #[test]
+    fn defunct_active_generation_reap_replays_the_same_operation_idempotently() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "defunct-active-replay";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let reason = "holder Session is durably defunct";
+
+        let first =
+            block_defunct_active_generation(worktree.path(), owner, holder, reason).unwrap();
+        let replay =
+            block_defunct_active_generation(worktree.path(), owner, holder, reason).unwrap();
+
+        assert_eq!(first, replay);
+        assert_eq!(
+            load_generation_ledger(worktree.path(), owner)
+                .unwrap()
+                .unwrap()
+                .lifecycle_events
+                .len(),
+            1,
+            "a replayed reap must not append a second lifecycle transition"
+        );
+    }
+
+    /// The reap is a Host-side authority mutation, so it must refuse every
+    /// input that is not the exact Active generation named by its holder.
+    #[test]
+    fn defunct_active_generation_reap_refuses_a_foreign_holder_or_settled_generation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "defunct-active-guard";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+
+        assert_eq!(
+            block_defunct_active_generation(worktree.path(), owner, "another-session", "reap")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::AlreadyExists,
+            "reaping requires the exact Session that holds the generation",
+        );
+        assert_eq!(
+            block_defunct_active_generation(worktree.path(), owner, holder, "   ")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData,
+            "reaping requires a non-empty audit reason",
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "a refused reap must not mutate owner authority",
+        );
+
+        block_defunct_active_generation(worktree.path(), owner, holder, "holder is defunct")
+            .unwrap();
+        assert_eq!(
+            block_defunct_active_generation(worktree.path(), owner, holder, "a different reason")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::AlreadyExists,
+            "an already terminalized generation is never re-terminalized by another outcome",
+        );
     }
 
     #[test]
