@@ -3738,6 +3738,7 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
     let holder_sessions_dir = sessions_dir.clone();
     let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
     let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
+    let (lease_released_tx, lease_released_rx) = std::sync::mpsc::sync_channel(1);
     let holder = std::thread::spawn(move || {
         gwt_agent::with_session_path_lease_wait(
             &holder_sessions_dir,
@@ -3748,18 +3749,20 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
                     .send(())
                     .expect("report contended Session lease");
                 release_lease_rx
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(Duration::from_secs(30))
                     .expect("release contended Session lease");
                 Ok(())
             },
         )
         .expect("hold contended Session lease");
+        lease_released_tx
+            .send(())
+            .expect("report released Session lease");
     });
     lease_acquired_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("Session lease holder starts");
 
-    let started = Instant::now();
     let outcome = runtime.handle_agent_frontend_event_if_current(
         "pane-client".to_string(),
         grant,
@@ -3767,12 +3770,7 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
             text: "must-not-block-tao\r".to_string(),
         },
     );
-    let elapsed = started.elapsed();
 
-    release_lease_tx
-        .send(())
-        .expect("release contended Session lease");
-    holder.join().expect("join Session lease holder");
     assert!(
         matches!(
             outcome,
@@ -3781,9 +3779,19 @@ fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_
         "tao dispatch must fail closed when its pre-dispatch lease is no longer immediately available"
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "tao dispatch waited {elapsed:?} for a contended Session lease"
+        matches!(
+            lease_released_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "tao dispatch returned only after the contended Session lease was released"
     );
+    release_lease_tx
+        .send(())
+        .expect("release contended Session lease");
+    holder.join().expect("join Session lease holder");
+    lease_released_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("Session lease holder reports release");
 }
 
 #[test]

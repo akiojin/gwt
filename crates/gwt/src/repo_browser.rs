@@ -380,7 +380,7 @@ mod tests {
     fn async_branch_load_results_are_broadcast_not_bound_to_a_stale_websocket_client() {
         let source = include_str!("repo_browser.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split("\nmod tests {")
             .next()
             .expect("production source before tests");
 

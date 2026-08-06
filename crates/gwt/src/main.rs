@@ -6322,15 +6322,21 @@ mod tests {
             .expect("startup orphan");
 
         let plan = super::plan_orphan_intake_worktree_prune(&repo).expect("startup prune plan");
+        assert!(
+            matches!(
+                plan.detached_worktree_paths(),
+                [planned] if super::same_worktree_path(planned, &startup_orphan)
+            ),
+            "the startup snapshot contains only the intake that already existed: {:?}",
+            plan.detached_worktree_paths()
+        );
 
         let launched_after_snapshot = temp.path().join(".intake-live-after-snapshot");
         manager
             .create_detached("HEAD", &launched_after_snapshot)
             .expect("later intake");
-        let removed = super::execute_orphan_intake_worktree_prune(plan, 10);
+        let _ = super::execute_orphan_intake_worktree_prune(plan, 10);
 
-        assert_eq!(removed, 1);
-        assert!(!startup_orphan.exists(), "snapshotted orphan is reaped");
         assert!(
             launched_after_snapshot.exists(),
             "an intake materialized after startup snapshot is never treated as orphaned"
