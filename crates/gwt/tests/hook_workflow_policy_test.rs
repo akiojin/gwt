@@ -50,9 +50,14 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
-const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
-const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+// Keep the integration fixture on the production StrictStop wall-clock scale.
+// Owner preflight now includes privacy-context subprocesses, so the old 900ms
+// scaled budget could expire before the loopback transport was reached. The
+// transport itself is synchronized to the absolute resolution deadline below;
+// using a realistic budget tests composition without testing host scheduling.
+const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_secs(15);
+const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_secs(5);
 
 /// How long the loopback fixture server waits for the client to connect. The
 /// client only connects after building its `DefaultCliEnv` and entering the
@@ -63,6 +68,7 @@ const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250)
 /// direct-stop budget itself is measured separately after setup completes.
 const LOOPBACK_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
 fn evaluate_direct_stop_with_test_budget(env: &mut DefaultCliEnv) -> HookOutput {
     let deadline = ResolutionDeadline::new(
         DIRECT_STOP_TEST_CONNECT_TIMEOUT,
@@ -760,6 +766,8 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         let address = listener.local_addr().expect("loopback address");
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
+        let transport_stall_until = Arc::new(OnceLock::<Instant>::new());
+        let server_transport_stall_until = Arc::clone(&transport_stall_until);
         let server = std::thread::spawn(move || {
             let mut first = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             server_requests.fetch_add(1, Ordering::SeqCst);
@@ -781,7 +789,9 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
             stalled
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .expect("stall read timeout");
-            let until = Instant::now() + Duration::from_millis(850);
+            let until = *server_transport_stall_until
+                .get()
+                .expect("absolute transport stall deadline");
             let mut byte = [0_u8; 1];
             while Instant::now() < until {
                 match stalled.read(&mut byte) {
@@ -801,13 +811,26 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         );
         let _token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-test-token");
         let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
+        let deadline = ResolutionDeadline::new(
+            DIRECT_STOP_TEST_CONNECT_TIMEOUT,
+            DIRECT_STOP_TEST_TOTAL_BUDGET,
+        );
+        let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
+        transport_stall_until
+            .set(resolution_deadline.expires_at() + Duration::from_millis(25))
+            .expect("set absolute transport stall deadline");
         let started = Instant::now();
 
-        let output = evaluate_direct_stop_with_test_budget(&mut env);
+        let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+            &mut env,
+            false,
+            &deadline,
+            DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+        );
         let elapsed = started.elapsed();
 
         let HookOutput::StopBlock { reason } = output else {
-            panic!("stalled direct Stop owner search must block");
+            panic!("stalled direct Stop owner search must block after {elapsed:?}: {output:?}");
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
         assert!(

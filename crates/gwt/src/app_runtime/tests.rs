@@ -828,6 +828,8 @@ fn init_repo(repo_path: &Path) {
         ["init", "-q"].as_slice(),
         ["remote", "add", "origin", remote.as_str()].as_slice(),
         ["config", "http.proxy", "http://127.0.0.1:9"].as_slice(),
+        ["config", "--add", "credential.helper", ""].as_slice(),
+        ["config", "credential.interactive", "never"].as_slice(),
     ] {
         let output = gwt_core::process::hidden_command("git")
             .args(args)

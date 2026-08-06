@@ -14,7 +14,8 @@ use uuid::Uuid;
 use super::{
     improvement_owner::{
         deliver_pending_owner_status, render_public_issue_payload, resolve_candidate_owner,
-        resolve_candidate_owner_with_expected_revision, select_candidate_owner,
+        resolve_candidate_owner_with_expected_revision,
+        resolve_candidate_owner_with_operation_deadline, select_candidate_owner,
         PublicMutationContext,
     },
     CliEnv,
@@ -1001,6 +1002,14 @@ pub(crate) fn capture_registered<E: CliEnv>(
     env: &mut E,
     input: RegisteredCaptureInput,
 ) -> Result<ImprovementCandidate, SpecOpsError> {
+    capture_registered_with_resolution_deadline(env, input, None)
+}
+
+fn capture_registered_with_resolution_deadline<E: CliEnv>(
+    env: &mut E,
+    input: RegisteredCaptureInput,
+    resolution_deadline: Option<&ResolutionDeadline>,
+) -> Result<ImprovementCandidate, SpecOpsError> {
     let registration = registration_for_token(input.token)?;
     if input.routing_basis_revision != registration.routing_basis_revision {
         return Err(invalid("registered producer routing revision is stale"));
@@ -1110,14 +1119,34 @@ pub(crate) fn capture_registered<E: CliEnv>(
         deliver_pending_owner_status(env, &mut candidate)?;
     }
     if capture_status_settled && should_resolve_after_capture(&candidate, pending_generation) {
-        candidate = resolve_candidate_owner(env, &candidate.id, input.budget_profile)?;
+        candidate = match resolution_deadline {
+            Some(deadline) => resolve_candidate_owner_with_operation_deadline(
+                env,
+                &candidate.id,
+                input.budget_profile,
+                deadline,
+                deadline.expires_at(),
+            )?,
+            None => resolve_candidate_owner(env, &candidate.id, input.budget_profile)?,
+        };
     }
     Ok(candidate)
 }
 
+pub(super) const MANAGED_HOOK_CAPTURE_BUDGET_PROFILE: CaptureBudgetProfile =
+    CaptureBudgetProfile::StrictStop;
+
 pub(crate) fn capture_managed_hook_failure<E: CliEnv>(
     env: &mut E,
     event: super::improvement_contract::ManagedHookFailureEvent,
+) -> Result<super::improvement_contract::ManagedHookCaptureResult, SpecOpsError> {
+    capture_managed_hook_failure_with_resolution_deadline(env, event, None)
+}
+
+fn capture_managed_hook_failure_with_resolution_deadline<E: CliEnv>(
+    env: &mut E,
+    event: super::improvement_contract::ManagedHookFailureEvent,
+    resolution_deadline: Option<&ResolutionDeadline>,
 ) -> Result<super::improvement_contract::ManagedHookCaptureResult, SpecOpsError> {
     use super::improvement_contract::{
         ManagedHookCaptureResult, ManagedHookEligibility, ManagedHookEvidenceKind,
@@ -1136,13 +1165,13 @@ pub(crate) fn capture_managed_hook_failure<E: CliEnv>(
     };
     let interpretive_session_id =
         (occurrence_origin == OccurrenceOrigin::Interpretive).then_some(event.session_key);
-    let candidate = capture_registered(
+    let candidate = capture_registered_with_resolution_deadline(
         env,
         RegisteredCaptureInput {
             token,
             source_event_id: event.event_key,
             routing_basis_revision: 1,
-            budget_profile: CaptureBudgetProfile::StrictStop,
+            budget_profile: MANAGED_HOOK_CAPTURE_BUDGET_PROFILE,
             source: "hook-runtime".to_string(),
             target_artifact: event.target_artifact,
             classification: "gwt-caused".to_string(),
@@ -1160,6 +1189,7 @@ pub(crate) fn capture_managed_hook_failure<E: CliEnv>(
             occurrence_origin,
             interpretive_session_id,
         },
+        resolution_deadline,
     )?;
     let eligibility = match candidate.eligibility {
         ImprovementEligibility::Deterministic => ManagedHookEligibility::Deterministic,
@@ -1177,6 +1207,15 @@ pub(crate) fn capture_managed_hook_failure<E: CliEnv>(
         occurrences: candidate.occurrences,
         eligibility,
     })
+}
+
+#[cfg(test)]
+pub(super) fn capture_managed_hook_failure_with_test_deadline<E: CliEnv>(
+    env: &mut E,
+    event: super::improvement_contract::ManagedHookFailureEvent,
+    resolution_deadline: &ResolutionDeadline,
+) -> Result<super::improvement_contract::ManagedHookCaptureResult, SpecOpsError> {
+    capture_managed_hook_failure_with_resolution_deadline(env, event, Some(resolution_deadline))
 }
 
 pub(crate) fn managed_hook_failure_fingerprint(
@@ -4300,7 +4339,7 @@ mod tests {
                 .expect("canonical source scope nonce");
         let payload = render_public_issue_payload(
             &candidate,
-            &PublicMutationContext::for_repo(&env.repo_path),
+            &PublicMutationContext::for_repo_with_test_budget(&env.repo_path),
         )
         .expect("typed owner payload");
         let repository = gwt_github::client::RepositoryIdentity::gwt_upstream();
@@ -4507,7 +4546,7 @@ mod tests {
                 capture_registered_candidate_without_resolution(&mut env_b, "machine-b");
             let payload = render_public_issue_payload(
                 &candidate_b,
-                &PublicMutationContext::for_repo(&env_b.repo_path),
+                &PublicMutationContext::for_repo_with_test_budget(&env_b.repo_path),
             )
             .expect("machine B payload");
             let predicted_79 = RepositoryIssue {
@@ -6054,7 +6093,7 @@ mod tests {
             capture_registered_candidate_without_resolution(&mut env, "numbered-save-failure");
         let payload = render_public_issue_payload(
             &candidate,
-            &PublicMutationContext::for_repo(&env.repo_path),
+            &PublicMutationContext::for_repo_with_test_budget(&env.repo_path),
         )
         .expect("owner payload");
         let repository = RepositoryIdentity::gwt_upstream();
@@ -6158,7 +6197,7 @@ mod tests {
             capture_registered_candidate_without_resolution(&mut env, "hidden-created-owner");
         let payload = render_public_issue_payload(
             &candidate,
-            &PublicMutationContext::for_repo(&env.repo_path),
+            &PublicMutationContext::for_repo_with_test_budget(&env.repo_path),
         )
         .expect("owner payload");
         let repository = RepositoryIdentity::gwt_upstream();
@@ -6270,7 +6309,7 @@ mod tests {
             capture_registered_candidate_without_resolution(&mut env, "hidden-created-duplicate");
         let payload = render_public_issue_payload(
             &candidate,
-            &PublicMutationContext::for_repo(&env.repo_path),
+            &PublicMutationContext::for_repo_with_test_budget(&env.repo_path),
         )
         .expect("owner payload");
         let repository = RepositoryIdentity::gwt_upstream();

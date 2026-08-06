@@ -189,10 +189,36 @@ mod tests {
             "managed-hook-event-a",
         );
 
-        let first =
-            capture_managed_hook_failure(&mut env, event.clone()).expect("first typed capture");
-        let replay =
-            capture_managed_hook_failure(&mut env, event.clone()).expect("idempotent replay");
+        assert_eq!(
+            super::super::improvement::MANAGED_HOOK_CAPTURE_BUDGET_PROFILE,
+            super::super::improvement::CaptureBudgetProfile::StrictStop,
+            "the production managed-hook entrypoint must retain the StrictStop profile"
+        );
+        // This test owns producer validation and durable deduplication. Retain
+        // the registered StrictStop profile while giving its real owner search
+        // enough wall-clock room under full-suite CPU and file-lock load. The
+        // production deadline composition is covered by direct Stop integration
+        // tests with the unchanged public entrypoint.
+        let first_deadline = gwt_github::client::ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(60),
+        );
+        let first = super::super::improvement::capture_managed_hook_failure_with_test_deadline(
+            &mut env,
+            event.clone(),
+            &first_deadline,
+        )
+        .expect("first typed capture");
+        let replay_deadline = gwt_github::client::ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(60),
+        );
+        let replay = super::super::improvement::capture_managed_hook_failure_with_test_deadline(
+            &mut env,
+            event.clone(),
+            &replay_deadline,
+        )
+        .expect("idempotent replay");
         assert_eq!(replay.candidate_id, first.candidate_id);
         assert_eq!(replay.fingerprint, first.fingerprint);
         assert_eq!(replay.occurrences, 1);
@@ -206,8 +232,8 @@ mod tests {
         let (connect_timeout, total_remaining) = env
             .last_owner_client_budget()
             .expect("managed Stop producer must invoke Owner Resolution");
-        assert!(connect_timeout <= std::time::Duration::from_secs(3));
-        assert!(total_remaining <= std::time::Duration::from_secs(15));
+        assert!(connect_timeout <= std::time::Duration::from_secs(5));
+        assert!(total_remaining <= std::time::Duration::from_secs(60));
 
         let mut forged = event.clone();
         forged.fingerprint = format!("{}0", forged.fingerprint);
