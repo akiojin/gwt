@@ -14,13 +14,32 @@ use gwt_skills::{
     CodexHookDiscoveryMode, ManagedAssetTarget,
 };
 
+/// Which `.codex/hooks.json` copies a non-launch (re-)materialization owns.
+///
+/// #3474: the self-heal writer ran with [`CodexHookDiscoveryMode::WorkspaceHome`],
+/// which for a linked worktree resolves to the repo-root copy, while the health
+/// auditor only ever read the worktree-local copy. A stale worktree-local file
+/// was therefore reported forever and rewritten never. Outside a launch, gwt
+/// does not know which Codex version will open the worktree, so it owns BOTH
+/// discovery locations — the auditor reads the same set (see
+/// [`managed_codex_hook_paths`]). Only the launch path narrows this, from the
+/// Codex version it is actually about to run.
+pub const MANAGED_CODEX_HOOK_DISCOVERY_MODE: CodexHookDiscoveryMode = CodexHookDiscoveryMode::Both;
+
+/// Every `.codex/hooks.json` gwt owns for `worktree`: the worktree-local copy
+/// (read by Codex before 0.131.0-alpha.21) and the workspace-home copy (read by
+/// newer Codex). Deduplicated when both resolve to the same file.
+pub fn managed_codex_hook_paths(worktree: &Path) -> Vec<PathBuf> {
+    gwt_skills::codex_hooks_paths_for_codex_discovery(worktree, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
+}
+
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
     crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
     crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
     materialize_managed_gwt_assets_for_targets(
         worktree,
         &ManagedAssetTarget::ALL,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )?;
     update_git_exclude(worktree).map_err(|error| {
@@ -33,7 +52,7 @@ pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId)
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
         worktree,
         agent_id,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )
 }
@@ -65,7 +84,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
     materialize_managed_gwt_assets_for_targets(
         worktree,
         &targets,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
         worktree_is_ephemeral(worktree),
     )?;
     update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
@@ -144,7 +163,7 @@ pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<(
     regenerate_managed_hook_configs_for_targets(
         worktree,
         &targets,
-        CodexHookDiscoveryMode::WorkspaceHome,
+        MANAGED_CODEX_HOOK_DISCOVERY_MODE,
     )
 }
 
