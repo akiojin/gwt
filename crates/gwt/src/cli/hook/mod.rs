@@ -50,6 +50,23 @@ pub(crate) use identity::{
     resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookSessionId, RawHookEvent,
 };
 
+/// SPEC-3431 FR-029: whether this hook is running for the resident PM.
+///
+/// The PM receives a byte-identical managed asset set to every other agent,
+/// including the hooks — but it is not an implementation agent. It never
+/// touches production code, never opens PRs, owns no Work item, and its window
+/// title is fixed. Reminders and gates written for implementation sessions
+/// either demand impossible settlements or bury the PM's actual contract under
+/// instructions that outrank it.
+///
+/// Keyed on the worktree path rather than an environment variable, for the
+/// same reason `worktree_form::is_ephemeral_intake_worktree` is: the decision
+/// must be deterministic per worktree so an ambient value from another session
+/// can never redirect policy.
+pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
+    crate::pm_registry::is_pm_worktree(&gwt_core::paths::resolve_current_worktree_root(worktree))
+}
+
 /// Every hook name exposed via `gwtd hook <name>`.
 ///
 /// Adding a new variant requires updating [`HookKind::from_name`] and

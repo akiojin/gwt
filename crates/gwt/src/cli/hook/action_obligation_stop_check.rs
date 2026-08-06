@@ -21,6 +21,14 @@ use crate::cli::action_obligation;
 /// missing or unparsable prompt arms nothing — unclassifiable input must not
 /// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
+    // SPEC-3431 FR-029: the resident PM cannot settle a producing obligation.
+    // Every settlement path (all-passing `verify.run`, `pr.*`) requires
+    // production artifacts the PM's contract forbids it from creating, so
+    // arming one leaves it blocked at Stop with no exit but a false
+    // `execution.blocked`. Never arm rather than block-then-excuse.
+    if super::is_resident_pm_worktree(worktree) {
+        return;
+    }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
@@ -114,6 +122,72 @@ mod tests {
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
             HookOutput::Silent
+        );
+    }
+
+    /// SPEC-3431 FR-029: the resident PM never arms a producing obligation.
+    ///
+    /// The settlement paths are an all-passing `verify.run`, `issue.comment` /
+    /// `issue.spec.edit`, or `pr.*`. The PM's contract forbids it from touching
+    /// production code or PRs at all — implementation is always performed by
+    /// agents the Issue Monitor launches — so an implementation obligation is
+    /// **structurally unsettleable** for the PM and its only exit is filing a
+    /// false `execution.blocked` every turn. Observed live: the gate was
+    /// already arming against the running PM session.
+    #[test]
+    fn the_resident_pm_never_arms_a_producing_obligation() {
+        // GWT_SESSION_ID is process-global; without this these two tests race
+        // each other and whichever loses reads the other's session id.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(pm_worktree.join(".gwt")).unwrap();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        handle_user_prompt_submit(
+            &pm_worktree,
+            &serde_json::json!({ "prompt": "#3457 を修正して" }).to_string(),
+        );
+
+        assert_eq!(
+            handle_with_input(&pm_worktree, "{}", Some("pm-session")),
+            HookOutput::Silent,
+            "the PM must not be blocked by an obligation it cannot settle"
+        );
+    }
+
+    /// The exemption is keyed on the PM worktree alone: an ordinary agent in
+    /// any other worktree keeps the gate exactly as it was.
+    #[test]
+    fn an_ordinary_worktree_still_arms_obligations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree();
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "sess-ordinary",
+        );
+
+        handle_user_prompt_submit(
+            dir.path(),
+            &serde_json::json!({ "prompt": "バグを修正して" }).to_string(),
+        );
+
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-ordinary")),
+                HookOutput::StopBlock { .. }
+            ),
+            "non-PM sessions must keep the prompt-to-action gate"
         );
     }
 

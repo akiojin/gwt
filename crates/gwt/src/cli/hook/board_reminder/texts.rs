@@ -237,6 +237,30 @@ Work lifecycle は終端 delivery settlement 中です。coordination と blocke
 
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
 
+/// SPEC-3431 FR-029: what the resident PM is told at an intent boundary.
+///
+/// Replaces the implementation-agent reminder wholesale. That text tells an
+/// agent to post its own work-phase transitions to the Board, to keep a Work
+/// item current, and not to create branches — none of which apply to a PM that
+/// owns no Work, performs no git operations, and reports to the user in
+/// conversation (FR-017). Leaving it in place buries the PM's actual contract
+/// under ~4KB of instructions that outrank it every turn.
+pub(super) const PM_REMINDER: &str = "# Project Manager\n\
+\n\
+You are this project's resident PM. Your operating contract is the `gwt-pm` skill; it outranks generic agent guidance.\n\
+\n\
+Report to the user in conversation, at milestones, as a digest (`needs_human` and fatal failures immediately). Use `board.post` with mentions only to address another agent, and `board.show` to read what agents reported about themselves. Do not narrate your own work phases to the Board.\n\
+\n\
+Every cycle, reconcile a fresh `issue.monitor.status` and check the agents that are running.";
+
+pub(super) const PM_REMINDER_JA: &str = "# Project Manager\n\
+\n\
+あなたはこのプロジェクトの常駐 PM です。行動規範は `gwt-pm` skill であり、一般の agent 向け指示より優先されます。\n\
+\n\
+報告はユーザーとの会話で、節目ごとに digest として行います（`needs_human` と致命的失敗は即時）。`board.post` は他 agent へ話しかけるときだけ mention 付きで使い、`board.show` は他 agent の自己申告を読むために使います。自分の作業 phase を Board に流さないでください。\n\
+\n\
+毎周回、`issue.monitor.status` を取り直して照合し、動いている agent を確認します。";
+
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion です。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
 
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
