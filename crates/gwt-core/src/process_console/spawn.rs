@@ -914,6 +914,24 @@ mod tests {
 
     use super::*;
 
+    /// Budget for a process that should finish immediately.
+    ///
+    /// The full Windows crate suite starts many subprocesses concurrently, and
+    /// llvm-cov adds enough startup overhead for a `cmd /C echo` fixture to
+    /// exceed the previous two-second budget. The observed full-suite failure
+    /// crossed two seconds while the focused fixture completed in 70ms. This
+    /// matches the process-tree fixtures below, whose measured parallel-load
+    /// budget already uses 15 seconds. The timeout behavior itself is covered
+    /// by dedicated tests with deliberately short deadlines.
+    const QUICK_PROCESS_FIXTURE_BUDGET: Duration = Duration::from_secs(15);
+
+    /// Upper bound proving a 60-second fixture was stopped before it completed
+    /// naturally. This is intentionally much larger than the 150ms operation
+    /// deadline: synchronous process startup cannot be preempted and took 2.45s
+    /// in the full Windows suite, so a tighter wall-clock assertion tests host
+    /// load instead of scoped-deadline propagation.
+    const FINITE_SLEEP_TERMINATION_BOUND: Duration = Duration::from_secs(30);
+
     struct PostReapDelayGuard(u64);
 
     impl PostReapDelayGuard {
@@ -1508,7 +1526,7 @@ mod tests {
             cmd,
             &args,
             SpawnOptions::new("test deadline echo"),
-            std::time::Instant::now() + Duration::from_secs(2),
+            std::time::Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
         )
         .await
         .expect("command before deadline");
@@ -1521,12 +1539,12 @@ mod tests {
         let (program, args) = if cfg!(windows) {
             (
                 "cmd".to_string(),
-                vec!["/C".to_string(), "ping -n 3 127.0.0.1 >NUL".to_string()],
+                vec!["/C".to_string(), "ping -n 61 127.0.0.1 >NUL".to_string()],
             )
         } else {
             (
                 "sh".to_string(),
-                vec!["-c".to_string(), "sleep 2".to_string()],
+                vec!["-c".to_string(), "sleep 60".to_string()],
             )
         };
         let started = std::time::Instant::now();
@@ -1545,7 +1563,7 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(
-            started.elapsed() < Duration::from_millis(1_500),
+            started.elapsed() < FINITE_SLEEP_TERMINATION_BOUND,
             "finite sleep outlived the scoped deadline: {:?}",
             started.elapsed()
         );
