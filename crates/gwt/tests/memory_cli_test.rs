@@ -106,7 +106,12 @@ fn memory_add_writes_to_machine_local_work_notes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let normalized_stdout = stdout.replace('\\', "/");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse memory.add envelope");
+    let normalized_stdout = envelope["output"]
+        .as_str()
+        .expect("memory.add output string")
+        .replace('\\', "/");
     assert!(
         normalized_stdout.contains("work-notes/memory.md"),
         "stdout should name the machine-local path, got: {stdout}"
