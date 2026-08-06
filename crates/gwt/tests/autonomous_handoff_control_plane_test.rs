@@ -298,6 +298,49 @@ fn handoffs_survive_the_prefs_round_trip() {
     assert_eq!(restored_handoff.session_id, "session-abc");
 }
 
+/// AC-4/AC-8 (restart): after a process restart the parked Issue must stay
+/// parked. A rescan rebuilds the inbox from scratch, so the restored park has
+/// to survive it — otherwise the restart would silently relaunch the work the
+/// human was asked about.
+#[test]
+fn a_parked_issue_stays_parked_across_a_restart_and_rescan() {
+    let mut monitor = autonomous_monitor();
+    monitor.set_gui_connected(true);
+    let issue = auto_issue(42);
+    launch_autonomous(&mut monitor, &issue);
+    monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);
+    monitor.apply_pending_autonomous_handoffs(NOW);
+
+    // Restart: only the persisted prefs survive; the inbox is rebuilt by scan.
+    let restarted_prefs = monitor.prefs();
+    let mut restarted =
+        IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restarted_prefs);
+    restarted.set_gui_connected(true);
+    gwt::scan_issue_monitor_candidates(
+        &mut restarted,
+        std::slice::from_ref(&issue),
+        "2026-08-06T07:00:00Z",
+    );
+
+    assert_eq!(
+        restarted.inbox_item(42).map(|item| item.state),
+        Some(MonitorInboxState::NeedsHuman),
+        "the rescan must not revive a parked issue as Queued"
+    );
+    assert!(
+        !restarted.queued_issue_numbers().contains(&42),
+        "a parked issue must not be re-queued after a restart"
+    );
+    assert!(
+        restarted.next_launch_request("2026-08-06T07:00:01Z").is_none(),
+        "a parked issue must never be relaunched by the restarted driver"
+    );
+    assert!(
+        restarted.open_autonomous_handoff(42).is_some(),
+        "the question is still addressable after the restart"
+    );
+}
+
 /// Older prefs written before this field exists must still deserialize.
 #[test]
 fn prefs_without_the_handoff_field_still_deserialize() {

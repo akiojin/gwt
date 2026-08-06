@@ -323,7 +323,8 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
       .issue-monitor-card__state-badge[data-state="launched"] {
         color: var(--color-state-active);
       }
-      .issue-monitor-card__state-badge[data-state="blocked_by_claim"] {
+      .issue-monitor-card__state-badge[data-state="blocked_by_claim"],
+      .issue-monitor-card__state-badge[data-state="needs_human"] {
         color: var(--color-state-needs-input);
       }
       .issue-monitor-card__state-badge[data-state="launch_failed"] {
@@ -646,6 +647,14 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
         return "Agent failed";
       case "skipped":
         return "Skipped";
+      // Issue #3478: these three are NOT queued. Falling through to the default
+      // told the operator a parked or excluded Issue was still in line to run.
+      case "needs_human":
+        return "Needs human";
+      case "not_ready":
+        return "Not ready";
+      case "hold_excluded":
+        return "On hold";
       default:
         return "Queued";
     }

@@ -428,6 +428,25 @@ test("autonomous toggle sends the control and reflects status", () => {
   );
 });
 
+test("non-queued row states render their own badge instead of falling back to Queued", () => {
+  // Issue #3478 AC-9: a parked Issue that reads "Queued" tells the operator the
+  // opposite of the truth. `needs_human`, `not_ready` and `hold_excluded` all
+  // fell through to the default label.
+  const { document, surface } = makeFixture();
+  surface.applyStatus({ enabled: true, autonomous_mode: true });
+  surface.applyInbox([
+    issue(3164, "needs_human", ["auto-merge"]),
+    issue(3165, "not_ready", ["gwt-spec"]),
+    issue(3166, "hold_excluded", []),
+    issue(3167, "queued", []),
+  ]);
+
+  const badges = Array.from(
+    document.querySelectorAll(".issue-monitor-card__state-badge"),
+  ).map((badge) => badge.textContent);
+  assert.deepEqual(badges, ["Needs human", "Not ready", "On hold", "Queued"]);
+});
+
 test("a parked confirmation question surfaces its text, reason and resumability", () => {
   // Issue #3478 AC-9: a human must be able to see WHAT the parked autonomous
   // execution is waiting on, why, and whether answering resumes it — without
