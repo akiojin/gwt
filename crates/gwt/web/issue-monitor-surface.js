@@ -879,6 +879,28 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
           autoMeta.dataset.needsHuman = autonomousEntry.needs_human ? "true" : "false";
           issue.appendChild(autoMeta);
         }
+        // Issue #3478 AC-9: when the park was caused by a confirmation
+        // question, show WHAT is being waited on so a human can unblock the
+        // queue without opening the agent window.
+        const pending = autonomousEntry.pending_question;
+        if (pending && pending.question) {
+          const questionParts = [`⏸ Waiting on: ${pending.question}`];
+          if (Array.isArray(pending.options) && pending.options.length) {
+            questionParts.push(`Options: ${pending.options.join(" / ")}`);
+          }
+          questionParts.push(`Reason: ${pending.reason_code || "unclassified"}`);
+          questionParts.push(`Session: ${pending.session_id || "unknown"}`);
+          questionParts.push(pending.resumable ? "Resumable" : "Not resumable");
+          const questionBlock = element(
+            "div",
+            "issue-monitor-card__autonomous-question",
+            questionParts.join(" | "),
+          );
+          questionBlock.dataset.handoffId = pending.handoff_id || "";
+          questionBlock.dataset.reasonCode = pending.reason_code || "unclassified";
+          questionBlock.dataset.resumable = pending.resumable ? "true" : "false";
+          issue.appendChild(questionBlock);
+        }
       }
       const metaParts = [];
       if (item.blocked_by_owner) {

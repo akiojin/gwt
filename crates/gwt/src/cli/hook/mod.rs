@@ -12,6 +12,7 @@
 //! sibling files and consume these types.
 
 pub mod action_obligation_stop_check;
+pub mod autonomous_question_guard;
 pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;

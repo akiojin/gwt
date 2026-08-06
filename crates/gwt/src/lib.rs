@@ -2,6 +2,7 @@ pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
 #[doc(hidden)]
 pub use agent_project_state::validated_project_state_root_for_session_recovery;
+pub mod autonomous_handoff;
 pub mod backend_service;
 pub mod board_audience;
 pub mod board_provider;
@@ -114,9 +115,10 @@ pub use issue_monitor::{
     issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
     load_issue_monitor_prefs, mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
     persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
-    save_issue_monitor_prefs, scan_issue_monitor_candidates,
-    scan_issue_monitor_candidates_with_provenance, try_mutate_issue_monitor_prefs,
-    try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousIssueRecord, AutonomousPhase,
+    record_autonomous_question_handoff, save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    scan_issue_monitor_candidates_with_provenance, take_autonomous_resume_prompt_from_prefs,
+    try_mutate_issue_monitor_prefs, try_mutate_issue_monitor_prefs_without_authority_fence,
+    AutonomousHandoffResumption, AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase,
     AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAgentStatus,
     IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
     IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,

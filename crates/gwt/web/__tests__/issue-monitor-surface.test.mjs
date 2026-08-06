@@ -428,6 +428,61 @@ test("autonomous toggle sends the control and reflects status", () => {
   );
 });
 
+test("a parked confirmation question surfaces its text, reason and resumability", () => {
+  // Issue #3478 AC-9: a human must be able to see WHAT the parked autonomous
+  // execution is waiting on, why, and whether answering resumes it — without
+  // opening the agent window.
+  const { document, surface } = makeFixture();
+  surface.applyStatus({
+    enabled: true,
+    autonomous_mode: true,
+    autonomous_issues: [
+      {
+        issue_number: 3164,
+        phase: "needs_human",
+        attempts: 1,
+        needs_human: true,
+        needs_human_reason: "Autonomous execution reached a question that needs human judgment",
+        pending_question: {
+          handoff_id: "handoff-1",
+          question: "Should the legacy table be dropped?",
+          options: ["Drop it", "Keep it"],
+          reason_code: "irreversible_action",
+          session_id: "session-abc",
+          provider: "claude-code",
+          created_at: "2026-08-06T05:00:00Z",
+          resumable: true,
+        },
+      },
+    ],
+  });
+  surface.applyInbox([issue(3164, "needs_human", ["auto-merge"])]);
+
+  const question = document.querySelector(".issue-monitor-card__autonomous-question");
+  assert.ok(question, "the waiting question is rendered");
+  assert.equal(question.dataset.handoffId, "handoff-1");
+  assert.equal(question.dataset.reasonCode, "irreversible_action");
+  assert.equal(question.dataset.resumable, "true");
+  assert.match(question.textContent, /Should the legacy table be dropped\?/);
+  assert.match(question.textContent, /Drop it/);
+  assert.match(question.textContent, /irreversible_action/);
+  assert.match(question.textContent, /session-abc/);
+});
+
+test("an issue parked without a question renders no question block", () => {
+  const { document, surface } = makeFixture();
+  surface.applyStatus({
+    enabled: true,
+    autonomous_mode: true,
+    autonomous_issues: [
+      { issue_number: 3164, phase: "needs_human", attempts: 3, needs_human: true },
+    ],
+  });
+  surface.applyInbox([issue(3164, "needs_human", ["auto-merge"])]);
+
+  assert.equal(document.querySelector(".issue-monitor-card__autonomous-question"), null);
+});
+
 test("per-issue NeedsHuman / phase / attempts surface from autonomous_issues", () => {
   // SPEC #3200 T-090/FR-033: the autonomous lifecycle is visible per issue.
   const { document, surface } = makeFixture();
