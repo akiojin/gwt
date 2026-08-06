@@ -812,7 +812,6 @@ mod tests {
         e
     }
 
-    #[test]
     /// SPEC-3431 FR-029: the resident PM gets no Work-state reminders.
     ///
     /// The title demand ("set title-summary as your first action, this is not
