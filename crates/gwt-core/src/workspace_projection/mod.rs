@@ -22,6 +22,7 @@ mod identity;
 mod lifecycle;
 mod persistence;
 mod projection;
+pub mod store_migration;
 mod work_items;
 
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};

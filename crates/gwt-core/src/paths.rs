@@ -1,14 +1,17 @@
 //! Utility functions for gwt filesystem paths.
 
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use crate::{
     error::Result,
-    repo_hash::{compute_path_hash, detect_repo_hash, RepoHash},
+    repo_hash::{
+        compute_path_hash, detect_repo_hash, detect_repo_identity, RepoHash, RepoIdentitySource,
+    },
 };
 
 /// Return the gwt home directory (`~/.gwt/`).
@@ -174,9 +177,75 @@ pub fn gwt_project_dir(repo_hash: &RepoHash) -> PathBuf {
     gwt_projects_dir().join(repo_hash.as_str())
 }
 
+/// How a [`ProjectScope`] hash was derived.
+///
+/// Issue #3466: an unresolvable repository identity falls back to a path hash,
+/// which scopes the project store to *where* it was opened instead of *which*
+/// repository it is. Reporting the source lets callers surface that split
+/// instead of discovering it as two divergent stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectScopeSource {
+    /// Resolved from a repository identity (origin URL).
+    Repository(RepoIdentitySource),
+    /// No repository identity was resolvable; the hash is a path hash and the
+    /// store is therefore not shared with any other view of this project.
+    PathFallback,
+}
+
+/// The project store scope for a path: its hash plus how the hash was derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectScope {
+    pub hash: RepoHash,
+    pub source: ProjectScopeSource,
+}
+
+/// Resolve the project store scope for a repository, worktree, or layout root.
+///
+/// A path-hash fallback is reported once per path so the condition that split
+/// the store in #3466 is visible in `~/.gwt/logs/` rather than only in its
+/// consequences.
+pub fn resolve_project_scope(repo_path: &Path) -> ProjectScope {
+    match detect_repo_identity(repo_path) {
+        Some(identity) => ProjectScope {
+            hash: identity.hash,
+            source: ProjectScopeSource::Repository(identity.source),
+        },
+        None => {
+            let hash = compute_path_hash(repo_path);
+            warn_path_fallback_once(repo_path, &hash);
+            ProjectScope {
+                hash,
+                source: ProjectScopeSource::PathFallback,
+            }
+        }
+    }
+}
+
+/// Paths already reported by [`warn_path_fallback_once`]. The resolver runs on
+/// every project-scoped path lookup, so an unconditional warning would drown
+/// the log it is meant to make readable.
+static REPORTED_PATH_FALLBACKS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn warn_path_fallback_once(repo_path: &Path, hash: &RepoHash) {
+    let reported = REPORTED_PATH_FALLBACKS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut reported = reported
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !reported.insert(repo_path.to_path_buf()) {
+        return;
+    }
+    tracing::warn!(
+        target: "gwt::paths",
+        project_root = %repo_path.display(),
+        project_hash = %hash,
+        "no repository identity resolved; project state is scoped to this path. \
+         A second view of the same repository will use a different store (#3466)."
+    );
+}
+
 /// Return the project scope hash for a repository path.
 pub fn project_scope_hash(repo_path: &Path) -> RepoHash {
-    detect_repo_hash(repo_path).unwrap_or_else(|| compute_path_hash(repo_path))
+    resolve_project_scope(repo_path).hash
 }
 
 /// Return the project data directory for a repository path.

@@ -112,13 +112,126 @@ pub fn compute_path_hash(path: &Path) -> RepoHash {
     RepoHash(hex_full[..HASH_HEX_LEN].to_string())
 }
 
+/// How a repository identity was resolved.
+///
+/// Issue #3466: the identity used to be an opaque `Option<RepoHash>`, so a
+/// failed lookup silently degraded to a path hash and split the project store
+/// in two. Carrying the source makes that observable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoIdentitySource {
+    /// `origin` came from the path's own git directory (or its common dir),
+    /// i.e. the path is a repository or one of its worktrees.
+    Origin,
+    /// The path itself is not a repository, but a bare repository nested
+    /// directly beneath it holds `origin`. This is the Nested Bare + Worktree
+    /// layout root that gwt materializes worktrees under.
+    NestedBareRepository(PathBuf),
+}
+
+/// A resolved repository identity together with how it was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub hash: RepoHash,
+    pub source: RepoIdentitySource,
+}
+
 /// Detect a `RepoHash` from the `origin` remote configured for `repo_root`.
+///
+/// Strict: `repo_root` must itself be a repository or worktree. Callers that
+/// resolve a *project* scope want [`detect_repo_identity`], which also accepts
+/// a Nested Bare + Worktree layout root.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
     let url = origin_url_from_git_config(repo_root)?;
     if url.is_empty() {
         return None;
     }
     Some(compute_repo_hash(&url))
+}
+
+/// Resolve the repository identity for `repo_root`, accepting both a
+/// repository/worktree and a Nested Bare + Worktree layout root.
+pub fn detect_repo_identity(repo_root: &Path) -> Option<RepoIdentity> {
+    if let Some(hash) = detect_repo_hash(repo_root) {
+        return Some(RepoIdentity {
+            hash,
+            source: RepoIdentitySource::Origin,
+        });
+    }
+    child_bare_repositories(repo_root)
+        .into_iter()
+        .find_map(|bare| {
+            detect_repo_hash(&bare).map(|hash| RepoIdentity {
+                hash,
+                source: RepoIdentitySource::NestedBareRepository(bare),
+            })
+        })
+}
+
+/// The shared git directory backing `repo_root`.
+///
+/// For a repository or one of its worktrees this is the common dir; for a
+/// Nested Bare + Worktree layout root it is the nested bare repository. Used
+/// to enumerate the repository's worktrees without shelling out to git.
+pub fn resolve_repository_common_dir(repo_root: &Path) -> Option<PathBuf> {
+    if let Some(git_dir) = resolve_git_dir(repo_root) {
+        return Some(resolve_common_git_dir(&git_dir));
+    }
+    child_bare_repositories(repo_root)
+        .into_iter()
+        .find(|bare| detect_repo_hash(bare).is_some())
+}
+
+/// Working-tree roots of every linked worktree registered under `common_dir`.
+///
+/// Each `worktrees/<name>/gitdir` records the path of that worktree's `.git`
+/// file, so its parent is the worktree root.
+pub fn linked_worktree_roots(common_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(common_dir.join("worktrees")) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.path().join("gitdir")).ok())
+        .filter_map(|contents| {
+            let raw = contents
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            (!raw.is_empty()).then(|| PathBuf::from(raw))
+        })
+        .filter_map(|git_file| git_file.parent().map(Path::to_path_buf))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Bare repositories sitting *directly* under `repo_path`, sorted by path.
+///
+/// Only direct children qualify, so an unrelated deep checkout can never
+/// hijack the identity of an enclosing directory, and the sort makes the
+/// choice deterministic when a layout root holds more than one.
+pub fn child_bare_repositories(repo_path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(repo_path) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_bare_repository(path))
+        .collect();
+    candidates.sort();
+    candidates
+}
+
+/// A bare repository has no working tree, so recognise it by its git layout.
+fn is_bare_repository(path: &Path) -> bool {
+    path.is_dir()
+        && path.join("HEAD").is_file()
+        && path.join("objects").is_dir()
+        && path.join("refs").is_dir()
 }
 
 fn origin_url_from_git_config(repo_root: &Path) -> Option<String> {

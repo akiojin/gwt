@@ -1219,7 +1219,76 @@ pub(super) fn run<E: CliEnv>(
                 out,
             )
         }
+        WorkspaceCommand::StoreConsolidate {
+            dry_run,
+            manifest_hash,
+        } => run_store_consolidate(env.repo_path(), dry_run, manifest_hash.as_deref(), out),
     }
+}
+
+/// Issue #3466 (AC-4, AC-7, AC-8): report or apply project store consolidation.
+///
+/// The dry run is the review step — it prints the orphaned stores and the
+/// `manifest_hash` that pins them. Applying requires that hash back, so a plan
+/// approved against one state can never be applied to another.
+fn run_store_consolidate(
+    repo_path: &Path,
+    dry_run: bool,
+    manifest_hash: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    use gwt_core::workspace_projection::store_migration::{
+        apply_store_consolidation, plan_store_consolidation, StoreConsolidationOutcome,
+    };
+
+    let plan =
+        plan_store_consolidation(repo_path).map_err(|error| string_error(error.to_string()))?;
+    if dry_run {
+        let payload = serde_json::json!({
+            "dry_run": true,
+            "project_root": plan.project_root,
+            "canonical_hash": plan.canonical_hash.as_str(),
+            "canonical_store": plan.canonical_store,
+            "manifest_hash": plan.manifest_hash,
+            "orphans": plan.orphans,
+        });
+        out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
+            string_error(format!("could not encode the consolidation plan: {error}"))
+        })?);
+        out.push('\n');
+        return Ok(0);
+    }
+
+    let Some(expected) = manifest_hash else {
+        return Err(string_error(format!(
+            "workspace.store_consolidate requires the manifest_hash from a dry run (current: {})",
+            plan.manifest_hash
+        )));
+    };
+    let outcome = apply_store_consolidation(repo_path, expected)
+        .map_err(|error| string_error(error.to_string()))?;
+    let payload = match &outcome {
+        StoreConsolidationOutcome::NothingToDo => serde_json::json!({
+            "dry_run": false,
+            "outcome": "nothing_to_do",
+        }),
+        StoreConsolidationOutcome::Consolidated {
+            quarantined,
+            work_item_count,
+        } => serde_json::json!({
+            "dry_run": false,
+            "outcome": "consolidated",
+            "quarantined": quarantined,
+            "work_item_count": work_item_count,
+        }),
+    };
+    out.push_str(&serde_json::to_string_pretty(&payload).map_err(|error| {
+        string_error(format!(
+            "could not encode the consolidation outcome: {error}"
+        ))
+    })?);
+    out.push('\n');
+    Ok(0)
 }
 
 /// SPEC-2359 US-41 (FR-153): implement `workspace.projection_list` over a
@@ -3038,14 +3107,27 @@ pub(crate) mod tests {
         );
     }
 
+    /// A distinct `origin` per fixture project.
+    ///
+    /// #3466 scopes the project store to the repository identity, so every
+    /// fixture that shared one hard-coded remote would now share one store —
+    /// and, because the fixtures also share `BRANCH`, one canonical Work id.
+    /// Deriving the remote from the project root keeps unrelated fixtures
+    /// isolated while still exercising the real Nested Bare + Worktree layout.
+    fn fixture_origin_url(project_state_root: &Path) -> String {
+        let slug = gwt_core::repo_hash::compute_path_hash(project_state_root);
+        format!("https://example.invalid/acme/workspace-update-{slug}.git")
+    }
+
     fn initialize_session_git_layout(project_state_root: &Path, worktree_path: &Path) {
         const BRANCH: &str = "work/20260601-0934";
-        const REMOTE: &str = "https://example.invalid/acme/workspace-update.git";
         std::fs::create_dir_all(project_state_root).expect("project root");
+        let remote = fixture_origin_url(project_state_root);
+        let remote = remote.as_str();
         if project_state_root == worktree_path {
             crate::cli::trusted_store::init_git_repo_with_origin(worktree_path);
             run_git(&["checkout", "-b", BRANCH], worktree_path);
-            run_git(&["remote", "set-url", "origin", REMOTE], worktree_path);
+            run_git(&["remote", "set-url", "origin", remote], worktree_path);
             return;
         }
 
@@ -3060,7 +3142,7 @@ pub(crate) mod tests {
             &["clone", "--bare", bootstrap_arg, bare_arg],
             project_state_root,
         );
-        run_git(&["remote", "set-url", "origin", REMOTE], &bare);
+        run_git(&["remote", "set-url", "origin", remote], &bare);
         if worktree_path.exists() {
             std::fs::remove_dir(worktree_path).expect("remove empty worktree placeholder");
         }
@@ -3289,6 +3371,23 @@ pub(crate) mod tests {
 
     fn workspace_recovery_state_bytes(paths: &[PathBuf]) -> Vec<Option<Vec<u8>>> {
         paths.iter().map(|path| std::fs::read(path).ok()).collect()
+    }
+
+    /// Every `project-state/<name>` file that exists under the scoped `~/.gwt`
+    /// home. #3466 unified the layout root and worktree stores, so "no second
+    /// store" is asserted by enumerating what was actually written rather than
+    /// by comparing two paths that can no longer differ.
+    fn materialized_project_state_files(name: &str) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path().join("project-state").join(name))
+            .filter(|path| path.is_file())
+            .collect();
+        found.sort();
+        found
     }
 
     fn seed_exact_workspace_work(
@@ -4229,10 +4328,12 @@ pub(crate) mod tests {
             agent.current_focus.as_deref(),
             Some("Implement canonical Project State identity")
         );
-        assert!(
-            load_workspace_projection(&worktree)
-                .expect("load worktree projection")
-                .is_none(),
+        // #3466: the worktree resolves to the repository's single project
+        // store, so "no split Project State" means the worktree view *is* the
+        // canonical one rather than an absent second file.
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
             "agent workspace update must not create a split Project State under the worktree root"
         );
         assert!(
@@ -4451,6 +4552,11 @@ pub(crate) mod tests {
         );
     }
 
+    /// #3466 removed the condition this test used to guard: a worktree and its
+    /// project root resolve to one project store, so an "obsolete split
+    /// projection" is no longer constructible. The test now pins that
+    /// structural guarantee — one projection file, reached identically from
+    /// either root — instead of the repair behaviour it made necessary.
     #[test]
     fn workspace_update_does_not_run_split_state_repair() {
         let _guard = env_guard();
@@ -4474,13 +4580,11 @@ pub(crate) mod tests {
         ));
         save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
 
-        let mut split = WorkspaceProjection::default_for_project(&worktree);
-        let mut split_agent =
-            assigned_agent_with_window("session-1", "project::agent-1", &worktree);
-        split_agent.title_summary = Some("Split root title".to_string());
-        split_agent.current_focus = Some("Previously written to worktree root".to_string());
-        split.agents.push(split_agent);
-        save_workspace_projection(&worktree, &split).expect("save split projection");
+        assert_eq!(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&worktree),
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
+            "a worktree must not be able to address a second Project State"
+        );
 
         let mut env = TestEnv::new(worktree.clone());
         let mut out = String::new();
@@ -4514,21 +4618,16 @@ pub(crate) mod tests {
         assert_eq!(
             agent.title_summary.as_deref(),
             None,
-            "mutation must not import identity from the obsolete split projection"
+            "mutation must not invent identity the caller did not supply"
         );
         assert_eq!(
             agent.current_focus.as_deref(),
             Some("Continue from canonical Project State")
         );
-        let untouched_split = load_workspace_projection(&worktree)
-            .expect("load untouched split projection")
-            .expect("split projection remains present");
         assert_eq!(
-            untouched_split
-                .latest_agent_for_session("session-1")
-                .and_then(|agent| agent.title_summary.as_deref()),
-            Some("Split root title"),
-            "workspace.update must not mutate or repair the obsolete split projection"
+            materialized_project_state_files("current.json"),
+            vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
+            "workspace.update must leave exactly one Project State behind"
         );
     }
 
@@ -5406,10 +5505,11 @@ pub(crate) mod tests {
             container.branch.as_deref() == Some("work/20260601-0934")
                 && container.worktree_path.as_deref() == Some(expected_worktree.as_path())
         }));
-        assert!(
-            load_workspace_projection(&worktree)
-                .expect("load worktree projection")
-                .is_none(),
+        // #3466: the worktree shares the project root's store, so a split
+        // current projection can only show up as a *second* current.json.
+        assert_eq!(
+            materialized_project_state_files("current.json"),
+            vec![gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root)],
             "recovery must not create a split current projection"
         );
         assert!(
