@@ -3704,7 +3704,7 @@ impl AppRuntime {
                 Ok(true) => {}
                 Err(_) => return ActiveOwnerLiveness::Unknown,
             }
-            if gwt::process::is_process_alive(pid) {
+            if gwt::process::is_host_process_alive(pid) {
                 match gwt_agent::SessionRuntimeState::load(&sidecar) {
                     Ok(state)
                         if matches!(

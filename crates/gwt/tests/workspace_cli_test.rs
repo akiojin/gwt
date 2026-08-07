@@ -685,12 +685,7 @@ async fn capture_workspace_update(
                     Session::load(&session_path).expect("load Host Session before Docker switch");
                 session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
                 session
-                    .bind_docker_runtime(
-                        project_root
-                            .canonicalize()
-                            .expect("canonical Docker runtime root"),
-                        &project_root,
-                    )
+                    .bind_docker_runtime("/workspace/gwt-test", &project_root)
                     .expect("bind Docker runtime before static Host response");
                 session
                     .save(&gwt_core::paths::gwt_sessions_dir())
@@ -1228,14 +1223,7 @@ fn mark_bound_session_as_docker(fixture: &Fixture) {
     let mut session = Session::load(&session_path).expect("load bound Docker Session fixture");
     session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
     session
-        .bind_docker_runtime(
-            fixture
-                .project
-                .path()
-                .canonicalize()
-                .expect("canonical Docker runtime fixture"),
-            fixture.project.path(),
-        )
+        .bind_docker_runtime("/workspace/gwt-test", fixture.project.path())
         .expect("bind Docker runtime fixture");
     session
         .save(&fixture.home.path().join(".gwt/sessions"))
@@ -1428,14 +1416,15 @@ fn workspace_update_complete_forward_pair_uses_host_proxy_without_reading_contai
         .path()
         .canonicalize()
         .expect("canonical project root");
+    let observation_root = gwt_core::paths::normalize_windows_child_process_path(&project_root);
     assert_eq!(
         captured.body,
         serde_json::json!({
             "schema_version": 1,
             "claimed_session_id": SESSION,
             "observation": {
-                "cwd": project_root,
-                "git_toplevel": project_root,
+                "cwd": observation_root,
+                "git_toplevel": observation_root,
                 "repo_hash": project_scope_hash(fixture.project.path()).as_str(),
                 "branch": BRANCH,
             },
@@ -1470,6 +1459,7 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
             .path()
             .canonicalize()
             .expect("canonical project root");
+        let observation_root = gwt_core::paths::normalize_windows_child_process_path(&project_root);
         let host_state_dir = host_home
             .path()
             .join(".gwt/projects")
@@ -1522,8 +1512,8 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
                 "schema_version": 1,
                 "claimed_session_id": SESSION,
                 "observation": {
-                    "cwd": project_root,
-                    "git_toplevel": project_root,
+                    "cwd": observation_root,
+                    "git_toplevel": observation_root,
                     "repo_hash": project_scope_hash(&project_root).as_str(),
                     "branch": BRANCH,
                 },

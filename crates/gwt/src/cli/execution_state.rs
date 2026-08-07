@@ -14653,7 +14653,8 @@ mod tests {
         }
 
         fn normalized_test_path(path: &Path) -> String {
-            let rendered = path.to_string_lossy();
+            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let rendered = canonical.to_string_lossy();
             rendered
                 .strip_prefix("/private")
                 .unwrap_or(&rendered)

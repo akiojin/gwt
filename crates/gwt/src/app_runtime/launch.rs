@@ -85,6 +85,14 @@ pub struct ProcessLaunch {
     pub(crate) env: HashMap<String, String>,
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingToolRuntimeMigration {
+    source: gwt_agent::Session,
+    provenance: gwt_agent::ToolRuntimeProvenance,
+    target_session_id: String,
 }
 
 fn private_launch_env_key(key: &str) -> bool {
@@ -507,6 +515,29 @@ impl std::fmt::Debug for ProcessLaunch {
             .field("remove_env", &self.remove_env)
             .field("cwd", &self.cwd)
             .finish()
+    }
+}
+
+impl AppRuntime {
+    pub(crate) fn finalize_tool_runtime_migration_session_start(
+        &mut self,
+        window_id: &str,
+    ) -> Result<(), String> {
+        let Some(pending) = self.pending_tool_runtime_migrations.get(window_id).cloned() else {
+            return Ok(());
+        };
+        let active_session = self.active_agent_sessions.get(window_id).ok_or_else(|| {
+            "the launched pane has no active Session for provenance migration".to_string()
+        })?;
+        if active_session.session_id != pending.target_session_id {
+            return Err(format!(
+                "tool runtime provenance migration target changed from Session {} to {}",
+                pending.target_session_id, active_session.session_id
+            ));
+        }
+        persist_lazy_tool_runtime_provenance_migration(&self.sessions_dir, &pending)?;
+        self.pending_tool_runtime_migrations.remove(window_id);
+        Ok(())
     }
 }
 
@@ -1394,6 +1425,10 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(linked) = session.linked_issue_number {
         builder = builder.linked_issue_number(linked);
     }
+    if let Some(provenance) = session.tool_runtime_provenance.clone() {
+        builder = builder.tool_runtime_provenance(provenance);
+    }
+    builder = builder.tool_runtime_source_session_id(session.id.clone());
 
     if let Some(resume_id) = session.exact_resume_session_id() {
         builder = builder
@@ -1412,6 +1447,109 @@ pub(super) fn launch_config_from_persisted_session(
         config.display_name = session.display_name.clone();
     }
     config
+}
+
+fn hydrate_tool_runtime_provenance_from_source_session(
+    sessions_dir: &Path,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<Option<gwt_agent::Session>, String> {
+    let Some(source_session_id) = config.tool_runtime_source_session_id.as_deref() else {
+        return Ok(None);
+    };
+    gwt_agent::validate_session_id_path_component(source_session_id)?;
+    let path = sessions_dir.join(format!("{source_session_id}.toml"));
+    let source = match gwt_agent::Session::load(&path) {
+        Ok(source) => source,
+        Err(error) => {
+            return Err(format!(
+                "failed to restore tool runtime provenance from Session {source_session_id}: {error}"
+            ));
+        }
+    };
+    if source.id != source_session_id {
+        return Err(format!(
+            "tool runtime provenance Session id mismatch: requested {source_session_id}, loaded {}",
+            source.id
+        ));
+    }
+    if source.agent_id != config.agent_id {
+        return Err(format!(
+            "tool runtime provenance agent mismatch for Session {source_session_id}"
+        ));
+    }
+    if let Some(config_provenance) = config.tool_runtime_provenance.as_ref() {
+        if source.tool_runtime_provenance.as_ref() != Some(config_provenance) {
+            return Err(format!(
+                "tool runtime provenance changed for source Session {source_session_id}; retry launch"
+            ));
+        }
+        return Ok(None);
+    }
+    if let Some(provenance) = source.tool_runtime_provenance.clone() {
+        config.tool_runtime_provenance = Some(provenance);
+        Ok(None)
+    } else {
+        Ok(Some(source))
+    }
+}
+
+fn pending_lazy_tool_runtime_provenance_migration(
+    source: gwt_agent::Session,
+    config: &gwt_agent::LaunchConfig,
+    target_session_id: String,
+) -> Result<PendingToolRuntimeMigration, String> {
+    let provenance = config.tool_runtime_provenance.clone().ok_or_else(|| {
+        format!(
+            "tool runtime provenance resolution did not complete for Session {}",
+            source.id
+        )
+    })?;
+    Ok(PendingToolRuntimeMigration {
+        source,
+        provenance,
+        target_session_id,
+    })
+}
+
+fn persist_lazy_tool_runtime_provenance_migration(
+    sessions_dir: &Path,
+    pending: &PendingToolRuntimeMigration,
+) -> Result<(), String> {
+    let source = &pending.source;
+    let mut migrated = source.clone();
+    migrated.migrate_legacy_launch_args();
+    migrated.tool_runtime_provenance = Some(pending.provenance.clone());
+    match migrated.save_if_unchanged(sessions_dir, source) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "tool runtime provenance migration raced with another Session {} update; retry launch",
+            source.id
+        )),
+        Err(error) => Err(format!(
+            "failed to persist tool runtime provenance migration for Session {}: {error}",
+            source.id
+        )),
+    }
+}
+
+fn apply_post_resolution_bun_cache_fast_path(config: &mut gwt_agent::LaunchConfig) -> bool {
+    if config.tool_runtime_provenance.is_some() {
+        return false;
+    }
+    gwt_agent::apply_host_bunx_cache_fast_path(config)
+}
+
+fn initial_agent_window_status(config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
+    #[cfg(windows)]
+    if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+        && matches!(
+            config.agent_id,
+            gwt_agent::AgentId::Codex | gwt_agent::AgentId::ClaudeCode
+        )
+    {
+        return WindowProcessStatus::Starting;
+    }
+    WindowProcessStatus::Running
 }
 
 #[derive(Debug, Clone)]
@@ -2143,7 +2281,7 @@ impl AppRuntime {
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
             Ok((
-                process_launch,
+                mut process_launch,
                 session_id,
                 branch_name,
                 display_name,
@@ -2156,6 +2294,8 @@ impl AppRuntime {
                 had_prepared_execution,
                 agent_project_root,
             )) => {
+                let pending_tool_runtime_migration =
+                    process_launch.pending_tool_runtime_migration.take();
                 let issued_capability_token = process_launch
                     .env
                     .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
@@ -2378,6 +2518,10 @@ impl AppRuntime {
                     Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
                 ) {
                     Ok(()) => {
+                        if let Some(pending) = pending_tool_runtime_migration {
+                            self.pending_tool_runtime_migrations
+                                .insert(window_id.clone(), pending);
+                        }
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         if is_continue_work {
                             if let Some(operation_id) = self
@@ -2645,6 +2789,7 @@ impl AppRuntime {
         detail: String,
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
+        self.pending_tool_runtime_migrations.remove(&window_id);
         // Activation is the irreversible continuation commit. Reconcile its
         // exact durable/live state before the generic launch-error path can
         // tear down the pane, Session, or capability needed for readback and
@@ -2832,6 +2977,7 @@ impl AppRuntime {
                 env,
                 remove_env,
                 cwd: Some(project_root),
+                pending_tool_runtime_migration: None,
             },
             console_kind,
         ) {
@@ -3251,8 +3397,9 @@ impl AppRuntime {
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
+        let initial_status = initial_agent_window_status(&config);
         self.window_pty_statuses
-            .insert(window_id.clone(), WindowProcessStatus::Running);
+            .insert(window_id.clone(), initial_status);
         self.window_hook_states.remove(&window_id);
         if let Some(key) = inflight_key {
             self.inflight_launches
@@ -3260,9 +3407,7 @@ impl AppRuntime {
         }
 
         let mut events = vec![self.workspace_state_broadcast()];
-        let composed_status = self
-            .window_status(&window_id)
-            .unwrap_or(WindowProcessStatus::Running);
+        let composed_status = self.window_status(&window_id).unwrap_or(initial_status);
         events.extend(Self::status_events(
             window_id.clone(),
             composed_status,
@@ -3366,6 +3511,8 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
+            let tool_runtime_migration_source =
+                hydrate_tool_runtime_provenance_from_source_session(&sessions_dir, &mut config)?;
             let runner_health_report = (config.runtime_target
                 == gwt_agent::LaunchRuntimeTarget::Host)
                 .then(|| resolve_host_runner_health_checked(&mut config))
@@ -3417,7 +3564,7 @@ impl AppRuntime {
             }
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && gwt_agent::apply_host_bunx_cache_fast_path(&mut config)
+                && apply_post_resolution_bun_cache_fast_path(&mut config)
             {
                 tracing::debug!(
                     agent = %config.agent_id,
@@ -3434,6 +3581,10 @@ impl AppRuntime {
                 &config.args,
                 config.session_mode == gwt_agent::SessionMode::Resume,
             );
+            let durable_tool_runtime_command = config
+                .tool_runtime_provenance
+                .as_ref()
+                .map(|_| gwt_agent::durable_session_launch_command(&config));
             apply_windows_host_shell_wrapper(&mut config)?;
 
             let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
@@ -3456,9 +3607,11 @@ impl AppRuntime {
             session.docker_service = config.docker_service.clone();
             session.docker_lifecycle_intent = config.docker_lifecycle_intent;
             session.linked_issue_number = config.linked_issue_number;
-            session.launch_command = config.command.clone();
+            session.launch_command =
+                durable_tool_runtime_command.unwrap_or_else(|| config.command.clone());
             session.launch_args = config.args.clone();
             session.windows_shell = config.windows_shell;
+            session.tool_runtime_provenance = config.tool_runtime_provenance.clone();
             if session.session_mode == gwt_agent::SessionMode::Resume {
                 session.agent_session_id = config.resume_session_id.clone();
             }
@@ -3512,6 +3665,21 @@ impl AppRuntime {
             }
 
             let session_id = session.id.clone();
+            let mut pending_tool_runtime_migration = tool_runtime_migration_source
+                .map(|source| {
+                    pending_lazy_tool_runtime_provenance_migration(
+                        source,
+                        &config,
+                        session_id.clone(),
+                    )
+                })
+                .transpose()?;
+            if pending_tool_runtime_migration
+                .as_ref()
+                .is_some_and(|pending| pending.source.id == session_id)
+            {
+                session.tool_runtime_provenance = None;
+            }
             let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
@@ -3642,6 +3810,18 @@ impl AppRuntime {
                     ),
                 });
             }
+            if let Some(pending) = pending_tool_runtime_migration.as_mut() {
+                if pending.source.id == session_id {
+                    pending.source = gwt_agent::Session::load(
+                        &sessions_dir.join(format!("{session_id}.toml")),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "failed to stage same-Session tool runtime provenance migration for Session {session_id}: {error}"
+                        )
+                    })?;
+                }
+            }
 
             let process_launch = ProcessLaunch {
                 command: config.command.clone(),
@@ -3649,6 +3829,7 @@ impl AppRuntime {
                 env: config.env_vars.clone(),
                 remove_env: config.remove_env.clone(),
                 cwd: config.working_dir.clone(),
+                pending_tool_runtime_migration,
             };
             Ok((
                 process_launch,
@@ -4295,6 +4476,7 @@ mod docker_session_persistence_tests {
             env: config.env_vars,
             remove_env: config.remove_env,
             cwd: config.working_dir,
+            pending_tool_runtime_migration: None,
         };
         assert_eq!(process_launch.command, runtime.binary());
         let workdir_index = process_launch
@@ -6122,5 +6304,189 @@ mod fr001_capability_cache_tests {
         );
         assert!(!off.claude_ultracode_supported());
         assert!(!off.claude_workflows_enabled());
+    }
+}
+
+#[cfg(test)]
+mod tool_runtime_integration_tests {
+    use super::*;
+
+    fn provenance() -> gwt_agent::ToolRuntimeProvenance {
+        gwt_agent::ToolRuntimeProvenance {
+            schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+            official_package: "@openai/codex".to_string(),
+            requested_selector: "latest".to_string(),
+            resolved_exact_version: "0.116.0".to_string(),
+            runner_kind: gwt_agent::ToolRuntimeRunnerKind::Npx,
+            resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
+        }
+    }
+
+    #[test]
+    fn quick_start_source_session_hydrates_tool_runtime_provenance_before_prepare() {
+        let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let mut session = gwt_agent::Session::new(
+            worktree.path(),
+            "work/issue-3456",
+            gwt_agent::AgentId::Codex,
+        );
+        session.tool_runtime_provenance = Some(provenance());
+        session.save(sessions_dir.path()).expect("save session");
+
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .tool_runtime_source_session_id(session.id.clone())
+            .build();
+        let migration =
+            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
+                .expect("hydrate provenance");
+
+        assert!(migration.is_none());
+        assert_eq!(
+            config.tool_runtime_provenance,
+            session.tool_runtime_provenance
+        );
+    }
+
+    #[test]
+    fn legacy_source_session_migration_is_staged_until_authenticated_commit() {
+        let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let mut session = gwt_agent::Session::new(
+            worktree.path(),
+            "work/issue-3456",
+            gwt_agent::AgentId::Codex,
+        );
+        session.schema_version = 0;
+        session.save(sessions_dir.path()).expect("save session");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .tool_runtime_source_session_id(session.id.clone())
+            .build();
+
+        let migration =
+            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
+                .expect("load migration source")
+                .expect("legacy source");
+        assert!(
+            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
+                .expect("reload before resolution")
+                .tool_runtime_provenance
+                .is_none(),
+            "loading a legacy source must not mutate it before health succeeds"
+        );
+
+        config.tool_runtime_provenance = Some(provenance());
+        let pending = pending_lazy_tool_runtime_provenance_migration(
+            migration,
+            &config,
+            "target-session".to_string(),
+        )
+        .expect("stage migration");
+        assert!(
+            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
+                .expect("reload staged source")
+                .tool_runtime_provenance
+                .is_none(),
+            "staging an exact plan must not mutate the legacy source before authenticated SessionStart"
+        );
+        persist_lazy_tool_runtime_provenance_migration(sessions_dir.path(), &pending)
+            .expect("commit migration");
+
+        assert_eq!(
+            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
+                .expect("reload migrated session")
+                .tool_runtime_provenance,
+            config.tool_runtime_provenance
+        );
+    }
+
+    #[test]
+    fn missing_explicit_source_session_fails_closed_before_package_resolution() {
+        let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .tool_runtime_source_session_id("missing-session")
+            .tool_runtime_provenance(provenance())
+            .build();
+
+        let error =
+            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
+                .expect_err("an explicit missing source must fail closed");
+
+        assert!(error.contains("missing-session"));
+        assert_eq!(config.tool_runtime_provenance, Some(provenance()));
+    }
+
+    #[test]
+    fn lazy_provenance_migration_cas_failure_preserves_current_session_bytes() {
+        let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let session = gwt_agent::Session::new(
+            worktree.path(),
+            "work/issue-3456",
+            gwt_agent::AgentId::Codex,
+        );
+        session.save(sessions_dir.path()).expect("save session");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .tool_runtime_source_session_id(session.id.clone())
+            .build();
+        let migration =
+            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
+                .expect("load migration source")
+                .expect("legacy source");
+
+        let mut concurrent = session.clone();
+        concurrent.display_name = "Concurrent update".to_string();
+        concurrent
+            .save_if_unchanged(sessions_dir.path(), &session)
+            .expect("concurrent save");
+        let path = sessions_dir.path().join(format!("{}.toml", session.id));
+        let expected_bytes = std::fs::read(&path).expect("read concurrent bytes");
+        config.tool_runtime_provenance = Some(provenance());
+        let pending = pending_lazy_tool_runtime_provenance_migration(
+            migration,
+            &config,
+            "target-session".to_string(),
+        )
+        .expect("stage migration");
+
+        let error = persist_lazy_tool_runtime_provenance_migration(sessions_dir.path(), &pending)
+            .expect_err("stale migration must fail closed");
+
+        assert!(error.contains("raced"));
+        assert_eq!(
+            std::fs::read(path).expect("read bytes after rejected migration"),
+            expected_bytes
+        );
+    }
+
+    #[test]
+    fn exact_tool_runtime_plan_is_not_rewritten_by_bun_cache_fast_path() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .tool_runtime_provenance(provenance())
+            .build();
+        config.command = "npx.cmd".to_string();
+        config.args = vec!["--yes".to_string(), "@openai/codex@0.116.0".to_string()];
+        let expected = (config.command.clone(), config.args.clone());
+
+        assert!(!apply_post_resolution_bun_cache_fast_path(&mut config));
+        assert_eq!((config.command, config.args), expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn targeted_windows_official_provider_stays_starting_during_pre_spawn_health_checks() {
+        for agent_id in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
+            let config = gwt_agent::AgentLaunchBuilder::new(agent_id).build();
+            assert_eq!(
+                initial_agent_window_status(&config),
+                WindowProcessStatus::Starting
+            );
+        }
+
+        let generic = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::OpenCode).build();
+        assert_eq!(
+            initial_agent_window_status(&generic),
+            WindowProcessStatus::Running
+        );
     }
 }

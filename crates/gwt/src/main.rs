@@ -1317,6 +1317,17 @@ mod tests {
         }
     }
 
+    fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
+        let mut env = HashMap::new();
+        let mut remove_env = additional
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>();
+        gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
+            .apply_to_parts(&mut env, &mut remove_env);
+        remove_env
+    }
+
     #[test]
     fn stale_agent_frontend_outcome_unregisters_and_closes_pane_client() {
         let clients = ClientHub::default();
@@ -2636,6 +2647,7 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
+            pending_tool_runtime_migrations: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
@@ -3984,6 +3996,7 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
+                    pending_tool_runtime_migration: None,
                 },
                 "session-3".to_string(),
                 "feature/demo".to_string(),
@@ -4017,6 +4030,7 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
+                pending_tool_runtime_migration: None,
             }),
         );
         assert!(matches!(
@@ -5084,6 +5098,7 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
+                    pending_tool_runtime_migration: None,
                 },
                 "session-1".to_string(),
                 "feature/demo".to_string(),
@@ -5126,6 +5141,7 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
+                    pending_tool_runtime_migration: None,
                 },
                 "session-2".to_string(),
                 "feature/demo".to_string(),
@@ -5159,6 +5175,7 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
+                pending_tool_runtime_migration: None,
             }),
         );
         assert!(matches!(
@@ -5180,6 +5197,7 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
+                pending_tool_runtime_migration: None,
             }),
         );
         assert!(matches!(
@@ -5373,6 +5391,7 @@ mod tests {
         config
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
@@ -5407,6 +5426,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn host_package_runner_fallback_keeps_bunx_when_probe_succeeds() {
         let mut config = sample_versioned_launch_config();
@@ -5542,10 +5562,7 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
-        assert_eq!(
-            launch.remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(launch.remove_env, expected_launch_remove_env(&["SECRET"]));
     }
 
     #[test]
@@ -5714,8 +5731,26 @@ mod tests {
         assert_eq!(config.args[1], "-NoProfile");
         assert_eq!(config.args[2], "-Command");
         let script = config.args[3].as_str();
-        assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
-        assert!(script.contains("'value''s'"));
+        #[cfg(not(windows))]
+        {
+            assert!(
+                script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"),
+                "{script}"
+            );
+            assert!(script.contains("'value''s'"));
+        }
+        #[cfg(windows)]
+        {
+            let inner = config
+                .env_vars
+                .get(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV)
+                .expect("resolver-owned inner cmd expression");
+            assert_eq!(inner, r#""C:\Program Files\nodejs\npx.cmd" "value's""#);
+            assert!(
+                script.contains(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV),
+                "{script}"
+            );
+        }
         assert!(script.contains("[gwt] launching agent"));
         assert!(script.contains("[gwt] process exited with status"));
         assert!(script.contains("exit $gwtExitCode"));
@@ -7482,10 +7517,7 @@ mod tests {
             Some("enabled")
         );
         assert!(!effective_env.contains_key("SECRET"));
-        assert_eq!(
-            remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["SECRET"]));
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

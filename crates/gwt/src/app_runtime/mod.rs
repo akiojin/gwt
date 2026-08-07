@@ -705,6 +705,12 @@ pub struct AppRuntime {
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Legacy official-provider provenance is staged during preparation and
+    /// committed only after the exact launched Session emits authenticated
+    /// SessionStart. Any earlier route failure leaves the source Session bytes
+    /// unchanged and retryable.
+    pub(crate) pending_tool_runtime_migrations:
+        HashMap<String, launch::PendingToolRuntimeMigration>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
@@ -869,6 +875,17 @@ impl ProjectTabRuntime {
 enum IssueMonitorScanPolicy {
     Scan,
     CacheOnly,
+}
+
+fn local_issue_monitor_fallback_projection_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(timeout) = std::env::var_os("GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS")
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        .filter(|timeout| *timeout <= 60_000)
+    {
+        return std::time::Duration::from_millis(timeout);
+    }
+    std::time::Duration::from_secs(1)
 }
 
 #[cfg(test)]
@@ -1331,6 +1348,7 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
@@ -2974,7 +2992,7 @@ impl AppRuntime {
         project_root: &Path,
     ) -> (Vec<gwt::IssueMonitorIssue>, Option<String>, String) {
         let _cache_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
         );
         let cache_root = gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
         let (cached_issues, cache_error) =
