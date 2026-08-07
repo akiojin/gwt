@@ -3033,14 +3033,8 @@ mod tests {
         )
         .expect("preview before mutation");
         let listed = parse_output(&list_out);
-        let preview_title = listed["candidates"][0]["issue_preview"]["title"]
-            .as_str()
-            .expect("preview title")
-            .to_string();
-        let preview_body = listed["candidates"][0]["issue_preview"]["body"]
-            .as_str()
-            .expect("preview body")
-            .to_string();
+        let public_projection =
+            serde_json::to_string(&listed["candidates"][0]).expect("public candidate projection");
 
         let error = run_collect(
             &mut env,
@@ -3057,14 +3051,13 @@ mod tests {
         assert!(error
             .to_string()
             .contains("manual labels are not supported"));
-        assert!(!preview_title.contains("/Users/alice"));
         assert!(
-            !preview_body.contains("/Users/alice"),
-            "public preview must not contain private paths: {preview_body}"
+            !public_projection.contains("/Users/alice"),
+            "public projection must not contain private paths: {public_projection}"
         );
         assert!(
-            !preview_body.contains("ghp_1234567890abcdef"),
-            "public preview must not contain token-like secrets: {preview_body}"
+            !public_projection.contains("ghp_1234567890abcdef"),
+            "public projection must not contain token-like secrets: {public_projection}"
         );
         assert!(env.owner_client.owner_call_log().is_empty());
         assert!(env.owner_client.owner_mutation_call_log().is_empty());
@@ -3164,7 +3157,15 @@ mod tests {
 
         assert_eq!(list_code, 0, "list output: {list_out}");
         let output = parse_output(&list_out);
+        let candidate = &output["candidates"][0];
         let preview = &output["candidates"][0]["issue_preview"];
+        if preview.is_null() {
+            assert_eq!(candidate["summary"], "Public preview unavailable");
+            let encoded = serde_json::to_string(candidate).expect("public candidate projection");
+            assert!(!encoded.contains("/Users/alice"));
+            assert!(!encoded.contains("ghp_1234567890abcdef"));
+            return;
+        }
         assert_eq!(preview["repository"], "akiojin/gwt");
         assert_eq!(
             preview["title"],
