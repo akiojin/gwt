@@ -332,7 +332,9 @@ fn a_parked_issue_stays_parked_across_a_restart_and_rescan() {
         "a parked issue must not be re-queued after a restart"
     );
     assert!(
-        restarted.next_launch_request("2026-08-06T07:00:01Z").is_none(),
+        restarted
+            .next_launch_request("2026-08-06T07:00:01Z")
+            .is_none(),
         "a parked issue must never be relaunched by the restarted driver"
     );
     assert!(
