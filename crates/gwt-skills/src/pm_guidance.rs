@@ -281,10 +281,11 @@ mod tests {
             "`pane.list`",
             "`pane.read`",
             "`launched_window_id`",
-            // FR-031: stopping a pane is allowed and bounded.
+            // FR-066: stopping a pane is allowed and bounded. This is the
+            // explicit amendment to FR-023's blanket prohibition.
             "`pane.close`",
             "counts as one attempt",
-            // FR-033: stalls are observable, and their cause is not.
+            // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
             "Never run `pane.send`",
@@ -346,15 +347,19 @@ mod tests {
             !body.contains("inbox snapshots"),
             "there is no inbox operation; the snapshot is issue.monitor.status"
         );
-        // SPEC-3431 FR-031 (user ruling 2026-08-07): the close prohibition is
-        // gone on purpose. It was a workaround for `requeue_window` consuming
-        // no attempt, which a person closing a window by hand triggered just as
-        // easily — the constraint made the PM weaker without protecting
-        // anyone. The loop is now bounded where it happens, so the capability
-        // is safe. Pinned as a negative so it is not "restored" as a fix.
+        // SPEC-3431 FR-066 (user ruling 2026-08-07, reaffirmed on the FR
+        // renumbering): the close prohibition is gone on purpose. It was a
+        // workaround for `requeue_window` consuming no attempt, which a person
+        // closing a window by hand triggered just as easily — the constraint
+        // made the PM weaker without protecting anyone. The loop is now bounded
+        // where it happens, so the capability is safe. FR-066 amends FR-023 for
+        // `pane.close` only; `pane.send` and the rest of FR-023 stand, and the
+        // Monitor-owned stop_only/failover_restart lifecycle (FR-029〜031/033)
+        // remains a separate, still-open requirement rather than a substitute.
+        // Pinned as a negative so it is not "restored" as a fix.
         assert!(
             !body.contains("Never run `pane.close`"),
-            "FR-031: the close footgun is bounded in requeue_window, not by \
+            "FR-066: the close footgun is bounded in requeue_window, not by \
              taking the capability away from the PM"
         );
     }

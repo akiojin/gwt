@@ -21613,7 +21613,7 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
     )));
 }
 
-/// SPEC-3431 FR-030: a dead agent frees its Issue Monitor slot even while its
+/// SPEC-3431 FR-065: a dead agent frees its Issue Monitor slot even while its
 /// pane is kept on screen for diagnosis.
 ///
 /// `WindowProcessStatus::Error` on an agent window comes from `try_wait`
@@ -21628,7 +21628,7 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
 /// slot held. With the default `max_active = 1` that stops the whole queue —
 /// which is exactly what "the PM registers Issues but nothing ever runs" looks
 /// like from the outside.
-/// SPEC-3431 FR-033: a hook arrival is what advances the activity clock.
+/// SPEC-3431 FR-068: a hook arrival is what advances the activity clock.
 ///
 /// The existing heartbeat call sits on the PTY-status path and fires only when
 /// `handle_runtime_status` receives `Running` — which never happens for a
@@ -21680,7 +21680,7 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     );
 }
 
-/// SPEC-3431 FR-032: an agent that exits cleanly also frees its slot.
+/// SPEC-3431 FR-067: an agent that exits cleanly also frees its slot.
 ///
 /// FR-030 closed this leak on the `Error` side, but `exit 0` maps to
 /// `WindowProcessStatus::Stopped` (`window_state.rs`, `PaneStatus::Completed(0)`)

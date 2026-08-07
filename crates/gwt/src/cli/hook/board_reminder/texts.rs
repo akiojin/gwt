@@ -237,7 +237,7 @@ Work lifecycle は終端 delivery settlement 中です。coordination と blocke
 
 pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
 
-/// SPEC-3431 FR-029: what the resident PM is told at an intent boundary.
+/// SPEC-3431 FR-064: what the resident PM is told at an intent boundary.
 ///
 /// Replaces the implementation-agent reminder wholesale. That text tells an
 /// agent to post its own work-phase transitions to the Board, to keep a Work

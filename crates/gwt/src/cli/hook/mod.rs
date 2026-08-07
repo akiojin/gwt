@@ -50,7 +50,7 @@ pub(crate) use identity::{
     resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookSessionId, RawHookEvent,
 };
 
-/// SPEC-3431 FR-029: whether this hook is running for the resident PM.
+/// SPEC-3431 FR-064: whether this hook is running for the resident PM.
 ///
 /// The PM receives a byte-identical managed asset set to every other agent,
 /// including the hooks — but it is not an implementation agent. It never

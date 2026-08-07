@@ -914,7 +914,7 @@ pub struct IssueMonitorAgentStatus {
     pub last_scan_at: Option<String>,
 }
 
-/// SPEC-3431 FR-034: when the provider backing `agent_id` is out of quota,
+/// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
 /// the instant it recovers.
 ///
 /// `None` when that provider has quota left, is unknown to the usage poller,
@@ -958,7 +958,7 @@ pub struct IssueMonitorInboxSummary {
     pub launched_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
-    /// SPEC-3431 FR-033: when this launch last showed signs of life (RFC3339).
+    /// SPEC-3431 FR-068: when this launch last showed signs of life (RFC3339).
     ///
     /// Seeded at launch and advanced by hook arrivals, which is the only clock
     /// that tracks real progress: a live agent blocked on an approval prompt,
@@ -2961,8 +2961,8 @@ impl IssueMonitorState {
                     blocked_by_owner: item.blocked_by_owner.clone(),
                     launched_window_id: item.launched_window_id.clone(),
                     error_message: item.error_message.clone(),
-                    // FR-033: the autonomous record already carries the
-                    // heartbeat that hook arrivals refresh. Surfacing it here
+                    // SPEC-3431 FR-068: the autonomous record already carries
+                    // the heartbeat that hook arrivals refresh. Surfacing it here
                     // rather than adding a parallel field keeps one clock, so
                     // a reader and the stuck detector can never disagree.
                     last_activity_at: self
@@ -4131,7 +4131,7 @@ impl IssueMonitorState {
             item.launched_window_id = Some(window_id);
             item.error_message = None;
         }
-        // SPEC-3431 FR-033: start the activity clock here rather than only on
+        // SPEC-3431 FR-068: start the activity clock here rather than only on
         // the autonomous path. Every launch needs it — an agent that stalls
         // without autonomous mode stalls just as silently — and this is the
         // one place every launch is confirmed.
@@ -4408,7 +4408,7 @@ impl IssueMonitorState {
     /// "done" state. Terminal states (Merged/Released/failed) are preserved.
     /// Returns the affected Issue number when the window mapped to an active
     /// launch that was re-queued.
-    /// SPEC-3431 FR-034: free the slot held by a launch whose provider hit its
+    /// SPEC-3431 FR-069: free the slot held by a launch whose provider hit its
     /// usage limit, and hold the issue until `resets_at`.
     ///
     /// Deliberately unlike [`Self::requeue_window_at`]: no attempt is consumed
@@ -4420,7 +4420,7 @@ impl IssueMonitorState {
     ///
     /// This is the single stall the mechanism resolves on its own, because it
     /// is the single stall whose cause the provider states outright. Every
-    /// other stall is reported and left to the PM (FR-034), since an approval
+    /// other stall is reported and left to the PM (SPEC-3431 FR-069), since an approval
     /// prompt, a rate limit, and a hang are indistinguishable from elapsed
     /// time alone.
     pub fn release_rate_limited_launch(
@@ -4464,7 +4464,7 @@ impl IssueMonitorState {
 
     /// [`Self::requeue_window`] with an injected clock for the backoff floor.
     ///
-    /// SPEC-3431 FR-031: a close is a bounded retry, not a free one. It used to
+    /// SPEC-3431 FR-066: a close is a bounded retry, not a free one. It used to
     /// consume no attempt and set no backoff, so under autonomous mode the
     /// closed issue went straight back to the queue head and the next scan
     /// relaunched it immediately — closing a pane restarted it instead of
@@ -5869,7 +5869,7 @@ mod tests {
         assert_eq!(monitor.queue_len(), 1);
     }
 
-    /// SPEC-3431 FR-034: the reset instant to hold a launch until, when the
+    /// SPEC-3431 FR-069: the reset instant to hold a launch until, when the
     /// agent's own provider is out of quota.
     #[test]
     fn rate_limit_reset_is_resolved_from_the_agents_own_provider() {
@@ -5906,7 +5906,7 @@ mod tests {
         assert_eq!(rate_limit_reset_for_agent("gemini", &accounts), None);
     }
 
-    /// SPEC-3431 FR-034: a rate-limited launch releases its slot.
+    /// SPEC-3431 FR-069: a rate-limited launch releases its slot.
     ///
     /// This is the one stall whose cause is known for certain — the provider
     /// itself reports `limit_reached` with a reset instant — so it is the one
@@ -5946,7 +5946,7 @@ mod tests {
         );
     }
 
-    /// FR-034: a stall whose cause is *not* known keeps its slot.
+    /// SPEC-3431 FR-069: a stall whose cause is *not* known keeps its slot.
     ///
     /// Approval prompts, rate limits, and genuine hangs are indistinguishable
     /// from the snapshot, so reclaiming a slot on elapsed time alone would kill
@@ -5975,7 +5975,7 @@ mod tests {
         );
     }
 
-    /// SPEC-3431 FR-033: a launched issue reports when its agent last showed
+    /// SPEC-3431 FR-068: a launched issue reports when its agent last showed
     /// signs of life, so "running but not progressing" is observable at all.
     ///
     /// Everything a live agent can get stuck on — waiting for approval, a
@@ -6018,7 +6018,7 @@ mod tests {
         assert_eq!(after, "2026-08-07T09:00:00Z");
     }
 
-    /// SPEC-3431 FR-031: closing a launched window is a bounded retry.
+    /// SPEC-3431 FR-066: closing a launched window is a bounded retry.
     ///
     /// Requeueing consumed no attempt and set no backoff, so with autonomous
     /// mode on, closing a pane put the issue straight back at the head of the

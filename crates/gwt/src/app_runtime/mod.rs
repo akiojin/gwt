@@ -733,7 +733,7 @@ pub struct AppRuntime {
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
-    /// SPEC-3431 FR-033: when each agent window last showed activity, so the
+    /// SPEC-3431 FR-068: when each agent window last showed activity, so the
     /// heartbeat published to the Issue Monitor can be throttled instead of
     /// firing a daemon control on every hook. Keyed by combined window id.
     pub(crate) last_agent_activity: HashMap<String, chrono::DateTime<chrono::Utc>>,
@@ -2622,7 +2622,7 @@ impl AppRuntime {
     /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
     /// (a runtime status change). Best-effort refresh of the daemon's
     /// stuck-detection window for the mapped issue. No-op for non-monitor windows.
-    /// SPEC-3431 FR-033: the last recorded activity for `window_id`.
+    /// SPEC-3431 FR-068: the last recorded activity for `window_id`.
     #[cfg(test)]
     pub(crate) fn last_agent_activity_for_test(
         &self,
@@ -2631,7 +2631,7 @@ impl AppRuntime {
         self.last_agent_activity.get(window_id).copied()
     }
 
-    /// SPEC-3431 FR-033: minimum gap between heartbeat publications for one
+    /// SPEC-3431 FR-068: minimum gap between heartbeat publications for one
     /// window. Hooks arrive per tool call, which is far more often than a
     /// stall check needs, and each publication is a daemon control round trip.
     const HEARTBEAT_THROTTLE_SECS: i64 = 60;

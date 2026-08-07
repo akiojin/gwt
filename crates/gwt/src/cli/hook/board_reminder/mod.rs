@@ -530,7 +530,7 @@ pub fn compute_plan(
     // Only a terminal delivery settlement still quiets them.
     let suppress_work_state_reminders =
         terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
-    // SPEC-3431 FR-029: the resident PM owns no Work item, its window title is
+    // SPEC-3431 FR-064: the resident PM owns no Work item, its window title is
     // fixed, and `workspace.update` cannot even succeed from its detached
     // worktree (#3477). Suppress separately from the terminal-settlement path
     // so the PM gets its own reminder rather than a settlement notice.
@@ -629,7 +629,7 @@ fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -
         })
 }
 
-/// SPEC-3431 FR-029: swap the implementation-agent reminder for the PM's.
+/// SPEC-3431 FR-064: swap the implementation-agent reminder for the PM's.
 /// Shares [`replace_with_terminal_settlement_reminder`]'s substitution so both
 /// stay in step when a base reminder variant is added.
 fn replace_with_pm_reminder(
@@ -812,7 +812,7 @@ mod tests {
         e
     }
 
-    /// SPEC-3431 FR-029: the resident PM gets no Work-state reminders.
+    /// SPEC-3431 FR-064: the resident PM gets no Work-state reminders.
     ///
     /// The title demand ("set title-summary as your first action, this is not
     /// optional", re-issued every turn) outranks the PM's own contract in the

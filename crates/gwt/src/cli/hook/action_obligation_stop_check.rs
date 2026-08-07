@@ -21,7 +21,7 @@ use crate::cli::action_obligation;
 /// missing or unparsable prompt arms nothing — unclassifiable input must not
 /// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
-    // SPEC-3431 FR-029: the resident PM cannot settle a producing obligation.
+    // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
     // Every settlement path (all-passing `verify.run`, `pr.*`) requires
     // production artifacts the PM's contract forbids it from creating, so
     // arming one leaves it blocked at Stop with no exit but a false
@@ -125,7 +125,7 @@ mod tests {
         );
     }
 
-    /// SPEC-3431 FR-029: the resident PM never arms a producing obligation.
+    /// SPEC-3431 FR-064: the resident PM never arms a producing obligation.
     ///
     /// The settlement paths are an all-passing `verify.run`, `issue.comment` /
     /// `issue.spec.edit`, or `pr.*`. The PM's contract forbids it from touching

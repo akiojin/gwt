@@ -233,7 +233,7 @@ impl AppRuntime {
         // deliberate for the pane itself — a stopped agent window stays on the
         // canvas so its final output remains readable
         // (`app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics`,
-        // #3274). SPEC-3431 FR-032 keeps that behaviour and fixes the separate
+        // #3274). SPEC-3431 FR-067 keeps that behaviour and fixes the separate
         // bug it was masking: the Issue Monitor was never told either, so the
         // launch's slot stayed held. Visibility and accounting are decided
         // independently below.
@@ -265,7 +265,7 @@ impl AppRuntime {
             }
             let _ = self.persist();
             let mut events = cleanup_events;
-            // SPEC-3431 FR-032: auto-close reaps the window itself instead of
+            // SPEC-3431 FR-067: auto-close reaps the window itself instead of
             // going through `close_window_events`, so it also owes the Issue
             // Monitor the notification that path would have sent. Without it
             // the launch's slot stays held by a window that no longer exists.
@@ -307,7 +307,7 @@ impl AppRuntime {
         // exited — drain any intake worktree cleanup queued by the session
         // stop above (or by an earlier explicit stop of this window).
         let mut events = self.take_ephemeral_worktree_cleanup_events();
-        // SPEC-3431 FR-030: notify the Issue Monitor whenever an agent window
+        // SPEC-3431 FR-065: notify the Issue Monitor whenever an agent window
         // reaches Error, including when the pane is kept on screen.
         //
         // `keep_active_agent_session_for_recovery` used to gate this too, but
@@ -325,7 +325,7 @@ impl AppRuntime {
         // only cleared by a later hook event, and a dead process sends none.
         // With the default `max_active = 1` that stops the whole queue.
         //
-        // SPEC-3431 FR-032: `Stopped` (a clean `exit 0`) leaks the same way.
+        // SPEC-3431 FR-067: `Stopped` (a clean `exit 0`) leaks the same way.
         // It never reached `agent_failed`, and the auto-close gate below
         // additionally required `window_hook_states == Some(Stopped)` — a
         // value `window_state_for_hook_event` cannot produce — so the window
@@ -436,7 +436,7 @@ impl AppRuntime {
             return events;
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
-        // SPEC-3431 FR-033: a hook arrival is the one signal that an agent is
+        // SPEC-3431 FR-068: a hook arrival is the one signal that an agent is
         // actually making progress. The PTY-status heartbeat below never fires
         // for a working agent (the watcher thread stays silent until the
         // process exits), so without this the activity clock froze at launch
