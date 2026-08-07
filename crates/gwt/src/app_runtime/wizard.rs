@@ -2277,6 +2277,10 @@ impl AppRuntime {
         .map(|prefs| prefs.autonomous_mode)
         .unwrap_or(false);
         launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // Issue #3478 (AC-1): the unattended agent must know it is unattended,
+        // so its hooks can convert a confirmation question into a NeedsHuman
+        // handoff instead of letting it hold this slot until the stuck timeout.
+        launch_request.set_autonomous_execution_context(autonomous_mode, issue_number);
         // SPEC #3200 FR-015: apply the distinct review model for the review agent.
         if let (Some(model), LaunchWizardLaunchRequest::Agent(config)) =
             (&review_model_override, &mut launch_request)
@@ -2360,6 +2364,17 @@ impl AppRuntime {
         }
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok(None);
+        }
+        // Issue #3478 (AC-5): a parked question that a human answered resumes
+        // this exact session with the answer as its first prompt, so the work
+        // continues with the decision context it was parked on. Taken once —
+        // a later resume of the same session must not replay a stale answer.
+        if let Some(prompt) = gwt::take_autonomous_resume_prompt_from_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+            issue_number,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ) {
+            config.args.push(prompt);
         }
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
             project_root,

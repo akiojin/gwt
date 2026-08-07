@@ -3020,6 +3020,25 @@ fn scan_issue_monitor_once_blocking(
             &now,
         )?;
     }
+    // Issue #3478 (FR-025): drive the question handoffs the intercepting hook
+    // wrote. Parking runs BEFORE the stuck sweep so a recognized question frees
+    // its slot on this scan instead of waiting out `stuck_timeout_secs`, and
+    // answered handoffs are un-parked in the same pass so the resumed launch
+    // can be claimed immediately.
+    let parked = monitor.apply_pending_autonomous_handoffs(&now);
+    if !parked.is_empty() {
+        tracing::info!(
+            ?parked,
+            "parked autonomous issues on a human-judgment question"
+        );
+    }
+    let resumed = monitor.resume_answered_autonomous_handoffs(&now);
+    if !resumed.is_empty() {
+        tracing::info!(
+            issues = ?resumed.iter().map(|r| r.issue_number).collect::<Vec<_>>(),
+            "resuming autonomous issues whose question was answered"
+        );
+    }
     monitor.recover_stuck_autonomous(&now);
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
     // `gh pr merge --disable-auto` here would let a stale cloned scan mutate

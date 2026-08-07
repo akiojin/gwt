@@ -128,6 +128,17 @@ pub enum IssueCommand {
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
     },
+    /// Issue #3478 (AC-9): list the questions autonomous executions are parked
+    /// on, so a human can see what is blocking the queue.
+    MonitorQuestions {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Issue #3478 (AC-5): register a human answer for one parked question.
+    MonitorQuestionAnswer {
+        project_root: Option<std::path::PathBuf>,
+        handoff_id: String,
+        answer: String,
+    },
 }
 
 /// SPEC-1942 command model for `pr.*` JSON operations.

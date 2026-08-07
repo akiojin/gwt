@@ -165,6 +165,7 @@ fn format_issue_help() -> String {
         "  issue.spec.repair | issue.spec.rename",
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
+        "  issue.monitor.questions | issue.monitor.question.answer",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
@@ -176,6 +177,7 @@ fn format_issue_help() -> String {
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
+        "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
     ]
