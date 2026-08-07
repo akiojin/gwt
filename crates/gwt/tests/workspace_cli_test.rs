@@ -56,6 +56,11 @@ const BRANCH: &str = "work/ws-cli";
 const WORK_ID: &str = "existing-similar-work";
 const FOREIGN_CURRENT_WORK_ID: &str = "foreign-current-work";
 const FORWARD_TOKEN: &str = "workspace-proxy-secret-sentinel";
+// Instrumented Windows `gwtd` startup can exceed three seconds under the
+// full single-threaded coverage matrix. The client still owns the operation
+// timeout; this deadline only keeps the loopback observer alive long enough
+// to see its first request.
+const FIRST_PROXY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const HOST_WORK_ID: &str = "host-work-id";
 const HOST_JOURNAL_ENTRY_ID: &str = "host-journal-entry-id";
 
@@ -318,7 +323,7 @@ impl DisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let first_request_deadline = std::time::Instant::now() + FIRST_PROXY_REQUEST_TIMEOUT;
             let mut accepted = 0;
             loop {
                 match listener.accept() {
@@ -408,7 +413,7 @@ impl ApplyThenDisconnectServer {
         let (tx, rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let first_request_deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let first_request_deadline = std::time::Instant::now() + FIRST_PROXY_REQUEST_TIMEOUT;
             let mut accepted = 0;
             let mut applied_receipt = None;
             loop {
