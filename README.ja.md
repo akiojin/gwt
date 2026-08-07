@@ -354,6 +354,24 @@ Managed hooks は user hook を保持しながら、Agent state、workflow guard
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
 
+### Hook ファイルの所有権
+
+- gwt は `.claude/settings.local.json` をマシンローカルファイルとして再生成し、
+  Git 除外も gwt が管理します。
+- gwt は `.codex/hooks.json` を作成またはマージしますが、`.gitignore` にも
+  `info/exclude` にも追加しません。
+- `.codex/hooks.json` を version 管理するかどうかはリポジトリ側の決定です。
+  ファイルが既に存在する場合、gwt は gwt-managed hook エントリだけを差し替え、
+  user hook と無関係な top-level 設定は保持します。
+- version 管理する場合は移植可能な `gwtd` fallback を維持し、マシンローカルの
+  絶対パスをコミットしないでください。再生成は
+  `GWT_HOOK_BIN=gwtd cargo run -p gwt-skills --example regenerate_hook_settings -- worktree-local`
+  で行います。
+- launch 以外では、gwt は Codex の hook discovery 先を両方
+  （worktree ローカルの `.codex/hooks.json` と repo root 側の workspace-home
+  コピー）所有します。hook health の報告と self-heal は常に同じファイル集合を
+  対象にします。
+
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に
 gwt が注入した loopback endpoint と bearer token だけへ hook event を POST し、

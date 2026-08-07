@@ -375,6 +375,23 @@ Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
 
+### Hook file ownership
+
+- gwt regenerates `.claude/settings.local.json` as a local machine file and
+  manages its Git exclusion.
+- gwt creates or merges `.codex/hooks.json`, but does not add it to `.gitignore`
+  or `info/exclude`.
+- Whether `.codex/hooks.json` is version-controlled is a repository decision.
+  When the file already exists, gwt replaces only gwt-managed hook entries and
+  keeps user hooks plus unrelated top-level settings.
+- A version-controlled `.codex/hooks.json` should keep the portable `gwtd`
+  fallback so a machine-local absolute path is never committed. Regenerate it
+  with
+  `GWT_HOOK_BIN=gwtd cargo run -p gwt-skills --example regenerate_hook_settings -- worktree-local`.
+- Outside a launch, gwt owns both Codex hook discovery locations — the
+  worktree-local `.codex/hooks.json` and the workspace-home copy at the repo
+  root — so hook health reporting and self-heal always target the same files.
+
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
 the loopback endpoint and bearer token that gwt injects for that session, then

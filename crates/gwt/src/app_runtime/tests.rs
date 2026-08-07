@@ -14188,6 +14188,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     });
     assert!(monitor.apply_confirmed_claim(
         fixture.owner.number,
@@ -19481,6 +19482,51 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 
     assert_eq!(fs::read(&config).unwrap(), before);
     assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
+}
+
+/// #3474: the `.codex/hooks.json` committed before the guarded template landed
+/// reports ONLY `managed hook binary missing:` when its bare fallback cannot be
+/// resolved, so the loop breaker below skipped it on every launch and the file
+/// never converged. The missing `command -v` guard is now its own issue class,
+/// so a legacy config is repaired — and the repaired file no longer raises it,
+/// so this still cannot loop.
+#[test]
+fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let config = worktree.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    // The legacy template, pinned to a binary that no longer exists: the ONLY
+    // issue it can raise through the binary audit is `managed hook binary
+    // missing:`, which is exactly what the loop breaker skips.
+    fs::write(
+        &config,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart"}}]}}]}}}}"#,
+            missing_pin.display()
+        ),
+    )
+    .unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&missing_pin.display().to_string()),
+    );
+
+    let rendered = fs::read_to_string(&config).unwrap();
+    assert!(rendered.contains("command -v"), "{rendered}");
+
+    // A second pass over the converged file must be a no-op: the guard issue is
+    // gone and only the unresolvable pin remains, which the loop breaker skips.
+    let converged = fs::read(&config).unwrap();
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&missing_pin.display().to_string()),
+    );
+    assert_eq!(fs::read(&config).unwrap(), converged);
 }
 
 #[test]
@@ -30910,6 +30956,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             state: gwt::IssueMonitorIssueState::Open,
             body: None,
             url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
@@ -31014,6 +31061,81 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
 }
 
 #[test]
+fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    let mut issue = gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Issue 42".to_string(),
+        labels: vec!["bug".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+    };
+    monitor.record_candidate(issue.clone());
+    let key = monitor
+        .prepare_pending_effect(
+            "claim-effect-42",
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                expires_at: "2026-08-05T10:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        )
+        .expect("prepare claim effect");
+    assert!(monitor.mark_pending_effect_attempting(&key));
+    let attempting = monitor.pending_effects()[0].clone();
+
+    issue.labels.push("hold".to_string());
+    monitor.record_candidate(issue);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist excluded state");
+
+    assert_eq!(
+        super::commit_local_issue_monitor_effect_result(
+            &prefs_path,
+            &mut monitor,
+            attempting,
+            LocalIssueMonitorEffectOutcome::Claim(Ok(
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                    gwt_github::issue_auto_claim::ClaimComment {
+                        comment_id: Some(gwt_github::CommentId(99)),
+                        claim_id: "claim-42".to_string(),
+                        owner: "host/session".to_string(),
+                        issue_number: 42,
+                        status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                        heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                        expires_at: "2026-08-05T10:30:00Z".to_string(),
+                        launched_work_id: Some("work/issue-42".to_string()),
+                    },
+                ),
+            )),
+            "2026-08-05T10:01:00Z",
+        ),
+        1
+    );
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(persisted.launching_issues.is_empty());
+    assert!(persisted.pending_launch_deliveries.is_empty());
+    assert!(persisted.pending_effects.iter().any(|effect| matches!(
+        &effect.payload,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42,
+            claim_id,
+            owner,
+        } if claim_id == "claim-42" && owner == "host/session"
+    )));
+}
+
+#[test]
 fn app_runtime_local_driver_rejects_stale_process_attempting_without_disk_fence() {
     let _env_lock = env_test_lock()
         .lock()
@@ -31108,6 +31230,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     });
     assert!(monitor.apply_confirmed_claim(
         42,
@@ -32436,6 +32559,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -32525,6 +32649,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -32637,6 +32762,7 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -32728,6 +32854,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
