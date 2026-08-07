@@ -801,6 +801,7 @@ fn percent_decode_registry_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn percent_decode_registry_path_handles_non_ascii_without_losing_valid_decoding() {
         assert_eq!(percent_decode_registry_path("/%€/package"), "/%€/package");
