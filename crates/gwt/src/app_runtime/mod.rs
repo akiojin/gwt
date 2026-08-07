@@ -141,8 +141,11 @@ use launch::{
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     maybe_register_codex_managed_hook_trust_for_launch,
 };
+pub(crate) use launch::{continue_work_readiness_decision, ReadinessDeadlineDecision};
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
-pub use launch::{AgentLaunchResult, LaunchWizardMemoryCache, ProcessLaunch};
+pub use launch::{
+    AgentLaunchResult, ContinueWorkReadinessWatch, LaunchWizardMemoryCache, ProcessLaunch,
+};
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
 use profile::ProfileSaveRequest;
@@ -766,6 +769,13 @@ pub struct AppRuntime {
     pub(crate) local_worktree_branches:
         std::cell::RefCell<HashMap<PathBuf, std::collections::HashSet<String>>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
+    /// Issue #3475: PTY output bytes seen per window, counted monotonically
+    /// for as long as the window keeps its runtime state tracking. The
+    /// authenticated SessionStart readiness deadline compares it against the
+    /// count captured when the deadline was armed, so it only ever needs the
+    /// delta — an in-place agent restart reusing the same window is fine.
+    /// Runtime-only; never persisted.
+    pub(crate) window_output_bytes: HashMap<String, u64>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
     pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
@@ -1254,6 +1264,7 @@ fn issue_monitor_issue_from_snapshot(
         },
         body: (!snapshot.body.is_empty()).then(|| snapshot.body.clone()),
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     }
 }
 
@@ -1339,6 +1350,7 @@ impl AppRuntime {
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
+            window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
             agent_capability_issuer: None,
@@ -5258,6 +5270,7 @@ impl AppRuntime {
 
     pub(crate) fn seed_window_pty_statuses(&mut self) {
         self.window_pty_statuses.clear();
+        self.window_output_bytes.clear();
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
                 if window.preset.requires_process() {
@@ -5308,6 +5321,7 @@ impl AppRuntime {
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
+        self.window_output_bytes.remove(window_id);
         self.window_hook_states.remove(window_id);
         self.recoverable_agent_error_windows.remove(window_id);
         self.board_all_view_windows.remove(window_id);

@@ -51,20 +51,21 @@ use super::continuation::{
     ActiveOwnerLiveness, DurableLaunchRecoveryKind,
 };
 use super::{
-    active_work_projection_from_saved, dispatch_agent_launch_success,
-    drive_local_issue_monitor_claim_effects_with, local_issue_monitor_fallback_commit_count,
-    local_issue_monitor_remote_scan_count, prepare_local_issue_monitor_claim_proposals,
-    rebase_mutate_and_persist_issue_monitor_state, record_issue_monitor_scan_failures,
-    reset_local_issue_monitor_fallback_commit_count, reset_local_issue_monitor_remote_scan_count,
-    save_resumed_workspace_projection, save_start_work_workspace_projection,
-    save_workspace_launch_projection, ActiveAgentSession, AgentKanbanLaunchTarget,
-    AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
-    CachedContinueWorkOutcome, DispatchTarget, IssueMonitorProfileSaveContext,
+    active_work_projection_from_saved, continue_work_readiness_decision,
+    dispatch_agent_launch_success, drive_local_issue_monitor_claim_effects_with,
+    local_issue_monitor_fallback_commit_count, local_issue_monitor_remote_scan_count,
+    prepare_local_issue_monitor_claim_proposals, rebase_mutate_and_persist_issue_monitor_state,
+    record_issue_monitor_scan_failures, reset_local_issue_monitor_fallback_commit_count,
+    reset_local_issue_monitor_remote_scan_count, save_resumed_workspace_projection,
+    save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
+    AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
+    AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
     KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
     LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
     PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch,
-    ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind,
-    WorkspaceResumeContext,
+    ProjectTabRuntime, ReadinessDeadlineDecision, UserEvent, WindowRuntime,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
@@ -3109,6 +3110,7 @@ fn sample_runtime_with_events(
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
+        window_output_bytes: HashMap::new(),
         window_hook_states: HashMap::new(),
         recoverable_agent_error_windows: HashSet::new(),
         agent_capability_issuer: None,
@@ -9133,11 +9135,19 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
     );
 
     assert!(runtime
-        .handle_continue_work_ready_timeout(&window_id, "stale-operation")
+        .handle_continue_work_ready_timeout(
+            &window_id,
+            &ContinueWorkReadinessWatch::new("stale-operation".to_string()),
+        )
         .is_empty());
     assert!(runtime.pending_continue_work.contains_key(&window_id));
 
-    let events = runtime.handle_continue_work_ready_timeout(&window_id, "current-operation");
+    // No PTY runtime is registered for this window, so the very first deadline
+    // has no liveness evidence to extend on and aborts exactly as before.
+    let events = runtime.handle_continue_work_ready_timeout(
+        &window_id,
+        &ContinueWorkReadinessWatch::new("current-operation".to_string()),
+    );
     assert!(
         events.iter().any(|event| matches!(
             &event.event,
@@ -9153,6 +9163,154 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
     assert!(!runtime.pending_continue_work.contains_key(&window_id));
 }
 
+/// Issue #3475: the readiness deadline is progress-aware. A pane that is alive
+/// and still emitting PTY output buys another extension instead of aborting a
+/// prepared successor mid-bootstrap, and the silent streak resets.
+#[test]
+fn continue_work_readiness_deadline_extends_while_the_pane_is_alive_and_producing_output() {
+    let watch = ContinueWorkReadinessWatch {
+        operation_id: "op".to_string(),
+        extensions: 0,
+        silent_extensions: 1,
+        observed_output_bytes: 128,
+    };
+
+    assert_eq!(
+        continue_work_readiness_decision(&watch, true, 4096),
+        ReadinessDeadlineDecision::Extend(ContinueWorkReadinessWatch {
+            operation_id: "op".to_string(),
+            extensions: 1,
+            silent_extensions: 0,
+            observed_output_bytes: 4096,
+        }),
+    );
+}
+
+/// Issue #3475: no liveness evidence means the deadline still aborts on the
+/// spot — the extension budget must never keep a dead launch pending.
+#[test]
+fn continue_work_readiness_deadline_aborts_at_once_when_the_pane_process_is_gone() {
+    let watch = ContinueWorkReadinessWatch {
+        operation_id: "op".to_string(),
+        extensions: 1,
+        silent_extensions: 0,
+        observed_output_bytes: 10,
+    };
+
+    let ReadinessDeadlineDecision::Abort { detail } =
+        continue_work_readiness_decision(&watch, false, 4096)
+    else {
+        panic!("a dead pane must abort the readiness deadline");
+    };
+    assert!(detail.contains("after 150s"), "{detail}");
+    assert!(detail.contains("no longer running"), "{detail}");
+}
+
+/// Issue #3475: a live but permanently silent pane is bounded by the silent
+/// streak cap, and the abort names the total wait plus what never happened.
+#[test]
+fn continue_work_readiness_deadline_abort_is_bounded_when_a_live_pane_stays_silent() {
+    let mut watch = ContinueWorkReadinessWatch::new("op".to_string());
+    let mut granted = 0_u32;
+    let detail = loop {
+        match continue_work_readiness_decision(&watch, true, 0) {
+            ReadinessDeadlineDecision::Extend(next) => {
+                granted += 1;
+                assert!(granted <= 8, "a silent pane must not extend forever");
+                watch = next;
+            }
+            ReadinessDeadlineDecision::Abort { detail } => break detail,
+        }
+    };
+
+    assert_eq!(granted, 2);
+    assert!(detail.contains("after 210s"), "{detail}");
+    assert!(detail.contains("never produced any output"), "{detail}");
+}
+
+/// Issue #3475: progress buys time but not an unbounded wait — the absolute
+/// extension cap still terminates a pane that keeps talking without ever
+/// reporting an authenticated SessionStart.
+#[test]
+fn continue_work_readiness_deadline_abort_is_bounded_even_while_output_keeps_flowing() {
+    let mut watch = ContinueWorkReadinessWatch::new("op".to_string());
+    let mut output_bytes = 0_u64;
+    let mut granted = 0_u32;
+    let detail = loop {
+        output_bytes += 4096;
+        match continue_work_readiness_decision(&watch, true, output_bytes) {
+            ReadinessDeadlineDecision::Extend(next) => {
+                granted += 1;
+                assert!(granted <= 8, "a progressing pane must not extend forever");
+                watch = next;
+            }
+            ReadinessDeadlineDecision::Abort { detail } => break detail,
+        }
+    };
+
+    assert_eq!(granted, 4);
+    assert!(detail.contains("after 330s"), "{detail}");
+    assert!(detail.contains("never reported"), "{detail}");
+}
+
+/// Issue #3475: walk the pure readiness policy forward until it is one deadline
+/// away from giving up. Runtime-level tests use this to reach the terminal
+/// abort without hard-coding the extension budget and without sleeping on a
+/// wall clock (Issue #3339).
+fn readiness_watch_at_last_extension(
+    operation_id: &str,
+    output_bytes: u64,
+) -> ContinueWorkReadinessWatch {
+    let mut watch = ContinueWorkReadinessWatch::new(operation_id.to_string());
+    loop {
+        match continue_work_readiness_decision(&watch, true, output_bytes) {
+            ReadinessDeadlineDecision::Extend(next) => watch = next,
+            ReadinessDeadlineDecision::Abort { .. } => return watch,
+        }
+    }
+}
+
+/// Issue #3475: end-to-end on the runtime — a Continue work candidate whose
+/// agent pane is still alive survives the base deadline instead of losing its
+/// prepared successor, which is the exact regression a 12.5 MB Codex resume hit.
+#[test]
+fn continue_work_ready_timeout_extends_while_the_agent_pty_is_still_live() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-live-pane");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+
+    let events = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &ContinueWorkReadinessWatch::new(fixture.operation_id.clone()),
+    );
+
+    assert!(
+        events.is_empty(),
+        "a live agent pane must extend the readiness deadline: {events:#?}"
+    );
+    assert!(
+        fixture
+            .runtime
+            .pending_fresh_execution_launches
+            .contains_key(&fixture.window_id),
+        "the prepared successor must survive an extended deadline"
+    );
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
+            .expect("read binding after extension"),
+        Some(fixture.predecessor_binding.clone()),
+        "extending must not touch the predecessor generation",
+    );
+}
+
 #[test]
 fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
     let source = include_str!("launch.rs");
@@ -9165,7 +9323,7 @@ fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
         .expect("async launch preparation function");
     let launch_dispatch = &source[launch_dispatch_start..async_preparation_start];
     assert!(
-        !launch_dispatch.contains("UserEvent::ContinueWorkReadyTimeout"),
+        !launch_dispatch.contains("arm_continue_work_readiness_deadline"),
         "Continue work readiness timeout must not start before async launch preparation"
     );
 
@@ -9181,7 +9339,7 @@ fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
         .find("PTY handoff complete")
         .expect("successful PTY handoff marker");
     let last_ready_timeout = launch_complete
-        .rfind("UserEvent::ContinueWorkReadyTimeout")
+        .rfind("arm_continue_work_readiness_deadline")
         .expect("readiness timeout scheduling");
     assert!(
         last_ready_timeout > pty_handoff,
@@ -14188,6 +14346,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     });
     assert!(monitor.apply_confirmed_claim(
         fixture.owner.number,
@@ -14303,9 +14462,12 @@ fn fresh_execution_ready_timeout_aborts_candidate_and_preserves_blocked_predeces
     let _home = ScopedGwtHome::set(temp.path());
     let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-timeout-operation");
 
-    let events = fixture
-        .runtime
-        .handle_continue_work_ready_timeout(&fixture.window_id, &fixture.operation_id);
+    // The fixture never spawned a PTY, so the base deadline sees no liveness
+    // evidence and aborts without spending any extension budget.
+    let events = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &ContinueWorkReadinessWatch::new(fixture.operation_id.clone()),
+    );
 
     assert!(!events.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
@@ -17107,9 +17269,20 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
             if detail == "Waiting for authenticated SessionStart..."
     )));
 
-    let cleanup = fixture
+    // Issue #3475: the spawned pane is alive but silent, so the deadline first
+    // spends its bounded extension budget; only the terminal deadline rolls the
+    // candidate back.
+    assert!(fixture
         .runtime
-        .handle_continue_work_ready_timeout(&fixture.window_id, &fixture.operation_id);
+        .handle_continue_work_ready_timeout(
+            &fixture.window_id,
+            &ContinueWorkReadinessWatch::new(fixture.operation_id.clone()),
+        )
+        .is_empty());
+    let cleanup = fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
     assert!(!cleanup.is_empty());
     assert_pending_fresh_execution_was_rolled_back(&fixture);
 }
@@ -30910,6 +31083,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
             state: gwt::IssueMonitorIssueState::Open,
             body: None,
             url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
@@ -31014,6 +31188,81 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
 }
 
 #[test]
+fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    let mut issue = gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Issue 42".to_string(),
+        labels: vec!["bug".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+    };
+    monitor.record_candidate(issue.clone());
+    let key = monitor
+        .prepare_pending_effect(
+            "claim-effect-42",
+            gwt::IssueMonitorEffectPayload::AcquireClaim {
+                issue_number: 42,
+                claim_id: "claim-42".to_string(),
+                owner: "host/session".to_string(),
+                heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                expires_at: "2026-08-05T10:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            },
+        )
+        .expect("prepare claim effect");
+    assert!(monitor.mark_pending_effect_attempting(&key));
+    let attempting = monitor.pending_effects()[0].clone();
+
+    issue.labels.push("hold".to_string());
+    monitor.record_candidate(issue);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist excluded state");
+
+    assert_eq!(
+        super::commit_local_issue_monitor_effect_result(
+            &prefs_path,
+            &mut monitor,
+            attempting,
+            LocalIssueMonitorEffectOutcome::Claim(Ok(
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                    gwt_github::issue_auto_claim::ClaimComment {
+                        comment_id: Some(gwt_github::CommentId(99)),
+                        claim_id: "claim-42".to_string(),
+                        owner: "host/session".to_string(),
+                        issue_number: 42,
+                        status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                        heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                        expires_at: "2026-08-05T10:30:00Z".to_string(),
+                        launched_work_id: Some("work/issue-42".to_string()),
+                    },
+                ),
+            )),
+            "2026-08-05T10:01:00Z",
+        ),
+        1
+    );
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(persisted.launching_issues.is_empty());
+    assert!(persisted.pending_launch_deliveries.is_empty());
+    assert!(persisted.pending_effects.iter().any(|effect| matches!(
+        &effect.payload,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42,
+            claim_id,
+            owner,
+        } if claim_id == "claim-42" && owner == "host/session"
+    )));
+}
+
+#[test]
 fn app_runtime_local_driver_rejects_stale_process_attempting_without_disk_fence() {
     let _env_lock = env_test_lock()
         .lock()
@@ -31108,6 +31357,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     });
     assert!(monitor.apply_confirmed_claim(
         42,
@@ -32436,6 +32686,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -32525,6 +32776,7 @@ fn durable_issue_monitor_delivery_replays_after_materializing_window_disappears(
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -32637,6 +32889,7 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,
@@ -32728,6 +32981,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
         url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
     });
     assert!(monitor.apply_confirmed_claim(
         3165,

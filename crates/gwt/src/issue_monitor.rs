@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 
+use crate::autonomous_handoff::{AutonomousHandoffState, AutonomousQuestionHandoff};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +69,6 @@ pub fn git_https_auth_setup_message(original_error: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorConfig {
     pub enabled: bool,
-    pub trigger_label: String,
     pub poll_interval_secs: u64,
     pub claim_heartbeat_secs: u64,
     pub claim_ttl_secs: u64,
@@ -261,6 +261,85 @@ fn complete_attempting_effect(
     Some(pending_effects.remove(index))
 }
 
+fn ensure_claim_release_effect(
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    authority_epoch: u64,
+    source_effect_id: &str,
+    issue_number: u64,
+    claim_id: &str,
+    owner: &str,
+) {
+    if pending_effects.iter().any(|effect| {
+        matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: pending_issue,
+                claim_id: pending_claim,
+                owner: pending_owner,
+            } if *pending_issue == issue_number
+                && pending_claim == claim_id
+                && pending_owner == owner
+        )
+    }) {
+        return;
+    }
+    pending_effects.push(PendingIssueMonitorEffect::prepared(
+        format!("release:{source_effect_id}:ineligible:{authority_epoch}"),
+        authority_epoch,
+        IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number,
+            claim_id: claim_id.to_string(),
+            owner: owner.to_string(),
+        },
+    ));
+}
+
+fn revoke_uncommitted_claims_for_issue(
+    pending_effects: &mut Vec<PendingIssueMonitorEffect>,
+    authority_epoch: u64,
+    issue_number: u64,
+) {
+    let attempting = pending_effects
+        .iter()
+        .filter(|effect| {
+            effect.state == IssueMonitorEffectState::Attempting
+                && matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: pending_issue,
+                        ..
+                    } if pending_issue == issue_number
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    pending_effects.retain(|effect| {
+        effect.state != IssueMonitorEffectState::Prepared
+            || !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: pending_issue,
+                    ..
+                } if pending_issue == issue_number
+            )
+    });
+    for effect in attempting {
+        if let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        {
+            ensure_claim_release_effect(
+                pending_effects,
+                authority_epoch,
+                &effect.effect_id,
+                issue_number,
+                claim_id,
+                owner,
+            );
+        }
+    }
+}
+
 fn advance_autonomous_effect_authority(
     autonomous_mode: &mut bool,
     effect_authority_epoch: &mut u64,
@@ -438,6 +517,12 @@ pub struct IssueMonitorPrefs {
     /// one slot is sufficient while the worker enforces a FIFO retry barrier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_control_receipt: Option<IssueMonitorControlReceipt>,
+    /// Issue #3478 (FR-025): durable question handoffs. Appended by the
+    /// intercepting hook (any process) and driven through their lifecycle by
+    /// the Issue Monitor driver. Empty is omitted so existing prefs files keep
+    /// their compact shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autonomous_handoffs: Vec<AutonomousQuestionHandoff>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -460,6 +545,7 @@ impl Default for IssueMonitorPrefs {
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
             last_control_receipt: None,
+            autonomous_handoffs: Vec::new(),
         }
     }
 }
@@ -742,7 +828,6 @@ impl Default for IssueMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            trigger_label: "auto-improve".to_string(),
             poll_interval_secs: 300,
             claim_heartbeat_secs: 300,
             claim_ttl_secs: 1800,
@@ -784,6 +869,15 @@ pub fn is_legacy_git_launch_failure_for_project(message: &str, project_root: &Pa
         == gwt_core::paths::normalize_windows_child_process_path(project_root)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorReadiness {
+    #[default]
+    NotApplicable,
+    Ready,
+    NotReady,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorIssue {
     pub number: u64,
@@ -794,12 +888,20 @@ pub struct IssueMonitorIssue {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default)]
+    pub readiness: IssueMonitorReadiness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorInboxState {
     Queued,
+    /// A design-required Issue is missing a usable plan or tasks artifact.
+    /// This is re-evaluated on every scan and is therefore non-terminal.
+    NotReady,
+    /// An operator excluded the Issue from automatic execution with a hold
+    /// label. This is re-evaluated on every scan and is therefore non-terminal.
+    HoldExcluded,
     Launching,
     Launched,
     /// Work PR merged into the base branch — the agent's work is done and the
@@ -847,6 +949,8 @@ pub struct IssueMonitorInboxItem {
     pub launch_plan: Option<IssueMonitorLaunchPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -907,6 +1011,13 @@ pub struct AutonomousIssueSummary {
     pub phase: AutonomousPhase,
     pub attempts: u32,
     pub needs_human: bool,
+    /// Issue #3478 (AC-9): why the issue is parked, in operator-facing English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_reason: Option<String>,
+    /// Issue #3478 (AC-9): the question waiting for a human, when the park was
+    /// caused by a confirmation question rather than a failed gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<AutonomousPendingQuestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -968,6 +1079,41 @@ pub struct IssueMonitorState {
     pending_autonomous_notices: VecDeque<AutonomousNotice>,
     /// #3223 follow-up: claim anchors for unbound launches (issue → RFC3339).
     launching_claimed_at: BTreeMap<u64, String>,
+    /// Issue #3478 (FR-025): structured question handoffs written by the
+    /// intercepting hook and driven to `AwaitingHuman` / `Resumed` here.
+    #[serde(default)]
+    autonomous_handoffs: Vec<AutonomousQuestionHandoff>,
+}
+
+/// Issue #3478 (AC-5): one answered handoff ready to be delivered back to the
+/// exact session that asked, so the parked work resumes without a duplicate
+/// launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousHandoffResumption {
+    pub handoff_id: String,
+    pub issue_number: u64,
+    /// gwt Session id of the agent that asked. The resume path must target
+    /// this exact session.
+    pub session_id: String,
+    /// Answer prompt delivered to the resumed session (question + answer).
+    pub prompt: String,
+}
+
+/// Issue #3478 (AC-9): status-view projection of one waiting question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousPendingQuestion {
+    pub handoff_id: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Machine-readable
+    /// [`AutonomousHandoffReason`](crate::autonomous_handoff::AutonomousHandoffReason) code.
+    pub reason_code: String,
+    pub session_id: String,
+    pub provider: String,
+    pub created_at: String,
+    /// Whether registering an answer can resume the stored session.
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -986,6 +1132,35 @@ enum PendingLaunchDeliveryMatch {
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
     let _ = config;
     issue.state == IssueMonitorIssueState::Open
+}
+
+const ISSUE_MONITOR_NOT_READY_REASON: &str = "plan/tasks の整備が必要（gwt-plan-spec）";
+
+fn issue_monitor_candidate_exclusion(
+    issue: &IssueMonitorIssue,
+) -> Option<(MonitorInboxState, String)> {
+    if let Some(label) = issue
+        .labels
+        .iter()
+        .find(|label| label.eq_ignore_ascii_case("hold"))
+    {
+        return Some((
+            MonitorInboxState::HoldExcluded,
+            format!("hold label: {label}"),
+        ));
+    }
+    if issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+        && issue.readiness != IssueMonitorReadiness::Ready
+    {
+        return Some((
+            MonitorInboxState::NotReady,
+            ISSUE_MONITOR_NOT_READY_REASON.to_string(),
+        ));
+    }
+    None
 }
 
 /// SPEC #3200 FR-003/004/005: routing decision for whether an open Issue may be
@@ -1719,6 +1894,96 @@ pub fn issue_monitor_prefs_path_for_repo_path(repo_path: &Path) -> std::path::Pa
         .join("project-state/issue-monitor.json")
 }
 
+/// Issue #3478 (AC-5): the prompt delivered to the resumed session. It restates
+/// the exact question the agent asked and the human's answer, so the resumed
+/// conversation regains the decision context it was parked on.
+pub fn autonomous_handoff_answer_prompt(handoff: &AutonomousQuestionHandoff) -> String {
+    let mut prompt = format!(
+        "Your autonomous execution for Issue #{issue} was parked on a question that needed human judgment.\n\n\
+Question you asked:\n{question}\n",
+        issue = handoff.issue_number,
+        question = handoff.question,
+    );
+    if !handoff.options.is_empty() {
+        prompt.push_str("\nOptions you offered:\n");
+        for option in &handoff.options {
+            if option.description.is_empty() {
+                prompt.push_str(&format!("- {}\n", option.label));
+            } else {
+                prompt.push_str(&format!("- {}: {}\n", option.label, option.description));
+            }
+        }
+    }
+    prompt.push_str(&format!(
+        "\nHuman answer:\n{answer}\n\nContinue the work with this answer. Do not re-ask it.",
+        answer = handoff.answer.as_deref().unwrap_or(""),
+    ));
+    prompt
+}
+
+/// Issue #3478 (AC-5): cross-process one-shot take of the answer prompt owed to
+/// `issue_number`'s resumed launch.
+///
+/// The daemon un-parks the Issue but the GUI owns the launch, so the delivery
+/// marker has to be committed to the shared control plane under its stable
+/// lock — otherwise two launch attempts could both believe they own the answer.
+pub fn take_autonomous_resume_prompt_from_prefs(
+    prefs_path: &Path,
+    issue_number: u64,
+    now: &str,
+) -> Option<String> {
+    mutate_issue_monitor_prefs_recovering(
+        prefs_path,
+        &IssueMonitorPrefs::recovery_default(),
+        |prefs| {
+            let handoff = prefs.autonomous_handoffs.iter_mut().find(|handoff| {
+                handoff.issue_number == issue_number
+                    && handoff.state == AutonomousHandoffState::Resumed
+                    && handoff.delivered_at.is_none()
+            })?;
+            handoff.delivered_at = Some(now.to_string());
+            Some(autonomous_handoff_answer_prompt(handoff))
+        },
+    )
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            path = %prefs_path.display(),
+            "failed to take autonomous resume prompt"
+        );
+    })
+    .ok()
+    .and_then(|(_, prompt)| prompt)
+}
+
+/// Issue #3478 (FR-025): append one handoff to the project's Issue Monitor
+/// control plane under the stable cross-process prefs lock.
+///
+/// Called from the intercepting hook, which runs in the agent's process rather
+/// than the daemon's. Appending is idempotent on `handoff_id` so a retried
+/// hook invocation cannot park the same question twice. This writes only the
+/// disk-owned inbound queue — every lifecycle transition stays with the
+/// driver — so it deliberately does not require the effect authority fence.
+pub fn record_autonomous_question_handoff(
+    prefs_path: &Path,
+    handoff: &AutonomousQuestionHandoff,
+) -> io::Result<()> {
+    mutate_issue_monitor_prefs_recovering(
+        prefs_path,
+        &IssueMonitorPrefs::recovery_default(),
+        |prefs| {
+            if !prefs
+                .autonomous_handoffs
+                .iter()
+                .any(|known| known.handoff_id == handoff.handoff_id)
+            {
+                prefs.autonomous_handoffs.push(handoff.clone());
+            }
+        },
+    )
+    .map(|_| ())
+}
+
 impl IssueMonitorState {
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
@@ -1751,6 +2016,7 @@ impl IssueMonitorState {
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
+            autonomous_handoffs: Vec::new(),
         }
     }
 
@@ -1815,6 +2081,7 @@ impl IssueMonitorState {
         for record in prefs.autonomous_records {
             state.autonomous_records.insert(record.issue_number, record);
         }
+        state.autonomous_handoffs = prefs.autonomous_handoffs;
         state
     }
 
@@ -1860,6 +2127,7 @@ impl IssueMonitorState {
             last_control_receipt: self.last_control_receipt.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
+            autonomous_handoffs: self.autonomous_handoffs.clone(),
         }
     }
 
@@ -2162,6 +2430,181 @@ impl IssueMonitorState {
         }
     }
 
+    /// Issue #3478 (FR-025): all question handoffs known to this driver, in
+    /// arrival order.
+    pub fn autonomous_handoffs(&self) -> &[AutonomousQuestionHandoff] {
+        &self.autonomous_handoffs
+    }
+
+    /// The handoff still blocking `issue_number`, if any. `Answered` and
+    /// `Resumed` handoffs are history and no longer block.
+    pub fn open_autonomous_handoff(&self, issue_number: u64) -> Option<&AutonomousQuestionHandoff> {
+        self.autonomous_handoffs
+            .iter()
+            .find(|handoff| handoff.issue_number == issue_number && handoff.is_open())
+    }
+
+    /// Absorb handoffs observed outside this driver (hook writes, another
+    /// process's answer) without losing driver-owned lifecycle transitions.
+    ///
+    /// Ownership per state is explicit: `Pending` is written by the
+    /// intercepting hook and `Answered` by the canonical answer operation —
+    /// both are inputs the driver must observe. `AwaitingHuman` and `Resumed`
+    /// are driver-owned outputs, so a stale inbound copy of them never rewinds
+    /// a transition this driver already made.
+    pub fn absorb_autonomous_handoffs(
+        &mut self,
+        incoming: impl IntoIterator<Item = AutonomousQuestionHandoff>,
+    ) {
+        for handoff in incoming {
+            match self
+                .autonomous_handoffs
+                .iter_mut()
+                .find(|known| known.handoff_id == handoff.handoff_id)
+            {
+                None => self.autonomous_handoffs.push(handoff),
+                Some(known) => {
+                    if handoff.state == AutonomousHandoffState::Answered
+                        && known.state == AutonomousHandoffState::AwaitingHuman
+                    {
+                        known.state = AutonomousHandoffState::Answered;
+                        known.answer = handoff.answer;
+                        known.answered_at = handoff.answered_at;
+                    }
+                }
+            }
+        }
+    }
+
+    /// SPEC #3200 FR-025 / Issue #3478 (AC-4, AC-7): park every Issue whose
+    /// autonomous agent hit a human-judgment question and free its active slot
+    /// in the same pass — the recognized question never waits for
+    /// `stuck_timeout_secs`.
+    ///
+    /// Fail-closed like every other autonomous transition: a no-op while
+    /// autonomous mode is off, so the SPEC #3165 human-gated flow is untouched.
+    /// Idempotent — a handoff leaves `Pending` exactly once.
+    pub fn apply_pending_autonomous_handoffs(&mut self, _now: &str) -> Vec<u64> {
+        if !self.autonomous_mode {
+            return Vec::new();
+        }
+        let pending = self
+            .autonomous_handoffs
+            .iter_mut()
+            .filter(|handoff| handoff.state == AutonomousHandoffState::Pending)
+            .map(|handoff| {
+                handoff.state = AutonomousHandoffState::AwaitingHuman;
+                (handoff.issue_number, handoff.rationale.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut parked = Vec::new();
+        for (issue_number, reason) in pending {
+            self.escalate_to_needs_human(issue_number, reason);
+            if !parked.contains(&issue_number) {
+                parked.push(issue_number);
+            }
+        }
+        parked
+    }
+
+    /// Issue #3478 (AC-5): register a human answer for one open handoff.
+    /// Returns `false` for an unknown or already-answered handoff so a caller
+    /// never reports a delivered answer that went nowhere.
+    pub fn answer_autonomous_handoff(&mut self, handoff_id: &str, answer: &str, now: &str) -> bool {
+        let Some(handoff) = self
+            .autonomous_handoffs
+            .iter_mut()
+            .find(|handoff| handoff.handoff_id == handoff_id && handoff.is_open())
+        else {
+            return false;
+        };
+        handoff.answer = Some(answer.to_string());
+        handoff.answered_at = Some(now.to_string());
+        handoff.state = AutonomousHandoffState::Answered;
+        true
+    }
+
+    /// Issue #3478 (AC-5): un-park every answered handoff and return the
+    /// resume instructions for its owning session.
+    ///
+    /// The parked attempt is resumed, not restarted: the autonomous record
+    /// returns to `Implementing` with its attempt counter untouched, and the
+    /// Issue is queued exactly once so the launch path re-engages the stored
+    /// session instead of spawning a second agent for the same work.
+    pub fn resume_answered_autonomous_handoffs(
+        &mut self,
+        now: &str,
+    ) -> Vec<AutonomousHandoffResumption> {
+        if !self.autonomous_mode {
+            return Vec::new();
+        }
+        let answered = self
+            .autonomous_handoffs
+            .iter_mut()
+            .filter(|handoff| handoff.state == AutonomousHandoffState::Answered)
+            .map(|handoff| {
+                handoff.state = AutonomousHandoffState::Resumed;
+                AutonomousHandoffResumption {
+                    handoff_id: handoff.handoff_id.clone(),
+                    issue_number: handoff.issue_number,
+                    session_id: handoff.session_id.clone(),
+                    prompt: autonomous_handoff_answer_prompt(handoff),
+                }
+            })
+            .collect::<Vec<_>>();
+        for resumption in &answered {
+            self.unpark_answered_autonomous_issue(resumption.issue_number, now);
+        }
+        answered
+    }
+
+    /// Issue #3478 (AC-5): take the answer prompt owed to `issue_number`'s
+    /// resumed launch, marking it delivered so it is handed over exactly once.
+    ///
+    /// One-shot by construction: a replayed prompt would re-inject a stale
+    /// human decision into a session that already acted on it.
+    pub fn take_autonomous_resume_prompt(
+        &mut self,
+        issue_number: u64,
+        now: &str,
+    ) -> Option<String> {
+        let handoff = self.autonomous_handoffs.iter_mut().find(|handoff| {
+            handoff.issue_number == issue_number
+                && handoff.state == AutonomousHandoffState::Resumed
+                && handoff.delivered_at.is_none()
+        })?;
+        handoff.delivered_at = Some(now.to_string());
+        Some(autonomous_handoff_answer_prompt(handoff))
+    }
+
+    /// Reverse exactly what [`escalate_to_needs_human`](Self::escalate_to_needs_human)
+    /// did for a question park, leaving the attempt counter and the acceptance
+    /// snapshot alone.
+    fn unpark_answered_autonomous_issue(&mut self, issue_number: u64, now: &str) {
+        self.failed_issues.remove(&issue_number);
+        self.failed_windows.remove(&issue_number);
+        self.last_error = None;
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Implementing);
+        self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Queued;
+            item.error_message = None;
+        }
+        if !self.queue.contains(&issue_number) && !self.active_launches.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+        }
+        self.apply_priority_order_to_queue();
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} answered — resuming the parked session"),
+        );
+    }
+
     pub fn set_gui_connected(&mut self, connected: bool) {
         self.gui_connected = connected;
     }
@@ -2292,6 +2735,9 @@ impl IssueMonitorState {
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
+        // Issue #3478: the hook (and the answer operation) write handoffs from
+        // outside this process, so disk is the inbound source for them.
+        self.absorb_autonomous_handoffs(disk.autonomous_handoffs.iter().cloned());
     }
 
     /// Rebase a GUI observer on the latest committed prefs. The GUI does not
@@ -2857,11 +3303,34 @@ impl IssueMonitorState {
             autonomous_issues: self
                 .autonomous_records
                 .values()
-                .map(|record| AutonomousIssueSummary {
-                    issue_number: record.issue_number,
-                    phase: record.phase,
-                    attempts: record.attempts,
-                    needs_human: record.phase == AutonomousPhase::NeedsHuman,
+                .map(|record| {
+                    let needs_human = record.phase == AutonomousPhase::NeedsHuman;
+                    let handoff = self.open_autonomous_handoff(record.issue_number);
+                    AutonomousIssueSummary {
+                        issue_number: record.issue_number,
+                        phase: record.phase,
+                        attempts: record.attempts,
+                        needs_human,
+                        needs_human_reason: needs_human
+                            .then(|| self.failed_issues.get(&record.issue_number).cloned())
+                            .flatten(),
+                        pending_question: handoff.map(|handoff| AutonomousPendingQuestion {
+                            handoff_id: handoff.handoff_id.clone(),
+                            question: handoff.question.clone(),
+                            options: handoff
+                                .options
+                                .iter()
+                                .map(|option| option.label.clone())
+                                .collect(),
+                            reason_code: handoff.reason_code.as_str().to_string(),
+                            session_id: handoff.session_id.clone(),
+                            provider: handoff.provider.clone(),
+                            created_at: handoff.created_at.clone(),
+                            // A stored session id is what makes the parked work
+                            // resumable rather than restartable.
+                            resumable: !handoff.session_id.trim().is_empty(),
+                        }),
+                    }
                 })
                 .collect(),
         }
@@ -3055,6 +3524,16 @@ impl IssueMonitorState {
             return EligibilityDecision::HumanGate("not an autonomous candidate".to_string());
         }
         let number = issue.number;
+        if self.inbox_item(number).is_some_and(|item| {
+            matches!(
+                item.state,
+                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+            )
+        }) {
+            return EligibilityDecision::HumanGate(
+                "candidate is excluded from automatic launch".to_string(),
+            );
+        }
         // Idempotency: a candidate already in flight is left alone.
         if self.active_launches.contains(&number) {
             return EligibilityDecision::Eligible;
@@ -3285,6 +3764,7 @@ impl IssueMonitorState {
             claim_expires_at: None,
             launched_window_id,
             error_message,
+            exclusion_reason: None,
         };
         self.upsert_inbox(item);
         if state == MonitorInboxState::Queued
@@ -3299,6 +3779,7 @@ impl IssueMonitorState {
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         let issue_number = issue.number;
         let existing = self.inbox_item(issue_number).cloned();
+        let exclusion = issue_monitor_candidate_exclusion(&issue);
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
             existing.as_ref().and_then(|item| {
                 if matches!(
@@ -3344,16 +3825,28 @@ impl IssueMonitorState {
             // Issue #3222: a claimed launch whose window is not bound yet stays
             // visibly in-flight; the queue-push guard below then skips it.
             MonitorInboxState::Launching
+        } else if existing
+            .as_ref()
+            .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+        {
+            MonitorInboxState::NeedsHuman
+        } else if let Some((state, _)) = exclusion.as_ref() {
+            *state
         } else {
             match existing.as_ref().map(|item| item.state) {
                 // A reopened Issue previously marked Released/Merged (but no
                 // longer tracked as merged) returns to the queue.
-                Some(MonitorInboxState::Released) | Some(MonitorInboxState::Merged) | None => {
-                    MonitorInboxState::Queued
-                }
+                Some(MonitorInboxState::Released)
+                | Some(MonitorInboxState::Merged)
+                | Some(MonitorInboxState::NotReady)
+                | Some(MonitorInboxState::HoldExcluded)
+                | None => MonitorInboxState::Queued,
                 Some(other) => other,
             }
         };
+        let exclusion_reason = exclusion.as_ref().and_then(|(excluded_state, reason)| {
+            (*excluded_state == state).then(|| reason.clone())
+        });
         let item = IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
@@ -3371,8 +3864,22 @@ impl IssueMonitorState {
                     .and_then(|item| item.launched_window_id.clone())
             }),
             error_message,
+            exclusion_reason,
         };
+        if matches!(
+            state,
+            MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+        ) {
+            revoke_uncommitted_claims_for_issue(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                issue_number,
+            );
+        }
         self.upsert_inbox(item);
+        if state != MonitorInboxState::Queued {
+            self.queue.retain(|queued| *queued != issue_number);
+        }
         if state == MonitorInboxState::Queued
             && !self.queue.contains(&issue_number)
             && !self.active_launches.contains(&issue_number)
@@ -3388,8 +3895,14 @@ impl IssueMonitorState {
         issue: IssueMonitorIssue,
         owner: impl Into<String>,
         expires_at: impl Into<String>,
-    ) {
+    ) -> bool {
         self.queue.retain(|queued| *queued != issue.number);
+        if !self
+            .inbox_item(issue.number)
+            .is_some_and(|item| item.state == MonitorInboxState::Queued)
+        {
+            return false;
+        }
         self.upsert_inbox(IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
             issue,
@@ -3399,8 +3912,10 @@ impl IssueMonitorState {
             claim_expires_at: Some(expires_at.into()),
             launched_window_id: None,
             error_message: None,
+            exclusion_reason: None,
         });
         self.apply_priority_order_to_inbox();
+        true
     }
 
     pub fn reorder_queued_issues(&mut self, issue_numbers: &[u64]) {
@@ -3848,11 +4363,23 @@ impl IssueMonitorState {
         claim_effect_id: &str,
         now: &str,
     ) -> bool {
-        let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
-            return false;
-        };
         let claim_id = claim_id.into();
         let claim_owner = claim_owner.into();
+        let Some(issue) = self
+            .inbox_item(issue_number)
+            .filter(|item| item.state == MonitorInboxState::Queued)
+            .map(|item| item.issue.clone())
+        else {
+            ensure_claim_release_effect(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                claim_effect_id,
+                issue_number,
+                &claim_id,
+                &claim_owner,
+            );
+            return false;
+        };
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
@@ -4197,6 +4724,7 @@ impl IssueMonitorState {
             item.state = state;
             item.launched_window_id = None;
             item.error_message = None;
+            item.exclusion_reason = None;
         }
     }
 
@@ -4414,6 +4942,14 @@ pub fn scan_issue_monitor_candidates(
         }
 
         monitor.record_candidate(issue.clone());
+        if monitor.inbox_item(issue.number).is_some_and(|item| {
+            matches!(
+                item.state,
+                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+            )
+        }) {
+            summary.skipped += 1;
+        }
     }
 
     summary
@@ -4519,6 +5055,7 @@ mod tests {
             state: IssueMonitorIssueState::Open,
             body: None,
             url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
         }
     }
 
@@ -4571,6 +5108,27 @@ mod tests {
                 autonomous_mode: false,
                 has_launch_profile: false,
             }
+        );
+    }
+
+    #[test]
+    fn rejected_blocked_claim_removes_a_stale_nonqueued_queue_entry() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        let candidate = issue(42);
+        monitor.record_candidate(candidate.clone());
+        monitor.set_inbox_state(42, MonitorInboxState::HoldExcluded);
+
+        assert!(!monitor.record_blocked_by_claim(candidate, "other-agent", "2026-08-05T10:30:00Z",));
+        assert!(
+            monitor.queued_issue_numbers().is_empty(),
+            "a rejected late claim result must still guarantee synchronous loop progress"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::HoldExcluded)
         );
     }
 
@@ -7728,6 +8286,7 @@ mod tests {
             state: IssueMonitorIssueState::Open,
             body: Some(body.to_string()),
             url: None,
+            readiness: IssueMonitorReadiness::NotApplicable,
         }
     }
 
