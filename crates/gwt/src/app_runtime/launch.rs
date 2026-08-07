@@ -1539,11 +1539,11 @@ fn apply_post_resolution_bun_cache_fast_path(config: &mut gwt_agent::LaunchConfi
     gwt_agent::apply_host_bunx_cache_fast_path(config)
 }
 
-fn initial_agent_window_status(config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
+fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
     #[cfg(windows)]
-    if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+    if _config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
         && matches!(
-            config.agent_id,
+            _config.agent_id,
             gwt_agent::AgentId::Codex | gwt_agent::AgentId::ClaudeCode
         )
     {
