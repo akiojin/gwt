@@ -15,7 +15,7 @@ use std::{
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{mpsc, Mutex, MutexGuard, OnceLock},
     thread::JoinHandle,
     time::Duration,
 };
@@ -59,6 +59,16 @@ const FORWARD_TOKEN: &str = "workspace-proxy-secret-sentinel";
 const HOST_WORK_ID: &str = "host-work-id";
 const HOST_JOURNAL_ENTRY_ID: &str = "host-journal-entry-id";
 const DOCKER_RUNTIME_WORKTREE: &str = "/workspace/project";
+
+/// Serialize only the tests that execute a real Host authority mutation.
+/// Waiting at test entry keeps contention outside the bridge client's fixed
+/// production timeout; locking inside the handler would consume that budget.
+fn real_host_mutation_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[derive(Debug)]
 struct CapturedWorkspaceUpdate {
@@ -1425,6 +1435,7 @@ fn workspace_update_complete_forward_pair_uses_host_proxy_without_reading_contai
 
 #[test]
 fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_container_home() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     for (case, poisoned_container) in [("empty", false), ("poisoned", true)] {
         let fixture = fixture();
         if poisoned_container {
@@ -1587,6 +1598,7 @@ fn workspace_update_real_host_proxy_mutates_host_authority_with_separate_contain
 
 #[test]
 fn workspace_update_exact_same_home_host_accepts_fresh_canonical_journal_receipt() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1641,6 +1653,7 @@ fn workspace_update_exact_same_home_host_accepts_fresh_canonical_journal_receipt
 
 #[test]
 fn workspace_update_exact_same_home_foreign_work_accepts_fresh_work_event_receipt() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1725,6 +1738,7 @@ fn workspace_update_exact_same_home_foreign_work_accepts_fresh_work_event_receip
 
 #[test]
 fn workspace_update_current_snapshot_accepts_fresh_event_after_host_switches_current_work() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -1858,6 +1872,7 @@ fn workspace_update_foreign_work_rejects_static_receipt_without_fresh_event() {
 
 #[test]
 fn workspace_update_foreign_work_rejects_preexisting_matching_event_as_stale() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
@@ -2142,6 +2157,7 @@ fn workspace_update_proxy_response_loss_never_replays_locally_or_to_the_host() {
 
 #[test]
 fn workspace_update_proxy_response_loss_after_host_apply_delivers_once() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let mut server = ApplyThenDisconnectServer::start(
@@ -2431,6 +2447,7 @@ fn workspace_update_host_rejects_success_receipt_with_unknown_journal_entry() {
 
 #[test]
 fn workspace_update_host_rejects_preexisting_matching_journal_receipt_as_stale() {
+    let _real_host_mutation = real_host_mutation_test_lock();
     let fixture = fixture();
     let exact = prepare_exact_ensured_host(&fixture);
     let project_root = fixture
