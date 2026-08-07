@@ -733,6 +733,10 @@ pub struct AppRuntime {
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
+    /// SPEC-3431 FR-033: when each agent window last showed activity, so the
+    /// heartbeat published to the Issue Monitor can be throttled instead of
+    /// firing a daemon control on every hook. Keyed by combined window id.
+    pub(crate) last_agent_activity: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
     /// Issue-time opaque agent capability keyed by combined window id.
     ///
@@ -1305,6 +1309,7 @@ impl AppRuntime {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
+            last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -2617,12 +2622,40 @@ impl AppRuntime {
     /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
     /// (a runtime status change). Best-effort refresh of the daemon's
     /// stuck-detection window for the mapped issue. No-op for non-monitor windows.
+    /// SPEC-3431 FR-033: the last recorded activity for `window_id`.
+    #[cfg(test)]
+    pub(crate) fn last_agent_activity_for_test(
+        &self,
+        window_id: &str,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.last_agent_activity.get(window_id).copied()
+    }
+
+    /// SPEC-3431 FR-033: minimum gap between heartbeat publications for one
+    /// window. Hooks arrive per tool call, which is far more often than a
+    /// stall check needs, and each publication is a daemon control round trip.
+    const HEARTBEAT_THROTTLE_SECS: i64 = 60;
+
     pub(crate) fn issue_monitor_heartbeat(&mut self, project_root: &Path, window_id: &str) {
+        // Record the observation before deciding whether to publish: activity
+        // is a fact about the window, independent of whether this window is
+        // currently bound to a monitored issue. Binding can be established
+        // later (or lost), and a gap in the local clock would then read as a
+        // stall that never happened.
+        let now_instant = chrono::Utc::now();
+        let recently_published = self.last_agent_activity.get(window_id).is_some_and(|last| {
+            (now_instant - *last).num_seconds() < Self::HEARTBEAT_THROTTLE_SECS
+        });
+        self.last_agent_activity
+            .insert(window_id.to_string(), now_instant);
+        if recently_published {
+            return;
+        }
         let issue_number = self.issue_monitor_issue_number_for_window(project_root, window_id);
         let Some(issue_number) = issue_number else {
             return;
         };
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         if let Err(error) = self.publish_issue_monitor_control(
             project_root,
             serde_json::json!({

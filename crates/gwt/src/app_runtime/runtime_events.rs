@@ -436,6 +436,15 @@ impl AppRuntime {
             return events;
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
+        // SPEC-3431 FR-033: a hook arrival is the one signal that an agent is
+        // actually making progress. The PTY-status heartbeat below never fires
+        // for a working agent (the watcher thread stays silent until the
+        // process exits), so without this the activity clock froze at launch
+        // and a rate-limited or hung agent was indistinguishable from a busy
+        // one. Throttled inside `issue_monitor_heartbeat`.
+        if let Some(project_root) = issue_monitor_project_root.clone() {
+            self.issue_monitor_heartbeat(&project_root, &window_id);
+        }
         if event.source_event.as_deref() == Some("SessionStart") {
             events.extend(self.finalize_fresh_execution_launch_session_start(
                 &window_id,

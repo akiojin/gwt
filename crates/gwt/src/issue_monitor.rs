@@ -927,6 +927,16 @@ pub struct IssueMonitorInboxSummary {
     pub launched_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// SPEC-3431 FR-033: when this launch last showed signs of life (RFC3339).
+    ///
+    /// Seeded at launch and advanced by hook arrivals, which is the only clock
+    /// that tracks real progress: a live agent blocked on an approval prompt,
+    /// a provider rate limit, or a genuine hang produces no PTY status change
+    /// at all, so without this the four cases are indistinguishable from
+    /// healthy work. Reported rather than judged — the reader decides what
+    /// "too old" means for the work at hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -2920,6 +2930,14 @@ impl IssueMonitorState {
                     blocked_by_owner: item.blocked_by_owner.clone(),
                     launched_window_id: item.launched_window_id.clone(),
                     error_message: item.error_message.clone(),
+                    // FR-033: the autonomous record already carries the
+                    // heartbeat that hook arrivals refresh. Surfacing it here
+                    // rather than adding a parallel field keeps one clock, so
+                    // a reader and the stuck detector can never disagree.
+                    last_activity_at: self
+                        .autonomous_records
+                        .get(&item.issue.number)
+                        .and_then(|record| record.last_heartbeat.clone()),
                 })
                 .collect(),
             last_error: status.last_error,
@@ -4082,6 +4100,12 @@ impl IssueMonitorState {
             item.launched_window_id = Some(window_id);
             item.error_message = None;
         }
+        // SPEC-3431 FR-033: start the activity clock here rather than only on
+        // the autonomous path. Every launch needs it — an agent that stalls
+        // without autonomous mode stalls just as silently — and this is the
+        // one place every launch is confirmed.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_autonomous_heartbeat(issue_number, &now);
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
@@ -4666,6 +4690,8 @@ mod tests {
                     blocked_by_owner: Some("other-agent".to_string()),
                     launched_window_id: None,
                     error_message: None,
+                    // Never launched, so no activity clock was ever started.
+                    last_activity_at: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -5763,6 +5789,49 @@ mod tests {
             "closing an unmerged window returns to pending, never a fake done state"
         );
         assert_eq!(monitor.queue_len(), 1);
+    }
+
+    /// SPEC-3431 FR-033: a launched issue reports when its agent last showed
+    /// signs of life, so "running but not progressing" is observable at all.
+    ///
+    /// Everything a live agent can get stuck on — waiting for approval, a
+    /// provider rate limit, a genuine hang — leaves `WindowProcessStatus`
+    /// untouched, because gwt receives no event at all. The composed state
+    /// collapses to `window_hook_states`' two values (`Idle` / `Running`),
+    /// which only say whether the last hook was tool-ish or a Stop. Without a
+    /// timestamp those four situations are indistinguishable from healthy
+    /// work, which is why a rate-limited agent showed `● Running` for days.
+    ///
+    /// Hook arrivals are the right clock: `PreToolUse` / `PostToolUse` /
+    /// `UserPromptSubmit` each mean one unit of work actually happened. PTY
+    /// status cannot serve — its watcher thread `continue`s while the process
+    /// runs and only speaks when it exits, so `last_heartbeat` never advanced
+    /// past the value seeded at launch.
+    #[test]
+    fn launched_issue_reports_its_last_activity() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let launched_at = monitor
+            .agent_status()
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .and_then(|row| row.last_activity_at.clone())
+            .expect("a launched issue starts its activity clock");
+
+        monitor.record_autonomous_heartbeat(42, "2026-08-07T09:00:00Z");
+
+        let after = monitor
+            .agent_status()
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .and_then(|row| row.last_activity_at.clone())
+            .expect("still reported");
+        assert_ne!(
+            after, launched_at,
+            "a hook arrival must advance the activity clock"
+        );
+        assert_eq!(after, "2026-08-07T09:00:00Z");
     }
 
     /// SPEC-3431 FR-031: closing a launched window is a bounded retry.

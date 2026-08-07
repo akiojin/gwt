@@ -3087,6 +3087,7 @@ fn sample_runtime_with_events(
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         recoverable_agent_error_windows: HashSet::new(),
+        last_agent_activity: HashMap::new(),
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
@@ -21576,6 +21577,58 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
 /// slot held. With the default `max_active = 1` that stops the whole queue —
 /// which is exactly what "the PM registers Issues but nothing ever runs" looks
 /// like from the outside.
+/// SPEC-3431 FR-033: a hook arrival is what advances the activity clock.
+///
+/// The existing heartbeat call sits on the PTY-status path and fires only when
+/// `handle_runtime_status` receives `Running` — which never happens for a
+/// working agent: the launch sets `Running` through `set_window_status`
+/// (bypassing this handler) and the PTY watcher thread `continue`s while the
+/// process lives, speaking only when it exits. So `last_heartbeat` stayed at
+/// the value seeded at launch and "stuck detection" degraded into a fixed
+/// timer measured from launch.
+///
+/// Hook arrivals are the real progress signal — `PreToolUse` / `PostToolUse` /
+/// `UserPromptSubmit` each mean one unit of work actually happened.
+#[test]
+fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.project_root = repo.clone();
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+
+    // The heartbeat itself goes out over the daemon control channel, which a
+    // unit test cannot observe. Assert the decision instead: after a hook
+    // arrival the runtime must have recorded that this window showed activity.
+    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PostToolUse",
+        "session-1",
+    ));
+
+    assert!(
+        runtime.last_agent_activity_for_test(&window_id).is_some(),
+        "a hook arrival must refresh the activity clock for its window"
+    );
+}
+
 /// SPEC-3431 FR-032: an agent that exits cleanly also frees its slot.
 ///
 /// FR-030 closed this leak on the `Error` side, but `exit 0` maps to
