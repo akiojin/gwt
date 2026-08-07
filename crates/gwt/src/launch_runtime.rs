@@ -1,5 +1,54 @@
 use super::*;
 
+/// Keep runtime origin operations testable without allowing a detached test
+/// worker to contact a public placeholder after its fixture has been removed.
+/// Production builds always execute the operation. Unit-test builds skip only
+/// GitHub-shaped placeholder origins or repositories whose origin can no
+/// longer be inspected; local fixture remotes still exercise the real path.
+pub(crate) fn run_origin_operation<T, E>(
+    git_root: &Path,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    if origin_operation_must_skip_test_remote(git_root) {
+        return Ok(None);
+    }
+    operation().map(Some)
+}
+
+#[cfg(not(test))]
+fn origin_operation_must_skip_test_remote(_git_root: &Path) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn origin_operation_must_skip_test_remote(git_root: &Path) -> bool {
+    let Ok(output) = gwt_core::process::hidden_command("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(git_root)
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .starts_with("https://github.com/example/")
+}
+
+fn run_required_origin_operation<T, E: std::fmt::Display>(
+    git_root: &Path,
+    error_context: &str,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, String> {
+    run_origin_operation(git_root, operation)
+        .map_err(|err| format!("{error_context}: {err}"))?
+        .ok_or_else(|| {
+            format!("{error_context}: origin access is disabled for an isolated test fixture")
+        })
+}
+
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
 }
@@ -90,16 +139,18 @@ pub fn resolve_launch_worktree_request(
 
     if !has_local_branch {
         if is_start_work_branch_name(&branch_name) {
-            manager
-                .prepare_start_work_remote_develop()
-                .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
+            run_required_origin_operation(
+                &main_repo_path,
+                "failed to prepare origin/develop for Start Work",
+                || manager.prepare_start_work_remote_develop(),
+            )?;
             effective_base_branch = "origin/develop".to_string();
             remote_base_ref = origin_remote_ref(&effective_base_branch);
             *base_branch = Some(effective_base_branch.clone());
         } else {
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to fetch origin: {err}"))?;
+            run_required_origin_operation(&main_repo_path, "failed to fetch origin", || {
+                manager.fetch_origin()
+            })?;
         }
 
         if !manager
@@ -134,16 +185,18 @@ pub fn resolve_launch_worktree_request(
             .remote_branch_exists(&remote_branch_ref)
             .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
         {
-            manager
-                .create_remote_branch_from_base(&remote_base_ref, &branch_name)
-                .map_err(|err| {
-                    format!(
-                        "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                    )
-                })?;
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
+            run_required_origin_operation(
+                &main_repo_path,
+                &format!(
+                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}"
+                ),
+                || manager.create_remote_branch_from_base(&remote_base_ref, &branch_name),
+            )?;
+            run_required_origin_operation(
+                &main_repo_path,
+                "failed to refresh origin refs after push",
+                || manager.fetch_origin(),
+            )?;
         }
     }
 
@@ -206,12 +259,14 @@ pub fn resolve_ephemeral_launch_worktree(
         let has_origin = manager
             .has_origin_remote()
             .map_err(|err| format!("failed to inspect origin remote: {err}"))?;
-        if has_origin {
-            manager
-                .fetch_origin()
-                .map_err(|err| format!("failed to fetch origin for intake base: {err}"))?;
-        }
-        if has_origin
+        let has_fresh_origin = if has_origin {
+            run_origin_operation(&main_repo_path, || manager.fetch_origin())
+                .map_err(|err| format!("failed to fetch origin for intake base: {err}"))?
+                .is_some()
+        } else {
+            false
+        };
+        if has_fresh_origin
             && manager
                 .remote_branch_exists(base_ref)
                 .map_err(|err| format!("failed to verify intake base {base_ref}: {err}"))?
@@ -900,6 +955,60 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn origin_operations_skip_unsafe_test_fixtures_but_preserve_local_remotes() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        run_git(&repo, &["init", "-q"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo-runtime-origin.git",
+            ],
+        );
+
+        let mut calls = 0;
+        let placeholder: Result<Option<()>, ()> = run_origin_operation(&repo, || {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(placeholder, Ok(None));
+        assert_eq!(calls, 0);
+
+        let missing_repo = temp.path().join("already-removed-repo");
+        let missing: Result<Option<()>, ()> = run_origin_operation(&missing_repo, || {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(missing, Ok(None));
+        assert_eq!(calls, 0);
+
+        let local_origin = temp.path().join("origin.git");
+        run_git(
+            temp.path(),
+            &["init", "--bare", "-q", local_origin.to_str().unwrap()],
+        );
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                local_origin.to_str().unwrap(),
+            ],
+        );
+        let local: Result<Option<()>, ()> = run_origin_operation(&repo, || {
+            calls += 1;
+            Ok(())
+        });
+        assert_eq!(local, Ok(Some(())));
+        assert_eq!(calls, 1);
+    }
 
     fn test_path(entries: &[&str]) -> String {
         std::env::join_paths(entries.iter().map(Path::new))

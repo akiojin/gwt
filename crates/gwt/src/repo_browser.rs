@@ -20,28 +20,8 @@ pub(crate) fn fetch_branch_inventory_origin(git_root: &Path) {
     // detached test thread races with fixture teardown and can no longer read
     // the origin: starting a fetch after that point would lose the fixture's
     // repository-local credential protections.
-    #[cfg(test)]
-    if branch_inventory_origin_must_skip_test_fetch(git_root) {
-        return;
-    }
-    let _ = gwt_git::WorktreeManager::new(git_root).fetch_origin();
-}
-
-#[cfg(test)]
-fn branch_inventory_origin_must_skip_test_fetch(git_root: &Path) -> bool {
-    let Ok(output) = gwt_core::process::hidden_command("git")
-        .args(["config", "--get", "remote.origin.url"])
-        .current_dir(git_root)
-        .output()
-    else {
-        return true;
-    };
-    if !output.status.success() {
-        return true;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .starts_with("https://github.com/example/")
+    let manager = gwt_git::WorktreeManager::new(git_root);
+    let _ = crate::launch_runtime::run_origin_operation(git_root, || manager.fetch_origin());
 }
 
 pub fn spawn_branch_load_async(
@@ -192,61 +172,6 @@ fn dispatch_branch_load_progressive(
                 message: error.to_string(),
             })],
         ),
-    }
-}
-
-#[cfg(test)]
-mod branch_inventory_fetch_tests {
-    use super::branch_inventory_origin_must_skip_test_fetch;
-
-    #[test]
-    fn missing_repository_is_never_fetched_by_branch_inventory_tests() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let missing_repo = temp.path().join("already-removed-repo");
-
-        assert!(branch_inventory_origin_must_skip_test_fetch(&missing_repo));
-    }
-
-    #[test]
-    fn public_placeholder_origin_is_never_fetched_by_branch_inventory_tests() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        for args in [
-            ["init", "-q"].as_slice(),
-            [
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/repo-branch-inventory.git",
-            ]
-            .as_slice(),
-        ] {
-            let output = gwt_core::process::hidden_command("git")
-                .args(args)
-                .current_dir(&repo)
-                .output()
-                .expect("run git fixture command");
-            assert!(output.status.success(), "git {args:?}");
-        }
-
-        assert!(branch_inventory_origin_must_skip_test_fetch(&repo));
-
-        let local_origin = temp.path().join("origin.git");
-        let init_bare = gwt_core::process::hidden_command("git")
-            .args(["init", "--bare", "-q"])
-            .arg(&local_origin)
-            .output()
-            .expect("init local origin");
-        assert!(init_bare.status.success());
-        let set_url = gwt_core::process::hidden_command("git")
-            .args(["remote", "set-url", "origin"])
-            .arg(&local_origin)
-            .current_dir(&repo)
-            .output()
-            .expect("set local origin");
-        assert!(set_url.status.success());
-        assert!(!branch_inventory_origin_must_skip_test_fetch(&repo));
     }
 }
 
