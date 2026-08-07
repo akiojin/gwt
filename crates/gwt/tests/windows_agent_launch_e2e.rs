@@ -47,7 +47,6 @@ enum RouteMode {
     Fresh,
     Resume,
     Continue,
-    NoSpawn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +55,7 @@ struct RouteCase {
     mode: RouteMode,
 }
 
-const ROUTE_CASES: [RouteCase; 38] = [
+const ROUTE_CASES: [RouteCase; 32] = [
     route("wizard.branch.configure", RouteMode::Fresh),
     route("wizard.work.configure", RouteMode::Fresh),
     route("wizard.intake.configure", RouteMode::Fresh),
@@ -81,21 +80,12 @@ const ROUTE_CASES: [RouteCase; 38] = [
         "monitor.autonomous.existing-resume.persisted",
         RouteMode::Resume,
     ),
-    route(
-        "monitor.autonomous.existing-resume.materialized-replay",
-        RouteMode::NoSpawn,
-    ),
-    route("workspace-agent-resume.linked-focus", RouteMode::NoSpawn),
     route("workspace-agent-resume.linked-exact", RouteMode::Resume),
     route("workspace-agent-resume.linked-handoff", RouteMode::Resume),
-    route("workspace-agent-resume.legacy-focus", RouteMode::NoSpawn),
     route("workspace-agent-resume.legacy-exact", RouteMode::Resume),
     route("workspace-agent-resume.legacy-picker", RouteMode::Resume),
-    route("branch-latest-resume.live-focus", RouteMode::NoSpawn),
     route("branch-latest-resume.persisted-resume", RouteMode::Resume),
-    route("board-origin-resume.live-focus", RouteMode::NoSpawn),
     route("board-origin-resume.persisted-resume", RouteMode::Resume),
-    route("continue-work.focused-existing", RouteMode::NoSpawn),
     route("continue-work.continued-conversation", RouteMode::Continue),
     route("continue-work.started-with-handoff", RouteMode::Fresh),
     route("restore.startup-auto-resume", RouteMode::Resume),
@@ -189,29 +179,9 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
     let public_route_only = std::env::var_os("GWT_WINDOWS_AGENT_E2E_PUBLIC_ROUTE_ONLY")
         .is_some_and(|value| value == "1");
 
-    let mut spawn_count = 0;
-    let mut no_spawn_count = 0;
+    let mut executed_route_count = 0;
     if !public_route_only {
         for route in ROUTE_CASES {
-            if route.mode == RouteMode::NoSpawn {
-                // No-spawn is selector-independent. Exercise each route once per
-                // provider in the latest shard instead of duplicating it in the
-                // exact-version shard.
-                if selector_shard == "exact" {
-                    continue;
-                }
-                let requests_before = fixture.requests().len();
-                let capture = route_capture_path(temp.path(), route.id);
-                assert!(!capture.exists());
-                assert_eq!(
-                    fixture.requests().len(),
-                    requests_before,
-                    "{} must not resolve package metadata",
-                    route.id
-                );
-                no_spawn_count += 1;
-                continue;
-            }
             run_shared_launch_boundary_case(
                 route,
                 provider,
@@ -222,12 +192,12 @@ fn windows_official_provider_launch_uses_verified_exact_npx_plan() {
                 &sessions_dir,
                 temp.path(),
             );
-            spawn_count += 1;
+            executed_route_count += 1;
         }
-        assert_eq!(spawn_count, 32);
         assert_eq!(
-            no_spawn_count,
-            if selector_shard == "latest" { 6 } else { 0 }
+            executed_route_count,
+            ROUTE_CASES.len(),
+            "every advertised route must execute the shared launch boundary"
         );
     }
 
@@ -863,7 +833,6 @@ fn run_shared_launch_boundary_case(
             .session_mode(SessionMode::Resume)
             .resume_session_id(format!("resume-{}", route.id)),
         RouteMode::Continue => builder.session_mode(SessionMode::Continue),
-        RouteMode::NoSpawn => unreachable!("no-spawn routes return before launch construction"),
     };
     for (key, value) in launch_env {
         builder = builder.env(key, value);
@@ -1147,21 +1116,6 @@ fn assert_canonical_route_manifest() {
         .map(|route| route.id)
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(ids.len(), ROUTE_CASES.len(), "route IDs must be unique");
-    let spawn_routes = ROUTE_CASES
-        .iter()
-        .filter(|route| route.mode != RouteMode::NoSpawn)
-        .count();
-    let no_spawn_routes = ROUTE_CASES
-        .iter()
-        .filter(|route| route.mode == RouteMode::NoSpawn)
-        .count();
-    assert_eq!(spawn_routes, 32);
-    assert_eq!(no_spawn_routes, 6);
-    assert_eq!(
-        spawn_routes * 2 /* providers */ * 2, /* selectors */
-        128
-    );
-    assert_eq!(no_spawn_routes * 2 /* providers */, 12);
 }
 
 fn runner_file_name_is(command: &str, expected: &str) -> bool {

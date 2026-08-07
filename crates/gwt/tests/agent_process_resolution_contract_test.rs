@@ -157,7 +157,10 @@ fn production_web_sources(root: &Path) -> Vec<(PathBuf, String)> {
             let entry = entry.expect("read web source entry");
             let path = entry.path();
             if path.is_dir() {
-                if path.file_name().and_then(|name| name.to_str()) != Some("__tests__") {
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("__tests__" | "node_modules" | "dist" | "build")
+                ) {
                     pending.push(path);
                 }
                 continue;
@@ -177,6 +180,32 @@ fn production_web_sources(root: &Path) -> Vec<(PathBuf, String)> {
         }
     }
     sources
+}
+
+#[test]
+fn production_web_sources_excludes_test_dependency_and_build_directories() {
+    let temp = tempfile::tempdir().expect("web source fixture");
+    for directory in ["__tests__", "node_modules", "dist", "build"] {
+        let path = temp.path().join(directory);
+        fs::create_dir_all(&path).expect("create excluded web directory");
+        fs::write(
+            path.join("forbidden.js"),
+            "sendEvent('open_active_work_launch_wizard');",
+        )
+        .expect("write excluded web source");
+    }
+    fs::write(
+        temp.path().join("production.js"),
+        "export const ready = true;",
+    )
+    .expect("write production web source");
+
+    let sources = production_web_sources(temp.path());
+    assert_eq!(sources.len(), 1);
+    assert_eq!(
+        sources[0].0.file_name().and_then(|name| name.to_str()),
+        Some("production.js")
+    );
 }
 
 #[test]

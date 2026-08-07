@@ -780,9 +780,12 @@ fn percent_decode_registry_path(path: &str) -> String {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let hex = &path[index + 1..index + 3];
-            if let Ok(value) = u8::from_str_radix(hex, 16) {
+        if bytes[index] == b'%' {
+            if let Some(value) = bytes
+                .get(index + 1..index + 3)
+                .and_then(|hex| std::str::from_utf8(hex).ok())
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
                 decoded.push(value);
                 index += 3;
                 continue;
@@ -797,6 +800,15 @@ fn percent_decode_registry_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_registry_path_handles_non_ascii_without_losing_valid_decoding() {
+        assert_eq!(percent_decode_registry_path("/%€/package"), "/%€/package");
+        assert_eq!(
+            percent_decode_registry_path("/%40Scope%2FPackage?cache=1"),
+            "/@scope/package"
+        );
+    }
 
     #[test]
     fn scoped_gwt_home_is_thread_local_and_restores() {

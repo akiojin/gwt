@@ -216,6 +216,7 @@ function Assert-CodexTurn {
 
   $sessionId = $null
   $turnCompleted = $false
+  $assistantMarkerObserved = $false
   foreach ($event in $Events) {
     $eventType = Get-ObjectString -InputObject $event -Names @("type")
     if ($eventType -eq "thread.started") {
@@ -230,6 +231,15 @@ function Assert-CodexTurn {
       if ($itemType -in @("command_execution", "mcp_tool_call", "web_search", "file_change")) {
         throw "Codex used a tool during the no-tools smoke turn."
       }
+      if ($itemType -eq "agent_message") {
+        $assistantText = Get-ObjectString `
+          -InputObject $itemProperty.Value `
+          -Names @("text", "content")
+        if ($null -ne $assistantText -and
+            $assistantText.Contains($ExpectedMarker, [StringComparison]::Ordinal)) {
+          $assistantMarkerObserved = $true
+        }
+      }
     }
   }
   if ([string]::IsNullOrWhiteSpace($sessionId) -or -not $turnCompleted) {
@@ -238,8 +248,7 @@ function Assert-CodexTurn {
   if (-not [string]::IsNullOrWhiteSpace($ExpectedSessionId) -and $sessionId -ne $ExpectedSessionId) {
     throw "Codex resume did not keep the same provider Session."
   }
-  $serialized = $Events | ConvertTo-Json -Depth 30 -Compress
-  if (-not $serialized.Contains($ExpectedMarker, [StringComparison]::Ordinal)) {
+  if (-not $assistantMarkerObserved) {
     throw "Codex did not return the expected no-tools marker."
   }
   return $sessionId
@@ -254,6 +263,7 @@ function Assert-ClaudeTurn {
 
   $sessionId = $null
   $success = $false
+  $assistantMarkerObserved = $false
   foreach ($event in $Events) {
     $candidate = Get-ObjectString -InputObject $event -Names @("session_id", "sessionId")
     if (-not [string]::IsNullOrWhiteSpace($candidate)) {
@@ -269,8 +279,16 @@ function Assert-ClaudeTurn {
       $contentProperty = $messageProperty.Value.PSObject.Properties["content"]
       if ($null -ne $contentProperty -and $contentProperty.Value -is [array]) {
         foreach ($block in $contentProperty.Value) {
-          if ((Get-ObjectString -InputObject $block -Names @("type")) -eq "tool_use") {
+          $blockType = Get-ObjectString -InputObject $block -Names @("type")
+          if ($blockType -eq "tool_use") {
             throw "Claude used a tool during the no-tools smoke turn."
+          }
+          if ($eventType -eq "assistant" -and $blockType -eq "text") {
+            $assistantText = Get-ObjectString -InputObject $block -Names @("text")
+            if ($null -ne $assistantText -and
+                $assistantText.Contains($ExpectedMarker, [StringComparison]::Ordinal)) {
+              $assistantMarkerObserved = $true
+            }
           }
         }
       }
@@ -282,8 +300,7 @@ function Assert-ClaudeTurn {
   if (-not [string]::IsNullOrWhiteSpace($ExpectedSessionId) -and $sessionId -ne $ExpectedSessionId) {
     throw "Claude resume did not keep the same provider Session."
   }
-  $serialized = $Events | ConvertTo-Json -Depth 30 -Compress
-  if (-not $serialized.Contains($ExpectedMarker, [StringComparison]::Ordinal)) {
+  if (-not $assistantMarkerObserved) {
     throw "Claude did not return the expected no-tools marker."
   }
   return $sessionId
@@ -332,6 +349,47 @@ function Get-HookCommand {
   # system command processor. Keep the explicit PowerShell wrapper used by the
   # production gwt hook generator, then call this PowerShell 7 script inside it.
   return "powershell.exe -NoProfile -NonInteractive -Command `"& { & '$quotedPwsh' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '$quotedScript' -InternalHookReceiptPath '$quotedReceipt' -InternalHookProvider '$ProviderName' }`""
+}
+
+function Protect-CurrentUserDirectory {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  if ($null -eq $currentUser) {
+    throw "Unable to resolve the current Windows user SID."
+  }
+  $acl = [Security.AccessControl.DirectorySecurity]::new()
+  $acl.SetOwner($currentUser)
+  $acl.SetAccessRuleProtection($true, $false)
+  $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+    [Security.AccessControl.InheritanceFlags]::ObjectInherit
+  $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+    $currentUser,
+    [Security.AccessControl.FileSystemRights]::FullControl,
+    $inheritance,
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Allow
+  )
+  [void]$acl.AddAccessRule($rule)
+  Set-Acl -LiteralPath $Path -AclObject $acl
+
+  $applied = Get-Acl -LiteralPath $Path
+  if (-not $applied.AreAccessRulesProtected) {
+    throw "Temporary credential directory still inherits access rules."
+  }
+  $unexpectedAllowRules = @($applied.Access | Where-Object {
+      if ($_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
+        return $false
+      }
+      try {
+        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]) -ne $currentUser
+      } catch {
+        return $true
+      }
+    })
+  if ($unexpectedAllowRules.Count -ne 0) {
+    throw "Temporary credential directory grants access outside the current user."
+  }
 }
 
 function Read-HookReceipts {
@@ -577,6 +635,7 @@ if ($selectedCases.Count -eq 0) {
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("gwt-windows-agent-smoke-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
+Protect-CurrentUserDirectory -Path $temporaryRoot
 try {
   $results = @()
   foreach ($case in $selectedCases) {

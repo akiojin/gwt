@@ -33611,13 +33611,15 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         panic!("Issue Monitor auto launch failed: {result:?}");
     };
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
-    assert!(
+    assert_eq!(
         process
             .args
-            .last()
-            .is_some_and(|argument| argument.contains("$gwt-execute #3165")),
+            .iter()
+            .filter(|argument| argument.contains("$gwt-execute #3165"))
+            .count(),
+        1,
         "Issue Monitor auto launch must pass the generated prompt to the agent: {:?}",
-        process.args.last()
+        process.args
     );
 }
 

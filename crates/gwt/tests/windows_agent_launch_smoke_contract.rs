@@ -76,6 +76,27 @@ fn windows_official_provider_smoke_is_explicit_sanitized_and_checkout_local() {
         "Codex smoke must use an isolated CODEX_HOME with user-level hooks and only copy the credential artifact"
     );
     assert!(
+        source.contains("$assistantMarkerObserved")
+            && source.contains("$itemType -eq \"agent_message\"")
+            && source.contains("$eventType -eq \"assistant\" -and $blockType -eq \"text\"")
+            && !source.contains("$serialized.Contains($ExpectedMarker"),
+        "provider markers must be accepted only from assistant output, never an echoed user prompt"
+    );
+    let protect_offset = source
+        .find("Protect-CurrentUserDirectory -Path $temporaryRoot")
+        .expect("temporary credential directory must receive a protected ACL");
+    let official_case_call_offset = protect_offset
+        + source[protect_offset..]
+            .find("Invoke-OfficialCase")
+            .expect("protected temporary root must be used by the official smoke cases");
+    assert!(
+        source.contains("SetAccessRuleProtection($true, $false)")
+            && source
+                .contains("Temporary credential directory grants access outside the current user")
+            && protect_offset < official_case_call_offset,
+        "the current-user-only ACL must be applied and verified before credentials are copied"
+    );
+    assert!(
         !source.contains("Join-Path $CaseRoot \".codex\"")
             && !source.contains("Join-Path $codexDir \"hooks.json\""),
         "Codex smoke must not depend on project-local hook discovery or ambient project trust"

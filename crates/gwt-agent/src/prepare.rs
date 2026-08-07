@@ -3216,15 +3216,25 @@ fn repair_windows_npx_cache_with(
         &quarantine,
         &quarantined_missing,
     )
-    .map_err(|error| format!("quarantined npm cache hash root failed final validation: {error}"))?;
+    .map_err(|error| {
+        format!(
+            "quarantined npm cache hash root at {} failed final validation: {error}",
+            quarantine.display()
+        )
+    })?;
     if quarantined != candidate.validation {
-        return Err(
-            "quarantined npm cache hash root identity changed; deletion aborted".to_string(),
-        );
+        return Err(format!(
+            "quarantined npm cache hash root identity changed at {}; deletion aborted",
+            quarantine.display()
+        ));
     }
 
-    remove_quarantine(&quarantine)
-        .map_err(|error| format!("failed to delete quarantined npm cache hash root: {error}"))
+    remove_quarantine(&quarantine).map_err(|error| {
+        format!(
+            "failed to delete quarantined npm cache hash root at {}: {error}",
+            quarantine.display()
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -5214,6 +5224,38 @@ mod tests {
         assert!(
             sibling_guard.is_file(),
             "sibling hash must remain untouched"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_repair_reports_leftover_quarantine_when_delete_fails() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let missing = create_windows_npx_fixture(&npx_base, "1111111111111111");
+        let candidate = detect_windows_npx_cache_corruption(
+            &windows_missing_binary_output(&missing),
+            &npx_base,
+        )
+        .expect("safe repair candidate");
+        let quarantined_path = std::cell::RefCell::new(None);
+
+        let error = repair_windows_npx_cache_with(&candidate, |quarantine| {
+            quarantined_path.replace(Some(quarantine.to_path_buf()));
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected delete failure",
+            ))
+        })
+        .expect_err("delete failure must preserve the quarantine for manual recovery");
+
+        let quarantined_path = quarantined_path
+            .into_inner()
+            .expect("failed delete quarantine path");
+        assert!(quarantined_path.is_dir());
+        assert!(
+            error.contains(&quarantined_path.display().to_string()),
+            "manual recovery diagnostics must identify the leftover quarantine: {error}"
         );
     }
 
