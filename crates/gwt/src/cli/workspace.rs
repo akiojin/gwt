@@ -1559,6 +1559,13 @@ fn workspace_ensure_agent_identity_matches(
     }
 }
 
+/// Canonicalize a stored Work owner onto the durable `SPEC-<n>` spelling.
+///
+/// Two legacy spellings reach the same SPEC owner and are safe to upgrade:
+/// `Issue #<n>` (a Work started as a plain Issue that later gained the
+/// `gwt-spec` label) and `SPEC #<n>` (SPEC #3431 FR-070 — the spelling the
+/// knowledge-launch wizard stamped before it was aligned with the binding).
+/// Both are one-way: nothing downgrades a durable SPEC owner.
 fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str>) -> bool {
     let Some(stored) = stored else {
         return false;
@@ -1566,16 +1573,21 @@ fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str
     let Some(durable) = durable else {
         return false;
     };
-    let stored_number = stored
-        .strip_prefix("Issue #")
-        .and_then(|number| number.parse::<u64>().ok());
-    let durable_number = durable
-        .strip_prefix("SPEC-")
-        .and_then(|number| number.parse::<u64>().ok());
-    let (Some(stored_number), Some(durable_number)) = (stored_number, durable_number) else {
+    let Some((prefix, stored_number)) = ["Issue #", "SPEC #"].into_iter().find_map(|prefix| {
+        stored
+            .strip_prefix(prefix)
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| (prefix, number))
+    }) else {
         return false;
     };
-    stored == format!("Issue #{stored_number}")
+    let Some(durable_number) = durable
+        .strip_prefix("SPEC-")
+        .and_then(|number| number.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    stored == format!("{prefix}{stored_number}")
         && durable == format!("SPEC-{durable_number}")
         && stored_number == durable_number
 }
@@ -5671,6 +5683,32 @@ pub(crate) mod tests {
             (Some("Issue #3412"), Some("SPEC-9999")),
             (Some("SPEC-3412"), Some("Issue #3412")),
             (Some("Issue #3412"), None),
+        ] {
+            assert!(
+                !workspace_ensure_can_upgrade_owner(stored, durable),
+                "unexpected owner upgrade: stored={stored:?}, durable={durable:?}"
+            );
+        }
+    }
+
+    /// SPEC #3431 FR-070: heal Work items the knowledge-launch wizard stamped
+    /// with the non-canonical `SPEC #<n>` spelling. No resolver emits that
+    /// form, so without this bridge every such Work is permanently wedged at
+    /// `workspace.ensure` and its agent can never persist a title-summary.
+    #[test]
+    fn workspace_ensure_owner_upgrade_heals_legacy_spec_hash_spelling() {
+        assert!(workspace_ensure_can_upgrade_owner(
+            Some("SPEC #3412"),
+            Some("SPEC-3412")
+        ));
+        for (stored, durable) in [
+            (Some("SPEC #03412"), Some("SPEC-3412")),
+            (Some("SPEC #3412 "), Some("SPEC-3412")),
+            (Some("SPEC#3412"), Some("SPEC-3412")),
+            (Some("SPEC #3412"), Some("SPEC-9999")),
+            (Some("SPEC #3412"), Some("Issue #3412")),
+            (Some("SPEC-3412"), Some("SPEC #3412")),
+            (Some("SPEC #3412"), None),
         ] {
             assert!(
                 !workspace_ensure_can_upgrade_owner(stored, durable),

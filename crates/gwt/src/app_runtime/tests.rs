@@ -18941,6 +18941,57 @@ fn app_runtime_issue_launch_wizard_seeds_issue_workspace_context() {
     assert_eq!(context.title.as_deref(), Some("Fix Launch Agent trace"));
 }
 
+/// SPEC #3431 FR-070: a spec-linked launch must seed the same owner spelling
+/// the durable execution binding produces (`SPEC-<n>`). The wizard used to
+/// write `SPEC #<n>`, which no resolver ever emits, so `workspace.ensure`
+/// rejected every spec-launched agent as an owner mismatch and left it unable
+/// to set its own title-summary for the whole life of the Work.
+#[test]
+fn app_runtime_spec_launch_wizard_seeds_canonical_spec_workspace_owner() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3431,
+            "PM エージェント",
+            &["gwt-spec"],
+            "Resident project manager",
+            "2026-08-07T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            3431,
+            LinkedIssueKind::Spec,
+        )
+        .expect("open spec launch wizard");
+
+    let context = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.workspace_resume_context.as_ref())
+        .expect("spec launch wizard should carry workspace context");
+    assert_eq!(
+        context.owner.as_deref(),
+        Some("SPEC-3431"),
+        "the wizard owner label must match the durable binding spelling, or \
+         workspace.ensure fails with an unrecoverable owner mismatch"
+    );
+}
+
 #[test]
 fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
     let _env_guard = env_test_lock().lock().expect("env lock");
