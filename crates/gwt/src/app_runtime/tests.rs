@@ -21576,6 +21576,75 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
 /// slot held. With the default `max_active = 1` that stops the whole queue —
 /// which is exactly what "the PM registers Issues but nothing ever runs" looks
 /// like from the outside.
+/// SPEC-3431 FR-032: an agent that exits cleanly also frees its slot.
+///
+/// FR-030 closed this leak on the `Error` side, but `exit 0` maps to
+/// `WindowProcessStatus::Stopped` (`window_state.rs`, `PaneStatus::Completed(0)`)
+/// and took a different path: no `agent_failed`, and the auto-close gate
+/// required `window_hook_states == Some(Stopped)` — a value
+/// `window_state_for_hook_event` can never return, so the window was never
+/// closed and no `WindowClosed` control was ever published. The row stayed
+/// `launched` holding the slot forever, and with the default `max_active = 1`
+/// that stops the whole queue exactly like the Error-side leak did.
+#[test]
+fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let runtime_for = |status: WindowProcessStatus| {
+        let mut tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        tab.project_root = repo.clone();
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+        let events =
+            runtime.handle_runtime_status(window_id, status, Some("Process exited".to_string()));
+        events
+            .iter()
+            .map(|outbound| outbound.event.event_kind().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    // The Error path is the reference: it already tells the Monitor. Compare
+    // only the Monitor-facing events — a clean exit auto-closes the window, so
+    // it legitimately stops emitting per-window state for a window that is
+    // gone, while a kept-for-diagnosis Error window keeps updating.
+    let monitor_events = |status| -> std::collections::BTreeSet<String> {
+        runtime_for(status)
+            .into_iter()
+            .filter(|kind| kind.starts_with("issue_monitor"))
+            .collect()
+    };
+    let reference = monitor_events(WindowProcessStatus::Error);
+    assert!(
+        !reference.is_empty(),
+        "precondition: the Error path notifies the Monitor"
+    );
+    let missing: Vec<_> = reference
+        .difference(&monitor_events(WindowProcessStatus::Stopped))
+        .cloned()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "a clean exit must release the slot just like a crash; missing: {missing:?}"
+    );
+}
+
 #[test]
 fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis() {
     let _env_lock = env_test_lock()

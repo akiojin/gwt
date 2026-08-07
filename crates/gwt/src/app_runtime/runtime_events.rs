@@ -227,6 +227,16 @@ impl AppRuntime {
         }
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
+        // The `window_hook_states == Some(Stopped)` condition is unreachable
+        // (`window_state_for_hook_event` only returns `Idle` / `Running`), so
+        // in practice an exiting agent window is never auto-closed. That is
+        // deliberate for the pane itself — a stopped agent window stays on the
+        // canvas so its final output remains readable
+        // (`app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics`,
+        // #3274). SPEC-3431 FR-032 keeps that behaviour and fixes the separate
+        // bug it was masking: the Issue Monitor was never told either, so the
+        // launch's slot stayed held. Visibility and accounting are decided
+        // independently below.
         let should_auto_close =
             should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
                 && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
@@ -255,6 +265,23 @@ impl AppRuntime {
             }
             let _ = self.persist();
             let mut events = cleanup_events;
+            // SPEC-3431 FR-032: auto-close reaps the window itself instead of
+            // going through `close_window_events`, so it also owes the Issue
+            // Monitor the notification that path would have sent. Without it
+            // the launch's slot stays held by a window that no longer exists.
+            if is_agent_window {
+                if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                    let message = detail
+                        .as_deref()
+                        .unwrap_or("Agent exited without completing the work")
+                        .to_string();
+                    events.extend(self.issue_monitor_agent_failed_events(
+                        project_root,
+                        &id,
+                        &message,
+                    ));
+                }
+            }
             self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             return events;
         }
@@ -297,11 +324,31 @@ impl AppRuntime {
         // row stayed `launched` forever. `recoverable_agent_error_windows` is
         // only cleared by a later hook event, and a dead process sends none.
         // With the default `max_active = 1` that stops the whole queue.
-        if is_agent_window && composed_status == WindowProcessStatus::Error {
-            let message = detail
-                .as_deref()
-                .unwrap_or("Agent entered error state")
-                .to_string();
+        //
+        // SPEC-3431 FR-032: `Stopped` (a clean `exit 0`) leaks the same way.
+        // It never reached `agent_failed`, and the auto-close gate below
+        // additionally required `window_hook_states == Some(Stopped)` — a
+        // value `window_state_for_hook_event` cannot produce — so the window
+        // was never closed either and no `WindowClosed` control was published.
+        // Nothing told the Monitor, so the row stayed `launched` holding the
+        // slot. The process is gone in both cases, so both release the slot.
+        //
+        // This reports a clean exit through the failure channel on purpose:
+        // the Monitor decides completion from the PR, not from an exit code,
+        // so the only claim being made here is "this launch is over". Naming
+        // it a success would be the lie, not naming it a failure.
+        if is_agent_window
+            && matches!(
+                composed_status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+        {
+            let default_message = if composed_status == WindowProcessStatus::Error {
+                "Agent entered error state"
+            } else {
+                "Agent exited without completing the work"
+            };
+            let message = detail.as_deref().unwrap_or(default_message).to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
                 events.extend(self.issue_monitor_agent_failed_events(project_root, &id, &message));
             }
