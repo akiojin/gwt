@@ -175,6 +175,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
+        "issue.monitor.questions" => CliCommand::Issue(IssueCommand::MonitorQuestions {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.question.answer" | "issue.monitor.question-answer" => {
+            CliCommand::Issue(IssueCommand::MonitorQuestionAnswer {
+                project_root: optional_path(params, "project_root")?,
+                handoff_id: required_string(params, "handoff_id")?,
+                answer: required_string(params, "answer")?,
+            })
+        }
         "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
                 project_root: optional_path(params, "project_root")?,
@@ -1700,6 +1710,40 @@ mod tests {
         // Missing the reviewed SHA is rejected.
         assert!(matches!(
             err("issue.monitor.review_verdict", json!({"issue_number": 42})),
+            CliParseError::MissingFlag(_)
+        ));
+    }
+
+    /// Issue #3478 (AC-5/AC-9): the canonical operations a human uses to see
+    /// and answer what an autonomous agent is waiting on.
+    #[test]
+    fn issue_monitor_question_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.questions", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorQuestions { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.question.answer",
+                json!({"handoff_id": "handoff-1", "answer": "Yes"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorQuestionAnswer {
+                project_root: None,
+                handoff_id: "handoff-1".to_string(),
+                answer: "Yes".to_string(),
+            })
+        );
+        // An answer can never be attached to an unidentified parked question,
+        // and an identified one can never be answered with nothing.
+        assert!(matches!(
+            err("issue.monitor.question.answer", json!({"answer": "Yes"})),
+            CliParseError::MissingFlag(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.question.answer",
+                json!({"handoff_id": "handoff-1"})
+            ),
             CliParseError::MissingFlag(_)
         ));
     }

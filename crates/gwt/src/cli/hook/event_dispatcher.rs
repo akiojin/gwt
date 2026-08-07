@@ -8,10 +8,10 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    action_obligation_stop_check, board_reminder, diagnostics, execution_control_stop_check,
-    skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
-    skill_register_spec_stop_check, work_event_settlement_stop_check, workflow_policy,
-    workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    action_obligation_stop_check, autonomous_question_guard, board_reminder, diagnostics,
+    execution_control_stop_check, skill_build_spec_stop_check, skill_discussion_stop_check,
+    skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
+    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -65,6 +65,14 @@ fn handle_session_start(
         IntentBoundaryEvent::SessionStart,
         session_start_diagnostic,
     );
+    // Issue #3478 (AC-1/AC-2): deliver the autonomous decision policy at the
+    // intent boundary so the agent resolves reversible choices itself instead
+    // of reaching for a question tool.
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::SessionStart,
+        autonomous_decision_policy_context(),
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -73,6 +81,16 @@ fn handle_session_start(
         IntentBoundaryEvent::SessionStart,
         pending_goal,
     ))
+}
+
+/// The autonomous decision policy for this session, or `None` for every
+/// human-driven launch (which must stay byte-identical to before).
+fn autonomous_decision_policy_context() -> Option<String> {
+    crate::autonomous_handoff::autonomous_execution_context_from_env(|name| {
+        std::env::var(name).ok()
+    })
+    .as_ref()
+    .map(crate::autonomous_handoff::autonomous_decision_policy)
 }
 
 fn handle_user_prompt_submit(
@@ -103,6 +121,11 @@ fn handle_user_prompt_submit(
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::UserPromptSubmit,
+        autonomous_decision_policy_context(),
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -120,6 +143,16 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward(input)
     })?;
+    // Issue #3478 (FR-025): the question guard runs before every other policy.
+    // A question tool call must be converted while it is still refusable — any
+    // later check that returns first would let the provider open the question
+    // UI and hold the Issue Monitor slot until the stuck timeout.
+    let question_guard = run_step(event, "autonomous-question-guard", || {
+        autonomous_question_guard::handle_with_input(input)
+    })?;
+    if question_guard != HookOutput::Silent {
+        return Ok(question_guard);
+    }
     run_step(event, "workflow-policy", || {
         workflow_policy::handle_with_input(input)
     })
@@ -350,6 +383,110 @@ mod tests {
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
+    }
+
+    /// Issue #3478 (AC-3): the question guard runs on PreToolUse, and it must
+    /// win over the later policy checks so a question can never reach a
+    /// waiting UI while some other guard debates the same call.
+    #[test]
+    fn pre_tool_use_converts_an_autonomous_question_before_any_other_policy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let session_id = "session-question-guard";
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, session_id);
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+        let _autonomous_issue =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3478");
+
+        let input = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Delete the release tag?"}]}
+        });
+        let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+            .expect("PreToolUse output");
+
+        let HookOutput::PreToolUsePermission { summary, .. } = output else {
+            panic!("expected the autonomous question to be denied");
+        };
+        assert_eq!(
+            summary,
+            crate::cli::hook::autonomous_question_guard::QUESTION_HANDOFF_SUMMARY
+        );
+    }
+
+    /// AC-6 non-regression: without the autonomous markers the same question
+    /// tool passes straight through.
+    #[test]
+    fn pre_tool_use_leaves_a_human_driven_question_alone() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+        let _autonomous_issue =
+            ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+
+        let input = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Which option do you prefer?"}]}
+        });
+        let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+            .expect("PreToolUse output");
+
+        assert_eq!(output, HookOutput::Silent);
+    }
+
+    /// AC-1/AC-2: the decision policy reaches the agent at every intent
+    /// boundary, so it survives context compaction.
+    #[test]
+    fn session_start_injects_the_autonomous_decision_policy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-policy");
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _autonomous =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+        let _autonomous_issue =
+            ScopedEnvVar::set(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3478");
+
+        let output =
+            handle_with_input("SessionStart", "{}", worktree.path(), None).expect("hook output");
+
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+            panic!("expected additional context carrying the autonomous policy");
+        };
+        assert!(
+            text.contains("Autonomous execution policy (Issue #3478)"),
+            "{text}"
+        );
+        assert!(text.contains("Question tools are blocked"), "{text}");
     }
 
     #[test]
