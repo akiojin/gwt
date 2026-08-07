@@ -16,26 +16,32 @@ pub(crate) fn fetch_branch_inventory_origin(git_root: &Path) {
     // identity stays realistic. Never let either detached branch-inventory
     // refresh contact that public placeholder: a credential helper can outlive
     // the test process and retain the verification runner's output pipe. Local
-    // fixture origins still exercise the real fetch path.
+    // fixture origins still exercise the real fetch path. Fail closed when a
+    // detached test thread races with fixture teardown and can no longer read
+    // the origin: starting a fetch after that point would lose the fixture's
+    // repository-local credential protections.
     #[cfg(test)]
-    if branch_inventory_origin_is_test_placeholder(git_root) {
+    if branch_inventory_origin_must_skip_test_fetch(git_root) {
         return;
     }
     let _ = gwt_git::WorktreeManager::new(git_root).fetch_origin();
 }
 
 #[cfg(test)]
-fn branch_inventory_origin_is_test_placeholder(git_root: &Path) -> bool {
-    gwt_core::process::hidden_command("git")
+fn branch_inventory_origin_must_skip_test_fetch(git_root: &Path) -> bool {
+    let Ok(output) = gwt_core::process::hidden_command("git")
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(git_root)
         .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .starts_with("https://github.com/example/")
-        })
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .starts_with("https://github.com/example/")
 }
 
 pub fn spawn_branch_load_async(
@@ -191,7 +197,15 @@ fn dispatch_branch_load_progressive(
 
 #[cfg(test)]
 mod branch_inventory_fetch_tests {
-    use super::branch_inventory_origin_is_test_placeholder;
+    use super::branch_inventory_origin_must_skip_test_fetch;
+
+    #[test]
+    fn missing_repository_is_never_fetched_by_branch_inventory_tests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_repo = temp.path().join("already-removed-repo");
+
+        assert!(branch_inventory_origin_must_skip_test_fetch(&missing_repo));
+    }
 
     #[test]
     fn public_placeholder_origin_is_never_fetched_by_branch_inventory_tests() {
@@ -216,7 +230,7 @@ mod branch_inventory_fetch_tests {
             assert!(output.status.success(), "git {args:?}");
         }
 
-        assert!(branch_inventory_origin_is_test_placeholder(&repo));
+        assert!(branch_inventory_origin_must_skip_test_fetch(&repo));
 
         let local_origin = temp.path().join("origin.git");
         let init_bare = gwt_core::process::hidden_command("git")
@@ -232,7 +246,7 @@ mod branch_inventory_fetch_tests {
             .output()
             .expect("set local origin");
         assert!(set_url.status.success());
-        assert!(!branch_inventory_origin_is_test_placeholder(&repo));
+        assert!(!branch_inventory_origin_must_skip_test_fetch(&repo));
     }
 }
 
