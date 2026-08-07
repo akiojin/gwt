@@ -118,16 +118,18 @@ You may watch the agents the Monitor launched. You may not drive them.
   its next intent boundary, not immediately. A Board post never
   interrupts a running agent, so never wait on one as if it did.
 
+You may also stop one:
+
+- `pane.close` ends a pane whose agent is hung, looping, or working on
+  something the backlog has moved past. Closing a Monitor-launched pane
+  counts as one attempt against that issue's retry budget and schedules
+  a backoff before it can start again; once the budget is spent the
+  issue goes to `needs_human` instead of relaunching. So a close is a
+  real stop, but a bounded one — you cannot spin an issue by closing it
+  repeatedly, and you should still say why you closed it.
+
 Hard limits, no exceptions:
 
-- Never run `pane.close`. Closing a Monitor-launched pane returns its
-  issue to the queue, so with autonomous mode on the Monitor relaunches
-  the same issue on the next scan — closing produces a launch loop, not
-  a stop. When an agent looks hung or looping, report it to the user
-  with the evidence you read and the option you recommend (demote it
-  with `issue.monitor.priority.move`, hold it with a label, or have the
-  user stop the pane from the GUI), then apply their answer through
-  those operations.
 - Never run `pane.send`. Input injection is scoped to a session's own
   pane and is not a coordination channel.
 - Read scrollback to diagnose and to report, never to hand an agent
@@ -263,14 +265,15 @@ mod tests {
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
-            // FR-023: read-only observation of the other agents.
+            // FR-023: observation of the other agents.
             "`board.show`",
             "`pane.list`",
             "`pane.read`",
             "`launched_window_id`",
-            "Never run `pane.close`",
+            // FR-031: stopping a pane is allowed and bounded.
+            "`pane.close`",
+            "counts as one attempt",
             "Never run `pane.send`",
-            "relaunches the same issue",
             // FR-010: the strong merge gate stays out of reach.
             "never submit a review verdict",
             // FR-004: the PM owns Issues for their whole life.
@@ -329,12 +332,17 @@ mod tests {
             !body.contains("inbox snapshots"),
             "there is no inbox operation; the snapshot is issue.monitor.status"
         );
-        for permitted_stop in ["run `pane.close`", "use `pane.close`"] {
-            assert!(
-                !body.contains(&format!("You may {permitted_stop}")),
-                "FR-023: closing a Monitor-launched pane relaunches its issue"
-            );
-        }
+        // SPEC-3431 FR-031 (user ruling 2026-08-07): the close prohibition is
+        // gone on purpose. It was a workaround for `requeue_window` consuming
+        // no attempt, which a person closing a window by hand triggered just as
+        // easily — the constraint made the PM weaker without protecting
+        // anyone. The loop is now bounded where it happens, so the capability
+        // is safe. Pinned as a negative so it is not "restored" as a fix.
+        assert!(
+            !body.contains("Never run `pane.close`"),
+            "FR-031: the close footgun is bounded in requeue_window, not by \
+             taking the capability away from the PM"
+        );
     }
 
     #[test]
