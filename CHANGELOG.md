@@ -1,6 +1,44 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.74.0] - 2026-08-07
+
+### Bug Fixes
+
+- **issue-monitor:** Claim 再照合と refresh 上限を修正
+- **autonomous:** 確認待ちを NeedsHuman へ即時 handoff して active slot を解放する
+- **issue-monitor:** Needs_human / not_ready / hold_excluded の行バッジが Queued と表示される
+- **launch:** SessionStart readiness を進捗ベースの上限付き期限に変更
+
+### Documentation
+
+- **skills:** Parked question handoff の JSON operations を gwt-agent skill に追記
+
+### Features
+
+- **issue-monitor:** Readiness と hold 除外を実装
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3460 の完了状態を記録
+- **work:** Issue #3478 の作業イベントを記録
+- **work:** Issue #3478 の完了状態を記録
+- **work:** Issue #3478 の完了 Work event を記録
+- **work:** Issue #3475 の完了状態を記録
+
+### Refactor
+
+- **issue-monitor:** 共有実行状態の型契約を追加
+
+### Styling
+
+- **autonomous:** Restart 復元テストの整形を rustfmt に合わせる
+
+### Testing
+
+- **action-obligation:** Revival記録テストを隔離
+- **autonomous:** 停止中の質問表示を実ブラウザ E2E で固定する
+
 ## [9.73.1] - 2026-08-05
 
 ### Bug Fixes
