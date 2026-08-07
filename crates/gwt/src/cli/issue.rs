@@ -162,6 +162,26 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             number,
         } => run_monitor_launch_now(env, project_root.as_deref(), number, out)?,
+        IssueCommand::MonitorStop {
+            project_root,
+            number,
+            reason,
+            claim_id,
+            delivery_id,
+            window_id,
+        } => run_monitor_stop(
+            env,
+            project_root.as_deref(),
+            number,
+            &reason,
+            crate::IssueMonitorStopTarget {
+                issue_number: number,
+                claim_id,
+                delivery_id,
+                window_id,
+            },
+            out,
+        )?,
         IssueCommand::MonitorConfigSet {
             project_root,
             enabled,
@@ -335,6 +355,95 @@ fn run_monitor_launch_now<E: CliEnv>(
     );
     out.push('\n');
     Ok(0)
+}
+
+/// SPEC-3431 FR-033 / T-087b: revoke one launch's authority and slot.
+///
+/// The stop is committed to prefs inside the same lock-protected mutation that
+/// evaluated the identity, so a scan running concurrently cannot observe a
+/// half-applied stop.
+///
+/// This operation does not tear the pane down, and deliberately so. Once the
+/// launch is revoked and held, `pane.close` on the returned window is inert —
+/// [`crate::IssueMonitorState::requeue_window_at`] finds no launch to requeue
+/// and the issue is terminal — so the safe teardown the PM already has under
+/// FR-066 composes with this stop instead of needing a second, redundant
+/// daemon→GUI channel that could disagree with it.
+fn run_monitor_stop<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    reason: &str,
+    target: crate::IssueMonitorStopTarget,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (_, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.stop_only(&target, reason, &now);
+        if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let (status, stopped_window_id) = match &outcome {
+        crate::IssueMonitorStopOutcome::Stopped { window_id } => {
+            ("stopped", Some(window_id.clone()))
+        }
+        crate::IssueMonitorStopOutcome::AlreadyStopped => ("already_stopped", None),
+        crate::IssueMonitorStopOutcome::Mismatch(mismatch) => {
+            // Fail closed: nothing was written, nothing is torn down, and the
+            // caller is told which component disagreed so it can re-read the
+            // snapshot rather than retry blindly.
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "mismatch": issue_monitor_stop_mismatch_label(*mismatch),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+
+    let stopped_window_id = stopped_window_id.filter(|window_id| !window_id.is_empty());
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": status,
+            "reason": reason,
+            "stopped_window_id": stopped_window_id,
+            // Say what is left to do rather than implying the pane is gone.
+            "pane_teardown": if stopped_window_id.is_some() {
+                "close the returned window with pane.close — the launch is already revoked, so the close cannot requeue or relaunch it"
+            } else {
+                "none"
+            },
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC-3431 FR-031: a stable, greppable name for each refusal.
+fn issue_monitor_stop_mismatch_label(mismatch: crate::IssueMonitorStopMismatch) -> &'static str {
+    match mismatch {
+        crate::IssueMonitorStopMismatch::UnknownIssue => "unknown_issue",
+        crate::IssueMonitorStopMismatch::NotRunning => "not_running",
+        crate::IssueMonitorStopMismatch::ClaimMismatch => "claim_mismatch",
+        crate::IssueMonitorStopMismatch::DeliveryMismatch => "delivery_mismatch",
+        crate::IssueMonitorStopMismatch::WindowMismatch => "window_mismatch",
+    }
 }
 
 fn apply_monitor_config_set(
@@ -1593,6 +1702,113 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&prefs_path).expect("prefs bytes"), before);
+    }
+
+    /// SPEC-3431 FR-033 / T-087b: the operation the PM actually calls.
+    ///
+    /// Drives the whole path a `gwtd` invocation takes — load prefs, evaluate
+    /// the identity, commit or refuse — because the unit matrix on
+    /// `IssueMonitorState` cannot catch a handler that writes prefs on a
+    /// refusal or reports success it did not achieve.
+    #[test]
+    fn monitor_stop_revokes_the_launch_and_refuses_a_stale_identity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        // A stale window id must change nothing on disk.
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-9".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 1, "a refused stop is not a success");
+        assert!(out.contains("\"status\":\"refused\""), "{out}");
+        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused stop must be zero-mutation"
+        );
+
+        // The exact identity releases the slot and holds the issue durably.
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"stopped\""), "{out}");
+        assert!(out.contains("tab-1::agent-1"), "{out}");
+        assert!(
+            out.contains("pane.close"),
+            "the caller must be told the pane is still theirs to close: {out}"
+        );
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(
+            prefs.launched_issues.is_empty(),
+            "the slot must be released on disk"
+        );
+        let reloaded =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            reloaded.stop_only_reason(42).as_deref(),
+            Some("provider rate limit"),
+            "FR-031: the reason must survive the prefs roundtrip"
+        );
+
+        // Repeating it is idempotent rather than an error.
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo),
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
     }
 
     // -------------------------------------------------------------------

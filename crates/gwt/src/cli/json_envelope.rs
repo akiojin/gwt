@@ -188,6 +188,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 number: required_u64(params, "number")?,
             })
         }
+        "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            // FR-031: an unexplained stop is not auditable.
+            reason: required_string(params, "reason")?,
+            // Which identity components are required is a property of the live
+            // launch, not of the request shape, so the state layer decides.
+            claim_id: optional_string(params, "claim_id")?,
+            delivery_id: optional_string(params, "delivery_id")?,
+            window_id: optional_string(params, "window_id")?,
+        }),
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -1861,6 +1872,69 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.launch_now", json!({})),
             CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC-3431 FR-033 / T-087b: the PM's stop instruction.
+    ///
+    /// The identity components are optional in the wire format because a
+    /// materializing launch has no window and a launched one has no delivery.
+    /// Which of them must be present is decided against the live state, not by
+    /// the parser — the parser cannot know, and guessing here would either
+    /// reject valid stops or let an under-specified one through.
+    #[test]
+    fn issue_monitor_stop_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.stop",
+                json!({
+                    "number": 42,
+                    "reason": "provider rate limit",
+                    "window_id": "tab-1::agent-1",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root: None,
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.stop",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 7,
+                    "reason": "switch provider",
+                    "claim_id": "claim-1",
+                    "delivery_id": "launch:effect-1",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 7,
+                reason: "switch provider".to_string(),
+                claim_id: Some("claim-1".to_string()),
+                delivery_id: Some("launch:effect-1".to_string()),
+                window_id: None,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.stop", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        // FR-031: an unexplained stop is not auditable, so the reason is not
+        // optional even though every identity component is.
+        assert!(matches!(
+            err("issue.monitor.stop", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.stop", json!({"number": 42, "reason": "  "})),
+            CliParseError::MissingFlag("reason")
         ));
     }
 

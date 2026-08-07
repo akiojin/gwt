@@ -126,7 +126,8 @@ pub use issue_monitor::{
     IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource,
     IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
     IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
-    MonitorInboxState, PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget, MonitorInboxState,
+    PendingIssueMonitorEffect, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,

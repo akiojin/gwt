@@ -1016,6 +1016,15 @@ pub struct IssueMonitorInboxSummary {
     /// "too old" means for the work at hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<String>,
+    /// SPEC-3431 FR-024/FR-033: the claim and delivery backing this launch.
+    ///
+    /// `stop_only` requires an exact identity match, so the PM has to be able
+    /// to read the identity it is asked to send. Without these two the
+    /// requirement is unsatisfiable from the snapshot alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -3017,6 +3026,11 @@ impl IssueMonitorState {
                         .autonomous_records
                         .get(&item.issue.number)
                         .and_then(|record| record.last_heartbeat.clone()),
+                    // SPEC-3431 FR-024/FR-033: the identity `stop_only` demands
+                    // has to be readable from the same snapshot, or the exact
+                    // match it enforces is unsatisfiable from the PM's side.
+                    claim_id: self.live_claim_id(item.issue.number),
+                    delivery_id: self.pending_launch_delivery_id(item.issue.number),
                 })
                 .collect(),
             last_error: status.last_error,
@@ -4549,34 +4563,44 @@ impl IssueMonitorState {
         now: &str,
     ) -> IssueMonitorStopOutcome {
         let issue_number = target.issue_number;
-        let Some(item) = self.inbox_item(issue_number) else {
-            return self.refuse_stop(issue_number, IssueMonitorStopMismatch::UnknownIssue);
-        };
-        let state = item.state;
 
         // An issue already stopped by this operation answers the same request
-        // idempotently. Any other terminal state (merged, released, failed)
-        // means there is no live launch to revoke and must not be relabelled.
-        if state.is_terminal() {
-            let already_stopped = state == MonitorInboxState::NeedsHuman
-                && item
-                    .error_message
-                    .as_deref()
-                    .is_some_and(|message| message.starts_with(STOP_ONLY_REASON_PREFIX));
-            return if already_stopped {
-                IssueMonitorStopOutcome::AlreadyStopped
-            } else {
-                self.refuse_stop(issue_number, IssueMonitorStopMismatch::NotRunning)
-            };
+        // idempotently. Checked before liveness, because the stop already
+        // released the slot.
+        if self.stop_only_reason(issue_number).is_some() {
+            return IssueMonitorStopOutcome::AlreadyStopped;
         }
-        if !matches!(
-            state,
-            MonitorInboxState::Launching | MonitorInboxState::Launched
-        ) {
+
+        // Liveness comes from the durable launch accounting, not the inbox.
+        // `with_prefs` restores `active_launches` but performs no candidate
+        // scan, so a short-lived process (every `gwtd` invocation) has an empty
+        // inbox for a running agent. Reading liveness off the inbox would make
+        // the operation answer `UnknownIssue` in exactly the process the PM
+        // calls it from.
+        let is_live = self.active_launches.contains(&issue_number);
+        let inbox_state = self.inbox_item(issue_number).map(|item| item.state);
+        if !is_live {
+            // Distinguish "never heard of it" from "not currently running", so
+            // the PM can tell a typo apart from a race it lost.
+            let known = inbox_state.is_some()
+                || self.failed_issues.contains_key(&issue_number)
+                || self.merged_issues.contains(&issue_number);
+            let mismatch = if known {
+                IssueMonitorStopMismatch::NotRunning
+            } else {
+                IssueMonitorStopMismatch::UnknownIssue
+            };
+            return self.refuse_stop(issue_number, mismatch);
+        }
+        // A terminal row still holding a slot is being reconciled elsewhere;
+        // relabelling it as stopped would overwrite that outcome.
+        if inbox_state.is_some_and(|state| state.is_terminal())
+            || self.merged_issues.contains(&issue_number)
+        {
             return self.refuse_stop(issue_number, IssueMonitorStopMismatch::NotRunning);
         }
 
-        if target.claim_id != item.claim_id {
+        if target.claim_id != self.live_claim_id(issue_number) {
             return self.refuse_stop(issue_number, IssueMonitorStopMismatch::ClaimMismatch);
         }
         if target.delivery_id != self.pending_launch_delivery_id(issue_number) {
@@ -4600,6 +4624,35 @@ impl IssueMonitorState {
         IssueMonitorStopOutcome::Stopped {
             window_id: live_window.unwrap_or_default(),
         }
+    }
+
+    /// SPEC-3431 FR-033: the reason this issue was stopped, if it was.
+    ///
+    /// Read from `failed_issues`, which is persisted, so the hold survives the
+    /// prefs roundtrip that happens between every `gwtd` invocation. The inbox
+    /// error message says the same thing but only in a process that scanned.
+    pub fn stop_only_reason(&self, issue_number: u64) -> Option<String> {
+        self.failed_issues
+            .get(&issue_number)
+            .and_then(|message| message.strip_prefix(STOP_ONLY_REASON_PREFIX))
+            .map(str::to_string)
+    }
+
+    /// SPEC-3431 FR-033: the claim backing the live launch for `issue_number`.
+    ///
+    /// The pending delivery carries it durably while the agent materializes;
+    /// once the GUI ACKs, the delivery is consumed and only a scanned inbox
+    /// row still knows it. Both are consulted so the answer is the same in the
+    /// daemon and in a bare `gwtd` process.
+    pub fn live_claim_id(&self, issue_number: u64) -> Option<String> {
+        self.pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number)
+            .map(|delivery| delivery.claim_id.clone())
+            .or_else(|| {
+                self.inbox_item(issue_number)
+                    .and_then(|item| item.claim_id.clone())
+            })
     }
 
     /// SPEC-3431 FR-033: refuse a stop without mutating any launch state.
@@ -4930,8 +4983,11 @@ mod tests {
                     blocked_by_owner: Some("other-agent".to_string()),
                     launched_window_id: None,
                     error_message: None,
-                    // Never launched, so no activity clock was ever started.
+                    // Never launched, so no activity clock was ever started
+                    // and there is no launch identity to stop.
                     last_activity_at: None,
+                    claim_id: None,
+                    delivery_id: None,
                 }],
                 last_error: None,
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
@@ -6430,6 +6486,105 @@ mod tests {
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    /// SPEC-3431 FR-033 / T-087b: stop_only must work in the process that
+    /// actually runs it.
+    ///
+    /// `gwtd` is short-lived: it loads prefs and has no inbox, because
+    /// [`IssueMonitorState::with_prefs`] restores the durable launch
+    /// accounting but not the scanned candidate rows. An implementation that
+    /// reads liveness off the inbox therefore answers `UnknownIssue` for every
+    /// running agent when the PM calls it — the unit matrix passes and the
+    /// operation is dead on arrival.
+    ///
+    /// The identity that survives the process boundary is the durable one:
+    /// active launches, launched windows, pending deliveries, failed issues.
+    #[test]
+    fn stop_only_works_from_prefs_without_a_scanned_inbox() {
+        let launched = launched_monitor(42, "tab-1::agent-1");
+        // Exactly what gwtd sees: prefs on disk, no candidate scan.
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
+        assert!(
+            monitor.inbox_item(42).is_none(),
+            "precondition: with_prefs restores no inbox"
+        );
+        assert_eq!(monitor.active_count(), 1, "precondition: the slot is held");
+
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        assert_eq!(
+            monitor.stop_only(&target, "rate limit", "2026-08-07T00:00:00Z"),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-1".to_string()
+            }
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot must be released");
+
+        // The hold has to survive the next prefs roundtrip, or the following
+        // scan relaunches the issue the PM just stopped.
+        let reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(reloaded.active_count(), 0);
+        assert_eq!(
+            reloaded.stop_only_reason(42).as_deref(),
+            Some("rate limit"),
+            "the stop must be durable and diagnosable after a reload"
+        );
+
+        // And a mismatch must still fail closed with no inbox to lean on.
+        let mut fresh =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
+        assert_eq!(
+            fresh.stop_only(
+                &IssueMonitorStopTarget {
+                    window_id: Some("tab-1::agent-2".to_string()),
+                    ..target.clone()
+                },
+                "rate limit",
+                "2026-08-07T00:00:00Z"
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        assert_eq!(fresh.active_count(), 1);
+    }
+
+    /// SPEC-3431 FR-024 / FR-033: the PM has to be able to *read* the identity
+    /// it is required to send. `claim_id` was missing from the snapshot, so an
+    /// exact-claim requirement was unsatisfiable from the PM's side.
+    #[test]
+    fn agent_status_exposes_the_claim_id_stop_only_requires() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-1",
+            "owner-1",
+            "effect-1",
+            "2026-08-07T00:00:00Z",
+        ));
+
+        let status = monitor.agent_status();
+        let row = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .expect("inbox row for the launching issue");
+        assert_eq!(
+            row.claim_id.as_deref(),
+            Some("claim-1"),
+            "FR-024: reconcile facts must come from the one snapshot"
+        );
+        assert_eq!(
+            row.delivery_id.as_deref(),
+            Some("launch:effect-1"),
+            "the PM cannot send a delivery id it cannot read"
         );
     }
 

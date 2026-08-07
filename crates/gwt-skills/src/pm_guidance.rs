@@ -129,15 +129,38 @@ You may watch the agents the Monitor launched. You may not drive them.
   its next intent boundary, not immediately. A Board post never
   interrupts a running agent, so never wait on one as if it did.
 
-You may also stop one:
+You may also stop one. There are two ways, and they mean different
+things:
 
-- `pane.close` ends a pane whose agent is hung, looping, or working on
-  something the backlog has moved past. Closing a Monitor-launched pane
-  counts as one attempt against that issue's retry budget and schedules
-  a backoff before it can start again; once the budget is spent the
-  issue goes to `needs_human` instead of relaunching. So a close is a
-  real stop, but a bounded one — you cannot spin an issue by closing it
-  repeatedly, and you should still say why you closed it.
+- `issue.monitor.stop` is how you say **stop**. Pass `params.number`,
+  a `params.reason`, and the identity of the launch you mean:
+  `params.claim_id`, `params.delivery_id`, and `params.window_id`, all
+  read from that issue's row in `issue.monitor.status`. It revokes the
+  launch's authority, frees its slot, and holds the issue.
+  It spends no retry attempt and puts nothing back in the queue.
+
+  Send the identity exactly as the snapshot reports it. Omitting a
+  component the Monitor is holding is a mismatch, not a wildcard, and a
+  mismatch stops nothing at all. That is deliberate: a stale snapshot
+  names a real issue number just as convincingly as a fresh one, and
+  killing the wrong agent cannot be undone. If you get `refused`, re-read
+  the snapshot instead of retrying — the `mismatch` field names the
+  component that disagreed.
+
+  The stop does not close the pane. Close it yourself afterwards with
+  `pane.close`; the launch is already revoked, so that close cannot
+  requeue or relaunch anything.
+
+- `pane.close` on its own says **this attempt failed, try again**.
+  Closing a Monitor-launched pane counts as one attempt against that
+  issue's retry budget and schedules a backoff before it can start
+  again; once the budget is spent the issue goes to `needs_human`
+  instead of relaunching. So a bare close is a real stop, but a bounded
+  one — you cannot spin an issue by closing it repeatedly, and you
+  should still say why you closed it.
+
+Use the first when the work should not run now. Use the second when you
+want it retried.
 
 Hard limits, no exceptions:
 
@@ -285,6 +308,12 @@ mod tests {
             // explicit amendment to FR-023's blanket prohibition.
             "`pane.close`",
             "counts as one attempt",
+            // FR-033: the Monitor-owned stop, and the fact that its identity
+            // is exact. A PM that sends a partial identity stops nothing, so
+            // the contract has to say why omission is not a wildcard.
+            "`issue.monitor.stop`",
+            "is a mismatch, not a wildcard",
+            "It spends no retry attempt",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
