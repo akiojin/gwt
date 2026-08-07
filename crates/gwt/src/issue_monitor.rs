@@ -4354,6 +4354,30 @@ impl IssueMonitorState {
     /// Returns the affected Issue number when the window mapped to an active
     /// launch that was re-queued.
     pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
+        self.requeue_window_at(
+            window_id,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+    }
+
+    /// [`Self::requeue_window`] with an injected clock for the backoff floor.
+    ///
+    /// SPEC-3431 FR-031: a close is a bounded retry, not a free one. It used to
+    /// consume no attempt and set no backoff, so under autonomous mode the
+    /// closed issue went straight back to the queue head and the next scan
+    /// relaunched it immediately — closing a pane restarted it instead of
+    /// stopping it.
+    ///
+    /// The PM's contract worked around that by forbidding pane closes, but the
+    /// constraint protected nobody: the only callers are the `WindowClosed`
+    /// control, so a person closing a window by hand hit the same loop. Bound
+    /// it here, where the loop is, and the capability is safe for everyone.
+    ///
+    /// The attempt ladder, backoff, and `NeedsHuman` escalation already exist
+    /// for autonomous failures; a close is a failed attempt by the same
+    /// definition ("closed without the work completing"), so it shares that
+    /// budget rather than introducing a second one that could disagree.
+    pub fn requeue_window_at(&mut self, window_id: &str, now: &str) -> Option<u64> {
         let issue_number = self.launched_window_issue(window_id)?;
         if self.merged_issues.contains(&issue_number) {
             return None;
@@ -4364,7 +4388,23 @@ impl IssueMonitorState {
         {
             return None;
         }
+        let attempt = self.record_attempt(issue_number);
+        let max = self.autonomous_tuning.max_attempts;
+        if attempt >= max {
+            self.clear_active_tracking(issue_number);
+            self.escalate_to_needs_human(
+                issue_number,
+                format!("closed without completing ({attempt}/{max} attempts used)"),
+            );
+            return Some(issue_number);
+        }
+        let backoff = autonomous_retry_backoff_secs(
+            attempt,
+            self.autonomous_tuning.retry_backoff_base_secs,
+            self.autonomous_tuning.retry_backoff_cap_secs,
+        );
         self.clear_active_tracking(issue_number);
+        self.autonomous_record_mut(issue_number).retry_not_before = rfc3339_plus_secs(now, backoff);
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if !self.queue.contains(&issue_number) {
             self.queue.push_back(issue_number);
@@ -5723,6 +5763,49 @@ mod tests {
             "closing an unmerged window returns to pending, never a fake done state"
         );
         assert_eq!(monitor.queue_len(), 1);
+    }
+
+    /// SPEC-3431 FR-031: closing a launched window is a bounded retry.
+    ///
+    /// Requeueing consumed no attempt and set no backoff, so with autonomous
+    /// mode on, closing a pane put the issue straight back at the head of the
+    /// queue and the next scan relaunched it — an unbounded loop. That is why
+    /// the PM was told not to close panes, but the constraint protected
+    /// nobody: the only callers are the `WindowClosed` control, so **a person
+    /// closing a window by hand hits exactly the same loop**.
+    ///
+    /// Bound it where the loop is instead. The attempt ladder, backoff, and
+    /// `NeedsHuman` escalation already exist for autonomous failures; a close
+    /// is a failed attempt by the same definition ("closed without the work
+    /// completing"), so it uses the same budget.
+    #[test]
+    fn requeue_window_consumes_an_attempt_and_stops_at_the_budget() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let max = monitor.autonomous_tuning.max_attempts;
+        assert!(max >= 2, "precondition: a real budget");
+
+        // The first close still returns the issue to the queue, but now with a
+        // backoff floor so the next scan cannot relaunch it instantly.
+        assert_eq!(monitor.requeue_window("tab-1::agent-1"), Some(42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(
+            !monitor.retry_ready(42, "2026-08-07T00:00:00Z"),
+            "an immediate relaunch is what made this a loop"
+        );
+
+        // Exhausting the budget hands the issue to a human instead of looping.
+        for _ in 1..max {
+            monitor.complete_active_launch(42, "tab-1::agent-1");
+            monitor.requeue_window("tab-1::agent-1");
+        }
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "after {max} closes the issue must stop being relaunched"
+        );
     }
 
     #[test]
