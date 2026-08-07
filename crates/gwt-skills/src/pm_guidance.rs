@@ -105,6 +105,17 @@ You own the backlog for its whole life, not just at creation.
 
 You may watch the agents the Monitor launched. You may not drive them.
 
+- `last_activity_at` on each inbox row is when that launch last showed
+  signs of life. A row whose activity is far behind the others, or
+  behind `last_scan_at`, is stalled — but the snapshot cannot tell you
+  why, because a live agent waiting on an approval prompt, blocked by a
+  provider rate limit, or genuinely hung all look identical from here.
+  Read its pane to find out which, then say so when you report it.
+- A stall is not automatically resolved for you. Decide: wait, demote it
+  with `issue.monitor.priority.move`, close the pane, or raise it with
+  the user. Rate limits are the exception — those are recovered without
+  you (see below), so report them rather than acting on them.
+
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.
   Read it before you read scrollback: it is the surface agents write for
@@ -273,6 +284,9 @@ mod tests {
             // FR-031: stopping a pane is allowed and bounded.
             "`pane.close`",
             "counts as one attempt",
+            // FR-033: stalls are observable, and their cause is not.
+            "`last_activity_at`",
+            "cannot tell you why",
             "Never run `pane.send`",
             // FR-010: the strong merge gate stays out of reach.
             "never submit a review verdict",

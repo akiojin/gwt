@@ -914,6 +914,37 @@ pub struct IssueMonitorAgentStatus {
     pub last_scan_at: Option<String>,
 }
 
+/// SPEC-3431 FR-034: when the provider backing `agent_id` is out of quota,
+/// the instant it recovers.
+///
+/// `None` when that provider has quota left, is unknown to the usage poller,
+/// or reports no reset instant. Scoped to the agent's own provider on purpose:
+/// one exhausted account must not stall launches running on a different one.
+///
+/// Pure so the decision can be tested without a usage poller, and so the
+/// caller (which has the launch profile) supplies the agent rather than this
+/// module guessing it.
+pub fn rate_limit_reset_for_agent(
+    agent_id: &str,
+    accounts: &[gwt_core::usage::ProviderUsage],
+) -> Option<String> {
+    use gwt_core::usage::UsageProvider;
+
+    let provider = match agent_id.trim().to_ascii_lowercase().as_str() {
+        "codex" => UsageProvider::Codex,
+        "claude" | "claude-code" => UsageProvider::ClaudeCode,
+        _ => return None,
+    };
+    accounts
+        .iter()
+        .find(|account| account.provider == provider && account.limit_reached)?
+        .windows
+        .iter()
+        .filter_map(|window| window.resets_at)
+        .min()
+        .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
 /// One inbox row, reduced to the facts an agent acts on. The full
 /// [`IssueMonitorInboxItem`] carries the whole GitHub issue payload, which
 /// would dwarf the rest of the snapshot.
@@ -4377,6 +4408,53 @@ impl IssueMonitorState {
     /// "done" state. Terminal states (Merged/Released/failed) are preserved.
     /// Returns the affected Issue number when the window mapped to an active
     /// launch that was re-queued.
+    /// SPEC-3431 FR-034: free the slot held by a launch whose provider hit its
+    /// usage limit, and hold the issue until `resets_at`.
+    ///
+    /// Deliberately unlike [`Self::requeue_window_at`]: no attempt is consumed
+    /// and the backoff is the provider's own reset instant rather than the
+    /// retry ladder. Nothing is wrong with the work or the agent — the account
+    /// simply ran out — so charging it against the issue's retry budget would
+    /// eventually escalate healthy work to `needs_human` for someone else's
+    /// billing cycle.
+    ///
+    /// This is the single stall the mechanism resolves on its own, because it
+    /// is the single stall whose cause the provider states outright. Every
+    /// other stall is reported and left to the PM (FR-034), since an approval
+    /// prompt, a rate limit, and a hang are indistinguishable from elapsed
+    /// time alone.
+    pub fn release_rate_limited_launch(
+        &mut self,
+        window_id: &str,
+        resets_at: &str,
+        now: &str,
+    ) -> Option<u64> {
+        let issue_number = self.launched_window_issue(window_id)?;
+        if self.merged_issues.contains(&issue_number) {
+            return None;
+        }
+        if self
+            .inbox_item(issue_number)
+            .is_some_and(|item| item.state.is_terminal())
+        {
+            return None;
+        }
+        self.clear_active_tracking(issue_number);
+        // An unparseable or already-past reset leaves no floor rather than
+        // blocking forever: the next scan then decides on fresh usage data.
+        let floor = chrono::DateTime::parse_from_rfc3339(resets_at)
+            .ok()
+            .filter(|reset| chrono::DateTime::parse_from_rfc3339(now).is_ok_and(|now| *reset > now))
+            .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        self.autonomous_record_mut(issue_number).retry_not_before = floor;
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
+        Some(issue_number)
+    }
+
     pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
         self.requeue_window_at(
             window_id,
@@ -5789,6 +5867,112 @@ mod tests {
             "closing an unmerged window returns to pending, never a fake done state"
         );
         assert_eq!(monitor.queue_len(), 1);
+    }
+
+    /// SPEC-3431 FR-034: the reset instant to hold a launch until, when the
+    /// agent's own provider is out of quota.
+    #[test]
+    fn rate_limit_reset_is_resolved_from_the_agents_own_provider() {
+        use gwt_core::usage::{ProviderUsage, UsageProvider, UsageState, UsageWindow, WindowKind};
+
+        let exhausted = ProviderUsage {
+            provider: UsageProvider::Codex,
+            account_label: None,
+            plan: None,
+            windows: vec![UsageWindow::new(
+                WindowKind::Weekly,
+                100.0,
+                Some("2026-08-10T14:26:00Z".parse().expect("reset")),
+            )],
+            limit_reached: true,
+            state: UsageState::Ok,
+            fetched_at: None,
+        };
+        let healthy = ProviderUsage {
+            provider: UsageProvider::ClaudeCode,
+            limit_reached: false,
+            ..exhausted.clone()
+        };
+        let accounts = vec![exhausted, healthy];
+
+        assert_eq!(
+            rate_limit_reset_for_agent("codex", &accounts).as_deref(),
+            Some("2026-08-10T14:26:00Z"),
+            "the exhausted provider's reset must be used as the floor"
+        );
+        // An agent on a different provider is unaffected — one account running
+        // out must not stall the whole fleet.
+        assert_eq!(rate_limit_reset_for_agent("claude", &accounts), None);
+        assert_eq!(rate_limit_reset_for_agent("gemini", &accounts), None);
+    }
+
+    /// SPEC-3431 FR-034: a rate-limited launch releases its slot.
+    ///
+    /// This is the one stall whose cause is known for certain — the provider
+    /// itself reports `limit_reached` with a reset instant — so it is the one
+    /// stall the mechanism resolves instead of merely reporting. Waiting is
+    /// pointless when the reset is days away (observed live: "try again at Aug
+    /// 10th", four days out) and the held slot stops the whole queue at the
+    /// default `max_active = 1`.
+    ///
+    /// The issue returns to the queue rather than failing: nothing is wrong
+    /// with the work. The reset instant becomes the backoff floor so the next
+    /// scan cannot immediately relaunch into the same wall.
+    #[test]
+    fn rate_limited_launch_releases_its_slot_until_the_reset() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        assert_eq!(monitor.active_count(), 1, "precondition: holding a slot");
+
+        let released = monitor.release_rate_limited_launch(
+            "tab-1::agent-1",
+            "2026-08-10T14:26:00Z",
+            "2026-08-07T00:00:00Z",
+        );
+
+        assert_eq!(released, Some(42));
+        assert_eq!(monitor.active_count(), 0, "the slot must be freed");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the work is fine; only the provider was unavailable"
+        );
+        assert!(
+            !monitor.retry_ready(42, "2026-08-09T00:00:00Z"),
+            "must not relaunch into the same wall before the reset"
+        );
+        assert!(
+            monitor.retry_ready(42, "2026-08-10T15:00:00Z"),
+            "must be relaunchable once the provider recovers"
+        );
+    }
+
+    /// FR-034: a stall whose cause is *not* known keeps its slot.
+    ///
+    /// Approval prompts, rate limits, and genuine hangs are indistinguishable
+    /// from the snapshot, so reclaiming a slot on elapsed time alone would kill
+    /// agents that are simply thinking for a long time. The mechanism reports;
+    /// the PM decides.
+    #[test]
+    fn an_unexplained_stall_keeps_its_slot() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_autonomous_heartbeat(42, "2026-08-01T00:00:00Z");
+
+        let status = monitor.agent_status();
+
+        assert_eq!(
+            status.active_launches,
+            vec![42],
+            "an unexplained stall must not be auto-reclaimed"
+        );
+        assert_eq!(
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .and_then(|row| row.last_activity_at.clone()),
+            Some("2026-08-01T00:00:00Z".to_string()),
+            "but it must be visible so the PM can act on it"
+        );
     }
 
     /// SPEC-3431 FR-033: a launched issue reports when its agent last showed
