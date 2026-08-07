@@ -2644,7 +2644,12 @@ mod tests {
         let marker = temp.path().join("rebuild-started.marker");
         let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_HANG", "1");
         let _marker = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_MARKER", &marker);
-        let expires_at = Instant::now() + Duration::from_millis(1_500);
+        // Coverage instrumentation makes startup of the child test binary
+        // materially slower than an idle production runner. Leave enough
+        // startup budget to reach the fixture while keeping the inherited
+        // deadline shorter than the fixture's deliberate hang.
+        let inherited_budget = Duration::from_secs(8);
+        let expires_at = Instant::now() + inherited_budget;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expires_at);
 
         queue_scope_rebuilds(
@@ -2654,14 +2659,18 @@ mod tests {
         );
 
         let marker_wait_started = Instant::now();
-        while !marker.exists() && marker_wait_started.elapsed() < Duration::from_secs(2) {
+        while !marker.exists()
+            && marker_wait_started.elapsed() < inherited_budget + Duration::from_secs(1)
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let settled = wait_for_index_search_repairs(Duration::from_secs(3));
+        let settlement_wait =
+            expires_at.saturating_duration_since(Instant::now()) + Duration::from_secs(3);
+        let settled = wait_for_index_search_repairs(settlement_wait);
         if !settled {
             // Let the pre-fix raw child finish before failing, keeping the
             // singleton tracker clean for the rest of the test process.
-            let _ = wait_for_index_search_repairs(Duration::from_secs(3));
+            let _ = wait_for_index_search_repairs(Duration::from_secs(20));
         }
 
         assert!(

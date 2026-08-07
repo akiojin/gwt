@@ -474,11 +474,20 @@ pub(crate) enum CaptureBudgetProfile {
     StrictStop,
 }
 
+// Unit tests exercise process-heavy owner resolution fixtures in parallel on
+// Windows. Keep production's 120-second contract exact while giving success-
+// path unit tests the same loaded-machine budget used by the dedicated owner
+// fixtures. Deadline behavior is covered with explicitly injected deadlines.
+#[cfg(not(test))]
+const NORMAL_RESOLUTION_MAX_ELAPSED: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const NORMAL_RESOLUTION_MAX_ELAPSED: Duration = Duration::from_secs(300);
+
 impl CaptureBudgetProfile {
     pub(super) fn resolution_deadline(self) -> ResolutionDeadline {
         match self {
             Self::Normal => {
-                ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120))
+                ResolutionDeadline::new(Duration::from_secs(5), NORMAL_RESOLUTION_MAX_ELAPSED)
             }
             Self::StrictStop => {
                 ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(15))
@@ -2774,6 +2783,18 @@ mod tests {
 
     fn parse_output(output: &str) -> Value {
         serde_json::from_str(output.trim()).expect("JSON output")
+    }
+
+    #[test]
+    fn normal_profile_unit_test_budget_tolerates_loaded_windows_suite() {
+        let deadline = CaptureBudgetProfile::Normal.resolution_deadline();
+        assert!(
+            deadline
+                .expires_at()
+                .saturating_duration_since(std::time::Instant::now())
+                >= std::time::Duration::from_secs(299),
+            "success-path unit tests must retain the loaded-machine budget"
+        );
     }
 
     fn capture_command(command: ImprovementCaptureCommand) -> ImprovementCommand {

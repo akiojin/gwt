@@ -2150,7 +2150,10 @@ mod tests {
             .map(PathBuf::from)
             .expect("rebuild marker path");
         std::fs::write(marker, b"started").expect("write rebuild marker");
-        std::thread::sleep(Duration::from_secs(4));
+        // Stay alive beyond the loaded-machine deadline used by the parent
+        // fixture so settlement proves process-tree termination, not a normal
+        // child exit.
+        std::thread::sleep(Duration::from_secs(15));
     }
 
     #[test]
