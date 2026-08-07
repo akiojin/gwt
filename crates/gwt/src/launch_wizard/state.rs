@@ -2283,6 +2283,10 @@ mod tests {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.reasoning_level.as_deref(), Some("medium"));
+                    assert!(
+                        config.tool_runtime_source_session_id.is_none(),
+                        "StartNew must resolve the requested selector again"
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -3251,6 +3255,92 @@ mod tests {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
                     assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
                     assert!(config.resume_session_id.is_none());
+                    assert_eq!(
+                        config.tool_runtime_source_session_id.as_deref(),
+                        Some("session-1")
+                    );
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_start_resume_uses_the_applied_entry_as_tool_runtime_source() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            vec![
+                quick_start_entry(
+                    "session-other",
+                    "codex",
+                    Some("resume-other"),
+                    None,
+                    gwt_agent::LaunchRuntimeTarget::Host,
+                    None,
+                ),
+                quick_start_entry(
+                    "session-selected",
+                    "codex",
+                    Some("resume-selected"),
+                    None,
+                    gwt_agent::LaunchRuntimeTarget::Host,
+                    None,
+                ),
+            ],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 1,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.resume_session_id.as_deref(), Some("resume-selected"));
+                    assert_eq!(
+                        config.tool_runtime_source_session_id.as_deref(),
+                        Some("session-selected")
+                    );
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_start_start_new_latest_does_not_reuse_tool_runtime_source() {
+        let mut entry = quick_start_entry(
+            "session-saved",
+            "codex",
+            Some("resume-saved"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.version = Some("latest".to_string());
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            vec![entry],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.tool_version.as_deref(), Some("latest"));
+                    assert!(
+                        config.tool_runtime_source_session_id.is_none(),
+                        "StartNew must re-resolve the latest requested selector"
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -3349,6 +3439,10 @@ mod tests {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::OpenClaw);
                     assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
                     assert_eq!(config.resume_session_id.as_deref(), Some("resume-1"));
+                    assert_eq!(
+                        config.tool_runtime_source_session_id.as_deref(),
+                        Some("session-1")
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },

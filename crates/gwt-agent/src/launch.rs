@@ -5,12 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
-    session::{SessionExecutionBinding, GWT_SESSION_RUNTIME_PATH_ENV},
+    session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
@@ -337,8 +337,15 @@ fn find_bunx_or_npx_for_agent_with_effective_env(
 fn package_runner_candidates_for_agent(agent_id: &AgentId) -> &'static [(&'static str, bool)] {
     #[cfg(windows)]
     {
-        let _ = agent_id;
-        package_runner_candidates()
+        if matches!(agent_id, AgentId::Codex | AgentId::ClaudeCode) {
+            // Native bunx on Windows can split a whitespace-bearing final prompt
+            // when it re-spawns the package binary (SPEC-1921 Phase 75 / #3456).
+            // npx preserves the prompt as one argv entry. Targeted launches
+            // fail closed when npx is unavailable; Bunx is not a candidate.
+            &[("npx.cmd", true)]
+        } else {
+            package_runner_candidates()
+        }
     }
     #[cfg(not(windows))]
     {
@@ -363,8 +370,13 @@ fn find_package_runner_with_effective_env(
     path.as_deref()
         .and_then(|path| find_package_runner_in_path(candidates, Some(path), &cwd))
         .unwrap_or_else(|| {
-            // Last resort: assume bunx is available
-            ("bunx".to_string(), false)
+            // Preserve the selected executable family for the bounded health
+            // probe. In particular, targeted Windows launches keep `npx.cmd`
+            // and fail closed instead of crossing to Bunx or a bare POSIX shim.
+            candidates
+                .first()
+                .map(|(name, needs_yes)| ((*name).to_string(), *needs_yes))
+                .unwrap_or_else(|| ("bunx".to_string(), false))
         })
 }
 
@@ -458,13 +470,13 @@ pub(crate) fn resolve_direct_runner_with_effective_env(
 
 /// Platform priority list of `npx` fallback executables consulted when the host
 /// `bunx` package-runner probe fails (Issue #2981). On Windows the `.cmd`
-/// variant comes first so `CreateProcess` can spawn it; the bare `npx` POSIX
-/// shim is not directly spawnable there (SPEC-1921 FR-080). Other platforms use
-/// the bare canonical name.
+/// variant is the only Windows candidate because the bare `npx` POSIX shim is
+/// not directly spawnable there (SPEC-1921 FR-080 / FR-167). Other platforms
+/// use the bare canonical name.
 fn npx_fallback_candidates() -> &'static [(&'static str, bool)] {
     #[cfg(windows)]
     {
-        &[("npx.cmd", true), ("npx", true)]
+        &[("npx.cmd", true)]
     }
     #[cfg(not(windows))]
     {
@@ -477,9 +489,9 @@ fn npx_fallback_candidates() -> &'static [(&'static str, bool)] {
 ///
 /// Resolution flows through the same Windows-aware `find_package_runner_in_path`
 /// machinery as the primary runner, so on Windows the spawnable `npx.cmd` is
-/// preferred over the bare `npx` shim (Issue #2981). Falls back to the canonical
-/// bare `"npx"` name when no candidate resolves on the launch `PATH`, preserving
-/// the prior behavior for environments without a resolvable npx.
+/// selected instead of the bare `npx` shim (Issue #2981). An unresolved Windows
+/// lookup retains `npx.cmd` so the health check fails closed without ever
+/// dispatching the POSIX shim; other platforms retain canonical bare `npx`.
 pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> String {
     resolve_host_npx_fallback_executable_with_effective_env(env, &[], None)
 }
@@ -494,7 +506,13 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
         .as_deref()
         .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
         .map(|(executable, _needs_yes)| executable)
-        .unwrap_or_else(|| "npx".to_string())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "npx.cmd".to_string()
+            } else {
+                "npx".to_string()
+            }
+        })
 }
 
 /// Execution lifecycle intent is independent from provider conversation
@@ -843,6 +861,12 @@ pub struct LaunchConfig {
     pub color: AgentColor,
     pub model: Option<String>,
     pub tool_version: Option<String>,
+    /// Path-independent identity of the exact official package selected for a
+    /// targeted Windows Host launch. Absolute runner paths remain runtime-only.
+    pub tool_runtime_provenance: Option<ToolRuntimeProvenance>,
+    /// Durable Session whose legacy tool provenance may be atomically upgraded
+    /// after the exact package probe succeeds. This is not execution lineage.
+    pub tool_runtime_source_session_id: Option<String>,
     pub reasoning_level: Option<String>,
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
@@ -899,6 +923,8 @@ pub struct AgentLaunchBuilder {
     base_branch: Option<String>,
     model: Option<String>,
     version: Option<String>,
+    tool_runtime_provenance: Option<ToolRuntimeProvenance>,
+    tool_runtime_source_session_id: Option<String>,
     fast_mode: bool,
     skip_permissions: bool,
     reasoning_level: Option<String>,
@@ -950,6 +976,8 @@ impl AgentLaunchBuilder {
             base_branch: None,
             model: None,
             version: None,
+            tool_runtime_provenance: None,
+            tool_runtime_source_session_id: None,
             fast_mode: false,
             skip_permissions: false,
             reasoning_level: None,
@@ -1031,6 +1059,21 @@ impl AgentLaunchBuilder {
     /// Set the version selection ("installed", "latest", or a semver string).
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
+        self
+    }
+
+    /// Reuse the exact, path-independent package identity persisted by a
+    /// previous Session. New explicit launches leave this unset and resolve
+    /// their requested selector afresh.
+    pub fn tool_runtime_provenance(mut self, provenance: ToolRuntimeProvenance) -> Self {
+        self.tool_runtime_provenance = Some(provenance);
+        self
+    }
+
+    /// Identify the durable Session eligible for a post-probe provenance
+    /// migration without coupling tool resolution to execution continuity.
+    pub fn tool_runtime_source_session_id(mut self, id: impl Into<String>) -> Self {
+        self.tool_runtime_source_session_id = Some(id.into());
         self
     }
 
@@ -1287,6 +1330,8 @@ impl AgentLaunchBuilder {
             .version
             .clone()
             .filter(|version| version != "installed");
+        let tool_runtime_provenance = self.tool_runtime_provenance.clone();
+        let tool_runtime_source_session_id = self.tool_runtime_source_session_id.clone();
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
@@ -1307,6 +1352,8 @@ impl AgentLaunchBuilder {
             color,
             model,
             tool_version,
+            tool_runtime_provenance,
+            tool_runtime_source_session_id,
             reasoning_level,
             session_mode,
             resume_session_id,
@@ -2911,6 +2958,92 @@ mod tests {
         assert_eq!(needs_yes, vec![false, false, true, true]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_targeted_official_provider_candidates_are_npx_only() {
+        // SPEC-1921 Phase 75 / Issue #3456: native bunx on Windows can split a
+        // whitespace-bearing final prompt into multiple argv entries. Official
+        // providers must use only npx so the prompt remains one optional argument.
+        for agent_id in [AgentId::Codex, AgentId::ClaudeCode] {
+            let candidates = package_runner_candidates_for_agent(&agent_id);
+            let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+            let needs_yes: Vec<bool> = candidates.iter().map(|(_, yes)| *yes).collect();
+
+            assert_eq!(names, vec!["npx.cmd"]);
+            assert_eq!(needs_yes, vec![true]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_targeted_runner_resolution_never_returns_bunx_when_npx_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("bunx.cmd"), "@echo off\r\n").expect("write bunx.cmd");
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        for agent_id in [AgentId::Codex, AgentId::ClaudeCode] {
+            let runner = resolve_runner_with_env(&agent_id, "latest", &env);
+            let executable = command_basename(&runner.executable).to_ascii_lowercase();
+            assert_eq!(
+                executable, "npx.cmd",
+                "targeted runner must fail through the spawnable npx.cmd health check instead of selecting Bunx or a bare shim"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_opencode_candidates_keep_bunx_first() {
+        let candidates = package_runner_candidates_for_agent(&AgentId::OpenCode);
+        let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+
+        assert_eq!(names, vec!["bunx.cmd", "bunx", "npx.cmd", "npx"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_codex_latest_resolves_npx_cmd_before_bunx_cmd() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("npx.cmd"), "@echo off\r\n").expect("write npx.cmd");
+        std::fs::write(temp.path().join("bunx.cmd"), "@echo off\r\n").expect("write bunx.cmd");
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let runner = resolve_runner_with_env(&AgentId::Codex, "latest", &env);
+
+        assert!(
+            Path::new(&runner.executable)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("npx.cmd")),
+            "expected npx.cmd, got {}",
+            runner.executable
+        );
+        assert_eq!(
+            runner.base_args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_targeted_codex_issue_prompt_remains_one_argument() {
+        let prompt = "$gwt-execute #3152";
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .version("latest")
+            .extra_arg(prompt)
+            .build();
+
+        assert_eq!(
+            config
+                .args
+                .iter()
+                .filter(|arg| arg.as_str() == prompt)
+                .count(),
+            1
+        );
+        assert_eq!(config.args.last().map(String::as_str), Some(prompt));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn nonwindows_package_runner_candidates_use_bare_names() {
@@ -3480,6 +3613,18 @@ mod tests {
                 .unwrap_or(false),
             "expected npx.cmd, got {resolved}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_host_npx_fallback_executable_never_defaults_to_bare_shim_on_windows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("npx"), "#!/bin/sh\n").expect("write bare shim");
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let resolved = resolve_host_npx_fallback_executable(&env);
+
+        assert_eq!(resolved, "npx.cmd");
     }
 
     #[test]

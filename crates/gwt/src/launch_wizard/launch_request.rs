@@ -170,6 +170,20 @@ impl LaunchWizardState {
         }
 
         let mut config = builder.build();
+        // A saved Session owns the exact tool-runtime provenance only when the
+        // launch continues that Session. StartNew and the interactive picker
+        // intentionally have no source so `latest` is resolved again.
+        let reuses_saved_session = match config.session_mode {
+            gwt_agent::SessionMode::Continue => true,
+            gwt_agent::SessionMode::Resume => config.resume_session_id.is_some(),
+            gwt_agent::SessionMode::Normal => false,
+        };
+        if self.launch_path == LaunchWizardLaunchPath::QuickStart && reuses_saved_session {
+            config.tool_runtime_source_session_id = self
+                .selected_quick_start_index
+                .and_then(|index| self.quick_start_entries.get(index))
+                .map(|entry| entry.session_id.clone());
+        }
         if !self.version.is_empty() {
             config.tool_version = Some(self.version.clone());
         }

@@ -962,7 +962,22 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
         }
         Err(_) => return AgentDurableAuthority::Unavailable,
     };
-    if session.execution_binding.as_ref() != Some(binding) {
+    if session.execution_binding.as_ref() != Some(binding)
+        || session.repo_hash.as_deref() != Some(binding.repo_hash.as_str())
+        || session.linked_issue_number != Some(binding.owner_number)
+    {
+        return AgentDurableAuthority::Stale;
+    }
+    let session_project_root = session
+        .project_state_root
+        .as_deref()
+        .filter(|root| !root.as_os_str().is_empty())
+        .unwrap_or(&session.worktree_path);
+    let session_project_root = match dunce::canonicalize(session_project_root) {
+        Ok(path) => gwt_core::paths::normalize_windows_child_process_path(&path),
+        Err(_) => return AgentDurableAuthority::Unavailable,
+    };
+    if session_project_root != principal.canonical_project_root {
         return AgentDurableAuthority::Stale;
     }
     let owner_kind = match binding.owner_kind.as_str() {
@@ -984,26 +999,7 @@ fn durable_agent_execution_authority(principal: &AgentSessionPrincipal) -> Agent
         Ok(false) => return AgentDurableAuthority::Stale,
         Err(_) => return AgentDurableAuthority::Unavailable,
     }
-
-    let probe_id = Uuid::new_v4().to_string();
-    let request = gwt::AgentExecutionBindingProbeRequest {
-        schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
-        operation_id: format!("pane-dispatch-{probe_id}"),
-        nonce: format!("pane-nonce-{probe_id}"),
-    };
-    match gwt::probe_authenticated_execution_binding(
-        principal.canonical_project_root(),
-        principal.session_id(),
-        binding,
-        &format!("pane-host-{probe_id}"),
-        request,
-    ) {
-        Ok(_) => AgentDurableAuthority::Current,
-        Err(error) if error.code == AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => {
-            AgentDurableAuthority::Stale
-        }
-        Err(_) => AgentDurableAuthority::Unavailable,
-    }
+    AgentDurableAuthority::Current
 }
 
 async fn durable_agent_execution_authority_async(

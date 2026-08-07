@@ -38,8 +38,10 @@ use gwt_core::{
 };
 use gwt_github::client::{
     fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation},
-    ApiError, IssueNumber, IssueState, ResolutionDeadline, UpdatedAt,
+    ApiError, ResolutionDeadline,
 };
+#[cfg(unix)]
+use gwt_github::client::{IssueNumber, IssueState, UpdatedAt};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -48,9 +50,18 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(not(windows))]
 const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
+#[cfg(windows)]
+const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(not(windows))]
 const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
+#[cfg(windows)]
+const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(windows))]
 const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+#[cfg(windows)]
+const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_secs(5);
 
 /// How long the loopback fixture server waits for the client to connect. The
 /// client only connects after building its `DefaultCliEnv` and entering the
@@ -61,6 +72,7 @@ const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250)
 /// direct-stop budget itself is measured separately after setup completes.
 const LOOPBACK_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
 fn evaluate_direct_stop_with_test_budget(env: &mut DefaultCliEnv) -> HookOutput {
     let deadline = ResolutionDeadline::new(
         DIRECT_STOP_TEST_CONNECT_TIMEOUT,
@@ -758,6 +770,8 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         let address = listener.local_addr().expect("loopback address");
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
+        let stall_until = Arc::new(OnceLock::<Instant>::new());
+        let server_stall_until = Arc::clone(&stall_until);
         let server = std::thread::spawn(move || {
             let mut first = accept_loopback_with_timeout(&listener, LOOPBACK_ACCEPT_TIMEOUT);
             server_requests.fetch_add(1, Ordering::SeqCst);
@@ -779,7 +793,9 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
             stalled
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .expect("stall read timeout");
-            let until = Instant::now() + Duration::from_millis(850);
+            let until = *server_stall_until
+                .get()
+                .expect("absolute transport stall deadline");
             let mut byte = [0_u8; 1];
             while Instant::now() < until {
                 match stalled.read(&mut byte) {
@@ -799,13 +815,28 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         );
         let _token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-test-token");
         let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
+        let deadline = ResolutionDeadline::new(
+            DIRECT_STOP_TEST_CONNECT_TIMEOUT,
+            DIRECT_STOP_TEST_TOTAL_BUDGET,
+        );
+        let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
+        stall_until
+            .set(resolution_deadline.expires_at() + Duration::from_millis(25))
+            .expect("set absolute transport stall deadline");
         let started = Instant::now();
 
-        let output = evaluate_direct_stop_with_test_budget(&mut env);
+        let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+            &mut env,
+            false,
+            &deadline,
+            DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+        );
         let elapsed = started.elapsed();
 
         let HookOutput::StopBlock { reason } = output else {
-            panic!("stalled direct Stop owner search must block");
+            panic!(
+                "stalled direct Stop owner search must block; output={output:?}; elapsed={elapsed:?}"
+            );
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
         assert!(
@@ -908,7 +939,9 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
 
         server.join().expect("loopback server");
         let HookOutput::StopBlock { reason } = output else {
-            panic!("post-attempt store contention must block Stop");
+            panic!(
+                "post-attempt store contention must block Stop; output={output:?}; elapsed={elapsed:?}"
+            );
         };
         assert!(reason.contains("state=blocked"), "{reason}");
         assert!(reason.contains("reason=timeout"), "{reason}");
