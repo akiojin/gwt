@@ -1905,21 +1905,24 @@ fn validate_workspace_ensure_recovery_state(
         .iter()
         .filter(|agent| agent.session_id == input.agent_session)
         .collect::<Vec<_>>();
-    if session_refs.len() != 1 {
+    if session_refs.len() > 1 {
         return Err(GwtError::Other(format!(
             "canonical Work {canonical_id} has ambiguous Session agent refs"
         )));
     }
-    if !workspace_ensure_agent_identity_matches(
-        session_refs[0].agent_id.as_deref(),
-        &recovery.session.agent_id,
-    ) {
-        return Err(GwtError::Other(format!(
-            "Work agent identity mismatch for Session {}: durable={}, stored={}",
-            input.agent_session,
-            durable_agent_id,
-            session_refs[0].agent_id.as_deref().unwrap_or("<none>")
-        )));
+    let session_ref = session_refs.first().copied();
+    if let Some(session_ref) = session_ref {
+        if !workspace_ensure_agent_identity_matches(
+            session_ref.agent_id.as_deref(),
+            &recovery.session.agent_id,
+        ) {
+            return Err(GwtError::Other(format!(
+                "Work agent identity mismatch for Session {}: durable={}, stored={}",
+                input.agent_session,
+                durable_agent_id,
+                session_ref.agent_id.as_deref().unwrap_or("<none>")
+            )));
+        }
     }
     let matching_containers = item
         .execution_containers
@@ -1964,7 +1967,8 @@ fn validate_workspace_ensure_recovery_state(
         }
     }
     Ok(WorkspaceEnsureAuthorityState::ExactExisting {
-        canonicalize_work_agent_id: session_refs[0].agent_id.as_deref() != Some(durable_agent_id),
+        canonicalize_work_agent_id: session_ref.and_then(|agent| agent.agent_id.as_deref())
+            != Some(durable_agent_id),
         canonicalize_work_owner,
         canonical_id,
     })
@@ -5440,6 +5444,86 @@ pub(crate) mod tests {
             std::fs::read(events_path).expect("event log after retry"),
             before_retry,
             "response-loss retry must not duplicate recovery events"
+        );
+    }
+
+    #[test]
+    fn workspace_ensure_rebinds_continued_session_to_existing_canonical_work_once() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let current_session = "session-continued-current";
+        write_bound_projectionless_session(current_session, &worktree, &project_root, 3412);
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-continued-predecessor",
+            Some("Issue #3412"),
+            "codex",
+        );
+
+        let input = WorkspaceEnsureInput {
+            agent_session: current_session.to_string(),
+            title_summary: "Continue exact canonical Work".to_string(),
+            current_focus: Some("Rebind the continued Session".to_string()),
+            spec: None,
+            issue: None,
+            topic: None,
+            boundary: None,
+        };
+        let result = ensure_workspace_for_agent(&worktree, input.clone())
+            .expect("continued Session should rebind to the exact canonical Work");
+
+        assert_eq!(
+            result.disposition,
+            WorkspaceEnsureDisposition::AlreadyAssigned
+        );
+        assert_eq!(result.workspace_id, work_id);
+        let projection = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = projection
+            .latest_agent_for_session(current_session)
+            .expect("continued Session projection agent");
+        assert!(agent.is_assigned());
+        assert_eq!(agent.workspace_id.as_deref(), Some(work_id.as_str()));
+
+        let work_items = load_workspace_work_items(&project_root)
+            .expect("load WorkItems projection")
+            .expect("WorkItems projection");
+        let work = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .expect("existing canonical Work");
+        assert_eq!(
+            work.agents
+                .iter()
+                .filter(|agent| agent.session_id == current_session)
+                .count(),
+            1,
+            "continued Session must be attached exactly once"
+        );
+        assert!(work
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-continued-predecessor"));
+
+        let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+        let before_retry = std::fs::read(&events_path).expect("event log after rebind");
+        let retry = ensure_workspace_for_agent(&worktree, input).expect("idempotent rebind retry");
+        assert_eq!(
+            retry.disposition,
+            WorkspaceEnsureDisposition::AlreadyAssigned
+        );
+        assert_eq!(retry.workspace_id, work_id);
+        assert_eq!(
+            std::fs::read(events_path).expect("event log after retry"),
+            before_retry,
+            "continued Session retry must not duplicate the Claim event"
         );
     }
 
