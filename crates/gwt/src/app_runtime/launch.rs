@@ -2139,6 +2139,9 @@ impl AppRuntime {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        // SPEC-3431 FR-001: a PM launch registers its session once it exists.
+        // Removed unconditionally so a failed launch leaves no stale marker.
+        let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -2346,8 +2349,30 @@ impl AppRuntime {
                         .workspace
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
                 }
+                // SPEC-3431 FR-001/FR-003: write the PM registration for a
+                // launch the ensure gate marked as PM, or for any resume whose
+                // source session is the registered PM (succession keeps the
+                // singleton pointing at the live conversation).
+                let pm_registration_root = pending_pm_project_root.or_else(|| {
+                    let source = auto_resume_source_session_id.as_ref()?;
+                    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+                    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).ok()?;
+                    (prefs.registration?.session_id == *source).then(|| project_root.clone())
+                });
                 if let Some(source_session_id) = auto_resume_source_session_id {
                     mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                }
+                // SPEC-3431 FR-026: a completed PM launch is the moment
+                // "running as" becomes true, so the settings panel is
+                // refreshed from the post-spawn state below.
+                let pm_launch_registered = pm_registration_root.is_some();
+                if let Some(pm_project_root) = pm_registration_root {
+                    self.register_pm_after_launch(
+                        &pm_project_root,
+                        &session_id_for_restore,
+                        agent_id.command(),
+                        &worktree_path,
+                    );
                 }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
@@ -2552,6 +2577,9 @@ impl AppRuntime {
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
+                        if pm_launch_registered {
+                            events.extend(self.pm_status_broadcast_events());
+                        }
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {

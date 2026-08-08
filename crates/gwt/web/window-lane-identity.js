@@ -33,6 +33,9 @@ export function windowLaneKind(windowData) {
 }
 
 export function shouldShowWindowLaneBadge(windowData) {
+  // SPEC-3431 FR-020: the PM is not an execution-lane worker, so an
+  // "Execution" badge on it is noise that competes with its PM identity.
+  if (windowData?.is_pm) return false;
   const kind = windowLaneKind(windowData);
   if (kind !== "unknown") {
     return true;
