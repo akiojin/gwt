@@ -90,6 +90,22 @@ pub struct PmSettings {
     /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
+    /// FR-035 (user ruling 2026-08-08): resident-loop cycle interval in
+    /// seconds. Both the Stop-gate floor and the subscribe timeout the PM is
+    /// told to use. Clamped to at least 10s so a typo cannot spin the loop.
+    #[serde(default = "default_loop_interval_secs")]
+    pub loop_interval_secs: u64,
+}
+
+fn default_loop_interval_secs() -> u64 {
+    60
+}
+
+impl PmSettings {
+    /// The effective loop interval, with the runaway floor applied.
+    pub fn loop_interval_secs_clamped(&self) -> u64 {
+        self.loop_interval_secs.max(10)
+    }
 }
 
 impl PmSettings {
@@ -126,6 +142,7 @@ impl Default for PmSettings {
         Self {
             auto_start: true,
             launch_profile: None,
+            loop_interval_secs: default_loop_interval_secs(),
         }
     }
 }
@@ -157,6 +174,51 @@ pub fn pm_prefs_path_for_repo_path(repo_path: &Path) -> PathBuf {
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
+}
+
+/// SPEC-3431 FR-012: durable state for the resident-loop driver. Lives beside
+/// `pm.json` so it survives context compaction, crash resume, and session
+/// succession — the PM's own notes do not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PmLoopState {
+    /// Loop continuations since the last user prompt; the cap parks the PM.
+    #[serde(default)]
+    pub consecutive_continuations: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_continued_at: Option<String>,
+}
+
+/// `pm-loop.json` path derived from the PM worktree itself. The hook's cwd is
+/// the worktree, whose grandparent is the gwt project dir — no ambient value
+/// is consulted, mirroring `is_pm_worktree`'s design.
+pub fn pm_loop_state_path_for_pm_worktree(worktree: &Path) -> Option<PathBuf> {
+    if !is_pm_worktree(worktree) {
+        return None;
+    }
+    Some(
+        worktree
+            .parent()?
+            .parent()?
+            .join("project-state/pm-loop.json"),
+    )
+}
+
+pub fn load_pm_loop_state(path: &Path) -> io::Result<PmLoopState> {
+    match fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(PmLoopState::default()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn save_pm_loop_state(path: &Path, state: &PmLoopState) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let scratch = unique_pm_scratch_path(path);
+    fs::write(&scratch, serde_json::to_string_pretty(state)?)?;
+    fs::rename(&scratch, path)
 }
 
 /// Whether `path` is some project's canonical PM worktree.
@@ -723,6 +785,7 @@ mod tests {
                     model: Some("some-model".to_string()),
                     ..PmLaunchProfile::default()
                 }),
+                ..PmSettings::default()
             };
             let resolved = settings.launch_profile_or_default();
             assert_eq!(
