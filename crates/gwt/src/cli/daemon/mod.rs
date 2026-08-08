@@ -297,6 +297,7 @@ fn subscribe_command<E: CliEnv>(
 fn subscribe_command<E: CliEnv>(
     _env: &mut E,
     _channels: Vec<String>,
+    _timeout_seconds: Option<u64>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     out.push_str(
