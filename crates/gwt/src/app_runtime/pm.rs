@@ -64,22 +64,29 @@ fn pm_wake_signals(inbox: &[gwt::IssueMonitorInboxItem]) -> std::collections::BT
     signals
 }
 
-/// An actively-looping PM picks new events up in its own next cycle; the wake
-/// is only for a loop that has gone quiet (parked on the budget cap, or dead
-/// after a within-floor stop). Same clock and knob as the Stop-gate driver.
+/// An actively-looping PM picks new events up in its own next cycle, and a PM
+/// a human just prompted is busy with that conversation — the wake is only
+/// for a loop quiet on both clocks (parked on the budget cap, or dead after a
+/// within-floor stop, with no recent user contact). Same interval knob as the
+/// Stop-gate driver.
 fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, now: &str) -> bool {
-    let Some(last) = state.last_continued_at.as_deref() else {
-        return true;
-    };
-    match (
-        chrono::DateTime::parse_from_rfc3339(now),
-        chrono::DateTime::parse_from_rfc3339(last),
-    ) {
-        (Ok(now_t), Ok(last_t)) => {
-            (now_t - last_t).num_seconds() >= i64::try_from(interval_secs).unwrap_or(i64::MAX)
+    let instant_is_quiet = |instant: Option<&str>| {
+        let Some(instant) = instant else {
+            return true;
+        };
+        match (
+            chrono::DateTime::parse_from_rfc3339(now),
+            chrono::DateTime::parse_from_rfc3339(instant),
+        ) {
+            (Ok(now_t), Ok(instant_t)) => {
+                (now_t - instant_t).num_seconds()
+                    >= i64::try_from(interval_secs).unwrap_or(i64::MAX)
+            }
+            _ => true,
         }
-        _ => true,
-    }
+    };
+    instant_is_quiet(state.last_continued_at.as_deref())
+        && instant_is_quiet(state.last_user_prompt_at.as_deref())
 }
 
 /// Who asked for the PM.
@@ -187,10 +194,13 @@ impl AppRuntime {
             return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
         }
         // FR-003 crash-loop damper: while the backoff floor is in the future
-        // the ensure gate must not respawn; the next project open (or manual
-        // action) after the floor recovers the PM.
+        // the automatic ladder must not respawn. Scoped to `Automatic` for the
+        // same reason as the auto_start opt-out above — FR-021 requires the
+        // explicit launcher/Restart click to start a stopped PM regardless.
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        if !pm_registry::pm_respawn_allowed(&registration, &now) {
+        if trigger == PmEnsureTrigger::Automatic
+            && !pm_registry::pm_respawn_allowed(&registration, &now)
+        {
             return Vec::new();
         }
         // Stale registration (FR-003): resume the same conversation when the

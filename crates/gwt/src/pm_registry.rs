@@ -186,6 +186,15 @@ pub struct PmLoopState {
     pub consecutive_continuations: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_continued_at: Option<String>,
+    /// The last real user prompt. The T-093 wake path treats a recently
+    /// prompted PM as busy with a human conversation and defers injection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_user_prompt_at: Option<String>,
+    /// Whether the most recent forced continuation in the current Stop chain
+    /// was the resident loop's own block. Guards the loop against riding a
+    /// `stop_hook_active` chain that a different Stop gate started.
+    #[serde(default)]
+    pub pending_own_block: bool,
 }
 
 /// `pm-loop.json` path derived from the PM worktree itself. The hook's cwd is

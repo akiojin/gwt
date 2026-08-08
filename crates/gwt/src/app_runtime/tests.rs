@@ -42409,6 +42409,7 @@ fn pm_wake_targets_only_the_registered_pm_pane_on_new_needs_human() {
         &gwt::pm_registry::PmLoopState {
             consecutive_continuations: 12,
             last_continued_at: Some("2026-08-08T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
         },
     )
     .expect("seed parked loop state");
@@ -42477,6 +42478,7 @@ fn pm_wake_suppression_during_active_loop_retries_on_the_next_snapshot() {
         &gwt::pm_registry::PmLoopState {
             consecutive_continuations: 3,
             last_continued_at: Some("2026-08-08T01:00:30Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
         },
     )
     .expect("seed active loop state");
@@ -42564,5 +42566,90 @@ fn pm_wake_never_fires_without_a_live_registered_pm_or_with_monitor_off() {
             .pm_wake_decision_at(&repo, &escalated_again, "2026-08-08T01:03:00Z")
             .is_none(),
         "no registration, no wake"
+    );
+}
+
+/// SPEC-3431 FR-021 (review fix): an explicit "Open PM" click starts the PM
+/// even while the crash-backoff floor is in the future — the floor damps only
+/// the automatic respawn ladder, never the user's own button.
+#[test]
+fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    // A crashed PM registration whose backoff floor is far in the future, with
+    // no live pane and no materializable session (forces the fresh-spawn arm).
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let mut registration = pm_registration_fixture("pm-session-crashed", &repo);
+    registration.consecutive_crashes = 3;
+    registration.next_not_before = Some("2999-01-01T00:00:00Z".to_string());
+    gwt::pm_registry::try_register_pm(&prefs_path, registration, |_| false)
+        .expect("seed crashed registration");
+
+    let automatic = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "the automatic ladder must keep honouring the backoff floor"
+    );
+    drop(automatic);
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Explicit);
+    assert!(
+        !runtime.pending_pm_launches.is_empty(),
+        "FR-021: the explicit launcher must start the PM despite the backoff floor"
+    );
+}
+
+/// SPEC-3431 T-093 (review fix): a PM that a human just prompted is busy with
+/// that conversation — monitor activity must not be injected into it; the
+/// signal is retained and delivered once the conversation has gone quiet.
+#[test]
+fn pm_wake_defers_to_an_active_human_conversation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            last_user_prompt_at: Some("2026-08-08T01:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed conversation state");
+
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &[], "2026-08-08T01:00:05Z")
+            .is_none(),
+        "baseline"
+    );
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:00:10Z")
+            .is_none(),
+        "a PM in an active human conversation must not receive injected input"
+    );
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:02:00Z")
+            .is_some(),
+        "the retained signal wakes once the conversation has gone quiet"
     );
 }

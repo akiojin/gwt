@@ -30,25 +30,40 @@ use crate::pm_registry::{self, PmLoopState};
 /// revives a parked PM when new monitor activity arrives.
 const PM_LOOP_MAX_CONSECUTIVE: u32 = 12;
 
-/// UserPromptSubmit entry: real user contact re-arms the loop budget.
+/// UserPromptSubmit entry: real user contact re-arms the loop budget and
+/// stamps the conversation clock the T-093 wake path defers to.
 pub fn handle_user_prompt_submit(worktree: &Path) {
+    handle_user_prompt_submit_at(
+        worktree,
+        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+}
+
+fn handle_user_prompt_submit_at(worktree: &Path, now: &str) {
     if !super::is_resident_pm_worktree(worktree) {
         return;
     }
     let Some(state_path) = pm_registry::pm_loop_state_path_for_pm_worktree(worktree) else {
         return;
     };
-    let _ = pm_registry::save_pm_loop_state(&state_path, &PmLoopState::default());
+    let _ = pm_registry::save_pm_loop_state(
+        &state_path,
+        &PmLoopState {
+            last_user_prompt_at: Some(now.to_string()),
+            ..PmLoopState::default()
+        },
+    );
 }
 
-pub fn handle_with_input(worktree: &Path, _input: &str) -> HookOutput {
+pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
     handle_at(
         worktree,
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        super::envelope::stop_hook_active_from(input),
     )
 }
 
-fn handle_at(worktree: &Path, now: &str) -> HookOutput {
+fn handle_at(worktree: &Path, now: &str, stop_hook_active: bool) -> HookOutput {
     if !super::is_resident_pm_worktree(worktree) {
         return HookOutput::Silent;
     }
@@ -65,15 +80,31 @@ fn handle_at(worktree: &Path, now: &str) -> HookOutput {
     let monitor_enabled = crate::load_issue_monitor_prefs(&prefs_path)
         .map(|prefs| prefs.enabled)
         .unwrap_or(false);
+    let mut state = pm_registry::load_pm_loop_state(&state_path).unwrap_or_default();
+    // A `stop_hook_active` chain the loop did not start belongs to another
+    // Stop gate — riding it would stack this loop's directive on top of that
+    // gate's forced continuation. The loop's own chain carries the marker set
+    // below and keeps flowing.
+    if stop_hook_active && !state.pending_own_block {
+        return HookOutput::Silent;
+    }
+    // Every Silent below ends the loop's own chain, so the marker is cleared
+    // (persisted only when it changes) before returning.
+    let end_own_chain = |state: &mut PmLoopState| {
+        if state.pending_own_block {
+            state.pending_own_block = false;
+            let _ = pm_registry::save_pm_loop_state(&state_path, state);
+        }
+    };
     if !monitor_enabled {
+        end_own_chain(&mut state);
         return HookOutput::Silent;
     }
     let interval_secs = pm_registry::load_pm_prefs(&project_state.join("pm.json"))
         .map(|prefs| prefs.settings.loop_interval_secs_clamped())
         .unwrap_or(60);
-
-    let mut state = pm_registry::load_pm_loop_state(&state_path).unwrap_or_default();
     if state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
+        end_own_chain(&mut state);
         return HookOutput::Silent;
     }
     if let Some(last) = state.last_continued_at.as_deref() {
@@ -82,12 +113,14 @@ fn handle_at(worktree: &Path, now: &str) -> HookOutput {
             chrono::DateTime::parse_from_rfc3339(last),
         ) {
             if (now_t - last_t).num_seconds() < interval_secs as i64 {
+                end_own_chain(&mut state);
                 return HookOutput::Silent;
             }
         }
     }
     state.consecutive_continuations = state.consecutive_continuations.saturating_add(1);
     state.last_continued_at = Some(now.to_string());
+    state.pending_own_block = true;
     let _ = pm_registry::save_pm_loop_state(&state_path, &state);
     HookOutput::stop_block(format!(
         "Resident PM loop: run one cycle before stopping. Run JSON operation `daemon.subscribe` \
@@ -135,7 +168,7 @@ mod tests {
         let (home, _repo, worktree) = pm_fixture();
         let _guard = ScopedGwtHome::set(home.path());
 
-        let output = handle_at(&worktree, "2026-08-08T00:00:00Z");
+        let output = handle_at(&worktree, "2026-08-08T00:00:00Z", false);
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected the loop to continue, got {output:?}");
@@ -152,19 +185,19 @@ mod tests {
         let _guard = ScopedGwtHome::set(home.path());
 
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z"),
+            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
             HookOutput::StopBlock { .. }
         ));
         // Inside the floor: silent, and the budget is not consumed.
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:30Z"),
+            handle_at(&worktree, "2026-08-08T00:00:30Z", false),
             HookOutput::Silent
         );
         // Exhaust the budget past the floor each time.
         let mut minute = 2;
         loop {
             let now = format!("2026-08-08T00:{minute:02}:00Z");
-            match handle_at(&worktree, &now) {
+            match handle_at(&worktree, &now, false) {
                 HookOutput::StopBlock { .. } => minute += 2,
                 _ => break,
             }
@@ -173,7 +206,7 @@ mod tests {
         // A user prompt re-arms.
         handle_user_prompt_submit(&worktree);
         assert!(matches!(
-            handle_at(&worktree, "2026-08-08T02:00:00Z"),
+            handle_at(&worktree, "2026-08-08T02:00:00Z", false),
             HookOutput::StopBlock { .. }
         ));
     }
@@ -192,14 +225,84 @@ mod tests {
         prefs.enabled = false;
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save");
         assert_eq!(
-            handle_at(&worktree, "2026-08-08T00:00:00Z"),
+            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
             HookOutput::Silent
         );
 
         let ordinary = tempfile::tempdir().expect("ordinary");
         assert_eq!(
-            handle_at(ordinary.path(), "2026-08-08T00:00:00Z"),
+            handle_at(ordinary.path(), "2026-08-08T00:00:00Z", false),
             HookOutput::Silent
         );
+    }
+
+    /// Review fix: the loop must not ride a `stop_hook_active` chain another
+    /// Stop gate started — only its own chain (marker set by its own block)
+    /// keeps flowing across `stop_hook_active` stops.
+    #[test]
+    fn foreign_forced_continuations_are_not_ridden_and_own_chain_flows() {
+        let (home, _repo, worktree) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+
+        // A foreign chain: some other gate forced the previous continuation.
+        assert_eq!(
+            handle_at(&worktree, "2026-08-08T00:00:00Z", true),
+            HookOutput::Silent,
+            "the loop must not stack onto another gate's forced continuation"
+        );
+
+        // Its own chain: block once, then keep flowing across the
+        // stop_hook_active stops of that same chain.
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:10:00Z", false),
+            HookOutput::StopBlock { .. }
+        ));
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:12:00Z", true),
+            HookOutput::StopBlock { .. }
+        ));
+
+        // A within-floor stop ends the loop's own chain (marker cleared), so
+        // a later stop_hook_active stop is foreign again.
+        assert_eq!(
+            handle_at(&worktree, "2026-08-08T00:12:30Z", true),
+            HookOutput::Silent,
+            "the floor ends the own chain"
+        );
+        assert_eq!(
+            handle_at(&worktree, "2026-08-08T00:20:00Z", true),
+            HookOutput::Silent,
+            "after the own chain ended, stop_hook_active stops are foreign"
+        );
+        // ...while a fresh chain start (no stop_hook_active) still drives.
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:21:00Z", false),
+            HookOutput::StopBlock { .. }
+        ));
+    }
+
+    /// Review fix: real user contact stamps the conversation clock (the wake
+    /// path defers to it) and re-arms the budget.
+    #[test]
+    fn user_prompt_submit_stamps_the_conversation_clock() {
+        let (home, _repo, worktree) = pm_fixture();
+        let _guard = ScopedGwtHome::set(home.path());
+
+        assert!(matches!(
+            handle_at(&worktree, "2026-08-08T00:00:00Z", false),
+            HookOutput::StopBlock { .. }
+        ));
+        handle_user_prompt_submit_at(&worktree, "2026-08-08T00:00:30Z");
+
+        let state_path =
+            pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).expect("pm loop state path");
+        let state = pm_registry::load_pm_loop_state(&state_path).expect("state");
+        assert_eq!(
+            state.last_user_prompt_at.as_deref(),
+            Some("2026-08-08T00:00:30Z")
+        );
+        assert_eq!(state.consecutive_continuations, 0);
+        assert!(!state.pending_own_block);
+        assert_eq!(state.last_continued_at, None);
     }
 }
