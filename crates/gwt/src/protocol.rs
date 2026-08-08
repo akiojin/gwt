@@ -1428,6 +1428,10 @@ pub struct ActiveWorkItemView {
     pub blocked_agents: usize,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    /// Worktree-specific managed-hook health. Unlike the projection-level
+    /// compatibility field, this is audited against this row's exact worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
     pub pr_state: Option<String>,
@@ -2998,6 +3002,28 @@ mod tests {
     };
 
     #[test]
+    fn knowledge_search_results_retains_the_baseline_rust_shape() {
+        // SPEC #1939 FR-407 — the public Rust event remains source-compatible
+        // with legacy clients. Optional retry metadata belongs to the private
+        // outbound wire envelope, not this public enum variant.
+        let event = BackendEvent::KnowledgeSearchResults {
+            id: "tab-1::issue-1".to_string(),
+            knowledge_kind: crate::knowledge_bridge::KnowledgeKind::Issue,
+            query: "silent recovery".to_string(),
+            request_id: 7,
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: true,
+        };
+        let value = serde_json::to_value(&event).expect("serialize baseline event");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "direct event serialization must retain the baseline wire shape: {value}"
+        );
+    }
+
+    #[test]
     fn pane_send_input_deserializes_session_scoped_injection_contract() {
         let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
             "kind": "pane_send_input",
@@ -3670,6 +3696,7 @@ mod tests {
                     blocked_agents: 0,
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    managed_hook_health: None,
                     pr_number: Some(2538),
                     pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
                     pr_state: Some("OPEN".to_string()),

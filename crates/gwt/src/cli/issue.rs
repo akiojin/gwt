@@ -202,6 +202,14 @@ pub(super) fn run<E: CliEnv>(
             },
             out,
         )?,
+        IssueCommand::MonitorQuestions { project_root } => {
+            run_monitor_questions(env, project_root.as_deref(), out)?
+        }
+        IssueCommand::MonitorQuestionAnswer {
+            project_root,
+            handoff_id,
+            answer,
+        } => run_monitor_question_answer(env, project_root.as_deref(), &handoff_id, &answer, out)?,
         IssueCommand::MonitorConfigSet {
             project_root,
             enabled,
@@ -280,6 +288,88 @@ fn run_monitor_status<E: CliEnv>(
     out.push_str(
         &serde_json::to_string(&monitor.agent_status())
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3478 (AC-9): the questions autonomous executions are parked on.
+///
+/// Reads the control plane directly rather than the daemon status projection:
+/// this must answer "what is blocking the queue" even when no daemon is
+/// running, which is exactly when a human is most likely to be looking.
+fn run_monitor_questions<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let questions = prefs
+        .autonomous_handoffs
+        .iter()
+        .filter(|handoff| handoff.is_open())
+        .collect::<Vec<_>>();
+    out.push_str(
+        &serde_json::to_string(&serde_json::json!({ "questions": questions }))
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?,
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #3478 (AC-5): register a human answer for one parked question.
+///
+/// Fail-closed on an unknown or already-answered handoff: reporting success for
+/// an answer that reaches nobody would leave the Issue parked forever while the
+/// human believes they unblocked it.
+fn run_monitor_question_answer<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    handoff_id: &str,
+    answer: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    if answer.trim().is_empty() {
+        return Err(io_as_api_error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "answer must not be empty",
+        )));
+    }
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (_, issue_number) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut candidate = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        if !candidate.answer_autonomous_handoff(handoff_id, answer, &now) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no open Issue Monitor question with handoff_id {handoff_id}"),
+            ));
+        }
+        let issue_number = candidate
+            .autonomous_handoffs()
+            .iter()
+            .find(|handoff| handoff.handoff_id == handoff_id)
+            .map(|handoff| handoff.issue_number);
+        // Only the handoff queue moves here. The driver owns un-parking the
+        // Issue and re-arming its launch, so an answer registered while the
+        // daemon is down is applied on its next scan instead of being lost.
+        prefs.autonomous_handoffs = candidate.prefs().autonomous_handoffs;
+        Ok(issue_number)
+    })
+    .map_err(io_as_api_error)?;
+    out.push_str(
+        &serde_json::json!({
+            "handoff_id": handoff_id,
+            "issue_number": issue_number,
+            "answered_at": now,
+        })
+        .to_string(),
     );
     out.push('\n');
     Ok(0)

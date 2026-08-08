@@ -2,6 +2,7 @@ pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
 #[doc(hidden)]
 pub use agent_project_state::validated_project_state_root_for_session_recovery;
+pub mod autonomous_handoff;
 pub mod backend_service;
 pub mod board_audience;
 pub mod board_provider;
@@ -115,9 +116,10 @@ pub use issue_monitor::{
     issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
     load_issue_monitor_prefs, mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
     persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
-    save_issue_monitor_prefs, scan_issue_monitor_candidates,
-    scan_issue_monitor_candidates_with_provenance, try_mutate_issue_monitor_prefs,
-    try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousIssueRecord, AutonomousPhase,
+    record_autonomous_question_handoff, save_issue_monitor_prefs, scan_issue_monitor_candidates,
+    scan_issue_monitor_candidates_with_provenance, take_autonomous_resume_prompt_from_prefs,
+    try_mutate_issue_monitor_prefs, try_mutate_issue_monitor_prefs_without_authority_fence,
+    AutonomousHandoffResumption, AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase,
     AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAgentStatus,
     IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
     IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,
@@ -125,16 +127,17 @@ pub use issue_monitor::{
     IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorInboxItem, IssueMonitorIssue,
     IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue,
-    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
+    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorScanSummary,
+    IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
     IssueMonitorStopTarget, MonitorInboxState, PendingIssueMonitorEffect,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
-    load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
-    update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
-    KnowledgeKind, KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
-    KnowledgeRelatedWorkView,
+    load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
+    search_knowledge_bridge, search_knowledge_bridge_outcome, update_knowledge_phase,
+    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
+    KnowledgeListItem, KnowledgeRelatedAgentView, KnowledgeRelatedSessionView,
+    KnowledgeRelatedWorkView, KnowledgeSearchOutcome, KnowledgeSemanticRetry,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,

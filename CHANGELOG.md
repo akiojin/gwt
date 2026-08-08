@@ -1,6 +1,124 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.74.0] - 2026-08-07
+
+### Bug Fixes
+
+- **issue-monitor:** Claim 再照合と refresh 上限を修正
+- **autonomous:** 確認待ちを NeedsHuman へ即時 handoff して active slot を解放する
+- **issue-monitor:** Needs_human / not_ready / hold_excluded の行バッジが Queued と表示される
+- **launch:** SessionStart readiness を進捗ベースの上限付き期限に変更
+
+### Documentation
+
+- **skills:** Parked question handoff の JSON operations を gwt-agent skill に追記
+
+### Features
+
+- **issue-monitor:** Readiness と hold 除外を実装
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3460 の完了状態を記録
+- **work:** Issue #3478 の作業イベントを記録
+- **work:** Issue #3478 の完了状態を記録
+- **work:** Issue #3478 の完了 Work event を記録
+- **work:** Issue #3475 の完了状態を記録
+
+### Refactor
+
+- **issue-monitor:** 共有実行状態の型契約を追加
+
+### Styling
+
+- **autonomous:** Restart 復元テストの整形を rustfmt に合わせる
+
+### Testing
+
+- **action-obligation:** Revival記録テストを隔離
+- **autonomous:** 停止中の質問表示を実ブラウザ E2E で固定する
+
+## [9.73.1] - 2026-08-05
+
+### Bug Fixes
+
+- **ci:** Prepare Release に発行元 PAT を配線しリリース準備を通す
+- Prevent terminal output starvation
+- Add content-free terminal latency tracing
+- Bound workspace hydration and projection
+- Reduce latency across prompt submission and navigation
+- **gui:** Keep session resume projections process-free
+- **gui:** Make background projections converge
+- **gui:** Invalidate topology at materialization
+- **gui:** Converge knowledge and topology refresh
+- **index:** 非ブロッキング検索の修復予約と型付き失敗分類を実装する
+- **knowledge:** 検索劣化を静音化し選択を cache-backed detail-only にする
+- **gui:** 選択を同期プレビュー化し selection generation でフェンスする
+- **gui:** Semantic 検索の静音無期限リトライとローカル即時フォールバックを実装する
+- **gui:** Knowledge Bridge の semantic 検索ステータス表示を除去する
+- **index:** 監査 P0/P1 を解消し検索試行の境界と静音性を強化する
+- **gui:** 選択/リトライの世代フェンスを強化し TOCTOU 送信を排除する
+- **gui:** PR の選択を従来の full-load 経路に維持する
+- **core:** Windows deadline spawn の resume をプロセススコープ化する
+- **index:** Retry metadata を private wire envelope へ移し公開型を保つ
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 3170 completion
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record Issue 3170 verification retry
+- **work:** Record workspace backfill
+- **spec-3170:** 旧ブランチ内容を origin/develop 基準へ揃える
+- **work:** SPEC-3170 検証フェーズの work イベントを記録する
+- **work:** SPEC-3170 の PR handoff 前 Work イベントを記録する
+- **work:** SPEC-3170 の Work を完了として記録する
+
+### Testing
+
+- 高負荷時のターミナル入力遅延を検証する
+- Separate prompt SLA from shared-suite watchdog
+- Isolate ordered navigation process contract
+- **gui:** 選択即応と静音リトライのブラウザ契約を固定する
+- 負荷依存で偽陽性になるテスト予算を実測値ベースへ是正する
+- **workspace:** Host probe がリクエストを読み切ってから応答する
+- **core:** Fixture のクレート汚染と home 解決レースを止める
+
+## [9.73.0] - 2026-08-05
+
+### Bug Fixes
+
+- **hooks:** Worktree ローカルのバイナリ固定を防ぐ
+- **hooks:** Runtime selectorの境界条件を補強する
+- **launch:** 滞留 generation による起動拒否に holder と回復導線を含める
+- **governance:** Make recovery diagnostics executable
+- **governance:** Close recovery authority gaps
+- **governance:** Validate recovery owner authority
+- **governance:** Enforce continuation predecessor CAS
+- **governance:** Reject activated takeover suffix retries
+- **governance:** Recovery authority transaction を厳密化
+- **governance:** Preserve recovery projection boundaries
+- **pr:** Allow completed lifecycle receipt handoff
+
+### Features
+
+- **governance:** Semantic effect の観測を追加
+
+### Miscellaneous Tasks
+
+- **work:** Correct resumed work handoff
+
+### Testing
+
+- **hooks:** Health envelopeテストの実行環境を固定する
+- **hooks:** Health fixture の実行環境を固定する
+- **hooks:** Projection fixture に安定版バイナリを設定する
+- **hooks:** Self-heal fixture を環境非依存にする
+
 ## [9.72.1] - 2026-08-03
 
 ### Bug Fixes

@@ -66,8 +66,8 @@ pub(crate) use app_runtime::{
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
-    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
-    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
+    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1011,10 +1011,12 @@ enum UserEvent {
         ticket: AgentSelfCloseCapabilityTicket,
     },
     /// Candidate Continue work launches must return an authenticated
-    /// SessionStart receipt before this correlated deadline.
+    /// SessionStart receipt before this correlated deadline. Issue #3475: the
+    /// deadline carries its own progress-aware state, so a fired deadline can
+    /// re-arm itself while the agent pane is demonstrably still coming up.
     ContinueWorkReadyTimeout {
         window_id: String,
-        operation_id: String,
+        watch: ContinueWorkReadinessWatch,
     },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
@@ -2661,6 +2663,7 @@ mod tests {
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
+            window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             last_agent_activity: std::collections::HashMap::new(),
@@ -2668,6 +2671,7 @@ mod tests {
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
+            knowledge_related_snapshot: Default::default(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -3029,6 +3033,7 @@ mod tests {
                     asset_url: Some(_),
                     ..
                 }),
+                ..
             }] if latest == "9.20.2"
         ));
     }
@@ -4429,6 +4434,7 @@ mod tests {
                 )
             })
         });
+        let events_before_selection = events.lock().expect("event log").len();
         assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
@@ -4440,21 +4446,20 @@ mod tests {
                 },
             )
             .is_empty());
+        // SPEC #3170 FR-102 (T-947): selection is a cache-backed detail-only
+        // path — it never rebuilds the list. With no resolvable cache entry
+        // the completion is the correlated selection error.
         wait_for_recorded_event("knowledge bridge selection dispatch", &events, |events| {
-            events
-                .iter()
-                .filter(|event| {
-                    matches!(
-                        event,
-                        UserEvent::Dispatch(dispatched)
-                            if dispatched.iter().any(|outbound| matches!(
-                                outbound.event,
-                                BackendEvent::KnowledgeEntries { .. }
-                            ))
-                    )
-                })
-                .count()
-                >= 2
+            events[events_before_selection..].iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeError { .. }
+                        ))
+                )
+            })
         });
 
         let cleanup_events = runtime.handle_frontend_event(
@@ -8084,16 +8089,8 @@ fn main() -> std::io::Result<()> {
                     let _ = proxy.send_event(UserEvent::QuitApp);
                 }
             }
-            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout {
-                window_id,
-                operation_id,
-            }) => {
-                clients.dispatch(
-                    app.handle_continue_work_ready_timeout(
-                        &window_id,
-                        &operation_id,
-                    ),
-                );
+            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
+                clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

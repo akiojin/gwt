@@ -74,6 +74,74 @@ fn spawn_startup_orphan_intake_prune(plans: Vec<(PathBuf, OrphanIntakePrunePlan)
     });
 }
 
+pub(super) fn self_heal_managed_hooks_in_worktrees<'a>(
+    worktrees: impl IntoIterator<Item = &'a Path>,
+) {
+    let expected_hook_bin = std::env::var("GWT_HOOK_BIN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            gwt::managed_assets::resolve_public_gwt_bin_path()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+    self_heal_managed_hooks_in_worktrees_with_expected(worktrees, expected_hook_bin.as_deref());
+}
+
+pub(super) fn self_heal_managed_hooks_in_worktrees_with_expected<'a>(
+    worktrees: impl IntoIterator<Item = &'a Path>,
+    expected_hook_bin: Option<&str>,
+) {
+    let mut seen = HashSet::new();
+    for worktree in worktrees {
+        let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(&canonical);
+        input.runtime_state_path = None;
+        if let Some(expected_hook_bin) = expected_hook_bin {
+            input.expected_hook_bin = Some(expected_hook_bin.to_string());
+        }
+        let health = gwt::cli::hook::health::read_managed_hook_health(&input);
+        let needs_repair = matches!(
+            health.status,
+            gwt::cli::hook::health::ManagedHookHealthStatus::NeedsAttention
+                | gwt::cli::hook::health::ManagedHookHealthStatus::Degraded
+        );
+        let only_current_binary_is_missing = expected_hook_bin.is_some()
+            && !health.issues.is_empty()
+            && health
+                .issues
+                .iter()
+                .all(|issue| issue.starts_with("managed hook binary missing:"));
+        if only_current_binary_is_missing {
+            continue;
+        }
+        if !needs_repair {
+            continue;
+        }
+        if let Err(error) =
+            gwt::managed_assets::regenerate_existing_managed_hook_configs(&canonical)
+        {
+            tracing::warn!(
+                worktree = %canonical.display(),
+                %error,
+                "managed hook startup self-heal failed"
+            );
+        } else if needs_repair {
+            if let Err(error) = gwt::cli::hook::health::record_managed_hook_self_healed(&canonical)
+            {
+                tracing::warn!(
+                    worktree = %canonical.display(),
+                    %error,
+                    "managed hook self-heal marker failed"
+                );
+            }
+        }
+    }
+}
+
 fn startup_auto_resume_window_geometry(
     index: usize,
     total: usize,
@@ -136,6 +204,24 @@ pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id:
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
+        let startup_worktrees = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None)
+                    .map(|entries| entries.into_iter().map(|entry| entry.path).collect())
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            project_root = %tab.project_root.display(),
+                            %error,
+                            "managed hook startup self-heal inventory failed"
+                        );
+                        vec![tab.project_root.clone()]
+                    })
+            })
+            .collect::<Vec<_>>();
+        self_heal_managed_hooks_in_worktrees(startup_worktrees.iter().map(PathBuf::as_path));
+
         // Fresh linked-owner launch authority is durable in the Session and
         // owner ledger, while readiness capabilities are intentionally
         // process-local. Reconcile that durable pair before startup migrations

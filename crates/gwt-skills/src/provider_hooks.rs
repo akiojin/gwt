@@ -326,7 +326,7 @@ fn opencode_plugin_content(bin: &str, self_improvement_stop: bool) -> String {
     format!(
         r#"import {{ spawnSync }} from "node:child_process";
 
-const GWT_HOOK_BIN = {bin};
+const GWT_HOOK_BIN = process.env.GWT_BIN_PATH || {bin};
 
 function canonicalPayload(nativeEvent, input = {{}}, output = {{}}, context = {{}}) {{
   const toolName = input.tool ?? input.toolName ?? output.tool ?? output.toolName ?? input.name;
@@ -430,7 +430,7 @@ if [ "$event" = "on_session_end" ]; then
   # Drop stderr so a gwtd that predates the gwt-self-improvement-stop transport
   # exception (e.g. <v9.63.0) degrades silently instead of leaking its
   # legacy-argv rejection into the Stop loop (issue #3178).
-  self_output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook gwt-self-improvement-stop 2>/dev/null)"
+  self_output="$(printf '%s' "$payload" | "$gwt_bin" hook gwt-self-improvement-stop 2>/dev/null)"
 fi
 "#
     } else {
@@ -440,6 +440,11 @@ fi
     r#"#!/bin/sh
 set -eu
 
+gwt_bin="${GWT_BIN_PATH:-}"
+if [ -z "$gwt_bin" ]; then
+  gwt_bin=__GWT_HOOK_BIN__
+fi
+
 event="${1:-}"
 if [ -z "$event" ]; then
   exit 0
@@ -447,7 +452,7 @@ fi
 
 payload="$(cat)"
 set +e
-output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook provider-event hermes "$event")"
+output="$(printf '%s' "$payload" | "$gwt_bin" hook provider-event hermes "$event" 2>/dev/null)"
 __GWT_SELF_IMPROVEMENT_BLOCK__
 set -e
 if [ -n "$self_output" ]; then
@@ -540,7 +545,7 @@ fn openclaw_plugin_content(bin: &str, self_improvement_stop: bool) -> String {
         r#"import {{ spawnSync }} from "node:child_process";
 import {{ definePluginEntry }} from "openclaw/plugin-sdk/plugin-entry";
 
-const GWT_HOOK_BIN = {bin};
+const GWT_HOOK_BIN = process.env.GWT_BIN_PATH || {bin};
 
 function dispatch(nativeEvent, event = {{}}, ctx = {{}}) {{
   const payload = {{
@@ -642,6 +647,128 @@ fn github_slug_from_remote_url(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{owner}/{repo}"))
+}
+
+#[cfg(test)]
+mod runtime_resolution_tests {
+    use super::*;
+    use std::process::Stdio;
+
+    const FALLBACK: &str = "/Applications/GWT.app/Contents/MacOS/gwtd";
+
+    #[test]
+    fn javascript_provider_bridges_resolve_runtime_override_before_fallback() {
+        for content in [
+            opencode_plugin_content(FALLBACK, false),
+            openclaw_plugin_content(FALLBACK, false),
+        ] {
+            assert!(
+                content.contains(
+                    "const GWT_HOOK_BIN = process.env.GWT_BIN_PATH || \"/Applications/GWT.app/Contents/MacOS/gwtd\";"
+                ),
+                "provider bridge must resolve GWT_BIN_PATH first: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_bridge_resolves_runtime_override_before_fallback() {
+        let content = hermes_hook_script_content(FALLBACK, true);
+
+        assert!(
+            content.contains("gwt_bin=\"${GWT_BIN_PATH:-}\""),
+            "Hermes bridge must resolve GWT_BIN_PATH first: {content}"
+        );
+        assert!(content.contains("gwt_bin='/Applications/GWT.app/Contents/MacOS/gwtd'"));
+        assert!(content.contains("\"$gwt_bin\" hook provider-event"));
+        assert!(content.contains("\"$gwt_bin\" hook gwt-self-improvement-stop"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_bridge_fails_open_when_binary_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("gwt-hook.sh");
+        fs::write(
+            &script,
+            hermes_hook_script_content("/definitely/missing/gwtd", true),
+        )
+        .unwrap();
+
+        let status = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env_remove("GWT_BIN_PATH")
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_bridge_invokes_brace_paths_for_runtime_and_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_hook_bin(path: &Path, marker: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_bin = dir.path().join("runtime}").join("gwtd");
+        let fallback_bin = dir.path().join("fallback}").join("gwtd");
+        write_hook_bin(&runtime_bin, "runtime");
+        write_hook_bin(&fallback_bin, "fallback");
+
+        let script = dir.path().join("gwt-hook.sh");
+        fs::write(
+            &script,
+            hermes_hook_script_content(&fallback_bin.to_string_lossy(), false),
+        )
+        .unwrap();
+
+        let runtime = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env("GWT_BIN_PATH", &runtime_bin)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run runtime-selected Hermes hook");
+        assert!(runtime.status.success());
+        assert_eq!(String::from_utf8_lossy(&runtime.stdout).trim(), "runtime");
+
+        let fallback = hidden_command("sh")
+            .arg(&script)
+            .arg("on_session_start")
+            .env_remove("GWT_BIN_PATH")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run fallback-selected Hermes hook");
+        assert!(fallback.status.success());
+        assert_eq!(String::from_utf8_lossy(&fallback.stdout).trim(), "fallback");
+    }
+
+    #[test]
+    fn opencode_bridge_fails_open_when_binary_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("gwt-hooks.mjs");
+        let mut content = opencode_plugin_content("/definitely/missing/gwtd", false);
+        content.push_str(
+            "\nconst hooks = await GwtHooks({});\nawait hooks['tool.execute.before']({}, {});\n",
+        );
+        fs::write(&script, content).unwrap();
+
+        let status = hidden_command("node")
+            .arg(&script)
+            .env_remove("GWT_BIN_PATH")
+            .status()
+            .expect("run OpenCode bridge");
+
+        assert!(status.success());
+    }
 }
 
 #[cfg(test)]

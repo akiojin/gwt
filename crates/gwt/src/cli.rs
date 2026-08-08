@@ -17,6 +17,7 @@ mod discuss;
 pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
+pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;

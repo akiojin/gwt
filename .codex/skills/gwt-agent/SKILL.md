@@ -166,6 +166,36 @@ the GUI and daemon on their next scan/rebase. Configuration changes use an
 atomic daemon control when it is available; the fence-aware local fallback is
 observed on the next scan.
 
+## Parked Question Handoffs
+
+An unattended autonomous execution never waits on a confirmation question. A
+question tool call is converted into a structured handoff before it can wait:
+the owner Issue is parked as `NeedsHuman` and its active slot is released for
+the next ready Issue.
+
+List the questions parked executions are waiting on:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.questions","params":{}}
+JSON
+```
+
+Each entry carries the owner Issue, the asking session, the question text, the
+offered options, the rationale, and a machine-readable `reason_code`.
+
+Answer one parked question by its `handoff_id`:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.question.answer","params":{"handoff_id":"<id>","answer":"<decision>"}}
+JSON
+```
+
+An unknown or already-answered `handoff_id` is rejected rather than silently
+accepted. On the next scan the driver un-parks the Issue and resumes the exact
+stored session with the answer as its first prompt — no duplicate launch.
+
 ## Workflows
 
 ### Discover Mode

@@ -142,8 +142,11 @@ use launch::{
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
     maybe_register_codex_managed_hook_trust_for_launch,
 };
+pub(crate) use launch::{continue_work_readiness_decision, ReadinessDeadlineDecision};
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
-pub use launch::{AgentLaunchResult, LaunchWizardMemoryCache, ProcessLaunch};
+pub use launch::{
+    AgentLaunchResult, ContinueWorkReadinessWatch, LaunchWizardMemoryCache, ProcessLaunch,
+};
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
 use profile::ProfileSaveRequest;
@@ -283,9 +286,20 @@ pub enum DispatchTarget {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum KnowledgeWireMetadata {
+    SemanticRetry(gwt::KnowledgeSemanticRetry),
+    NonSemanticError,
+}
+
+#[derive(Debug, Clone)]
 pub struct OutboundEvent {
     pub(crate) target: DispatchTarget,
     pub(crate) event: BackendEvent,
+    /// SPEC #1939 FR-407 / SPEC #3170 FR-098: private wire-only metadata for
+    /// semantic retry directives and explicitly non-semantic search errors.
+    /// Keeping it outside the public `BackendEvent` preserves the baseline
+    /// Rust construction/destructuring shape.
+    pub(crate) knowledge_wire_metadata: Option<KnowledgeWireMetadata>,
 }
 
 pub(crate) enum AgentFrontendDispatchOutcome {
@@ -333,6 +347,7 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::Broadcast,
             event,
+            knowledge_wire_metadata: None,
         }
     }
 
@@ -340,6 +355,45 @@ impl OutboundEvent {
         Self {
             target: DispatchTarget::Client(client_id.into()),
             event,
+            knowledge_wire_metadata: None,
+        }
+    }
+
+    pub(crate) fn reply_with_knowledge_semantic_retry(
+        client_id: impl Into<ClientId>,
+        event: BackendEvent,
+        semantic_retry: Option<gwt::KnowledgeSemanticRetry>,
+    ) -> Self {
+        assert!(
+            matches!(event, BackendEvent::KnowledgeSearchResults { .. }),
+            "knowledge semantic retry metadata requires KnowledgeSearchResults"
+        );
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+            knowledge_wire_metadata: semantic_retry.map(KnowledgeWireMetadata::SemanticRetry),
+        }
+    }
+
+    pub(crate) fn reply_with_nonsemantic_knowledge_error(
+        client_id: impl Into<ClientId>,
+        event: BackendEvent,
+    ) -> Self {
+        assert!(
+            matches!(
+                event,
+                BackendEvent::KnowledgeError {
+                    request_id: Some(_),
+                    query: Some(_),
+                    ..
+                }
+            ),
+            "non-semantic knowledge error metadata requires a correlated KnowledgeError"
+        );
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+            knowledge_wire_metadata: Some(KnowledgeWireMetadata::NonSemanticError),
         }
     }
 }
@@ -731,6 +785,13 @@ pub struct AppRuntime {
     pub(crate) local_worktree_branches:
         std::cell::RefCell<HashMap<PathBuf, std::collections::HashSet<String>>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
+    /// Issue #3475: PTY output bytes seen per window, counted monotonically
+    /// for as long as the window keeps its runtime state tracking. The
+    /// authenticated SessionStart readiness deadline compares it against the
+    /// count captured when the deadline was armed, so it only ever needs the
+    /// delta — an in-place agent restart reusing the same window is fine.
+    /// Runtime-only; never persisted.
+    pub(crate) window_output_bytes: HashMap<String, u64>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
     /// SPEC-3431 FR-068: when each agent window last showed activity, so the
@@ -748,6 +809,10 @@ pub struct AppRuntime {
     /// unguessable process-local ticket, never by wire correlation data.
     pub(crate) pending_agent_self_closes: HashMap<String, PendingAgentSelfClose>,
     pub(crate) issue_link_cache_dir: PathBuf,
+    /// SPEC #3170 FR-102: latest related-work snapshot per project root,
+    /// captured by full load/search/refresh augmentation and reused verbatim
+    /// by the detail-only selection path.
+    pub(crate) knowledge_related_snapshot: knowledge::KnowledgeRelatedSnapshot,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
@@ -1219,6 +1284,7 @@ fn issue_monitor_issue_from_snapshot(
         },
         body: (!snapshot.body.is_empty()).then(|| snapshot.body.clone()),
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     }
 }
 
@@ -1307,6 +1373,7 @@ impl AppRuntime {
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
+            window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
             last_agent_activity: HashMap::new(),
@@ -1314,6 +1381,7 @@ impl AppRuntime {
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
+            knowledge_related_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
             pty_writers,
@@ -3903,16 +3971,28 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-            } => self.load_knowledge_bridge_events(
-                &client_id,
-                KnowledgeLoadRequest {
-                    id: &id,
-                    kind: knowledge_kind,
-                    request_id,
-                    selected_number: Some(number),
-                    refresh: false,
-                },
-            ),
+            } => match knowledge_kind {
+                KnowledgeKind::Issue | KnowledgeKind::Spec => self
+                    .select_knowledge_bridge_entry_events(
+                        &client_id,
+                        &id,
+                        knowledge_kind,
+                        request_id,
+                        number,
+                    ),
+                // FR-102 intentionally covers only Issue/SPEC. Keep the PR
+                // surface on its pre-existing full-load selection path.
+                KnowledgeKind::Pr => self.load_knowledge_bridge_events(
+                    &client_id,
+                    KnowledgeLoadRequest {
+                        id: &id,
+                        kind: knowledge_kind,
+                        request_id,
+                        selected_number: Some(number),
+                        refresh: false,
+                    },
+                ),
+            },
             FrontendEvent::UpdateKnowledgeBridgePhase {
                 id,
                 request_id,
@@ -5278,6 +5358,7 @@ impl AppRuntime {
 
     pub(crate) fn seed_window_pty_statuses(&mut self) {
         self.window_pty_statuses.clear();
+        self.window_output_bytes.clear();
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
                 if window.preset.requires_process() {
@@ -5328,6 +5409,7 @@ impl AppRuntime {
 
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
+        self.window_output_bytes.remove(window_id);
         self.window_hook_states.remove(window_id);
         self.recoverable_agent_error_windows.remove(window_id);
         self.board_all_view_windows.remove(window_id);
