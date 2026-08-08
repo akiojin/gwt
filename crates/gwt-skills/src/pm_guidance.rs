@@ -159,8 +159,19 @@ things:
   one — you cannot spin an issue by closing it repeatedly, and you
   should still say why you closed it.
 
-Use the first when the work should not run now. Use the second when you
-want it retried.
+- `issue.monitor.failover` says **run this somewhere else**. Same
+  parameters and the same exact-identity rule as the stop, but instead
+  of holding the issue it puts it back at the head of the queue, so the
+  next scan launches it on whatever launch profile is saved at that
+  moment. Switching provider is therefore two steps: change the profile,
+  then call this. It spends no retry attempt either — when a provider is
+  out of quota the work is fine and the account is not, and charging
+  that to the issue's budget would eventually hand healthy work to a
+  human over someone else's billing cycle.
+
+Use the stop when the work should not run now. Use the failover when it
+should run on a different provider. Use a bare close when you want the
+same profile to try again.
 
 Hard limits, no exceptions:
 
@@ -314,6 +325,10 @@ mod tests {
             "`issue.monitor.stop`",
             "is a mismatch, not a wildcard",
             "It spends no retry attempt",
+            // FR-029〜031: the failover, and the fact that it is a different
+            // outcome rather than a different way to stop.
+            "`issue.monitor.failover`",
+            "run this somewhere else",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",

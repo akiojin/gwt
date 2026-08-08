@@ -182,6 +182,26 @@ pub(super) fn run<E: CliEnv>(
             },
             out,
         )?,
+        IssueCommand::MonitorFailover {
+            project_root,
+            number,
+            reason,
+            claim_id,
+            delivery_id,
+            window_id,
+        } => run_monitor_failover(
+            env,
+            project_root.as_deref(),
+            number,
+            &reason,
+            crate::IssueMonitorStopTarget {
+                issue_number: number,
+                claim_id,
+                delivery_id,
+                window_id,
+            },
+            out,
+        )?,
         IssueCommand::MonitorConfigSet {
             project_root,
             enabled,
@@ -425,6 +445,86 @@ fn run_monitor_stop<E: CliEnv>(
             // Say what is left to do rather than implying the pane is gone.
             "pane_teardown": if stopped_window_id.is_some() {
                 "close the returned window with pane.close — the launch is already revoked, so the close cannot requeue or relaunch it"
+            } else {
+                "none"
+            },
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC-3431 FR-029〜031 / T-081: revoke one launch and requeue its issue for
+/// the currently saved launch profile.
+///
+/// Switching provider is therefore two steps the PM already owns: edit the
+/// launch profile, then call this. The relaunch itself still goes through the
+/// ordinary claim/slot path — this operation never spawns an agent directly,
+/// so `max_active` and the claim gate keep meaning what they meant.
+///
+/// An immediate scan is requested afterwards so the requeue takes effect now
+/// rather than at the next interval tick; that is the whole point of asking for
+/// a failover instead of just waiting.
+fn run_monitor_failover<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    reason: &str,
+    target: crate::IssueMonitorStopTarget,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = monitor.failover_restart(&target, reason, &now);
+        if !matches!(outcome, crate::IssueMonitorFailoverOutcome::Mismatch(_)) {
+            *prefs = monitor.prefs();
+        }
+        Ok(outcome)
+    })
+    .map_err(io_as_api_error)?;
+
+    let stopped_window_id = match outcome {
+        crate::IssueMonitorFailoverOutcome::Restarting { stopped_window_id } => stopped_window_id,
+        crate::IssueMonitorFailoverOutcome::Mismatch(mismatch) => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "refused",
+                    "mismatch": issue_monitor_stop_mismatch_label(mismatch),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({ "scan_now": {} }),
+        std::process::id(),
+    );
+    let scan_requested = publish_monitor_config_set(&project_root, payload).is_ok();
+
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "restarting",
+            "reason": reason,
+            "stopped_window_id": stopped_window_id,
+            "priority_order": prefs.priority_order,
+            "launch_profile": prefs.launch_profile.as_ref().map(|profile| &profile.agent_id),
+            "scan_requested": scan_requested,
+            "scan_delivery": if scan_requested { "immediate" } else { "next-scheduled-scan" },
+            "pane_teardown": if stopped_window_id.is_some() {
+                "close the returned window with pane.close — it is no longer bound to the issue, so the close cannot requeue it"
             } else {
                 "none"
             },
@@ -1809,6 +1909,86 @@ mod tests {
         .expect("stop runs");
         assert_eq!(code, 0);
         assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
+    }
+
+    /// SPEC-3431 FR-029〜031 / T-081: the failover the PM calls when a provider
+    /// runs out of quota.
+    #[test]
+    fn monitor_failover_requeues_at_the_head_and_refuses_a_stale_identity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![43, 42],
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorFailover {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "codex rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-9".to_string()),
+            },
+            &mut out,
+        )
+        .expect("failover runs");
+        assert_eq!(code, 1);
+        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused failover must be zero-mutation"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorFailover {
+                project_root: Some(repo),
+                number: 42,
+                reason: "codex rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("failover runs");
+        assert_eq!(code, 0);
+        assert!(out.contains("\"status\":\"restarting\""), "{out}");
+
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        assert!(
+            prefs.launched_issues.is_empty(),
+            "the old launch must be revoked on disk"
+        );
+        assert_eq!(
+            prefs.priority_order.first().copied(),
+            Some(42),
+            "the failed-over issue must be first in line for the new profile"
+        );
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "a failover is not a failure and must not leave a hold behind"
+        );
     }
 
     // -------------------------------------------------------------------

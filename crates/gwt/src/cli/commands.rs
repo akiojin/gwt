@@ -149,6 +149,19 @@ pub enum IssueCommand {
         delivery_id: Option<String>,
         window_id: Option<String>,
     },
+    /// SPEC-3431 FR-029〜031: revoke one launch and requeue its issue at the
+    /// head so the currently saved launch profile picks it up.
+    ///
+    /// Same identity contract as [`Self::MonitorStop`]; the difference is the
+    /// outcome, not the gate.
+    MonitorFailover {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        reason: String,
+        claim_id: Option<String>,
+        delivery_id: Option<String>,
+        window_id: Option<String>,
+    },
 }
 
 /// SPEC-1942 command model for `pr.*` JSON operations.

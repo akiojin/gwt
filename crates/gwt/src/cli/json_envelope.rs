@@ -199,6 +199,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             delivery_id: optional_string(params, "delivery_id")?,
             window_id: optional_string(params, "window_id")?,
         }),
+        "issue.monitor.failover" => CliCommand::Issue(IssueCommand::MonitorFailover {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            reason: required_string(params, "reason")?,
+            claim_id: optional_string(params, "claim_id")?,
+            delivery_id: optional_string(params, "delivery_id")?,
+            window_id: optional_string(params, "window_id")?,
+        }),
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -1935,6 +1943,40 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.stop", json!({"number": 42, "reason": "  "})),
             CliParseError::MissingFlag("reason")
+        ));
+    }
+
+    /// SPEC-3431 FR-029〜031 / T-081: the failover takes the same request shape
+    /// as the stop, because it enforces the same identity — only the outcome
+    /// differs.
+    #[test]
+    fn issue_monitor_failover_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.failover",
+                json!({
+                    "number": 3476,
+                    "reason": "codex rate limit",
+                    "claim_id": "claim-1",
+                    "window_id": "tab-1::agent-1",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorFailover {
+                project_root: None,
+                number: 3476,
+                reason: "codex rate limit".to_string(),
+                claim_id: Some("claim-1".to_string()),
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.failover", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.failover", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
         ));
     }
 
