@@ -10,9 +10,9 @@ use std::{path::Path, time::Instant};
 use super::{
     action_obligation_stop_check, autonomous_question_guard, board_reminder, diagnostics,
     execution_control_stop_check, pm_loop_stop_check, skill_build_spec_stop_check,
-    skill_discussion_stop_check,
-    skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
-    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+    work_event_settlement_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
+    IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 

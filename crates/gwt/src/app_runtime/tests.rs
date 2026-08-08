@@ -3086,6 +3086,7 @@ fn sample_runtime_with_events(
         inflight_launches: HashMap::new(),
         pending_pm_launches: HashMap::new(),
         pm_sessions: HashMap::new(),
+        pm_wake_seen: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
@@ -42299,5 +42300,269 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
             .iter()
             .any(|outbound| matches!(outbound.event, BackendEvent::PmStatus { .. })),
         "the restart must broadcast pm_status"
+    );
+}
+
+// ---- SPEC-3431 T-093: daemon wake path for the resident PM loop ----
+
+fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueMonitorInboxItem {
+    gwt::IssueMonitorInboxItem {
+        issue: gwt::IssueMonitorIssue {
+            number,
+            title: format!("Issue {number}"),
+            labels: vec!["auto-merge".to_string()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        },
+        state,
+        claim_id: None,
+        blocked_by_owner: None,
+        claim_expires_at: None,
+        launched_window_id: None,
+        launch_plan: None,
+        error_message: None,
+        exclusion_reason: None,
+    }
+}
+
+/// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
+/// and a second non-PM pane that the wake must never reach.
+fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &monitor_prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed monitor prefs");
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "pm-window",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    ));
+    persisted.windows.push(sample_window(
+        "other-window",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    ));
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let pm_window_id = "tab-1::pm-window".to_string();
+    let mut pm_session = sample_active_agent_session("tab-1", &pm_window_id);
+    pm_session.session_id = "pm-session-live".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(pm_window_id.clone(), pm_session);
+    let other_window_id = "tab-1::other-window".to_string();
+    let mut other_session = sample_active_agent_session("tab-1", &other_window_id);
+    other_session.session_id = "other-session".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(other_window_id, other_session);
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-live", &repo),
+        |_| false,
+    )
+    .expect("seed registration");
+
+    (repo, runtime, pm_window_id)
+}
+
+/// T-093 (FR-012): a parked PM is woken by a NeedsHuman transition, the wake
+/// targets exactly the registered PM's pane, and the loop budget is re-armed.
+#[test]
+fn pm_wake_targets_only_the_registered_pm_pane_on_new_needs_human() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+
+    // Parked long ago: budget exhausted, last continuation stale.
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-08T00:00:00Z".to_string()),
+        },
+    )
+    .expect("seed parked loop state");
+
+    // Baseline observation: never wakes, only records what is already there.
+    let baseline = [pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued)];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &baseline, "2026-08-08T01:00:00Z")
+            .is_none(),
+        "the first observation is a baseline, not a wake"
+    );
+
+    // A new NeedsHuman row after the baseline is a wake.
+    let now_with_escalation = [
+        pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued),
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    let decision = runtime
+        .pm_wake_decision_at(&repo, &now_with_escalation, "2026-08-08T01:01:00Z")
+        .expect("a new NeedsHuman row must wake the parked PM");
+    assert_eq!(
+        decision.window_id, pm_window_id,
+        "the wake reaches the registered PM pane and nothing else"
+    );
+    assert!(
+        decision.prompt.contains("issue.monitor.status"),
+        "the prompt instructs one reconcile cycle: {}",
+        decision.prompt
+    );
+    assert!(
+        decision.prompt.ends_with('\r'),
+        "the prompt must submit itself"
+    );
+
+    let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("loop state");
+    assert_eq!(
+        rearmed.consecutive_continuations, 0,
+        "a wake re-arms the parked loop budget"
+    );
+
+    // The same snapshot again is consumed: no second wake for old news.
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &now_with_escalation, "2026-08-08T02:00:00Z")
+            .is_none(),
+        "an already-woken signal set must not wake twice"
+    );
+}
+
+/// T-093: while the loop is (recently) active the wake is suppressed but the
+/// signal is retained, so a floor-stopped loop is still revived later.
+#[test]
+fn pm_wake_suppression_during_active_loop_retries_on_the_next_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 3,
+            last_continued_at: Some("2026-08-08T01:00:30Z".to_string()),
+        },
+    )
+    .expect("seed active loop state");
+
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &[], "2026-08-08T01:00:40Z")
+            .is_none(),
+        "baseline"
+    );
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:00:50Z")
+            .is_none(),
+        "an actively-looping PM handles the event itself; no interrupt"
+    );
+    // The next snapshot after the interval elapses still carries the (unconsumed)
+    // signal and wakes.
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:02:00Z")
+            .is_some(),
+        "a retained signal wakes once the loop has gone quiet"
+    );
+}
+
+/// T-093 negative space: no registration, a dead PM pane, or a disabled
+/// Monitor never wake anything — and never target another session's pane.
+#[test]
+fn pm_wake_never_fires_without_a_live_registered_pm_or_with_monitor_off() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &[], "2026-08-08T01:00:00Z")
+            .is_none(),
+        "baseline"
+    );
+    let escalated = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+
+    // Monitor off: the user parked the project; stay silent.
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut monitor_prefs = gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs");
+    monitor_prefs.enabled = false;
+    gwt::save_issue_monitor_prefs(&monitor_prefs_path, &monitor_prefs).expect("save prefs");
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:01:00Z")
+            .is_none(),
+        "a disabled Monitor must not wake the PM"
+    );
+    monitor_prefs.enabled = true;
+    gwt::save_issue_monitor_prefs(&monitor_prefs_path, &monitor_prefs).expect("save prefs");
+
+    // Dead PM pane: the crash-resume path owns recovery, not the wake path.
+    runtime.active_agent_sessions.remove(&pm_window_id);
+    let escalated_more = [
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+        pm_wake_inbox_item(43, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated_more, "2026-08-08T01:02:00Z")
+            .is_none(),
+        "a dead PM pane is never woken (and no other pane is targeted)"
+    );
+
+    // No registration at all: nothing to wake.
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::deregister_pm(&prefs_path, "pm-session-live").expect("deregister");
+    let escalated_again = [
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+        pm_wake_inbox_item(43, gwt::MonitorInboxState::NeedsHuman),
+        pm_wake_inbox_item(44, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &escalated_again, "2026-08-08T01:03:00Z")
+            .is_none(),
+        "no registration, no wake"
     );
 }

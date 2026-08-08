@@ -715,6 +715,10 @@ pub struct AppRuntime {
     /// mark the PM window without touching disk on every render. Refreshed
     /// wherever the registration is read or written.
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
+    /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
+    /// path has already seen. The first snapshot is a baseline; only signals
+    /// beyond it can wake a quiet PM, so one event wakes at most once.
+    pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
     /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
     /// runs once the frontend reports canvas bounds (same deferral rule as
     /// startup auto-resume — agent panes never spawn before the canvas is
@@ -1345,6 +1349,7 @@ impl AppRuntime {
             inflight_launches: HashMap::new(),
             pending_pm_launches: HashMap::new(),
             pm_sessions: HashMap::new(),
+            pm_wake_seen: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
@@ -3082,8 +3087,11 @@ impl AppRuntime {
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         let message = error.to_string();
         monitor.record_control_commit_error(message.clone());
-        let mut events =
-            self.issue_monitor_snapshot_events_for(client_id, project_root.as_deref(), monitor);
+        let mut events = self.issue_monitor_snapshot_events_without_wake(
+            client_id,
+            project_root.as_deref(),
+            monitor,
+        );
         let toast = BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message,
@@ -3231,7 +3239,9 @@ impl AppRuntime {
             issues.push(issue_monitor_issue_from_snapshot(snapshot));
         }
         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
-        self.issue_monitor_snapshot_events_for(client_id, Some(project_root), monitor)
+        // Cache-backed quick view: a read model, not monitor-driven activity —
+        // it must not feed (or reset) the PM wake fingerprint.
+        self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -3545,6 +3555,30 @@ impl AppRuntime {
     }
 
     fn issue_monitor_snapshot_events_for(
+        &mut self,
+        client_id: Option<&str>,
+        project_root: Option<&Path>,
+        monitor: gwt::IssueMonitorState,
+    ) -> Vec<OutboundEvent> {
+        // SPEC-3431 T-093 (FR-012): every real local snapshot also feeds the
+        // PM wake path, before the active-tab filter — the resident PM watches
+        // its project regardless of which tab the user is looking at.
+        // Synthetic snapshots (the control-error fallback) must instead use
+        // [`Self::issue_monitor_snapshot_events_without_wake`]: their empty
+        // inbox would reset the wake baseline and replay old rows as news.
+        let mut events = Vec::new();
+        if let Some(project_root) = project_root {
+            events.extend(self.pm_wake_events(project_root, &monitor.inbox));
+        }
+        events.extend(self.issue_monitor_snapshot_events_without_wake(
+            client_id,
+            project_root,
+            monitor,
+        ));
+        events
+    }
+
+    fn issue_monitor_snapshot_events_without_wake(
         &self,
         client_id: Option<&str>,
         project_root: Option<&Path>,

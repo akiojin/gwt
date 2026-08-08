@@ -203,6 +203,12 @@ pub fn pm_loop_state_path_for_pm_worktree(worktree: &Path) -> Option<PathBuf> {
     )
 }
 
+/// The same `pm-loop.json`, resolved from the project's repo path — the GUI
+/// side (T-093 wake path) knows the project, not the hook's cwd.
+pub fn pm_loop_state_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-loop.json")
+}
+
 pub fn load_pm_loop_state(path: &Path) -> io::Result<PmLoopState> {
     match fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw)

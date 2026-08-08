@@ -39,6 +39,49 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
 /// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
 const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
+/// SPEC-3431 T-093 (FR-012): a wake the monitor-event path decided on — which
+/// pane receives the prompt and what it says. The window id is only ever the
+/// registered PM session's live pane, resolved inside the decision; no caller
+/// can point the wake anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PmWakeDecision {
+    pub(crate) window_id: String,
+    pub(crate) prompt: String,
+}
+
+/// What one monitor inbox snapshot contributes to the wake decision: every
+/// issue the monitor is holding, plus an extra marker for the rows a human
+/// must look at. A signal string appearing for the first time is "new
+/// activity"; the sets are compared, never interpreted.
+fn pm_wake_signals(inbox: &[gwt::IssueMonitorInboxItem]) -> std::collections::BTreeSet<String> {
+    let mut signals = std::collections::BTreeSet::new();
+    for item in inbox {
+        signals.insert(format!("issue:{}", item.issue.number));
+        if item.state == gwt::MonitorInboxState::NeedsHuman {
+            signals.insert(format!("needs_human:{}", item.issue.number));
+        }
+    }
+    signals
+}
+
+/// An actively-looping PM picks new events up in its own next cycle; the wake
+/// is only for a loop that has gone quiet (parked on the budget cap, or dead
+/// after a within-floor stop). Same clock and knob as the Stop-gate driver.
+fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, now: &str) -> bool {
+    let Some(last) = state.last_continued_at.as_deref() else {
+        return true;
+    };
+    match (
+        chrono::DateTime::parse_from_rfc3339(now),
+        chrono::DateTime::parse_from_rfc3339(last),
+    ) {
+        (Ok(now_t), Ok(last_t)) => {
+            (now_t - last_t).num_seconds() >= i64::try_from(interval_secs).unwrap_or(i64::MAX)
+        }
+        _ => true,
+    }
+}
+
 /// Who asked for the PM.
 ///
 /// SPEC-3431 FR-002's `auto_start` opt-out scopes to "opening a project starts
@@ -322,6 +365,145 @@ impl AppRuntime {
         // panel is refreshed exactly once rather than twice per restart.
         events.extend(self.ensure_pm_agent_for_tab(&tab_id, PmEnsureTrigger::Explicit));
         events
+    }
+
+    /// SPEC-3431 T-093 (FR-012): decide whether this inbox snapshot must wake
+    /// the resident PM, using `now` as the quiet-loop clock.
+    ///
+    /// The first snapshot per project is a baseline — GUI startup must not
+    /// replay a long-lived backlog as if it just happened. After that, a
+    /// signal never seen before wakes the PM iff the Monitor is enabled, a
+    /// registered PM pane is live, and the resident loop has gone quiet.
+    /// A delta suppressed only by an active loop is retained (not consumed),
+    /// so a loop that dies inside its floor is still revived by the next
+    /// snapshot; every other outcome consumes the delta.
+    pub(crate) fn pm_wake_decision_at(
+        &mut self,
+        project_root: &Path,
+        inbox: &[gwt::IssueMonitorInboxItem],
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        let signals = pm_wake_signals(inbox);
+        let Some(seen) = self.pm_wake_seen.get(project_root) else {
+            self.pm_wake_seen
+                .insert(project_root.to_path_buf(), signals);
+            return None;
+        };
+        let fresh: Vec<String> = signals.difference(seen).cloned().collect();
+        if fresh.is_empty() {
+            self.pm_wake_seen
+                .insert(project_root.to_path_buf(), signals);
+            return None;
+        }
+        // Monitor off = the user parked the project (the Stop-gate driver's
+        // rule). Consume the delta: re-enabling is a GUI action with a human
+        // present, not a moment to replay stale news.
+        let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let monitor_enabled = gwt::load_issue_monitor_prefs(&monitor_prefs_path)
+            .map(|prefs| prefs.enabled)
+            .unwrap_or(false);
+        if !monitor_enabled {
+            self.pm_wake_seen
+                .insert(project_root.to_path_buf(), signals);
+            return None;
+        }
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let prefs = match pm_registry::load_pm_prefs(&prefs_path) {
+            Ok(prefs) => prefs,
+            Err(error) => {
+                tracing::warn!(%error, "PM wake skipped: pm prefs unreadable");
+                return None;
+            }
+        };
+        let Some(registration) = prefs.registration else {
+            // No PM to wake; a later PM start reads status in its bootstrap.
+            self.pm_wake_seen
+                .insert(project_root.to_path_buf(), signals);
+            return None;
+        };
+        let Some(window_id) = self.live_pm_window_id(&registration.session_id) else {
+            // A dead PM is the crash-resume path's job, never the wake's.
+            self.pm_wake_seen
+                .insert(project_root.to_path_buf(), signals);
+            return None;
+        };
+        let interval_secs = prefs.settings.loop_interval_secs_clamped();
+        let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
+        let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+            // Actively looping: its own next cycle reconciles this. Keep the
+            // delta so a floor-stopped loop is revived by the next snapshot.
+            return None;
+        }
+        self.pm_wake_seen
+            .insert(project_root.to_path_buf(), signals);
+        // Re-arm the budget: new actionable work is exactly what the park was
+        // waiting for (the injected prompt's UserPromptSubmit re-arms too;
+        // doing it here keeps the state right even if hook wiring drifts).
+        if let Err(error) =
+            pm_registry::save_pm_loop_state(&loop_path, &pm_registry::PmLoopState::default())
+        {
+            tracing::warn!(%error, "PM wake could not re-arm the loop budget");
+        }
+        let mut reasons = fresh;
+        reasons.truncate(5);
+        Some(PmWakeDecision {
+            window_id,
+            prompt: format!(
+                "[gwt] Issue Monitor activity while the resident PM loop was idle ({}). \
+                 Run one reconcile cycle now: read a fresh `issue.monitor.status` snapshot, \
+                 triage the new items, and report the milestone digest.\r",
+                reasons.join(", ")
+            ),
+        })
+    }
+
+    /// Execute the wake: inject the prompt into the registered PM's pane. A
+    /// write failure is logged and dropped — the retained fingerprint was
+    /// already consumed, but the next genuinely new event will retry, and the
+    /// crash/resume paths own a dead pane.
+    pub(crate) fn pm_wake_events(
+        &mut self,
+        project_root: &Path,
+        inbox: &[gwt::IssueMonitorInboxItem],
+    ) -> Vec<OutboundEvent> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let Some(decision) = self.pm_wake_decision_at(project_root, inbox, &now) else {
+            return Vec::new();
+        };
+        match self.write_pm_wake_prompt(&decision) {
+            Ok(()) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "woke the resident PM for new Issue Monitor activity"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_id = %decision.window_id,
+                    "PM wake prompt injection failed"
+                );
+            }
+        }
+        Vec::new()
+    }
+
+    /// The one PTY write the wake path performs, against the window id the
+    /// decision resolved from the PM registration — mirrors
+    /// `pane_send_input_to_window_events` without a client reply.
+    fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
+        match self.runtimes.get(&decision.window_id) {
+            None => Err(format!("no live runtime for pane {}", decision.window_id)),
+            Some(runtime) => runtime
+                .pane
+                .lock()
+                .map_err(|error| error.to_string())
+                .and_then(|pane| {
+                    pane.write_input(decision.prompt.as_bytes())
+                        .map_err(|error| error.to_string())
+                }),
+        }
     }
 
     /// Authoritative liveness for a stored PM registration (FR-001): the

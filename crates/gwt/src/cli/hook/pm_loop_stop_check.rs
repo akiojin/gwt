@@ -25,8 +25,9 @@ use crate::pm_registry::{self, PmLoopState};
 // cycles.
 
 /// Consecutive continuations without user contact before the PM parks.
-/// With the contract's 300s subscribe this is roughly an hour of unattended
-/// residency after the last conversation.
+/// At the default 60s `loop_interval_secs` this is ~12 minutes of unattended
+/// residency after the last conversation; the daemon wake path (T-093)
+/// revives a parked PM when new monitor activity arrives.
 const PM_LOOP_MAX_CONSECUTIVE: u32 = 12;
 
 /// UserPromptSubmit entry: real user contact re-arms the loop budget.
