@@ -341,9 +341,12 @@ impl AppRuntime {
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        // SPEC #3431 FR-070: this must be the spelling the durable execution
+        // binding produces, not a display label. `workspace.ensure` compares
+        // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
         let owner_label = match linked_issue_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
-            LinkedIssueKind::Spec => format!("SPEC #{issue_number}"),
+            LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };
         let workspace_resume_context = Some(linked_issue_workspace_context(
             project_root,

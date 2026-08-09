@@ -9,9 +9,10 @@ use std::{path::Path, time::Instant};
 
 use super::{
     action_obligation_stop_check, autonomous_question_guard, board_reminder, diagnostics,
-    execution_control_stop_check, skill_build_spec_stop_check, skill_discussion_stop_check,
-    skill_plan_spec_stop_check, skill_register_spec_stop_check, work_event_settlement_stop_check,
-    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    execution_control_stop_check, pm_loop_stop_check, skill_build_spec_stop_check,
+    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+    work_event_settlement_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
+    IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -118,6 +119,10 @@ fn handle_user_prompt_submit(
     run_value(event, "action-obligation-record", || {
         action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
+    // SPEC-3431 FR-012: user contact re-arms the PM's resident-loop budget.
+    run_value(event, "pm-loop-reset", || {
+        pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
@@ -192,7 +197,14 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 7] = [
+    let stop_checks: [(&str, StopCheck<'_>); 8] = [
+        // SPEC-3431 FR-012: the resident PM's loop driver runs first — for the
+        // PM every other stop gate is either exempt (FR-029) or fail-open, and
+        // the loop continuation must not be shadowed by one of them.
+        (
+            "pm-loop-stop-check",
+            Box::new(|| pm_loop_stop_check::handle_with_input(worktree_root, input)),
+        ),
         (
             "skill-discussion-stop-check",
             Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),

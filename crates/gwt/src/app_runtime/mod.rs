@@ -105,6 +105,7 @@ mod launch_output_mirror;
 mod loaders;
 mod migration;
 pub(crate) mod persist_dispatcher;
+mod pm;
 mod profile;
 mod project_tabs;
 mod pty_io;
@@ -704,6 +705,25 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
+    /// project root whose `pm.json` must record the resulting session. The
+    /// entry is consumed by `handle_launch_complete`, which writes the PM
+    /// registration once the session id exists.
+    pub(crate) pending_pm_launches: HashMap<String, PathBuf>,
+    /// SPEC-3431 FR-020/FR-021: project root -> registered PM session id.
+    /// A read-through cache of `pm.json` so the per-broadcast window view can
+    /// mark the PM window without touching disk on every render. Refreshed
+    /// wherever the registration is read or written.
+    pub(crate) pm_sessions: HashMap<PathBuf, String>,
+    /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
+    /// path has already seen. The first snapshot is a baseline; only signals
+    /// beyond it can wake a quiet PM, so one event wakes at most once.
+    pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
+    /// runs once the frontend reports canvas bounds (same deferral rule as
+    /// startup auto-resume — agent panes never spawn before the canvas is
+    /// ready).
+    pub(crate) pending_startup_pm_tabs: Vec<String>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -778,6 +798,10 @@ pub struct AppRuntime {
     pub(crate) window_output_bytes: HashMap<String, u64>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
+    /// SPEC-3431 FR-068: when each agent window last showed activity, so the
+    /// heartbeat published to the Issue Monitor can be throttled instead of
+    /// firing a daemon control on every hook. Keyed by combined window id.
+    pub(crate) last_agent_activity: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
     /// Issue-time opaque agent capability keyed by combined window id.
     ///
@@ -1323,6 +1347,10 @@ impl AppRuntime {
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            pending_pm_launches: HashMap::new(),
+            pm_sessions: HashMap::new(),
+            pm_wake_seen: HashMap::new(),
+            pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: uuid::Uuid::new_v4().to_string(),
@@ -1353,6 +1381,7 @@ impl AppRuntime {
             window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
+            last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -2666,12 +2695,40 @@ impl AppRuntime {
     /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
     /// (a runtime status change). Best-effort refresh of the daemon's
     /// stuck-detection window for the mapped issue. No-op for non-monitor windows.
+    /// SPEC-3431 FR-068: the last recorded activity for `window_id`.
+    #[cfg(test)]
+    pub(crate) fn last_agent_activity_for_test(
+        &self,
+        window_id: &str,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.last_agent_activity.get(window_id).copied()
+    }
+
+    /// SPEC-3431 FR-068: minimum gap between heartbeat publications for one
+    /// window. Hooks arrive per tool call, which is far more often than a
+    /// stall check needs, and each publication is a daemon control round trip.
+    const HEARTBEAT_THROTTLE_SECS: i64 = 60;
+
     pub(crate) fn issue_monitor_heartbeat(&mut self, project_root: &Path, window_id: &str) {
+        // Record the observation before deciding whether to publish: activity
+        // is a fact about the window, independent of whether this window is
+        // currently bound to a monitored issue. Binding can be established
+        // later (or lost), and a gap in the local clock would then read as a
+        // stall that never happened.
+        let now_instant = chrono::Utc::now();
+        let recently_published = self.last_agent_activity.get(window_id).is_some_and(|last| {
+            (now_instant - *last).num_seconds() < Self::HEARTBEAT_THROTTLE_SECS
+        });
+        self.last_agent_activity
+            .insert(window_id.to_string(), now_instant);
+        if recently_published {
+            return;
+        }
         let issue_number = self.issue_monitor_issue_number_for_window(project_root, window_id);
         let Some(issue_number) = issue_number else {
             return;
         };
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         if let Err(error) = self.publish_issue_monitor_control(
             project_root,
             serde_json::json!({
@@ -3030,8 +3087,11 @@ impl AppRuntime {
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         let message = error.to_string();
         monitor.record_control_commit_error(message.clone());
-        let mut events =
-            self.issue_monitor_snapshot_events_for(client_id, project_root.as_deref(), monitor);
+        let mut events = self.issue_monitor_snapshot_events_without_wake(
+            client_id,
+            project_root.as_deref(),
+            monitor,
+        );
         let toast = BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message,
@@ -3179,7 +3239,9 @@ impl AppRuntime {
             issues.push(issue_monitor_issue_from_snapshot(snapshot));
         }
         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
-        self.issue_monitor_snapshot_events_for(client_id, Some(project_root), monitor)
+        // Cache-backed quick view: a read model, not monitor-driven activity —
+        // it must not feed (or reset) the PM wake fingerprint.
+        self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -3493,6 +3555,30 @@ impl AppRuntime {
     }
 
     fn issue_monitor_snapshot_events_for(
+        &mut self,
+        client_id: Option<&str>,
+        project_root: Option<&Path>,
+        monitor: gwt::IssueMonitorState,
+    ) -> Vec<OutboundEvent> {
+        // SPEC-3431 T-093 (FR-012): every real local snapshot also feeds the
+        // PM wake path, before the active-tab filter — the resident PM watches
+        // its project regardless of which tab the user is looking at.
+        // Synthetic snapshots (the control-error fallback) must instead use
+        // [`Self::issue_monitor_snapshot_events_without_wake`]: their empty
+        // inbox would reset the wake baseline and replay old rows as news.
+        let mut events = Vec::new();
+        if let Some(project_root) = project_root {
+            events.extend(self.pm_wake_events(project_root, &monitor.inbox));
+        }
+        events.extend(self.issue_monitor_snapshot_events_without_wake(
+            client_id,
+            project_root,
+            monitor,
+        ));
+        events
+    }
+
+    fn issue_monitor_snapshot_events_without_wake(
         &self,
         client_id: Option<&str>,
         project_root: Option<&Path>,
@@ -3625,6 +3711,27 @@ impl AppRuntime {
             FrontendEvent::StartupAutoResumeReady { bounds } => {
                 self.startup_auto_resume_ready_events(bounds)
             }
+            // SPEC-3431 FR-018/FR-019: one click always lands the user on the
+            // PM — existing pane gets framed, a missing one is started first.
+            FrontendEvent::OpenPmAgent { bounds } => {
+                let Some(tab_id) = self.active_tab_id.clone() else {
+                    return Vec::new();
+                };
+                self.ensure_pm_agent_for_tab_with_bounds(
+                    &tab_id,
+                    bounds,
+                    pm::PmEnsureTrigger::Explicit,
+                )
+            }
+            // SPEC-3431 FR-026: PM settings. The two writes never touch the
+            // running pane; only the explicit restart does.
+            FrontendEvent::SetPmAutoStart { enabled } => self.set_pm_auto_start_events(enabled),
+            FrontendEvent::SetPmLaunchProfile {
+                agent_id,
+                model,
+                reasoning,
+            } => self.set_pm_launch_profile_events(&agent_id, model, reasoning),
+            FrontendEvent::RestartPmAgent => self.restart_pm_agent_events(),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
             FrontendEvent::SelectCloneProjectParent => {
                 self.select_clone_project_parent_events(&client_id)
@@ -4830,6 +4937,12 @@ impl AppRuntime {
         if let Some(event) = self.active_work_projection_reply(client_id) {
             events.insert(1, event);
         }
+        // SPEC-3431 FR-026: hydrate the PM settings panel on connect. Without
+        // this a freshly loaded page shows the panel's built-in defaults until
+        // some unrelated PM transition happens to broadcast.
+        if let Some(event) = self.pm_status_event() {
+            events.push(OutboundEvent::reply(client_id.to_string(), event));
+        }
         self.schedule_active_improvement_candidates_refresh();
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
@@ -4887,6 +5000,15 @@ impl AppRuntime {
                 .map(|mut window| {
                     let raw_id = window.id.clone();
                     window.id = combined_window_id(&tab.id, &raw_id);
+                    // SPEC-3431 FR-020: mark the resident PM window so the
+                    // frontend can give it distinct chrome and target it from
+                    // the PM launcher.
+                    window.is_pm =
+                        self.pm_sessions
+                            .get(&tab.project_root)
+                            .is_some_and(|pm_session| {
+                                window.session_id.as_deref() == Some(pm_session.as_str())
+                            });
                     window.lane_kind = self
                         .active_agent_sessions
                         .get(&window.id)

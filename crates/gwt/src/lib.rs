@@ -37,6 +37,7 @@ pub mod migration;
 pub mod native_app;
 pub(crate) mod path_filter;
 pub mod persistence;
+pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
@@ -123,11 +124,12 @@ pub use issue_monitor::{
     IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
     IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,
     IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
-    IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource,
-    IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
-    IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, MonitorInboxState, PendingIssueMonitorEffect,
+    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorInboxItem, IssueMonitorIssue,
+    IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
+    IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue,
+    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorScanSummary,
+    IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
+    IssueMonitorStopTarget, MonitorInboxState, PendingIssueMonitorEffect,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
@@ -180,9 +182,9 @@ pub use protocol::{
     FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
     IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
     ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
-    ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
-    WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
     WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
     WorkspaceResumeSource, WorkspaceView,

@@ -6342,3 +6342,292 @@ button.workspace-board-ref:focus-visible {
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   SPEC-3431 — Project Manager surfaces.
+
+   The PM is the user's single conversational window, so it gets one identity
+   colour (--color-role-pm) reused by all three surfaces: the rail launcher,
+   the canvas launcher, and the PM window chrome. The colour is a ROLE, not a
+   runtime state, so it never replaces the status chip or the agent colour.
+   --------------------------------------------------------------------------- */
+
+/* Rail launcher (FR-018). The PM is the one rail item that is a *destination*
+   rather than a command, and review (2026-08-05) showed a plain icon does not
+   read as "this is the PM". It therefore carries a persistent accent chip so
+   it stands apart from the command icons at a glance, in every state. */
+.op-rail__item--pm {
+  color: var(--color-role-pm);
+  background: color-mix(in oklab, var(--color-role-pm) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-role-pm) 45%, transparent);
+}
+
+.op-rail__item--pm:hover,
+.op-rail__item--pm:focus-visible {
+  background: color-mix(in oklab, var(--color-role-pm) 26%, transparent);
+}
+
+.op-rail__item--pm .op-rail__icon {
+  color: var(--color-role-pm);
+}
+
+/* FR-021: running / stopped / not started. Light mode cannot lean on a
+   surface tint alone (near-white on near-white), so every state that is not
+   "absent" carries a filled dot in an accent colour. */
+.op-rail__pm-dot {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  pointer-events: none;
+}
+
+.op-rail__item--pm[data-pm-state="running"] .op-rail__pm-dot {
+  background: var(--color-role-pm);
+}
+
+.op-rail__item--pm[data-pm-state="stopped"] .op-rail__pm-dot {
+  background: var(--color-state-idle);
+}
+
+/* Canvas launcher (FR-018). Bottom-LEFT: .fleet-minimap owns bottom-right. */
+.canvas-pm-launcher {
+  position: absolute;
+  left: var(--space-4, 16px);
+  bottom: var(--space-4, 16px);
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  padding: var(--space-2, 8px) var(--space-4, 16px);
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--color-surface-elevated) 92%, transparent);
+  color: var(--color-role-pm);
+  box-shadow: var(--shadow-2);
+  transition: background var(--motion-fast) var(--motion-curve),
+              transform var(--motion-fast) var(--motion-curve);
+}
+
+.canvas-pm-launcher:hover {
+  background: color-mix(in oklab, var(--color-role-pm) 16%, var(--color-surface-elevated));
+}
+
+.canvas-pm-launcher:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.canvas-pm-launcher[hidden] {
+  display: none;
+}
+
+.canvas-pm-launcher__icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.canvas-pm-launcher__label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* PM window chrome (FR-020). A left accent bar plus a filled role badge —
+   form first, colour second — so the PM reads as distinct even for users who
+   cannot separate the hue from the agent ramp. */
+.workspace-window[data-pm="true"] {
+  /* 3px read as "hard to notice" against the dark window chrome in review
+     (2026-08-05); the bar has to be legible at a glance from across the
+     canvas, not only when the window is already in focus. */
+  border-left: 6px solid var(--color-role-pm);
+}
+
+.workspace-window[data-pm="true"] .titlebar {
+  background: color-mix(in oklab, var(--color-role-pm) 22%, transparent);
+  border-bottom: 1px solid color-mix(in oklab, var(--color-role-pm) 45%, transparent);
+}
+
+/* Keep the identity readable when the PM is not the focused window. */
+.workspace-window[data-pm="true"] .title-text {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+.workspace-window[data-pm="true"] .window-role-badge {
+  border-color: var(--color-role-pm);
+  background: var(--color-role-pm);
+  color: var(--color-canvas);
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-pm-launcher {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   SPEC-3431 FR-026 — Project Manager settings.
+
+   Anchored to the rail launcher rather than dropped into Settings: the PM is
+   configured where it is seen. The gear stays out of the way until the shell is
+   hovered or focused, so the rail keeps reading as one icon per action.
+   --------------------------------------------------------------------------- */
+.pm-launcher-shell {
+  position: relative;
+}
+
+.pm-launcher-gear {
+  position: absolute;
+  right: calc(-1 * var(--space-1, 4px));
+  top: calc(-1 * var(--space-1, 4px));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  appearance: none;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill, 999px);
+  background: var(--color-surface-elevated);
+  color: var(--color-role-pm);
+  transition: opacity var(--motion-fast) var(--motion-curve);
+}
+
+.pm-launcher-shell:hover .pm-launcher-gear,
+.pm-launcher-shell:focus-within .pm-launcher-gear,
+.pm-launcher-gear[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.pm-launcher-gear:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+.pm-settings-panel {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 0;
+  z-index: 40;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px);
+  border: 1px solid var(--color-border-strong);
+  border-left: 3px solid var(--color-role-pm);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+}
+
+.pm-settings-panel[hidden] {
+  display: none;
+}
+
+.pm-settings-panel__title {
+  margin: 0;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-role-pm);
+}
+
+.pm-settings-panel__running {
+  margin: 0;
+  font-size: var(--type-sm);
+  color: var(--color-text-strong);
+}
+
+/* The one place the user learns that the configured agent is not the one they
+   are talking to. Form (a bordered chip) carries it as much as colour. */
+.pm-settings-panel__pending {
+  margin: 0;
+  align-self: flex-start;
+  padding: 2px var(--space-2, 8px);
+  font-size: var(--type-xs);
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--color-role-pm) 16%, transparent);
+  color: var(--color-text-strong);
+}
+
+.pm-settings-panel__pending[hidden] {
+  display: none;
+}
+
+.pm-settings-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+}
+
+.pm-settings-panel__field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+.pm-settings-panel__label {
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.pm-settings-panel__select,
+.pm-settings-panel__input {
+  width: 100%;
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  font-size: var(--type-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.pm-settings-panel__select:focus-visible,
+.pm-settings-panel__input:focus-visible,
+.pm-settings-panel__checkbox:focus-visible,
+.pm-settings-panel__restart:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.pm-settings-panel__help {
+  margin: 0;
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.pm-settings-panel__restart {
+  padding: var(--space-1, 4px) var(--space-3, 12px);
+  appearance: none;
+  cursor: pointer;
+  font-size: var(--type-sm);
+  border: 1px solid var(--color-role-pm);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-role-pm);
+}
+
+.pm-settings-panel__restart:hover {
+  background: color-mix(in oklab, var(--color-role-pm) 16%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-launcher-gear {
+    transition: none;
+  }
+}

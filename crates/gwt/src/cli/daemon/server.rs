@@ -1249,6 +1249,12 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    /// SPEC-3431 FR-006: request one immediate scan without changing any
+    /// state. The PM's `launch_now` writes the new priority order to prefs
+    /// (the SOT the driver re-reads each scan) and then sends this so the
+    /// order takes effect now instead of at the next interval tick. The
+    /// launch itself still goes through the ordinary claim/slot path.
+    ScanNow,
     ConfigSet {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
@@ -1593,6 +1599,8 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::Enabled(_)
         | IssueMonitorControl::AutonomousMode(_)
         | IssueMonitorControl::ConfigSet { .. } => false,
+        // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
+        IssueMonitorControl::ScanNow => true,
         IssueMonitorControl::ClaimLaunchDelivery {
             issue_number,
             delivery_id,
@@ -1881,6 +1889,11 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                 });
+            }
+            // SPEC-3431 FR-006: `scan_now` carries no fields — its presence is
+            // the whole request.
+            if payload.get("scan_now").is_some() {
+                return Some(IssueMonitorControl::ScanNow);
             }
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
@@ -3521,9 +3534,10 @@ mod tests {
 
     use super::{
         apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
-        run_server, run_server_with_shutdown_and_worker_config,
-        spawn_issue_monitor_worker_with_config, spawn_issue_monitor_worker_with_config_and_timeout,
-        BroadcastHub, DaemonShutdown, IssueMonitorControl,
+        issue_monitor_control_is_authorizing, run_server,
+        run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
+        spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, DaemonShutdown,
+        IssueMonitorControl,
     };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
@@ -5036,6 +5050,45 @@ exit 0
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    // SPEC-3431 T-021 (FR-006): `scan_now` asks the driver for one immediate
+    // scan and nothing else. It carries no authority (it changes no config),
+    // and it must leave every piece of monitor state untouched — the launch
+    // itself still goes through the ordinary claim/slot path on that scan.
+    #[test]
+    fn issue_monitor_scan_now_decodes_and_only_requests_a_scan() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "scan_now": {} }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("scan_now control");
+        assert_eq!(control, IssueMonitorControl::ScanNow);
+        assert!(
+            !issue_monitor_control_is_authorizing(&control),
+            "scan_now changes no authority and must stay on the routine lane"
+        );
+
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 3,
+            priority_order: vec![9, 4],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let before = monitor.status_view_at("2026-08-04T00:00:00Z");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan, "scan_now must request an immediate scan");
+        assert_eq!(
+            monitor.status_view_at("2026-08-04T00:00:00Z"),
+            before,
+            "scan_now must not mutate monitor state"
+        );
     }
 
     #[test]
