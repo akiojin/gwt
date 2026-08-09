@@ -1164,11 +1164,10 @@ pub fn post_entry_exact(
     let decision = with_coordination_lock(worktree_root, || {
         ensure_repo_local_files(worktree_root)?;
         let coordination_root = coordination_dir(worktree_root);
-        let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
-        let projection_refresh_error =
-            refresh_exact_projection_locked(worktree_root, imported_legacy)
-                .err()
-                .map(|error| error.to_string());
+        let imported_legacy = import_late_legacy_event_log_exact_locked(&coordination_root)?;
+        let projection_refresh_error = refresh_exact_storage_locked(worktree_root, imported_legacy)
+            .err()
+            .map(|error| error.to_string());
         let matching_entries = load_board_entries_from_segments_root(&coordination_root)?
             .into_iter()
             .filter(|existing| existing.id == entry_id)
@@ -1368,9 +1367,9 @@ fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> 
     Ok(snapshot)
 }
 
-fn refresh_exact_projection_locked(worktree_root: &Path, force_rebuild: bool) -> Result<()> {
+fn refresh_exact_storage_locked(worktree_root: &Path, force_rebuild: bool) -> Result<()> {
     let coordination_root = coordination_dir(worktree_root);
-    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    let manifest = load_and_repair_event_manifest_locked(&coordination_root)?;
     let projection_path = coordination_board_projection_path(worktree_root);
     let projection: BoardProjection = match load_json_or_default(&projection_path) {
         Ok(projection) => projection,
@@ -1930,6 +1929,17 @@ fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegment
     }
 }
 
+fn load_and_repair_event_manifest_locked(coordination_root: &Path) -> Result<EventSegmentManifest> {
+    let path = coordination_events_manifest_path_from_root(coordination_root);
+    let manifest: EventSegmentManifest = load_json_or_default(&path)?;
+    if !event_manifest_needs_rebuild(coordination_root, &manifest)? {
+        return Ok(manifest);
+    }
+    let repaired = rebuild_event_manifest_from_segments(coordination_root)?;
+    write_event_manifest(coordination_root, &repaired)?;
+    Ok(repaired)
+}
+
 fn event_manifest_needs_rebuild(
     coordination_root: &Path,
     manifest: &EventSegmentManifest,
@@ -1984,7 +1994,30 @@ fn legacy_event_log_needs_import(coordination_root: &Path) -> Result<bool> {
     Ok(legacy_path.metadata()?.len() > 0)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LateLegacyImportPolicy {
+    DeduplicateByEntryId,
+    PreserveAllOccurrences,
+}
+
 fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool> {
+    import_late_legacy_event_log_locked_with_policy(
+        coordination_root,
+        LateLegacyImportPolicy::DeduplicateByEntryId,
+    )
+}
+
+fn import_late_legacy_event_log_exact_locked(coordination_root: &Path) -> Result<bool> {
+    import_late_legacy_event_log_locked_with_policy(
+        coordination_root,
+        LateLegacyImportPolicy::PreserveAllOccurrences,
+    )
+}
+
+fn import_late_legacy_event_log_locked_with_policy(
+    coordination_root: &Path,
+    policy: LateLegacyImportPolicy,
+) -> Result<bool> {
     let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
     if !legacy_path.exists() {
         return Ok(false);
@@ -1993,17 +2026,37 @@ fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool>
     let mut legacy_events = load_legacy_board_events_from_path(&legacy_path)?;
     legacy_events.sort_by_key(coordination_event_timestamp);
 
-    let mut seen_entry_ids = load_board_entries_from_segments_root(coordination_root)?
-        .into_iter()
-        .map(|entry| entry.id)
-        .collect::<HashSet<_>>();
+    let mut seen_entry_ids = if policy == LateLegacyImportPolicy::DeduplicateByEntryId {
+        Some(
+            load_board_entries_from_segments_root(coordination_root)?
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<HashSet<_>>(),
+        )
+    } else {
+        None
+    };
     let mut imported = false;
     for event in legacy_events {
-        let entry_id = coordination_event_entry_id(&event).to_string();
-        if !seen_entry_ids.insert(entry_id) {
-            continue;
+        if let Some(seen_entry_ids) = &mut seen_entry_ids {
+            let entry_id = coordination_event_entry_id(&event).to_string();
+            if !seen_entry_ids.insert(entry_id) {
+                continue;
+            }
         }
-        append_event_to_segments_root(coordination_root, &event, EVENT_SEGMENT_MAX_BYTES)?;
+        match append_event_to_segments_root_outcome(
+            coordination_root,
+            &event,
+            EVENT_SEGMENT_MAX_BYTES,
+        )? {
+            EventAppendOutcome::ManifestUpdated(_) => {}
+            EventAppendOutcome::CommittedWithoutManifest { error }
+                if policy == LateLegacyImportPolicy::DeduplicateByEntryId =>
+            {
+                return Err(GwtError::Other(error));
+            }
+            EventAppendOutcome::CommittedWithoutManifest { .. } => {}
+        }
         imported = true;
     }
     std::fs::remove_file(legacy_path)?;
@@ -2875,6 +2928,113 @@ mod tests {
     }
 
     #[test]
+    fn exact_post_preserves_segmented_and_late_legacy_same_id_for_duplicate_arbitration() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        append_event_to_segments(
+            dir.path(),
+            &CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            },
+            EVENT_SEGMENT_MAX_BYTES,
+        )
+        .unwrap();
+        load_snapshot(dir.path()).unwrap();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+
+        let error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoardExactAppendError::Conflict(BoardExactAppendConflict {
+                kind: BoardExactAppendConflictKind::DuplicateIdentity,
+                ..
+            })
+        ));
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_preserves_same_id_occurrences_within_late_legacy_log() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[
+                CoordinationEvent::MessageAppended {
+                    entry: entry.clone(),
+                },
+                CoordinationEvent::MessageAppended {
+                    entry: entry.clone(),
+                },
+            ],
+        );
+
+        let error = post_entry_exact(dir.path(), entry).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoardExactAppendError::Conflict(BoardExactAppendConflict {
+                kind: BoardExactAppendConflictKind::DuplicateIdentity,
+                ..
+            })
+        ));
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_does_not_duplicate_fsynced_late_legacy_import_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        fail_next_event_manifest_write();
+
+        let first = post_entry_exact(dir.path(), entry.clone())
+            .expect("fsynced legacy import must not surface as retryable storage failure");
+
+        assert_eq!(first.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!coordination_events_path(dir.path()).exists());
+        let second = post_entry_exact(dir.path(), entry).unwrap();
+        assert_eq!(second.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn normal_post_still_deduplicates_late_legacy_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+        post_entry(dir.path(), entry.clone()).unwrap();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended { entry }],
+        );
+        let mut next = recovery_entry();
+        next.id = "normal-post-after-legacy-duplicate".to_string();
+        next.body = "normal post remains legacy compatible".to_string();
+
+        let snapshot = post_entry(dir.path(), next).unwrap();
+
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
     fn exact_post_imports_late_legacy_identity_before_replay_decision() {
         let dir = tempfile::tempdir().unwrap();
         load_snapshot(dir.path()).unwrap();
@@ -3235,11 +3395,29 @@ mod tests {
             .refresh_error
             .as_deref()
             .is_some_and(|error| error.contains("manifest")));
-        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        let stale_manifest: EventSegmentManifest = serde_json::from_str(
+            &std::fs::read_to_string(coordination_events_manifest_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stale_manifest.total_entries(), 0);
 
         let replayed = post_entry_exact(dir.path(), entry).unwrap();
         assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
-        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        let persisted_manifest: EventSegmentManifest = serde_json::from_str(
+            &std::fs::read_to_string(coordination_events_manifest_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_manifest.total_entries(), 1);
+        assert_eq!(persisted_manifest.segments.len(), 1);
+        assert_eq!(persisted_manifest.segments[0].entries, 1);
+        assert_eq!(
+            persisted_manifest.segments[0].bytes,
+            coordination_events_segments_dir(dir.path())
+                .join(&persisted_manifest.segments[0].file)
+                .metadata()
+                .unwrap()
+                .len()
+        );
         let repaired_projection: BoardProjection =
             load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
         assert_eq!(repaired_projection.entries.len(), 1);
