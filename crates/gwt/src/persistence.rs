@@ -147,6 +147,12 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
+    /// window, recomputed per broadcast from the durable PM registration. It
+    /// is never deserialized from disk — a stored flag would drift from
+    /// `pm.json` — matching the `agent_color` wire-only convention above.
+    #[serde(default, skip_deserializing)]
+    pub is_pm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -243,6 +249,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                is_pm: false,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -268,6 +275,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                is_pm: false,
             },
         ],
         next_z_index: 3,
@@ -655,6 +663,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -680,6 +689,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 6,
@@ -950,6 +960,7 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                is_pm: false,
             }],
             next_z_index: 2,
         };
@@ -1040,6 +1051,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         assert!(
@@ -1113,6 +1125,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "file-tree-1".to_string(),
@@ -1138,6 +1151,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 3,
@@ -1351,6 +1365,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -1376,6 +1391,7 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    is_pm: false,
                 },
             ],
             next_z_index: 3,

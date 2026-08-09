@@ -15,6 +15,7 @@ use crate::{
         sync_issue_cache_from_remote_if_stale_with_fingerprint,
         sync_issue_cache_from_remote_with_fingerprint, ISSUE_CACHE_TTL,
     },
+    issue_monitor::MonitorInboxState,
 };
 
 const KNOWLEDGE_SEARCH_RESULT_LIMIT: usize = 50;
@@ -115,6 +116,16 @@ pub struct KnowledgeListItem {
     /// always grouped into the Backlog column and are not draggable.
     #[serde(default)]
     pub is_spec: bool,
+    /// Issue Monitor lifecycle state projected onto this cached Issue row.
+    /// `None` means no monitor snapshot was joined to the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_state: Option<MonitorInboxState>,
+    /// One-based position in the Issue Monitor queue, when queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<usize>,
+    /// Human-readable reason for a non-terminal monitor exclusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1010,6 +1021,9 @@ fn issue_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
+        monitor_state: None,
+        queue_position: None,
+        exclusion_reason: None,
     }
 }
 
@@ -1035,6 +1049,9 @@ fn spec_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
+        monitor_state: None,
+        queue_position: None,
+        exclusion_reason: None,
     }
 }
 
@@ -1573,6 +1590,9 @@ Extra context.
             "Issue view must be the unified Work Item list and include gwt-spec tagged Issues"
         );
         assert_eq!(issue_entry.linked_branch_count, 2);
+        assert_eq!(issue_entry.monitor_state, None);
+        assert_eq!(issue_entry.queue_position, None);
+        assert_eq!(issue_entry.exclusion_reason, None);
         assert_eq!(issue_view.selected_number, Some(11));
         assert_eq!(issue_view.detail.launch_issue_number, Some(11));
         assert!(issue_view
@@ -1600,6 +1620,9 @@ Extra context.
             .find(|entry| entry.number == 22)
             .expect("spec entry");
         assert_eq!(spec_entry.linked_branch_count, 1);
+        assert_eq!(spec_entry.monitor_state, None);
+        assert_eq!(spec_entry.queue_position, None);
+        assert_eq!(spec_entry.exclusion_reason, None);
         assert!(spec_entry.meta.contains("Backlog"));
         assert!(!spec_entry.meta.contains("phase/in-progress"));
         assert_eq!(spec_view.detail.launch_issue_number, Some(22));

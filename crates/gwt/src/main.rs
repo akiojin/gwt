@@ -66,8 +66,8 @@ pub(crate) use app_runtime::{
 };
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
-    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
-    ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
+    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -902,9 +902,12 @@ fn issue_monitor_daemon_user_event(
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorInbox { items },
-            )]))
+            // SPEC-3431 T-093: routed through the runtime (not straight to a
+            // broadcast) so the PM wake path observes daemon-driven activity.
+            Some(UserEvent::IssueMonitorDaemonInbox {
+                project_root: project_root.to_path_buf(),
+                items,
+            })
         }
         "toast" => {
             let toast = BackendEvent::IssueMonitorToast {
@@ -1011,10 +1014,12 @@ enum UserEvent {
         ticket: AgentSelfCloseCapabilityTicket,
     },
     /// Candidate Continue work launches must return an authenticated
-    /// SessionStart receipt before this correlated deadline.
+    /// SessionStart receipt before this correlated deadline. Issue #3475: the
+    /// deadline carries its own progress-aware state, so a fired deadline can
+    /// re-arm itself while the agent pane is demonstrably still coming up.
     ContinueWorkReadyTimeout {
         window_id: String,
-        operation_id: String,
+        watch: ContinueWorkReadinessWatch,
     },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
@@ -1108,6 +1113,12 @@ enum UserEvent {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+    },
+    /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
+    /// runtime so the PM wake path sees it before the broadcast.
+    IssueMonitorDaemonInbox {
+        project_root: PathBuf,
+        items: Vec<gwt::IssueMonitorInboxItem>,
     },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
@@ -1868,6 +1879,7 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         }
     }
 
@@ -2637,6 +2649,10 @@ mod tests {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
+            pending_pm_launches: HashMap::new(),
+            pm_sessions: HashMap::new(),
+            pm_wake_seen: HashMap::new(),
+            pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
@@ -2657,8 +2673,10 @@ mod tests {
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
+            window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
+            last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -8081,16 +8099,8 @@ fn main() -> std::io::Result<()> {
                     let _ = proxy.send_event(UserEvent::QuitApp);
                 }
             }
-            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout {
-                window_id,
-                operation_id,
-            }) => {
-                clients.dispatch(
-                    app.handle_continue_work_ready_timeout(
-                        &window_id,
-                        &operation_id,
-                    ),
-                );
+            Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
+                clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the
@@ -8196,6 +8206,18 @@ fn main() -> std::io::Result<()> {
                     linked_issue_kind,
                     delivery_id,
                 );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
+                project_root,
+                items,
+            }) => {
+                // SPEC-3431 T-093: the wake decision runs before the frontend
+                // broadcast so a parked PM is revived by daemon-side activity.
+                let mut events = app.pm_wake_events(&project_root, &items);
+                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
+                    items,
+                }));
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {

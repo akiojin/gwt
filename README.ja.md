@@ -321,6 +321,27 @@ NeedsHuman エスカレーション）はトーストとして表示され、永
 モデル）はプロジェクト単位で永続化されます。human-gated の基礎は SPEC
 [#3165](https://github.com/akiojin/gwt/issues/3165) を参照してください。
 
+## PM エージェント
+
+各プロジェクトには常駐の **PM エージェント**ペインが 1 つ起動します。これが
+ユーザーの唯一の対話窓口です。自然言語で要望を伝えると、PM が Issue への分解・
+登録・design-required Issue の計画策定・意味的な実行順序の決定・Issue Monitor
+への起動指示までを行います。進捗の報告と `NeedsHuman` エスカレーションの提示も
+同じ会話の中で行われます。
+
+PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
+スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
+担うため、多重起動の防止機構はそのまま維持されます。
+
+- プロジェクトを開くと自動起動します。プロジェクト単位で opt-out できます。
+- PM ペインを閉じると停止し、自動再起動はしません。クラッシュ時は自動復帰し、
+  クラッシュループを防ぐバックオフが働きます。
+- Issue Monitor の `enabled` / `autonomous_mode` を CLI から有効化できるのは
+  PM だけです。他のエージェントセッションは GUI 操作が必要です。マージ判断は
+  影響を受けません — 上記の強い自動ゲートが引き続きすべてのマージを決めます。
+
+設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
+
 ## Knowledge、Search、Managed Skills
 
 gwt は project knowledge を Agent workspace の近くに置きます。

@@ -66,6 +66,15 @@
      needs-input=amber, idle=gray), so a Remote tag reads as "a place, not a
      state". violet-400 clears WCAG AA as text on dark surfaces (~7.0 / ~6.0). */
   --color-state-remote: #a78bfa;
+  /* SPEC-3431 FR-020 — the resident PM agent's role accent. The PM is the
+     user's single conversational window, so it needs an identity that is not
+     a runtime state and not one of the agent brand colors (the PM itself runs
+     Claude, so it would otherwise read as amber like any Claude pane).
+     emerald-400 is unclaimed here: active=cyan, blocked=red, done=slate,
+     needs-input=amber, remote=violet, and the agent ramp uses amber/cyan/
+     fuchsia/green-400/blue/gray — this sits clear of opencode's #4ade80 in
+     hue-lightness while clearing WCAG AA as text on dark surfaces (~8.3). */
+  --color-role-pm: #34d399;
 
   /* Agent colors — SPEC-2133 semantic mapping, dark-tuned */
   --agent-claude: #fbbf24;
@@ -163,6 +172,11 @@
      violet-700 clears WCAG AA as text on bone surfaces (~7.4 / ~6.9) and is
      distinct from active/blocked/done/needs-input. */
   --color-state-remote: #6d28d9;
+  /* SPEC-3431 FR-020 — PM role accent, light theme. emerald-700 clears WCAG
+     AA as text on bone surfaces (~4.9) and keeps the PM readable as an
+     identity rather than a surface tint, so the PM window stays legible when
+     an active state is expressed only through elevation. */
+  --color-role-pm: #047857;
 
   /* Agent colors — dark-tuned chroma for bone background */
   --agent-claude: #92400e;
@@ -255,6 +269,7 @@
     --color-state-done: GrayText;
     --color-state-needs-input: Highlight;
     --color-state-remote: LinkText;
+    --color-role-pm: Highlight;
 
     --agent-claude: Highlight;
     --agent-codex: Highlight;

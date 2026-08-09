@@ -14,6 +14,8 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
+  crates/gwt/web/__tests__/pm-launcher.test.mjs \
+  crates/gwt/web/__tests__/pm-settings-panel.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
   crates/gwt/web/__tests__/improvement-inbox-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \

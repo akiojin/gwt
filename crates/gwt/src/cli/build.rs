@@ -125,8 +125,22 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
     if !state.active || state.session_id.trim() != session_id {
         return Ok(());
     }
-
     if let Some(target) = crate::daemon_runtime::HookForwardTarget::from_env_strict()? {
+        // SPEC-3431 (#3425 family): a session that was never bound by a launch
+        // has no bound Work for the managed bridge to terminalize, so
+        // demanding exact durable Host Work authority is unsatisfiable and
+        // left the skill state permanently open (complete needs a receipt,
+        // abort needed this authority — both require the missing binding).
+        // Skipping only the managed-bridge terminalization is truthful: there
+        // is no bound Work to mark. The legacy no-bridge path below still runs
+        // for legacy Work state, and the Done path keeps its own receipt gate
+        // in `build.complete`, which an unbound session still cannot pass.
+        let session_toml = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+        if let Ok(session) = gwt_agent::Session::load(&session_toml) {
+            if session.execution_binding.is_none() {
+                return Ok(());
+            }
+        }
         let compatibility_authority =
             crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
                 repo,
@@ -1055,6 +1069,82 @@ mod tests {
         assert!(work.is_terminal());
         assert!(!work.discarded);
         server.receive();
+    }
+
+    /// SPEC-3431 (#3425 family): a session without an execution binding can
+    /// still abort its own build state.
+    ///
+    /// A binding exists only when gwt's launch materialization wrote it; a
+    /// resumed successor session has none. Such a session also has no bound
+    /// Work to terminalize — yet the abort path demanded exact durable Host
+    /// Work authority and failed with "durable Session ... has no execution
+    /// binding". Combined with `build.complete` requiring a Work event
+    /// receipt (which likewise needs the binding), a skill state opened by an
+    /// unbound session could be neither settled nor abandoned, so the Stop
+    /// hook blocked that session forever. Observed live on work/issue-3431.
+    ///
+    /// Fail-open is safe here: skipping means "no bound Work exists, so there
+    /// is nothing to mark", and the Done path keeps its own receipt gate in
+    /// `build.complete`, which an unbound session still cannot pass.
+    #[test]
+    fn unbound_session_abort_skips_the_terminal_work_update() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let git = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let branch =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&git.repo))
+                .expect("read fixture branch");
+        let branch = String::from_utf8(branch.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+        let mut session = gwt_agent::Session::new(&git.repo, &branch, gwt_agent::AgentId::Codex);
+        session.id = "unbound-successor-session".to_string();
+        session.project_state_root = Some(git.repo.clone());
+        session.linked_issue_number = Some(3431);
+        assert!(
+            session.execution_binding.is_none(),
+            "precondition: this session was never bound by a launch"
+        );
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save unbound session");
+        gwt_core::skill_state::save(
+            &git.repo,
+            SKILL_NAME,
+            &gwt_core::skill_state::SkillState {
+                active: true,
+                owner_spec: Some(3431),
+                started_at: chrono::Utc::now(),
+                phase: None,
+                session_id: session.id.clone(),
+            },
+        )
+        .expect("open the build state as this session");
+
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
+        );
+        let result = with_terminal_bridge_env_for(&git.repo, &session.id, &server, |env| {
+            record_current_work_terminal_before_finalize(
+                env,
+                &SkillStateAction::Abort {
+                    spec: 3431,
+                    reason: Some("opened only to probe verify authority".to_string()),
+                },
+            )
+        });
+
+        assert!(
+            result.is_ok(),
+            "an unbound session must be able to abandon its own build state: {result:?}"
+        );
     }
 
     #[test]
