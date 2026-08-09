@@ -7574,6 +7574,115 @@ mod tests {
         );
     }
 
+    /// SPEC-3431 FR-030 / T-080: the old pane's delayed close can also land
+    /// *before* the replacement launch. The requeued issue must ride it out
+    /// untouched — still queued exactly once, still clean of failure markers.
+    #[test]
+    fn failover_requeue_survives_a_late_close_before_the_new_launch() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-1", "2026-08-07T00:00:12Z"),
+            None,
+            "the revoked window must not double-queue the issue it lost"
+        );
+        assert_eq!(
+            monitor
+                .queued_issue_numbers()
+                .iter()
+                .filter(|number| **number == 42)
+                .count(),
+            1,
+            "exactly one queue entry survives the late close"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "no failure marker may leak from the reaped pane"
+        );
+    }
+
+    /// SPEC-3431 FR-030 / T-080: a scan racing the failover (the ScanNow the
+    /// failover itself requests) must not double-queue the issue or launch it
+    /// twice.
+    #[test]
+    fn failover_then_scan_keeps_a_single_queue_entry_and_a_single_launch() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        // The immediate scan the failover requested re-observes the same
+        // candidate list.
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-07T00:00:11Z");
+        assert_eq!(
+            monitor
+                .queued_issue_numbers()
+                .iter()
+                .filter(|number| **number == 42)
+                .count(),
+            1,
+            "the concurrent scan must not add a second queue entry"
+        );
+
+        // The requeued launch lands once; a second scan afterwards must not
+        // spawn a sibling.
+        monitor.complete_active_launch(42, "tab-1::agent-2");
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-07T00:00:20Z");
+        assert_eq!(monitor.active_count(), 1, "exactly one launch, ever");
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "a running launch must not be queued again by the next scan"
+        );
+    }
+
+    /// SPEC-3431 FR-031 / T-081: when the restarted launch itself fails, the
+    /// failure must converge to a visible inbox error with the slot released —
+    /// not a silent loss, and not a phantom active slot.
+    #[test]
+    fn failed_restart_after_failover_converges_to_a_visible_failure() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        monitor.failover_restart(&target, "codex rate limit", "2026-08-07T00:00:10Z");
+
+        monitor.record_launch_failed(42, "saved profile binary missing");
+
+        assert_eq!(monitor.active_count(), 0, "no phantom active slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "the restart failure must be visible, not silently swallowed"
+        );
+        assert_eq!(
+            monitor
+                .inbox_item(42)
+                .and_then(|item| item.error_message.clone())
+                .as_deref(),
+            Some("saved profile binary missing"),
+            "the diagnosis must carry the reason the PM needs"
+        );
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "a failed launch must not silently spin in the queue"
+        );
+    }
+
     /// SPEC-3431 FR-024 / FR-033: the PM has to be able to *read* the identity
     /// it is required to send. `claim_id` was missing from the snapshot, so an
     /// exact-claim requirement was unsatisfiable from the PM's side.
