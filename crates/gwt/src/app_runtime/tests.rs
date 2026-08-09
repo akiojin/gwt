@@ -1135,7 +1135,7 @@ fn sample_window(
         dynamic_title_detail: None,
         agent_id: None,
         agent_color: None,
-        lane_kind: gwt::WindowLaneKind::Unknown,
+        worktree_form: gwt::WindowWorktreeForm::Unknown,
         tab_group_id: None,
         tab_group_active: false,
         session_id: None,
@@ -34324,7 +34324,7 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
 }
 
 #[test]
-fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_windows() {
+fn app_state_view_projects_agent_window_worktree_form_without_guessing_restored_windows() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -34337,20 +34337,20 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
     run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
 
     let mut tab_workspace = empty_workspace_state();
-    let mut intake = sample_window(
-        "agent-intake",
+    let mut ephemeral = sample_window(
+        "agent-ephemeral",
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    intake.title = "Codex".to_string();
-    intake.agent_id = Some("codex".to_string());
-    let mut execution = sample_window(
-        "agent-exec",
+    ephemeral.title = "Codex".to_string();
+    ephemeral.agent_id = Some("codex".to_string());
+    let mut branch_backed = sample_window(
+        "agent-branch-backed",
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    execution.title = "Codex".to_string();
-    execution.agent_id = Some("codex".to_string());
+    branch_backed.title = "Codex".to_string();
+    branch_backed.agent_id = Some("codex".to_string());
     let mut restored = sample_window(
         "agent-restored",
         WindowPreset::Agent,
@@ -34358,7 +34358,9 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
     );
     restored.title = "Codex".to_string();
     restored.agent_id = Some("codex".to_string());
-    tab_workspace.windows.extend([intake, execution, restored]);
+    tab_workspace
+        .windows
+        .extend([ephemeral, branch_backed, restored]);
     tab_workspace.next_z_index = 4;
     let tab = ProjectTabRuntime {
         id: "tab-1".to_string(),
@@ -34370,31 +34372,35 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let intake_id = combined_window_id("tab-1", "agent-intake");
-    let execution_id = combined_window_id("tab-1", "agent-exec");
+    let ephemeral_id = combined_window_id("tab-1", "agent-ephemeral");
+    let branch_backed_id = combined_window_id("tab-1", "agent-branch-backed");
     let manager = gwt_git::WorktreeManager::new(&repo);
-    let intake_worktree = temp.path().join(".intake-lane");
+    let ephemeral_worktree = temp.path().join(".intake-ephemeral");
     manager
-        .create_detached("HEAD", &intake_worktree)
-        .expect("create detached intake worktree");
-    let execution_worktree = temp.path().join(".intake-real-lane");
+        .create_detached("HEAD", &ephemeral_worktree)
+        .expect("create detached ephemeral worktree");
+    let branch_backed_worktree = temp.path().join(".intake-branch-backed");
     manager
-        .create_from_base("HEAD", "feature/lane-real", &execution_worktree)
-        .expect("create branch worktree with intake-like basename");
+        .create_from_base(
+            "HEAD",
+            "feature/worktree-form-real",
+            &branch_backed_worktree,
+        )
+        .expect("create branch worktree with an ephemeral-like basename");
 
-    let mut intake_session = sample_active_agent_session("tab-1", &intake_id);
-    intake_session.branch_name = "work".to_string();
-    intake_session.worktree_path = intake_worktree;
+    let mut ephemeral_session = sample_active_agent_session("tab-1", &ephemeral_id);
+    ephemeral_session.branch_name = "work".to_string();
+    ephemeral_session.worktree_path = ephemeral_worktree;
     runtime
         .active_agent_sessions
-        .insert(intake_id.clone(), intake_session);
+        .insert(ephemeral_id.clone(), ephemeral_session);
 
-    let mut execution_session = sample_active_agent_session("tab-1", &execution_id);
-    execution_session.branch_name = "feature/lane-real".to_string();
-    execution_session.worktree_path = execution_worktree;
+    let mut branch_backed_session = sample_active_agent_session("tab-1", &branch_backed_id);
+    branch_backed_session.branch_name = "feature/worktree-form-real".to_string();
+    branch_backed_session.worktree_path = branch_backed_worktree;
     runtime
         .active_agent_sessions
-        .insert(execution_id.clone(), execution_session);
+        .insert(branch_backed_id.clone(), branch_backed_session);
 
     let view = runtime.app_state_view();
     let windows = &view
@@ -34404,24 +34410,24 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
         .expect("tab")
         .workspace
         .windows;
-    let lane = |raw_id: &str| {
+    let form = |raw_id: &str| {
         windows
             .iter()
             .find(|window| window.id == combined_window_id("tab-1", raw_id))
-            .map(|window| window.lane_kind)
+            .map(|window| window.worktree_form)
             .expect("projected window")
     };
 
-    assert_eq!(lane("agent-intake"), gwt::WindowLaneKind::Intake);
+    assert_eq!(form("agent-ephemeral"), gwt::WindowWorktreeForm::Ephemeral);
     assert_eq!(
-        lane("agent-exec"),
-        gwt::WindowLaneKind::Execution,
-        "a named branch worktree with an .intake-* basename must not be mislabeled as Intake",
+        form("agent-branch-backed"),
+        gwt::WindowWorktreeForm::BranchBacked,
+        "a named branch worktree with an .intake-* basename must not be classified as ephemeral",
     );
     assert_eq!(
-        lane("agent-restored"),
-        gwt::WindowLaneKind::Unknown,
-        "restored agent windows without an active lane signal must not be mislabeled as Execution",
+        form("agent-restored"),
+        gwt::WindowWorktreeForm::Unknown,
+        "restored agent windows without an active session signal must remain unknown",
     );
 }
 

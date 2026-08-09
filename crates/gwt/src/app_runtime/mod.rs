@@ -5009,17 +5009,17 @@ impl AppRuntime {
                             .is_some_and(|pm_session| {
                                 window.session_id.as_deref() == Some(pm_session.as_str())
                             });
-                    window.lane_kind = self
+                    window.worktree_form = self
                         .active_agent_sessions
                         .get(&window.id)
                         .map(|session| {
-                            if self.is_ephemeral_intake_session(session) {
-                                gwt::WindowLaneKind::Intake
+                            if self.session_uses_ephemeral_worktree(session) {
+                                gwt::WindowWorktreeForm::Ephemeral
                             } else {
-                                gwt::WindowLaneKind::Execution
+                                gwt::WindowWorktreeForm::BranchBacked
                             }
                         })
-                        .unwrap_or(gwt::WindowLaneKind::Unknown);
+                        .unwrap_or(gwt::WindowWorktreeForm::Unknown);
                     if let gwt::WindowPlacement::AgentKanban {
                         board_id,
                         lane_id,

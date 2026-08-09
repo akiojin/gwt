@@ -376,7 +376,7 @@ pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
     !worktree.prunable && worktree.path.exists()
 }
 
-pub use gwt::worktree_form::{is_ephemeral_intake_worktree, INTAKE_WORKTREE_PREFIX};
+pub use gwt::worktree_form::{is_ephemeral_worktree_path, EPHEMERAL_WORKTREE_PREFIX};
 
 /// SPEC-3214 (codex #3237): whether a worktree-relative status `entry` is a
 /// gwt MERGED hook config (`.claude/settings.local.json` / `.codex/hooks.json`)
