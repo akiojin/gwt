@@ -24,6 +24,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{config::BareProjectConfig, paths::gwt_project_dir_for_repo_path, GwtError, Result};
@@ -75,6 +76,18 @@ pub enum BoardEntryKind {
     Blocked,
     Handoff,
     Decision,
+}
+
+/// Structural form of the worktree that originated a Board entry.
+///
+/// This is presentation and recovery provenance, not an Intake / Execution
+/// behavioral lane (SPEC-1921 FR-196).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardWorktreeForm {
+    Ephemeral,
+    BranchBacked,
+    Unknown,
 }
 
 impl std::str::FromStr for BoardEntryKind {
@@ -238,6 +251,17 @@ where
     Ok(normalize_board_audience(value))
 }
 
+fn deserialize_optional_trimmed_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(trimmed_or_none(Option::<String>::deserialize(
+        deserializer,
+    )?))
+}
+
 pub fn normalize_board_audience(values: Vec<String>) -> Vec<String> {
     normalize_audience(values)
 }
@@ -333,6 +357,14 @@ pub struct BoardEntry {
     pub origin_session_id: Option<String>,
     #[serde(default)]
     pub origin_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_worktree_form: Option<BoardWorktreeForm>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_trimmed_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub origin_recovery_id: Option<String>,
     #[serde(default)]
     pub target_owners: Vec<String>,
     #[serde(default)]
@@ -364,6 +396,16 @@ impl BoardEntry {
 
     pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
         self.origin_agent_id = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_worktree_form(mut self, value: BoardWorktreeForm) -> Self {
+        self.origin_worktree_form = Some(value);
+        self
+    }
+
+    pub fn with_origin_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_recovery_id = trimmed_or_none(Some(value.into()));
         self
     }
 
@@ -410,6 +452,10 @@ impl BoardEntry {
         self.audience = normalize_board_audience(std::mem::take(&mut self.audience));
     }
 
+    fn normalize_recovery_origin(&mut self) {
+        self.origin_recovery_id = trimmed_or_none(self.origin_recovery_id.take());
+    }
+
     pub fn with_audience_workspace(mut self, value: impl Into<String>) -> Self {
         let trimmed = value.into().trim().to_string();
         if !trimmed.is_empty() && !self.audience.iter().any(|existing| existing == &trimmed) {
@@ -447,12 +493,80 @@ impl BoardEntry {
             origin_branch: None,
             origin_session_id: None,
             origin_agent_id: None,
+            origin_worktree_form: None,
+            origin_recovery_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
             audience: Vec::new(),
             body_html: None,
         }
     }
+}
+
+pub const BOARD_PAYLOAD_DIGEST_VERSION: u32 = 1;
+
+/// Return the versioned digest of a Board entry's semantic payload.
+///
+/// The canonical payload includes display, routing, and origin semantics. It
+/// deliberately excludes the caller-supplied entry identity, generated
+/// timestamps, and derived HTML so a retry can reproduce the same logical
+/// append without reproducing generated values (SPEC-1921 FR-196).
+pub fn board_entry_payload_digest(entry: &BoardEntry) -> Result<String> {
+    #[derive(Serialize)]
+    struct CanonicalBoardPayloadV1<'a> {
+        version: u32,
+        author_kind: &'a AuthorKind,
+        author: &'a str,
+        kind: &'a BoardEntryKind,
+        body: &'a str,
+        title: &'a Option<String>,
+        title_summary: &'a Option<String>,
+        state: &'a Option<String>,
+        parent_id: &'a Option<String>,
+        related_topics: &'a [String],
+        related_owners: &'a [String],
+        origin_branch: &'a Option<String>,
+        origin_session_id: &'a Option<String>,
+        origin_agent_id: &'a Option<String>,
+        origin_worktree_form: &'a Option<BoardWorktreeForm>,
+        origin_recovery_id: Option<&'a str>,
+        target_owners: &'a [String],
+        mentions: &'a [BoardMention],
+        audience: Vec<String>,
+    }
+
+    let origin_recovery_id = entry
+        .origin_recovery_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let payload = CanonicalBoardPayloadV1 {
+        version: BOARD_PAYLOAD_DIGEST_VERSION,
+        author_kind: &entry.author_kind,
+        author: &entry.author,
+        kind: &entry.kind,
+        body: &entry.body,
+        title: &entry.title,
+        title_summary: &entry.title_summary,
+        state: &entry.state,
+        parent_id: &entry.parent_id,
+        related_topics: &entry.related_topics,
+        related_owners: &entry.related_owners,
+        origin_branch: &entry.origin_branch,
+        origin_session_id: &entry.origin_session_id,
+        origin_agent_id: &entry.origin_agent_id,
+        origin_worktree_form: &entry.origin_worktree_form,
+        origin_recovery_id,
+        target_owners: &entry.target_owners,
+        mentions: &entry.mentions,
+        audience: normalize_board_audience(entry.audience.clone()),
+    };
+    let canonical_bytes = serde_json::to_vec(&payload).map_err(json_error)?;
+    Ok(format!(
+        "v{}:sha256:{}",
+        BOARD_PAYLOAD_DIGEST_VERSION,
+        hex::encode(Sha256::digest(canonical_bytes))
+    ))
 }
 
 pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
@@ -478,6 +592,8 @@ pub struct BoardOrigin {
     pub branch: String,
     pub session_id: String,
     pub agent_id: String,
+    pub worktree_form: Option<BoardWorktreeForm>,
+    pub recovery_id: String,
 }
 
 impl BoardOrigin {
@@ -490,7 +606,19 @@ impl BoardOrigin {
             branch: branch.into(),
             session_id: session_id.into(),
             agent_id: agent_id.into(),
+            worktree_form: None,
+            recovery_id: String::new(),
         }
+    }
+
+    pub fn with_worktree_form(mut self, value: BoardWorktreeForm) -> Self {
+        self.worktree_form = Some(value);
+        self
+    }
+
+    pub fn with_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.recovery_id = value.into();
+        self
     }
 }
 
@@ -586,6 +714,8 @@ impl BoardEntryDraft {
         entry.origin_branch = blank_to_none(&self.origin.branch);
         entry.origin_session_id = blank_to_none(&self.origin.session_id);
         entry.origin_agent_id = blank_to_none(&self.origin.agent_id);
+        entry.origin_worktree_form = self.origin.worktree_form;
+        entry.origin_recovery_id = blank_to_none(&self.origin.recovery_id);
         Ok(entry)
     }
 }
@@ -725,6 +855,27 @@ mod board_entry_draft_tests {
     }
 
     #[test]
+    fn finalize_keeps_branchless_ephemeral_recovery_origin_and_drops_blank_recovery_id() {
+        let mut d = draft("body");
+        d.origin = BoardOrigin::new("  ", "session-1", "agent-a")
+            .with_worktree_form(BoardWorktreeForm::Ephemeral)
+            .with_recovery_id(" recovery-1 ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(
+            entry.origin_worktree_form,
+            Some(BoardWorktreeForm::Ephemeral)
+        );
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-1"));
+
+        let mut blank = draft("body");
+        blank.origin =
+            BoardOrigin::new("branch", "session-1", "agent-a").with_recovery_id(" \n\t ");
+        let entry = blank.finalize().expect("finalize");
+        assert_eq!(entry.origin_recovery_id, None);
+    }
+
+    #[test]
     fn finalize_defaults_leave_optional_fields_unset() {
         let entry = draft("body").finalize().expect("finalize");
         assert_eq!(entry.title, None);
@@ -738,6 +889,8 @@ mod board_entry_draft_tests {
         assert_eq!(entry.origin_branch, None);
         assert_eq!(entry.origin_session_id, None);
         assert_eq!(entry.origin_agent_id, None);
+        assert_eq!(entry.origin_worktree_form, None);
+        assert_eq!(entry.origin_recovery_id, None);
         assert_eq!(entry.state, None);
     }
 }
@@ -869,6 +1022,60 @@ impl BoardPostOutcome {
     }
 }
 
+/// Whether this exact append call materialized a new event or acknowledged an
+/// already-materialized event with the same semantic payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardExactAppendDisposition {
+    Appended,
+    Replayed,
+}
+
+/// Durable acknowledgement returned by the exact recovery append path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardExactAppendReceipt {
+    pub entry_id: String,
+    pub payload_digest: String,
+    pub disposition: BoardExactAppendDisposition,
+    /// A derived manifest/projection refresh can fail after the event fsync.
+    /// The receipt remains a successful committed acknowledgement and exposes
+    /// the refresh error so callers do not retry as though the append failed.
+    pub refresh_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardExactAppendConflictKind {
+    PayloadMismatch,
+    DuplicateIdentity,
+}
+
+/// Details of a deterministic Board identity conflict.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Board entry {entry_id} exact append conflict: {kind:?}")]
+pub struct BoardExactAppendConflict {
+    pub entry_id: String,
+    pub kind: BoardExactAppendConflictKind,
+    pub attempted_payload_digest: String,
+    pub existing_payload_digests: Vec<String>,
+}
+
+/// Failure surface for the recovery-specific exact append API.
+#[derive(Debug, thiserror::Error)]
+pub enum BoardExactAppendError {
+    #[error(transparent)]
+    Conflict(#[from] BoardExactAppendConflict),
+    #[error("exact Board recovery append is unsupported by this provider")]
+    Unsupported,
+    #[error(transparent)]
+    Storage(#[from] GwtError),
+}
+
+pub type BoardExactAppendResult<T> = std::result::Result<T, BoardExactAppendError>;
+
+enum BoardExactAppendDecision {
+    Receipt(BoardExactAppendReceipt),
+    Conflict(BoardExactAppendConflict),
+}
+
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
     coordination_project_dir(worktree_root)
         .unwrap_or_else(|| legacy_coordination_dir(worktree_root))
@@ -936,7 +1143,96 @@ pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<Coordinatio
 pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
     let mut entry = entry;
     entry.normalize_audience();
+    entry.normalize_recovery_origin();
     append_event_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
+}
+
+/// Append a caller-identified recovery entry exactly once.
+///
+/// Legacy import, segmented-history identity scan, duplicate arbitration, and
+/// any new append all run while holding the same deadline-aware coordination
+/// lock. Normal [`post_entry_outcome`] behavior remains unchanged.
+pub fn post_entry_exact(
+    worktree_root: &Path,
+    mut entry: BoardEntry,
+) -> BoardExactAppendResult<BoardExactAppendReceipt> {
+    entry.normalize_audience();
+    entry.normalize_recovery_origin();
+    let entry_id = entry.id.clone();
+    let attempted_payload_digest = board_entry_payload_digest(&entry)?;
+
+    let decision = with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files(worktree_root)?;
+        let coordination_root = coordination_dir(worktree_root);
+        let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
+        let projection_refresh_error =
+            refresh_exact_projection_locked(worktree_root, imported_legacy)
+                .err()
+                .map(|error| error.to_string());
+        let matching_entries = load_board_entries_from_segments_root(&coordination_root)?
+            .into_iter()
+            .filter(|existing| existing.id == entry_id)
+            .collect::<Vec<_>>();
+        let existing_payload_digests = matching_entries
+            .iter()
+            .map(board_entry_payload_digest)
+            .collect::<Result<Vec<_>>>()?;
+
+        if matching_entries.len() > 1 {
+            return Ok(BoardExactAppendDecision::Conflict(
+                BoardExactAppendConflict {
+                    entry_id,
+                    kind: BoardExactAppendConflictKind::DuplicateIdentity,
+                    attempted_payload_digest,
+                    existing_payload_digests,
+                },
+            ));
+        }
+
+        if let Some(existing_payload_digest) = existing_payload_digests.first() {
+            if existing_payload_digest != &attempted_payload_digest {
+                return Ok(BoardExactAppendDecision::Conflict(
+                    BoardExactAppendConflict {
+                        entry_id,
+                        kind: BoardExactAppendConflictKind::PayloadMismatch,
+                        attempted_payload_digest,
+                        existing_payload_digests,
+                    },
+                ));
+            }
+
+            return Ok(BoardExactAppendDecision::Receipt(BoardExactAppendReceipt {
+                entry_id,
+                payload_digest: attempted_payload_digest,
+                disposition: BoardExactAppendDisposition::Replayed,
+                refresh_error: projection_refresh_error,
+            }));
+        }
+
+        let outcome = append_event_after_legacy_import_locked_outcome(
+            worktree_root,
+            &CoordinationEvent::MessageAppended { entry },
+            imported_legacy && projection_refresh_error.is_some(),
+        )?;
+        let refresh_error = match outcome {
+            BoardPostOutcome::Refreshed(_) => None,
+            BoardPostOutcome::CommittedWithoutSnapshot { refresh_error, .. } => Some(refresh_error),
+        };
+        Ok(BoardExactAppendDecision::Receipt(BoardExactAppendReceipt {
+            entry_id,
+            payload_digest: attempted_payload_digest,
+            disposition: BoardExactAppendDisposition::Appended,
+            refresh_error,
+        }))
+    })
+    .map_err(BoardExactAppendError::Storage)?;
+
+    match decision {
+        BoardExactAppendDecision::Receipt(receipt) => Ok(receipt),
+        BoardExactAppendDecision::Conflict(conflict) => {
+            Err(BoardExactAppendError::Conflict(conflict))
+        }
+    }
 }
 
 pub fn append_event(
@@ -994,6 +1290,15 @@ fn append_event_locked_outcome(
 ) -> Result<BoardPostOutcome> {
     let coordination_root = coordination_dir(worktree_root);
     let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
+    append_event_after_legacy_import_locked_outcome(worktree_root, event, imported_legacy)
+}
+
+fn append_event_after_legacy_import_locked_outcome(
+    worktree_root: &Path,
+    event: &CoordinationEvent,
+    imported_legacy: bool,
+) -> Result<BoardPostOutcome> {
+    let coordination_root = coordination_dir(worktree_root);
     let entry_id = match event {
         CoordinationEvent::MessageAppended { entry } => entry.id.clone(),
     };
@@ -1063,6 +1368,23 @@ fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> 
     Ok(snapshot)
 }
 
+fn refresh_exact_projection_locked(worktree_root: &Path, force_rebuild: bool) -> Result<()> {
+    let coordination_root = coordination_dir(worktree_root);
+    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    let projection_path = coordination_board_projection_path(worktree_root);
+    let projection: BoardProjection = match load_json_or_default(&projection_path) {
+        Ok(projection) => projection,
+        Err(_) => {
+            repair_snapshot_locked(worktree_root)?;
+            return Ok(());
+        }
+    };
+    if force_rebuild || projection_needs_rebuild(&projection, &manifest) {
+        repair_snapshot_locked(worktree_root)?;
+    }
+    Ok(())
+}
+
 pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSnapshot> {
     if !event_path.exists() {
         File::create(event_path)?;
@@ -1102,6 +1424,7 @@ fn build_hot_projection(
 ) -> BoardProjection {
     for entry in &mut entries {
         entry.normalize_audience();
+        entry.normalize_recovery_origin();
     }
     entries.sort_by_key(|entry| entry.created_at);
     let total_entries = entries.len();
@@ -1125,6 +1448,7 @@ fn build_hot_projection(
 fn normalize_board_projection(projection: &mut BoardProjection) {
     for entry in &mut projection.entries {
         entry.normalize_audience();
+        entry.normalize_recovery_origin();
     }
 }
 
@@ -1816,7 +2140,10 @@ fn load_legacy_board_events_from_path(path: &Path) -> Result<Vec<CoordinationEve
 
 fn normalize_coordination_event(event: &mut CoordinationEvent) {
     match event {
-        CoordinationEvent::MessageAppended { entry } => entry.normalize_audience(),
+        CoordinationEvent::MessageAppended { entry } => {
+            entry.normalize_audience();
+            entry.normalize_recovery_origin();
+        }
     }
 }
 
@@ -2139,6 +2466,15 @@ pub fn load_entries_before_for_scope(
     })
 }
 
+/// Recovery-delivery guarantee advertised independently from normal Board
+/// posting. Remote providers remain unsupported until they can preserve the
+/// deterministic identity and exact acknowledgement contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardRecoveryCapability {
+    Unsupported,
+    ExactAcknowledgement,
+}
+
 /// Backend that serves the coordination Board (SPEC-2959).
 ///
 /// The trait mirrors the existing free-function read/write surface so that
@@ -2158,6 +2494,21 @@ pub trait BoardProvider {
     ) -> Result<BoardPostOutcome> {
         self.post_entry(worktree_root, entry)
             .map(BoardPostOutcome::Refreshed)
+    }
+    /// Advertise recovery-specific delivery semantics. Normal posting is
+    /// intentionally independent from this capability.
+    fn recovery_capability(&self) -> BoardRecoveryCapability {
+        BoardRecoveryCapability::Unsupported
+    }
+    /// Append a recovery entry with deterministic exact acknowledgement.
+    /// Providers without that guarantee fail closed before any normal post or
+    /// local fallback can occur.
+    fn post_recovery_entry_exact(
+        &self,
+        _worktree_root: &Path,
+        _entry: BoardEntry,
+    ) -> BoardExactAppendResult<BoardExactAppendReceipt> {
+        Err(BoardExactAppendError::Unsupported)
     }
     /// Load the hot projection snapshot.
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
@@ -2225,6 +2576,18 @@ impl BoardProvider for LocalProvider {
         entry: BoardEntry,
     ) -> Result<BoardPostOutcome> {
         post_entry_outcome(worktree_root, entry)
+    }
+
+    fn recovery_capability(&self) -> BoardRecoveryCapability {
+        BoardRecoveryCapability::ExactAcknowledgement
+    }
+
+    fn post_recovery_entry_exact(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> BoardExactAppendResult<BoardExactAppendReceipt> {
+        post_entry_exact(worktree_root, entry)
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -2300,6 +2663,36 @@ mod tests {
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
 
+    fn recovery_entry() -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "durable recovery update",
+            Some("running".to_string()),
+            Some("parent-entry".to_string()),
+            vec!["recovery".to_string()],
+            vec!["SPEC-1921".to_string()],
+        )
+        .with_title("Recovery delivery")
+        .with_title_summary("Board recovery")
+        .with_target_owner("session:session-1")
+        .with_mention(BoardMention::new(
+            BoardMentionTargetKind::Session,
+            "session-1",
+        ))
+        .with_audience(vec!["workspace-1"])
+        .with_origin_branch("work/issue-1974")
+        .with_origin_session_id("session-1")
+        .with_origin_agent_id("codex")
+        .with_origin_worktree_form(BoardWorktreeForm::BranchBacked)
+        .with_origin_recovery_id("recovery-1");
+        entry.id = "recovery-entry-1".to_string();
+        entry.created_at = Utc.with_ymd_and_hms(2026, 8, 9, 0, 0, 0).unwrap();
+        entry.updated_at = entry.created_at;
+        entry
+    }
+
     #[test]
     fn committed_operation_result_wins_over_unlock_failure() {
         let result = arbitrate_coordination_lock_result(
@@ -2324,6 +2717,335 @@ mod tests {
             result,
             Err(GwtError::Other(message)) if message == "operation failed"
         ));
+    }
+
+    #[test]
+    fn board_worktree_form_uses_canonical_wire_values() {
+        for (form, wire) in [
+            (BoardWorktreeForm::Ephemeral, "ephemeral"),
+            (BoardWorktreeForm::BranchBacked, "branch-backed"),
+            (BoardWorktreeForm::Unknown, "unknown"),
+        ] {
+            assert_eq!(serde_json::to_value(form).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<BoardWorktreeForm>(wire.into()).unwrap(),
+                form
+            );
+        }
+    }
+
+    #[test]
+    fn board_entry_recovery_origin_round_trips_and_legacy_defaults_to_none() {
+        let entry = recovery_entry();
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+        assert_eq!(encoded["origin_worktree_form"], "branch-backed");
+        assert_eq!(encoded["origin_recovery_id"], "recovery-1");
+        let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.origin_worktree_form,
+            Some(BoardWorktreeForm::BranchBacked)
+        );
+        assert_eq!(decoded.origin_recovery_id.as_deref(), Some("recovery-1"));
+
+        let legacy: BoardEntry = serde_json::from_value(serde_json::json!({
+            "id": "legacy-entry",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-08-09T00:00:00Z",
+            "updated_at": "2026-08-09T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(legacy.origin_worktree_form, None);
+        assert_eq!(legacy.origin_recovery_id, None);
+    }
+
+    #[test]
+    fn board_payload_digest_is_versioned_semantic_and_normalizes_audience() {
+        let entry = recovery_entry();
+        let digest = board_entry_payload_digest(&entry).unwrap();
+        assert!(digest.starts_with("v1:sha256:"));
+
+        let mut generated_only = entry.clone();
+        generated_only.id = "another-id".to_string();
+        generated_only.created_at += chrono::Duration::hours(1);
+        generated_only.updated_at += chrono::Duration::hours(2);
+        generated_only.body_html = Some("<p>derived</p>".to_string());
+        generated_only.audience = vec![" workspace-1 ".to_string(), "workspace-1".to_string()];
+        assert_eq!(
+            board_entry_payload_digest(&generated_only).unwrap(),
+            digest,
+            "identity, timestamps, derived HTML, and audience formatting are non-semantic"
+        );
+
+        let mut display_change = entry.clone();
+        display_change.title = Some("Different title".to_string());
+        assert_ne!(board_entry_payload_digest(&display_change).unwrap(), digest);
+
+        let mut routing_change = entry.clone();
+        routing_change.audience = vec!["workspace-2".to_string()];
+        assert_ne!(board_entry_payload_digest(&routing_change).unwrap(), digest);
+
+        let mut origin_change = entry;
+        origin_change.origin_worktree_form = Some(BoardWorktreeForm::Ephemeral);
+        assert_ne!(board_entry_payload_digest(&origin_change).unwrap(), digest);
+    }
+
+    #[test]
+    fn exact_post_appends_once_and_replays_same_semantic_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+
+        let appended = post_entry_exact(dir.path(), entry.clone()).unwrap();
+        assert_eq!(appended.entry_id, entry.id);
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert_eq!(
+            appended.payload_digest,
+            board_entry_payload_digest(&entry).unwrap()
+        );
+        assert_eq!(appended.refresh_error, None);
+
+        let mut replay = entry.clone();
+        replay.created_at += chrono::Duration::days(1);
+        replay.updated_at += chrono::Duration::days(1);
+        replay.body_html = Some("<p>not persisted</p>".to_string());
+        replay.audience = vec![" workspace-1 ".to_string(), "workspace-1".to_string()];
+        let replayed = post_entry_exact(dir.path(), replay).unwrap();
+        assert_eq!(replayed.entry_id, entry.id);
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(replayed.payload_digest, appended.payload_digest);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn exact_post_rejects_same_id_with_different_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+        post_entry_exact(dir.path(), entry.clone()).unwrap();
+
+        let mut changed = entry.clone();
+        changed.body = "mutated payload".to_string();
+        let error = post_entry_exact(dir.path(), changed).unwrap_err();
+        match error {
+            BoardExactAppendError::Conflict(conflict) => {
+                assert_eq!(conflict.entry_id, entry.id);
+                assert_eq!(conflict.kind, BoardExactAppendConflictKind::PayloadMismatch);
+                assert_eq!(conflict.existing_payload_digests.len(), 1);
+                assert_ne!(
+                    conflict.attempted_payload_digest,
+                    conflict.existing_payload_digests[0]
+                );
+            }
+            other => panic!("expected payload conflict, got {other}"),
+        }
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_rejects_pre_existing_duplicate_identity_even_for_same_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        let event = CoordinationEvent::MessageAppended {
+            entry: entry.clone(),
+        };
+        append_event_to_segments(dir.path(), &event, EVENT_SEGMENT_MAX_BYTES).unwrap();
+        append_event_to_segments(dir.path(), &event, EVENT_SEGMENT_MAX_BYTES).unwrap();
+
+        let error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+        match error {
+            BoardExactAppendError::Conflict(conflict) => {
+                assert_eq!(conflict.entry_id, entry.id);
+                assert_eq!(
+                    conflict.kind,
+                    BoardExactAppendConflictKind::DuplicateIdentity
+                );
+                assert_eq!(conflict.existing_payload_digests.len(), 2);
+                assert!(conflict
+                    .existing_payload_digests
+                    .iter()
+                    .all(|digest| digest == &conflict.attempted_payload_digest));
+            }
+            other => panic!("expected duplicate identity conflict, got {other}"),
+        }
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_imports_late_legacy_identity_before_replay_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+
+        let receipt = post_entry_exact(dir.path(), entry.clone()).unwrap();
+
+        assert_eq!(receipt.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].id, entry.id);
+    }
+
+    #[test]
+    fn exact_post_repairs_unrelated_late_legacy_projection_before_new_append() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let mut legacy = recovery_entry();
+        legacy.id = "unrelated-legacy-entry".to_string();
+        legacy.body = "unrelated late legacy payload".to_string();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: legacy.clone(),
+            }],
+        );
+        let entry = recovery_entry();
+
+        let receipt = post_entry_exact(dir.path(), entry.clone()).unwrap();
+
+        assert_eq!(receipt.disposition, BoardExactAppendDisposition::Appended);
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![legacy.id.as_str(), entry.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn exact_post_repairs_late_legacy_projection_before_conflict_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let existing = recovery_entry();
+        append_event_to_segments(
+            dir.path(),
+            &CoordinationEvent::MessageAppended {
+                entry: existing.clone(),
+            },
+            EVENT_SEGMENT_MAX_BYTES,
+        )
+        .unwrap();
+        load_snapshot(dir.path()).unwrap();
+
+        let mut legacy = recovery_entry();
+        legacy.id = "unrelated-late-legacy-conflict".to_string();
+        legacy.body = "late legacy payload before conflict".to_string();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: legacy.clone(),
+            }],
+        );
+        let mut attempted = existing.clone();
+        attempted.body = "different payload".to_string();
+
+        let error = post_entry_exact(dir.path(), attempted).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoardExactAppendError::Conflict(BoardExactAppendConflict {
+                kind: BoardExactAppendConflictKind::PayloadMismatch,
+                ..
+            })
+        ));
+        let repaired_projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(repaired_projection.total_entries, 2);
+        assert_eq!(
+            repaired_projection
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![existing.id.as_str(), legacy.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn exact_post_scans_identity_across_all_event_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        append_event_to_segments(
+            dir.path(),
+            &CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            },
+            128,
+        )
+        .unwrap();
+        for idx in 0..3 {
+            let mut filler = recovery_entry();
+            filler.id = format!("filler-{idx}");
+            filler.body = format!("filler-{idx}-{}", "x".repeat(256));
+            append_event_to_segments(
+                dir.path(),
+                &CoordinationEvent::MessageAppended { entry: filler },
+                128,
+            )
+            .unwrap();
+        }
+        assert!(load_event_manifest(dir.path()).unwrap().segments.len() > 1);
+
+        let receipt = post_entry_exact(dir.path(), entry).unwrap();
+
+        assert_eq!(receipt.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 4);
+    }
+
+    #[test]
+    fn concurrent_exact_retries_append_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(dir.path().to_path_buf());
+        let entry = Arc::new(recovery_entry());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let root = Arc::clone(&root);
+            let entry = Arc::clone(&entry);
+            handles.push(thread::spawn(move || {
+                post_entry_exact(root.as_path(), (*entry).clone()).unwrap()
+            }));
+        }
+
+        let receipts = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| { receipt.disposition == BoardExactAppendDisposition::Appended })
+                .count(),
+            1
+        );
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| { receipt.disposition == BoardExactAppendDisposition::Replayed })
+                .count(),
+            7
+        );
+        assert_eq!(
+            load_event_manifest(root.as_path()).unwrap().total_entries(),
+            1
+        );
     }
 
     #[test]
@@ -2403,6 +3125,28 @@ mod tests {
     }
 
     #[test]
+    fn local_provider_advertises_and_delegates_exact_recovery_append() {
+        let provider = LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+
+        assert_eq!(
+            provider.recovery_capability(),
+            BoardRecoveryCapability::ExactAcknowledgement
+        );
+        let appended = provider
+            .post_recovery_entry_exact(dir.path(), entry.clone())
+            .unwrap();
+        let replayed = provider
+            .post_recovery_entry_exact(dir.path(), entry)
+            .unwrap();
+
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
     fn post_entry_outcome_reports_commit_when_projection_refresh_fails() {
         let dir = tempfile::tempdir().unwrap();
         load_snapshot(dir.path()).unwrap();
@@ -2474,6 +3218,65 @@ mod tests {
         assert_eq!(repaired.board.entries.len(), 1);
         assert_eq!(repaired.board.entries[0].id, entry_id);
         assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_receipt_preserves_commit_when_manifest_refresh_fails_after_event_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        fail_next_event_manifest_write();
+
+        let appended = post_entry_exact(dir.path(), entry.clone())
+            .expect("fsynced exact event must return a committed receipt");
+
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert!(appended
+            .refresh_error
+            .as_deref()
+            .is_some_and(|error| error.contains("manifest")));
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        let repaired_projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(repaired_projection.entries.len(), 1);
+        assert_eq!(repaired_projection.total_entries, 1);
+    }
+
+    #[test]
+    fn exact_post_receipt_preserves_commit_when_projection_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let projection_path = coordination_board_projection_path(dir.path());
+        std::fs::remove_file(&projection_path).unwrap();
+        std::fs::create_dir(&projection_path).unwrap();
+        let entry = recovery_entry();
+
+        let appended = post_entry_exact(dir.path(), entry.clone())
+            .expect("projection refresh failure must not hide the committed append");
+
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert!(appended.refresh_error.is_some());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+
+        let replayed_while_blocked = post_entry_exact(dir.path(), entry.clone()).unwrap();
+        assert_eq!(
+            replayed_while_blocked.disposition,
+            BoardExactAppendDisposition::Replayed
+        );
+        assert!(replayed_while_blocked.refresh_error.is_some());
+
+        std::fs::remove_dir(&projection_path).unwrap();
+
+        let replayed = post_entry_exact(dir.path(), entry.clone()).unwrap();
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(replayed.refresh_error.is_none());
+        let repaired_projection: BoardProjection = load_json_or_default(&projection_path).unwrap();
+        assert_eq!(repaired_projection.entries.len(), 1);
+        assert_eq!(repaired_projection.entries[0].id, entry.id);
     }
 
     #[test]
