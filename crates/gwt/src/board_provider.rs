@@ -24,6 +24,7 @@ use gwt_core::coordination::{
     BoardProvider, CoordinationSnapshot, LocalProvider,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
+use gwt_core::recovery::RecoveryProvider;
 use gwt_core::{GwtError, Result};
 
 use crate::board_remote::http::ReqwestHttpClient;
@@ -304,25 +305,45 @@ fn build_remote_for(
 /// `.gwt/work/board.toml` overlaid on the global settings (SPEC-2963 FR-026).
 /// Each repo gets its own provider scoped to its own channel, so Board posts and
 /// reads never mix across projects. `local` stays on the zero-cost fast path.
-pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
+fn resolved_provider_for(worktree_root: &Path) -> (BoardProviderKind, Box<dyn BoardProvider>) {
     let project = ProjectBoardConfig::load_from_work_dir(&gwt_repo_local_work_dir(worktree_root));
     let global_kind = current_kind();
     // Fast path: no project override and global is local → zero-cost local,
     // identical to the pre-per-project behaviour (avoids loading Settings).
     if project.is_empty() && global_kind == BoardProviderKind::Local {
-        return Box::new(LocalProvider);
+        return (BoardProviderKind::Local, Box::new(LocalProvider));
     }
     let settings = Settings::load().unwrap_or_default();
     let resolved = resolve_board(&project, &settings, global_kind);
-    match resolved.kind {
-        BoardProviderKind::Local => Box::new(LocalProvider),
+    let provider = match resolved.kind {
+        BoardProviderKind::Local => Box::new(LocalProvider) as Box<dyn BoardProvider>,
         BoardProviderKind::Slack => {
             build_remote_for("slack", &resolved).unwrap_or_else(UnconfiguredProvider::boxed)
         }
         BoardProviderKind::Teams => {
             build_remote_for("teams", &resolved).unwrap_or_else(UnconfiguredProvider::boxed)
         }
-    }
+    };
+    (resolved.kind, provider)
+}
+
+pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
+    resolved_provider_for(worktree_root).1
+}
+
+/// Capture the configured provider and its recovery capability route once.
+/// The delivery coordinator performs capability preflight on this exact
+/// provider instance before deriving Session authority or opening a Store.
+pub(crate) fn recovery_route_for(
+    worktree_root: &Path,
+) -> crate::recovery_delivery::RecoveryDeliveryRoute {
+    let (kind, provider) = resolved_provider_for(worktree_root);
+    let provider_kind = match kind {
+        BoardProviderKind::Local => RecoveryProvider::Local,
+        BoardProviderKind::Slack => RecoveryProvider::Slack,
+        BoardProviderKind::Teams => RecoveryProvider::Teams,
+    };
+    crate::recovery_delivery::RecoveryDeliveryRoute::new(provider_kind, provider)
 }
 
 /// A JSON/human-facing view of how a repo's Board routes (SPEC-2963 FR-026).
@@ -517,6 +538,137 @@ pub fn load_entries_before_for_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::coordination::{AuthorKind, BoardExactAppendError, BoardRecoveryCapability};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct CountingHttp(Arc<AtomicUsize>);
+
+    impl crate::board_remote::slack::HttpClient for CountingHttp {
+        fn get(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &str)],
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP GET".to_string())
+        }
+
+        fn post_form(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &str)],
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP POST".to_string())
+        }
+
+        fn post_json(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP POST".to_string())
+        }
+
+        fn patch_json(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP PATCH".to_string())
+        }
+    }
+
+    fn recovery_probe_entry() -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "recovery probe",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn slack_and_teams_recovery_api_is_unsupported_before_http_or_local_mutation() {
+        let slack_http_calls = Arc::new(AtomicUsize::new(0));
+        let teams_http_calls = Arc::new(AtomicUsize::new(0));
+        for (provider_name, http_calls, provider) in [
+            (
+                "slack",
+                slack_http_calls.clone(),
+                Box::new(SlackProvider::new(
+                    "token",
+                    "channel",
+                    BTreeMap::new(),
+                    Box::new(CountingHttp(slack_http_calls)),
+                    60,
+                )) as Box<dyn BoardProvider>,
+            ),
+            (
+                "teams",
+                teams_http_calls.clone(),
+                Box::new(TeamsProvider::new(
+                    "token",
+                    "team/channel",
+                    BTreeMap::new(),
+                    Box::new(CountingHttp(teams_http_calls)),
+                    60,
+                )) as Box<dyn BoardProvider>,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            assert_eq!(
+                provider.recovery_capability(),
+                BoardRecoveryCapability::Unsupported
+            );
+            assert!(matches!(
+                provider.post_recovery_entry_exact(temp.path(), recovery_probe_entry()),
+                Err(BoardExactAppendError::Unsupported)
+            ));
+            assert!(
+                !gwt_core::coordination::coordination_events_path(temp.path()).exists(),
+                "unsupported remote recovery must not fall back to Local Board"
+            );
+            assert!(
+                !gwt_core::paths::gwt_board_remote_roots_path(temp.path()).exists(),
+                "unsupported remote recovery must not create thread-root mappings"
+            );
+            assert_eq!(
+                http_calls.load(Ordering::SeqCst),
+                0,
+                "unsupported {provider_name} recovery must perform zero HTTP calls"
+            );
+        }
+    }
+
+    #[test]
+    fn unconfigured_recovery_api_is_unsupported_before_any_board_mutation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let provider = UnconfiguredProvider::boxed("not configured");
+        assert_eq!(
+            provider.recovery_capability(),
+            BoardRecoveryCapability::Unsupported
+        );
+        assert!(matches!(
+            provider.post_recovery_entry_exact(temp.path(), recovery_probe_entry()),
+            Err(BoardExactAppendError::Unsupported)
+        ));
+        assert!(!gwt_core::coordination::coordination_events_path(temp.path()).exists());
+        assert!(!gwt_core::paths::gwt_board_remote_roots_path(temp.path()).exists());
+    }
 
     #[test]
     fn build_remote_local_reads_empty_board() {

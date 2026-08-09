@@ -42,6 +42,7 @@ pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
+pub mod recovery_delivery;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
@@ -51,6 +52,9 @@ pub mod window_state;
 pub mod work_notes;
 pub mod worktree_form;
 pub mod worktree_inventory;
+
+#[cfg(test)]
+mod recovery_delivery_tests;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {

@@ -31,6 +31,12 @@ pub enum BoardCommand {
     /// fields such as `params.targets`, `params.mentions`, and
     /// `params.broadcast`.
     Post(Box<BoardPostCommand>),
+    /// `board.post` with an explicit stable `intent_id`. This selects the
+    /// durable exact-delivery path without changing ordinary post semantics.
+    RecoveryPost {
+        intent_id: String,
+        command: Box<BoardPostCommand>,
+    },
     /// `board.config.show` — print this repo's resolved Board routing (provider /
     /// channel / tenant) so per-project separation can be confirmed by running
     /// it in two repos and seeing two different channels (SPEC-2963 FR-026).
@@ -241,6 +247,57 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
+        BoardCommand::RecoveryPost { intent_id, command } => {
+            let BoardPostCommand {
+                kind,
+                body,
+                file,
+                title,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+                broadcast,
+            } = *command;
+            let body = match (body, file) {
+                (Some(body), None) => body,
+                (None, Some(file)) => env.read_file(&file).map_err(io_as_spec_ops_error)?,
+                _ => {
+                    return Err(io_as_spec_ops_error(io::Error::other(
+                        "board post requires exactly one of --body or -f",
+                    )));
+                }
+            };
+            let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
+            let mentions = normalize_board_mentions(
+                &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
+            );
+            let input = crate::recovery_delivery::RecoveryDeliveryInput {
+                kind: kind.parse().map_err(gwt_error_to_spec_ops_error)?,
+                body,
+                title,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+                workspace_audience,
+                broadcast,
+            };
+            let report = crate::recovery_delivery::deliver_board_recovery(
+                env.repo_path(),
+                &intent_id,
+                input,
+            );
+            let rendered = serde_json::to_string(&report)
+                .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+            out.push_str(&rendered);
+            out.push('\n');
+            0
+        }
         BoardCommand::ConfigShow => {
             let routing = routing_for(env.repo_path());
             let rendered = serde_json::to_string_pretty(&routing)
@@ -302,6 +359,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut targets = Vec::new();
     let mut mentions = Vec::new();
     let mut broadcast = false;
+    let mut intent_id: Option<String> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -379,6 +437,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
             "--broadcast" => {
                 broadcast = true;
             }
+            "--intent-id" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--intent-id"));
+                }
+                intent_id = Some(args[i].clone());
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -387,7 +452,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         super::validate_title_summary_work_name("--title-summary", value)?;
     }
 
-    Ok(BoardCommand::Post(Box::new(BoardPostCommand {
+    let command = Box::new(BoardPostCommand {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
@@ -399,7 +464,11 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         targets,
         mentions,
         broadcast,
-    })))
+    });
+    Ok(match intent_id {
+        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        None => BoardCommand::Post(command),
+    })
 }
 
 fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
@@ -1969,5 +2038,34 @@ mod tests {
             !out.contains("Codex @ work/readable-board / sess-readable: Current state"),
             "body must not be collapsed into the header, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn board_family_parse_intent_id_selects_recovery_without_changing_normal_post() {
+        let normal = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("normal"),
+        ])
+        .expect("normal board post");
+        assert!(matches!(normal, BoardCommand::Post(_)));
+
+        let recovery = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("recover"),
+            s("--intent-id"),
+            s("stable-intent-1"),
+        ])
+        .expect("recovery board post");
+        let BoardCommand::RecoveryPost { intent_id, command } = recovery else {
+            panic!("--intent-id must select the recovery route");
+        };
+        assert_eq!(intent_id, "stable-intent-1");
+        assert_eq!(command.body.as_deref(), Some("recover"));
     }
 }

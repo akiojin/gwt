@@ -577,21 +577,41 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
         "title_summary",
         "board.post must not update agent title_summary",
     )?;
-    Ok(CliCommand::Board(BoardCommand::Post(Box::new(
-        BoardPostCommand {
-            kind: required_string(params, "kind")?,
-            body: Some(required_string(params, "body")?),
-            file: None,
-            title: optional_string(params, "title")?,
-            title_summary: None,
-            parent: optional_string(params, "parent")?,
-            topics: optional_string_vec(params, "topics")?,
-            owners: optional_string_vec(params, "owners")?,
-            targets: optional_string_vec(params, "targets")?,
-            mentions: optional_string_vec(params, "mentions")?,
-            broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
-        },
-    ))))
+    for key in [
+        "session_id",
+        "project_id",
+        "provider",
+        "worktree_form",
+        "recovery_id",
+        "entry_id",
+        "payload_digest",
+        "provider_receipt",
+        "operation_id",
+    ] {
+        reject_key(
+            params,
+            key,
+            "untrusted recovery identity field is not accepted by public board.post",
+        )?;
+    }
+    let intent_id = optional_string(params, "intent_id")?;
+    let command = Box::new(BoardPostCommand {
+        kind: required_string(params, "kind")?,
+        body: Some(required_string(params, "body")?),
+        file: None,
+        title: optional_string(params, "title")?,
+        title_summary: None,
+        parent: optional_string(params, "parent")?,
+        topics: optional_string_vec(params, "topics")?,
+        owners: optional_string_vec(params, "owners")?,
+        targets: optional_string_vec(params, "targets")?,
+        mentions: optional_string_vec(params, "mentions")?,
+        broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
+    });
+    Ok(CliCommand::Board(match intent_id {
+        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        None => BoardCommand::Post(command),
+    }))
 }
 
 fn improvement_capture(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1310,7 +1330,7 @@ mod tests {
         IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
         WorkflowCommand, WorkspaceCommand,
     };
-    use crate::cli::IssueMonitorPriorityPosition;
+    use crate::cli::{BoardCommand, IssueMonitorPriorityPosition};
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -2154,6 +2174,58 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn board_post_intent_id_selects_recovery_and_normal_shape_stays_normal() {
+        let normal = ok("board.post", json!({"kind": "status", "body": "normal"}));
+        assert!(matches!(normal, CliCommand::Board(BoardCommand::Post(_))));
+
+        let recovery = ok(
+            "board.post",
+            json!({
+                "kind": "status",
+                "body": "recover",
+                "intent_id": "stable-intent-1"
+            }),
+        );
+        assert!(matches!(
+            recovery,
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                ref intent_id,
+                ..
+            }) if intent_id == "stable-intent-1"
+        ));
+    }
+
+    #[test]
+    fn board_post_rejects_untrusted_recovery_identity_fields() {
+        for intent_id in [None, Some("stable-intent-1")] {
+            for key in [
+                "session_id",
+                "project_id",
+                "provider",
+                "worktree_form",
+                "recovery_id",
+                "entry_id",
+                "payload_digest",
+                "provider_receipt",
+                "operation_id",
+            ] {
+                let mut params = serde_json::Map::from_iter([
+                    ("kind".to_string(), json!("status")),
+                    ("body".to_string(), json!("recover")),
+                ]);
+                if let Some(intent_id) = intent_id {
+                    params.insert("intent_id".to_string(), json!(intent_id));
+                }
+                params.insert(key.to_string(), json!("untrusted"));
+                assert!(matches!(
+                    err("board.post", Value::Object(params)),
+                    CliParseError::InvalidValue { .. }
+                ));
+            }
+        }
     }
 
     #[test]
