@@ -189,6 +189,10 @@ root_js_modules! {
     "launch-wizard-surface.js" => "createLaunchWizardSurface",
     // SPEC-3165 — Issue auto-improve monitor card, inbox, and toast surface.
     "issue-monitor-surface.js" => "createIssueMonitorSurface",
+    // SPEC-3431 FR-026 — PM settings panel anchored to the rail launcher.
+    // app.js imports this at module top level, so the asset MUST be registered
+    // or the ES module load 404s and the splash hangs.
+    "pm-settings-panel.js" => "createPmSettingsPanel",
     // SPEC #3200 FR-034/FR-035 — autonomous Issue Monitor scrollable side-toast
     // notification stack. app.js imports this at module top level, so the asset
     // MUST be registered or the ES module load fails and the splash hangs.

@@ -39,6 +39,9 @@ export function windowWorktreeForm(windowData) {
 }
 
 export function shouldShowWindowWorktreeBadge(windowData) {
+  // SPEC-3431 FR-020: the resident PM is not a worker whose worktree form
+  // needs to compete with its PM identity in the shared window chrome.
+  if (windowData?.is_pm) return false;
   const preset = String(windowData?.preset || "").toLowerCase();
   return Boolean(
     windowData?.agent_id ||

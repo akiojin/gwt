@@ -383,6 +383,7 @@ impl WindowCanvasState {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -1270,6 +1271,7 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                is_pm: false,
             }],
             next_z_index: 2,
         });

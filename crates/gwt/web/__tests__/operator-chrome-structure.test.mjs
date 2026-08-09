@@ -645,6 +645,11 @@ test("workspace windows expose semantic worktree badges separately from agent co
 test("old lane identity vocabulary is absent from production presentation wiring", () => {
   const consumerSource = `${appSource}\n${projectShellSurfaceSource}\n${fleetMinimapSource}`;
   const presentationSource = `${consumerSource}\n${frontendStyle}`;
+  assert.equal(
+    existsSync(resolve(here, "../window-lane-identity.js")),
+    false,
+    "the retired lane identity module must not return during base merges",
+  );
   assert.doesNotMatch(
     consumerSource,
     /window-lane-identity|WindowLane|windowLane|cellLane|lane_kind|laneKind/,
@@ -5238,13 +5243,19 @@ test("titlebar click focuses on single click and only frames on double click", (
 });
 
 test("body and terminal single click focus the window without moving the camera", () => {
-  // focusWindowRemotely without {center:true} sends focus_window WITHOUT bounds
-  // (camera unchanged); the body/terminal mousedown handlers use that path.
+  // focusWindowRemotely is highlight + z-order only and never moves the
+  // camera; the body/terminal mousedown handlers use that path.
+  //
+  // It used to take a `{center}` option that attached `bounds` so the backend
+  // would compute a viewport. That viewport never arrived: viewport-sync
+  // adopts a server viewport once per scope and discards the rest (SPEC-2008
+  // FR-095, per-viewer camera), so the option was dead and three affordances
+  // silently did nothing. Camera moves now go through `requestWindowFrame`.
   const focusRemoteBody = extractFunctionBody(appSource, "focusWindowRemotely");
-  assert.match(
+  assert.doesNotMatch(
     focusRemoteBody,
-    /if\s*\(\s*center\s*\)\s*payload\.bounds\s*=\s*visibleBounds\(\)/,
-    "focusWindowRemotely must only attach bounds when explicitly centering",
+    /bounds/,
+    "focusWindowRemotely must never attach bounds",
   );
   // The non-terminal body click and terminal-root / overlay click all focus
   // only (no center → no camera move). Pinned as source patterns since these
