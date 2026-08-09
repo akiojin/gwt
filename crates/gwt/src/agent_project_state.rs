@@ -52,6 +52,28 @@ pub struct AgentExecutionContinuationReceipt {
     pub validated: bool,
 }
 
+/// Side-effect-free snapshot used by the desktop startup restore admission
+/// path. This is an internal cross-crate seam between the gwt library and its
+/// GUI binary, not a wire-protocol variant.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentExecutionContinuationPreflightState {
+    CurrentBound,
+    Recoverable,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExecutionContinuationPreflight {
+    pub owner_kind: crate::cli::execution_state::ExecutionOwnerKind,
+    pub owner_number: u64,
+    pub current_generation_id: String,
+    pub repository_target: String,
+    pub target_state: String,
+    pub state: AgentExecutionContinuationPreflightState,
+    pub active_binding: Option<SessionExecutionBinding>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionBindingProbeRequest {
@@ -608,6 +630,95 @@ fn evaluate_authenticated_execution_continuation(
         exact_unbound,
         current_binding,
     })
+}
+
+/// Evaluate startup Resume authority without changing the Session, execution
+/// ledger, Work projection, or process state. The mutating continuation
+/// coordinator remains the only writer after this snapshot is revalidated at
+/// the launch chokepoint.
+#[doc(hidden)]
+pub fn preflight_resume_producing_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+) -> std::result::Result<AgentExecutionContinuationPreflight, AgentWorkspaceUpdateError> {
+    let authority = evaluate_authenticated_execution_continuation(
+        authenticated_project_root,
+        authenticated_session_id,
+    )?;
+    if authority.record.status == crate::cli::execution_state::ExecutionControlStatus::Blocked {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            "blocked execution requires recovery before startup restore",
+        ));
+    }
+    let current_bound = authority.record.status
+        == crate::cli::execution_state::ExecutionControlStatus::Active
+        && authority.record.primary_session_id == authority.session.id
+        && authority.session.linked_issue_number == Some(authority.owner.number)
+        && authority
+            .session
+            .execution_binding
+            .as_ref()
+            .is_some_and(|binding| binding.identity == authority.current_binding);
+    let active_binding = current_bound
+        .then(|| authority.session.execution_binding.clone())
+        .flatten();
+    Ok(AgentExecutionContinuationPreflight {
+        owner_kind: authority.owner.kind,
+        owner_number: authority.owner.number,
+        current_generation_id: authority.current_binding.generation_id,
+        repository_target: authority.session.repo_hash.unwrap_or_default(),
+        target_state: format!("{:?}", authority.record.status).to_ascii_lowercase(),
+        state: if current_bound {
+            AgentExecutionContinuationPreflightState::CurrentBound
+        } else {
+            AgentExecutionContinuationPreflightState::Recoverable
+        },
+        active_binding,
+    })
+}
+
+/// Revalidate the absence snapshot used by a legacy/unowned startup restore.
+/// This is intentionally read-only: if owner authority appears after queueing,
+/// background startup must pause and leave adoption to an explicit Continue.
+#[doc(hidden)]
+pub fn validate_unowned_resume_authority(
+    authenticated_project_root: &Path,
+    authenticated_session_id: &str,
+) -> std::result::Result<(), AgentWorkspaceUpdateError> {
+    let session = load_session_for_mutation(authenticated_session_id).map_err(|_| {
+        AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            "durable Session metadata is unavailable; relaunch before restoring",
+        )
+    })?;
+    let principal_root =
+        canonicalize_mutation_path(authenticated_project_root, "authenticated project")
+            .map_err(|_| execution_binding_error("startup_unowned_project_invalid"))?;
+    let project_state_root = strict_project_state_root(&session)
+        .and_then(|root| canonicalize_mutation_path(&root, "canonical repository"))
+        .map_err(|_| execution_binding_error("startup_unowned_project_invalid"))?;
+    if session.id != authenticated_session_id || principal_root != project_state_root {
+        return Err(execution_binding_error(
+            "startup_unowned_principal_mismatch",
+        ));
+    }
+    let worktree = canonicalize_mutation_path(&session.worktree_path, "worktree")
+        .map_err(|_| execution_binding_error("startup_unowned_worktree_invalid"))?;
+    if session.linked_issue_number.is_some() || session.execution_binding.is_some() {
+        return Err(execution_binding_error(
+            "startup_unowned_session_became_owned",
+        ));
+    }
+    if crate::cli::execution_state::load(&worktree)
+        .map_err(|_| execution_binding_error("startup_unowned_record_unreadable"))?
+        .is_some()
+    {
+        return Err(execution_binding_error(
+            "startup_unowned_authority_appeared",
+        ));
+    }
+    Ok(())
 }
 
 /// Side-effect-free prerequisite evaluator shared by diagnosis and execution.
@@ -4150,6 +4261,40 @@ mod tests {
     fn execution_continuation_rebinds_current_generation_after_host_restart() {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: binding.owner_number,
+            };
+            let session_path =
+                gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+            let session_before_preflight =
+                std::fs::read(&session_path).expect("read active Session before preflight");
+            let ledger_before_preflight =
+                crate::cli::execution_state::load_generation_ledger(repo, owner)
+                    .expect("read active ledger before preflight");
+            let preflight = preflight_resume_producing_authority(repo, &session.id)
+                .expect("current-bound startup preflight");
+            assert_eq!(
+                preflight.state,
+                AgentExecutionContinuationPreflightState::CurrentBound
+            );
+            assert_eq!(preflight.owner_number, binding.owner_number);
+            assert_eq!(
+                preflight.current_generation_id,
+                binding.identity.generation_id
+            );
+            assert_eq!(preflight.active_binding.as_ref(), Some(&binding));
+            assert_eq!(
+                std::fs::read(&session_path).expect("read active Session after preflight"),
+                session_before_preflight,
+                "startup preflight must preserve active Session bytes"
+            );
+            assert_eq!(
+                crate::cli::execution_state::load_generation_ledger(repo, owner)
+                    .expect("read active ledger after preflight"),
+                ledger_before_preflight,
+                "startup preflight must preserve owner authority"
+            );
 
             let request = AgentExecutionContinuationRequest {
                 schema_version: AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
@@ -4182,10 +4327,6 @@ mod tests {
                 Some(session.id.as_str())
             );
             assert!(continuation.validated);
-            let owner = crate::cli::execution_state::ExecutionOwnerKey {
-                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
-                number: 2359,
-            };
             assert_eq!(
                 crate::cli::execution_state::load_generation_ledger(repo, owner)
                     .unwrap()
@@ -5542,6 +5683,18 @@ mod tests {
             let ledger_before_probe =
                 crate::cli::execution_state::load_generation_ledger(repo, owner)
                     .expect("read ledger before probe");
+            let startup_preflight = preflight_resume_producing_authority(repo, &session.id)
+                .expect("exact-unbound startup preflight");
+            assert_eq!(
+                startup_preflight.state,
+                AgentExecutionContinuationPreflightState::Recoverable
+            );
+            assert_eq!(startup_preflight.owner_number, owner.number);
+            assert_eq!(
+                startup_preflight.current_generation_id,
+                predecessor.generation_id
+            );
+            assert_eq!(startup_preflight.active_binding, None);
             let probe = probe_authenticated_execution_continuation(repo, &session.id);
             assert_eq!(
                 probe.state,

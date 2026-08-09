@@ -273,6 +273,15 @@ pub(crate) struct PendingStartupAutoResumeSession {
     pub(crate) tab_id: String,
     pub(crate) session: gwt_agent::Session,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) startup_restore: StartupRestoreLaunch,
+    pub(crate) auto_resume: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StartupRestoreLaunch {
+    pub(crate) source_session_id: String,
+    pub(crate) authority_preflight: Option<gwt::AgentExecutionContinuationPreflight>,
+    pub(crate) placeholder_raw_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -48,8 +48,8 @@ use super::{
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
     AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
-    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    PendingContinueWork, PendingFreshExecutionLaunch, StartupRestoreLaunch, UserEvent,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 #[cfg(test)]
@@ -670,6 +670,56 @@ fn existing_generation_conflict_detail(
     )
 }
 
+fn install_active_resume_binding(
+    session: &mut gwt_agent::Session,
+    launch_linked_issue_number: &mut Option<u64>,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> Result<(), String> {
+    if session
+        .linked_issue_number
+        .is_some_and(|owner_number| owner_number != binding.owner_number)
+    {
+        return Err(
+            "Authenticated Resume owner does not match the linked Session owner".to_string(),
+        );
+    }
+    session.id = binding.session_id.clone();
+    // The Session binding validator requires the trusted linked owner. Install
+    // it first instead of trusting an optional launch-wizard projection.
+    session.linked_issue_number = Some(binding.owner_number);
+    session.set_execution_binding(Some(binding.clone()))?;
+    // Exact-unbound Resume starts from a stale launch config with no owner.
+    // Keep the launch-complete projection aligned with the authenticated
+    // binding so it cannot clear the newly restored Issue/Work linkage.
+    *launch_linked_issue_number = Some(binding.owner_number);
+    Ok(())
+}
+
+fn revalidate_startup_restore_authority(
+    project_root: &Path,
+    predecessor_session_id: Option<&str>,
+    expected: &gwt::AgentExecutionContinuationPreflight,
+) -> Result<(), String> {
+    let predecessor_session_id = predecessor_session_id
+        .ok_or_else(|| "Startup restore lost its predecessor Session identity".to_string())?;
+    let actual = gwt::preflight_resume_producing_authority(project_root, predecessor_session_id)
+        .map_err(|error| format!("Startup restore authority is unavailable: {error}"))?;
+    if &actual != expected {
+        return Err("Startup restore authority changed before launch admission".to_string());
+    }
+    Ok(())
+}
+
+fn revalidate_unowned_startup_restore_authority(
+    project_root: &Path,
+    predecessor_session_id: Option<&str>,
+) -> Result<(), String> {
+    let predecessor_session_id = predecessor_session_id
+        .ok_or_else(|| "Startup restore lost its predecessor Session identity".to_string())?;
+    gwt::validate_unowned_resume_authority(project_root, predecessor_session_id)
+        .map_err(|error| format!("Startup restore authority changed after queueing: {error}"))
+}
+
 struct FinalizedAgentCapabilityLaunch<'a> {
     issuer: Option<&'a AgentCapabilityIssuer>,
     sessions_dir: &'a Path,
@@ -678,9 +728,9 @@ struct FinalizedAgentCapabilityLaunch<'a> {
     worktree: &'a Path,
     producing_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     prepared_continuation: Option<&'a gwt_agent::SessionExecutionBinding>,
-    /// Issue #3423: a `ReboundCurrent` continuation re-validated the current
-    /// generation for the predecessor Session. It carries no Prepared attempt,
-    /// so it installs as Active authority instead of the Prepared path.
+    /// SPEC-3393 FR-026: authenticated Resume recovery returns an already
+    /// activated binding for both `ReboundCurrent` and `SuccessorCreated`.
+    /// Neither outcome may re-enter the genuinely-Prepared launch path.
     rebound_continuation: Option<&'a gwt_agent::SessionExecutionBinding>,
     execution_entrypoint: &'a str,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
@@ -771,14 +821,12 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             );
         }
         if let Some(binding) = rebound_continuation {
-            // Issue #3423: the continuation coordinator re-validated and
-            // persisted this binding for the predecessor Session
-            // (`ReboundCurrent`). There is no Prepared attempt to activate —
-            // re-check the binding against the live owner ledger and issue
-            // Active authority for the in-place relaunch.
+            // The continuation coordinator already activated and persisted
+            // this binding. Re-check it against the live owner ledger and
+            // issue Active authority for the in-place relaunch.
             if producing_owner.is_some() {
                 return Err(
-                    "Rebound continuation cannot enter the genesis execution launch path"
+                    "Active continuation cannot enter the genesis execution launch path"
                         .to_string(),
                 );
             }
@@ -797,13 +845,13 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 != Some(&binding.identity)
             {
                 return Err(
-                    "Rebound continuation no longer matches the current execution generation"
+                    "Active continuation no longer matches the current execution generation"
                         .to_string(),
                 );
             }
             if session.execution_binding.as_ref() != Some(binding) {
                 return Err(
-                    "Rebound continuation Session binding changed before capability issuance"
+                    "Active continuation Session binding changed before capability issuance"
                         .to_string(),
                 );
             }
@@ -1435,6 +1483,13 @@ struct AgentWindowSpawnOptions {
     launch_feedback_context: Option<LaunchFeedbackContext>,
     agent_kanban_target: Option<AgentKanbanLaunchTarget>,
     continuation: Option<PendingContinueWork>,
+    startup_restore: Option<StartupRestoreLaunch>,
+}
+
+struct AgentWindowAsyncLaunch {
+    config: gwt_agent::LaunchConfig,
+    is_startup_restore: bool,
+    startup_authority_preflight: Option<gwt::AgentExecutionContinuationPreflight>,
 }
 
 #[derive(Debug, Clone)]
@@ -2013,7 +2068,8 @@ impl AppRuntime {
         let is_continue_work = self.pending_continue_work.contains_key(&window_id);
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
-        let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        let auto_resume_source_session_id =
+            self.pending_auto_resume_sources.get(&window_id).cloned();
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -2229,9 +2285,6 @@ impl AppRuntime {
                         .workspace
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
                 }
-                if let Some(source_session_id) = auto_resume_source_session_id {
-                    mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
-                }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
                 // SPEC-2809 — Launch Wizard always spawns an AI agent
@@ -2440,6 +2493,20 @@ impl AppRuntime {
                                 );
                             }
                         }
+                        // Startup restore is not committed at PTY creation:
+                        // Work/Issue projection can still reject the resumed
+                        // launch. Retain the source and failure routing until
+                        // every fallible launch-readiness publication above
+                        // has succeeded.
+                        self.pending_auto_resume_sources.remove(&window_id);
+                        if let Some(source_session_id) = auto_resume_source_session_id.as_deref() {
+                            if source_session_id != session_id_for_restore {
+                                mark_auto_resume_source_completed(
+                                    &self.sessions_dir,
+                                    source_session_id,
+                                );
+                            }
+                        }
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
@@ -2536,6 +2603,9 @@ impl AppRuntime {
         detail: String,
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
+        if let Some(events) = self.startup_restore_failed_events(&window_id, &detail) {
+            return events;
+        }
         // Activation is the irreversible continuation commit. Reconcile its
         // exact durable/live state before the generic launch-error path can
         // tear down the pane, Session, or capability needed for readback and
@@ -2815,6 +2885,7 @@ impl AppRuntime {
                 launch_feedback_context: None,
                 agent_kanban_target: None,
                 continuation: None,
+                startup_restore: None,
             },
         )
     }
@@ -2836,6 +2907,7 @@ impl AppRuntime {
                 launch_feedback_context: Some(launch_feedback_context),
                 agent_kanban_target: None,
                 continuation: None,
+                startup_restore: None,
             },
         )
     }
@@ -2857,6 +2929,7 @@ impl AppRuntime {
                 launch_feedback_context: Some(launch_feedback_context),
                 agent_kanban_target: None,
                 continuation: None,
+                startup_restore: None,
             },
         )
     }
@@ -2879,6 +2952,7 @@ impl AppRuntime {
                 launch_feedback_context,
                 agent_kanban_target: Some(target),
                 continuation: None,
+                startup_restore: None,
             },
         )
     }
@@ -2889,6 +2963,7 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
+        startup_restore: Option<StartupRestoreLaunch>,
     ) -> Result<Vec<OutboundEvent>, String> {
         self.spawn_agent_window_with_placement(
             tab_id,
@@ -2899,6 +2974,7 @@ impl AppRuntime {
                 launch_feedback_context: None,
                 agent_kanban_target: None,
                 continuation: None,
+                startup_restore,
             },
         )
     }
@@ -2920,6 +2996,7 @@ impl AppRuntime {
                 launch_feedback_context: None,
                 agent_kanban_target: None,
                 continuation: Some(continuation),
+                startup_restore: None,
             },
         )
     }
@@ -2981,6 +3058,7 @@ impl AppRuntime {
             launch_feedback_context,
             agent_kanban_target,
             continuation,
+            startup_restore,
         } = options;
         // SPEC #3200 FR-052: a durable Issue Monitor delivery must always
         // materialize its own window so the delivery tuple can be ACKed.
@@ -3068,51 +3146,80 @@ impl AppRuntime {
                     &issue_link_cache_dir,
                 )
             });
-        let window = match placement {
-            AgentWindowPlacement::Centered(bounds) => {
-                tab.workspace
-                    .add_window_with_title(WindowPreset::Agent, title, true, bounds)
-            }
-            AgentWindowPlacement::Exact(geometry) => tab
+        let reuses_startup_placeholder = startup_restore
+            .as_ref()
+            .and_then(|restore| restore.placeholder_raw_id.as_deref())
+            .is_some();
+        let window = if let Some(raw_id) = startup_restore
+            .as_ref()
+            .and_then(|restore| restore.placeholder_raw_id.as_deref())
+        {
+            let window = tab
                 .workspace
-                .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
-        };
-        if let Some(purpose_title) = purpose_title {
+                .window(raw_id)
+                .cloned()
+                .ok_or_else(|| "Startup restore placeholder disappeared".to_string())?;
+            if window.status != WindowProcessStatus::Stopped
+                || window.session_id.as_deref()
+                    != startup_restore
+                        .as_ref()
+                        .map(|restore| restore.source_session_id.as_str())
+            {
+                return Err("Startup restore placeholder identity changed".to_string());
+            }
+            window
+        } else {
+            let window = match placement {
+                AgentWindowPlacement::Centered(bounds) => {
+                    tab.workspace
+                        .add_window_with_title(WindowPreset::Agent, title, true, bounds)
+                }
+                AgentWindowPlacement::Exact(geometry) => tab
+                    .workspace
+                    .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
+            };
+            if let Some(purpose_title) = purpose_title {
+                let _ = tab
+                    .workspace
+                    .set_purpose_title(&window.id, Some(purpose_title));
+            }
             let _ = tab
                 .workspace
-                .set_purpose_title(&window.id, Some(purpose_title));
-        }
-        let _ = tab
-            .workspace
-            .set_agent_id(&window.id, config.agent_id.command().to_string());
-        if let Some(target) = agent_kanban_target.as_ref() {
-            let _ = tab.workspace.place_agent_window_in_kanban(
-                &window.id,
-                &target.board_id,
-                target.lane_id,
-                None,
-            );
-        }
+                .set_agent_id(&window.id, config.agent_id.command().to_string());
+            if let Some(target) = agent_kanban_target.as_ref() {
+                let _ = tab.workspace.place_agent_window_in_kanban(
+                    &window.id,
+                    &target.board_id,
+                    target.lane_id,
+                    None,
+                );
+            }
+            window
+        };
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
-        self.window_pty_statuses
-            .insert(window_id.clone(), WindowProcessStatus::Running);
-        self.window_hook_states.remove(&window_id);
+        if !reuses_startup_placeholder {
+            self.window_pty_statuses
+                .insert(window_id.clone(), WindowProcessStatus::Running);
+            self.window_hook_states.remove(&window_id);
+        }
         if let Some(key) = inflight_key {
             self.inflight_launches
                 .insert(key, (window_id.clone(), std::time::Instant::now()));
         }
 
         let mut events = vec![self.workspace_state_broadcast()];
-        let composed_status = self
-            .window_status(&window_id)
-            .unwrap_or(WindowProcessStatus::Running);
-        events.extend(Self::status_events(
-            window_id.clone(),
-            composed_status,
-            Some("Launching...".to_string()),
-        ));
+        if !reuses_startup_placeholder {
+            let composed_status = self
+                .window_status(&window_id)
+                .unwrap_or(WindowProcessStatus::Running);
+            events.extend(Self::status_events(
+                window_id.clone(),
+                composed_status,
+                Some("Launching...".to_string()),
+            ));
+        }
 
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -3142,13 +3249,21 @@ impl AppRuntime {
                 .insert(window_id.clone(), continuation);
         }
 
+        let is_startup_restore = startup_restore.is_some();
+        let startup_authority_preflight = startup_restore
+            .as_ref()
+            .and_then(|restore| restore.authority_preflight.clone());
         thread::spawn(move || {
-            Self::spawn_agent_window_async(
+            Self::spawn_agent_window_async_with_startup_restore(
                 proxy,
                 sessions_dir,
                 project_root,
                 window_id,
-                config,
+                AgentWindowAsyncLaunch {
+                    config,
+                    is_startup_restore,
+                    startup_authority_preflight,
+                },
                 profile_config_path,
                 agent_capability_issuer,
             );
@@ -3157,15 +3272,70 @@ impl AppRuntime {
         Ok(events)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_agent_window_async(
         proxy: AppEventProxy,
         sessions_dir: PathBuf,
         project_root: String,
         window_id: String,
-        mut config: gwt_agent::LaunchConfig,
+        config: gwt_agent::LaunchConfig,
         profile_config_path: PathBuf,
         agent_capability_issuer: Option<AgentCapabilityIssuer>,
     ) {
+        Self::spawn_agent_window_async_with_startup_restore(
+            proxy,
+            sessions_dir,
+            project_root,
+            window_id,
+            AgentWindowAsyncLaunch {
+                config,
+                is_startup_restore: false,
+                startup_authority_preflight: None,
+            },
+            profile_config_path,
+            agent_capability_issuer,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_unowned_startup_agent_window_async(
+        proxy: AppEventProxy,
+        sessions_dir: PathBuf,
+        project_root: String,
+        window_id: String,
+        config: gwt_agent::LaunchConfig,
+        profile_config_path: PathBuf,
+        agent_capability_issuer: Option<AgentCapabilityIssuer>,
+    ) {
+        Self::spawn_agent_window_async_with_startup_restore(
+            proxy,
+            sessions_dir,
+            project_root,
+            window_id,
+            AgentWindowAsyncLaunch {
+                config,
+                is_startup_restore: true,
+                startup_authority_preflight: None,
+            },
+            profile_config_path,
+            agent_capability_issuer,
+        );
+    }
+
+    fn spawn_agent_window_async_with_startup_restore(
+        proxy: AppEventProxy,
+        sessions_dir: PathBuf,
+        project_root: String,
+        window_id: String,
+        launch: AgentWindowAsyncLaunch,
+        profile_config_path: PathBuf,
+        agent_capability_issuer: Option<AgentCapabilityIssuer>,
+    ) {
+        let AgentWindowAsyncLaunch {
+            mut config,
+            is_startup_restore,
+            startup_authority_preflight,
+        } = launch;
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
         // Process Console lines into the agent terminal. Host launches keep
@@ -3184,6 +3354,27 @@ impl AppRuntime {
                 message: "Preparing worktree...".to_string(),
             });
             resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+            if let Some(expected) = startup_authority_preflight.as_ref() {
+                revalidate_startup_restore_authority(
+                    Path::new(&project_root),
+                    config.predecessor_session_id.as_deref(),
+                    expected,
+                )?;
+                if matches!(
+                    expected.state,
+                    gwt::AgentExecutionContinuationPreflightState::Recoverable
+                ) {
+                    return Err(
+                        "Startup restore requires explicit Continue before producing authority"
+                            .to_string(),
+                    );
+                }
+            } else if is_startup_restore {
+                revalidate_unowned_startup_restore_authority(
+                    Path::new(&project_root),
+                    config.predecessor_session_id.as_deref(),
+                )?;
+            }
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -3308,17 +3499,19 @@ impl AppRuntime {
                 session.agent_session_id = config.resume_session_id.clone();
             }
             session.update_status(gwt_agent::AgentStatus::Running);
-            // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
+            // SPEC-3393 FR-012 (AC-12) / #3410: an explicit Resume/Continue
             // recovers producing authority through the continuation
             // coordinator before spawn. Failure degrades to an unbound,
-            // input-capable launch — a resume must degrade, never block.
+            // input-capable launch — a manual resume must degrade, never block.
             //
-            // Issue #3423: the coordinator answers with two distinct shapes.
-            // Only `SuccessorCreated` carries a Prepared attempt and may
-            // launch as a PreparedContinuation. `ReboundCurrent` re-validated
-            // the predecessor Session's current-generation binding — the
-            // relaunch continues that Session in place with Active authority.
-            let mut rebound_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
+            // SPEC-3393 FR-026: the authenticated continuation transaction
+            // returns an already-activated binding for both outcomes. The
+            // genuinely Prepared path is reserved for Continue Work dispatch.
+            // Startup restoration is stricter: it may reuse only an exact,
+            // read-only validated Active binding. A recoverable generation
+            // stays paused for explicit Continue, so background startup can
+            // never win an authority race by creating another successor.
+            let mut active_continuation: Option<gwt_agent::SessionExecutionBinding> = None;
             if matches!(
                 config.execution_intent,
                 gwt_agent::ExecutionLaunchIntent::Automatic
@@ -3327,19 +3520,39 @@ impl AppRuntime {
                 gwt_agent::SessionMode::Resume | gwt_agent::SessionMode::Continue
             ) {
                 if let Some(predecessor) = config.predecessor_session_id.clone() {
-                    if let Some((receipt, binding)) = gwt::prepare_resume_producing_authority(
-                        Path::new(&project_root),
-                        &predecessor,
-                    ) {
-                        match receipt.outcome {
-                            gwt::AgentExecutionContinuationOutcome::SuccessorCreated => {
-                                config.execution_intent =
-                                    gwt_agent::ExecutionLaunchIntent::PreparedContinuation(binding);
+                    if is_startup_restore {
+                        if let Some(expected) = startup_authority_preflight.as_ref() {
+                            if !matches!(
+                                expected.state,
+                                gwt::AgentExecutionContinuationPreflightState::CurrentBound
+                            ) {
+                                return Err(
+                                    "Startup restore requires explicit Continue before producing authority"
+                                        .to_string(),
+                                );
                             }
-                            gwt::AgentExecutionContinuationOutcome::ReboundCurrent => {
-                                rebound_continuation = Some(binding);
-                            }
+                            revalidate_startup_restore_authority(
+                                Path::new(&project_root),
+                                Some(&predecessor),
+                                expected,
+                            )?;
+                            active_continuation =
+                                Some(expected.active_binding.clone().ok_or_else(|| {
+                                    "Startup restore lost its validated Active binding".to_string()
+                                })?);
+                        } else {
+                            revalidate_unowned_startup_restore_authority(
+                                Path::new(&project_root),
+                                Some(&predecessor),
+                            )?;
                         }
+                    } else if let Some((_receipt, binding)) =
+                        gwt::prepare_resume_producing_authority(
+                            Path::new(&project_root),
+                            &predecessor,
+                        )
+                    {
+                        active_continuation = Some(binding);
                     }
                 }
             }
@@ -3351,9 +3564,12 @@ impl AppRuntime {
                     Some(binding.clone())
                 }
             };
-            if let Some(binding) = rebound_continuation.as_ref() {
-                session.id = binding.session_id.clone();
-                session.set_execution_binding(Some(binding.clone()))?;
+            if let Some(binding) = active_continuation.as_ref() {
+                install_active_resume_binding(
+                    &mut session,
+                    &mut config.linked_issue_number,
+                    binding,
+                )?;
             }
 
             let session_id = session.id.clone();
@@ -3421,6 +3637,12 @@ impl AppRuntime {
                     })
                 })
                 .flatten();
+            if is_startup_restore && startup_authority_preflight.is_none() {
+                revalidate_unowned_startup_restore_authority(
+                    Path::new(&project_root),
+                    config.predecessor_session_id.as_deref(),
+                )?;
+            }
             let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,
@@ -3429,7 +3651,7 @@ impl AppRuntime {
                 worktree: &worktree_path,
                 producing_owner,
                 prepared_continuation: prepared_continuation.as_ref(),
-                rebound_continuation: rebound_continuation.as_ref(),
+                rebound_continuation: active_continuation.as_ref(),
                 execution_entrypoint: &execution_entrypoint,
                 runtime_target,
                 container_runtime: container_runtime.as_ref(),
@@ -4513,6 +4735,53 @@ mod agent_endpoint_env_tests {
         (launch, issuer, binding)
     }
 
+    fn successor_relaunch_fixture(
+        home: &Path,
+    ) -> (
+        PersistedExecutionLaunch,
+        AgentCapabilityIssuer,
+        gwt_agent::SessionExecutionBinding,
+    ) {
+        let mut launch = persisted_execution_launch(home);
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("materialize predecessor generation");
+        gwt::cli::execution_state::settle(
+            &launch.project,
+            &launch.session.id,
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle predecessor generation");
+
+        let (receipt, binding) =
+            gwt::prepare_resume_producing_authority(&launch.project, &launch.session.id)
+                .expect("activate a successor for the resumed Session");
+        assert_eq!(
+            receipt.outcome,
+            gwt::AgentExecutionContinuationOutcome::SuccessorCreated,
+            "a terminal predecessor must produce an already-activated successor"
+        );
+        assert_eq!(binding.session_id, launch.session.id);
+        (launch, issuer, binding)
+    }
+
     #[test]
     fn fresh_launch_conflict_names_the_generation_holder_and_recovery_route() {
         let _env_lock = crate::env_test_lock()
@@ -4676,7 +4945,79 @@ mod agent_endpoint_env_tests {
     }
 
     #[test]
-    fn rebound_continuation_rejects_stale_generation_binding() {
+    fn successor_created_resume_installs_active_authority_without_prepared_validation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, binding) = successor_relaunch_fixture(home.path());
+
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&launch.project, launch.owner)
+                .expect("read current successor binding"),
+            Some(binding.identity.clone()),
+            "SuccessorCreated is committed before the launch coordinator returns"
+        );
+        assert!(
+            !gwt::cli::execution_state::prepared_execution_binding_matches(
+                &launch.project,
+                launch.owner,
+                &launch.session.id,
+                &binding.identity,
+            )
+            .expect("probe Prepared authority"),
+            "an activated successor must never re-enter Prepared validation"
+        );
+
+        let mut resumed = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        resumed.project_state_root = Some(launch.project.clone());
+        resumed.id = binding.session_id.clone();
+        resumed.update_status(gwt_agent::AgentStatus::Running);
+        let mut launch_owner = None;
+        install_active_resume_binding(&mut resumed, &mut launch_owner, &binding)
+            .expect("install trusted owner before the activated binding");
+        assert_eq!(resumed.linked_issue_number, Some(launch.owner.number));
+        assert_eq!(
+            launch_owner,
+            Some(launch.owner.number),
+            "the trusted active binding must repair the stale launch projection too"
+        );
+
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut resumed,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: None,
+            prepared_continuation: None,
+            rebound_continuation: Some(&binding),
+            execution_entrypoint: "resume",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("install already-Active successor authority");
+
+        let token = env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .expect("active successor capability token");
+        let grant = issuer
+            .grant_for_test(token)
+            .expect("authenticate issued capability");
+        assert!(grant.principal().authorizes_producing_mutation());
+        assert_eq!(grant.principal().execution_binding(), Some(&binding));
+    }
+
+    #[test]
+    fn active_continuation_rejects_stale_generation_binding() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4714,21 +5055,20 @@ mod agent_endpoint_env_tests {
             container_runtime: None,
         }
         .install(&mut env)
-        .expect_err("a stale rebound binding must fail closed");
+        .expect_err("a stale active binding must fail closed");
         assert!(
-            error.contains(
-                "Rebound continuation no longer matches the current execution generation"
-            ),
+            error
+                .contains("Active continuation no longer matches the current execution generation"),
             "{error}"
         );
         assert!(
             !env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
-            "a rejected rebound install must not issue a capability"
+            "a rejected active install must not issue a capability"
         );
     }
 
     #[test]
-    fn rebound_continuation_cannot_enter_genesis_launch_path() {
+    fn active_continuation_cannot_enter_genesis_launch_path() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4760,9 +5100,9 @@ mod agent_endpoint_env_tests {
             container_runtime: None,
         }
         .install(&mut env)
-        .expect_err("rebound continuation must not mint genesis authority");
+        .expect_err("active continuation must not mint genesis authority");
         assert!(
-            error.contains("Rebound continuation cannot enter the genesis execution launch path"),
+            error.contains("Active continuation cannot enter the genesis execution launch path"),
             "{error}"
         );
     }

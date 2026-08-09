@@ -28,8 +28,8 @@ use super::{
     combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
     plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
     workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
-    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession, StartupRestoreLaunch,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -38,6 +38,69 @@ const MAX_STARTUP_INTAKE_PRUNE: usize = 32;
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
+
+pub(super) const STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL: &str =
+    "Paused — Needs recovery. Open this Work and choose Continue when you are ready to retry.";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StartupRestoreOwnerKey {
+    repository_target: String,
+    owner_number: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartupRestoreCandidateClass {
+    Unowned,
+    CurrentBound(StartupRestoreOwnerKey),
+    Recoverable(StartupRestoreOwnerKey),
+    NeedsRecovery,
+}
+
+fn select_startup_restore_candidates(classes: &[StartupRestoreCandidateClass]) -> Vec<bool> {
+    let mut selected = vec![false; classes.len()];
+    let mut by_owner: std::collections::HashMap<StartupRestoreOwnerKey, Vec<(usize, bool)>> =
+        std::collections::HashMap::new();
+    for (index, class) in classes.iter().enumerate() {
+        match class {
+            StartupRestoreCandidateClass::Unowned => selected[index] = true,
+            StartupRestoreCandidateClass::CurrentBound(owner) => {
+                by_owner
+                    .entry(owner.clone())
+                    .or_default()
+                    .push((index, true));
+            }
+            StartupRestoreCandidateClass::Recoverable(owner) => {
+                by_owner
+                    .entry(owner.clone())
+                    .or_default()
+                    .push((index, false));
+            }
+            StartupRestoreCandidateClass::NeedsRecovery => {}
+        }
+    }
+    for candidates in by_owner.into_values() {
+        let current = candidates
+            .iter()
+            .filter(|(_, current)| *current)
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        if current.len() == 1 {
+            selected[current[0]] = true;
+            continue;
+        }
+        if current.is_empty() {
+            let recoverable = candidates
+                .iter()
+                .filter(|(_, current)| !*current)
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>();
+            if recoverable.len() == 1 {
+                selected[recoverable[0]] = true;
+            }
+        }
+    }
+    selected
+}
 
 pub(super) fn spawn_startup_orphan_intake_prune_with<T, F>(
     jobs: Vec<T>,
@@ -194,6 +257,61 @@ fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
     session.status != gwt_agent::AgentStatus::Stopped
 }
 
+fn startup_restore_candidate_class(
+    session: &gwt_agent::Session,
+) -> (
+    StartupRestoreCandidateClass,
+    Option<gwt::AgentExecutionContinuationPreflight>,
+) {
+    let record = match gwt::cli::execution_state::load(&session.worktree_path) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session.id,
+                error = %error,
+                "startup restore authority record is unreadable"
+            );
+            return (StartupRestoreCandidateClass::NeedsRecovery, None);
+        }
+    };
+    if record.is_none()
+        && session.linked_issue_number.is_none()
+        && session.execution_binding.is_none()
+    {
+        return (StartupRestoreCandidateClass::Unowned, None);
+    }
+    let project_state_root = session
+        .project_state_root
+        .as_deref()
+        .unwrap_or(&session.worktree_path);
+    match gwt::preflight_resume_producing_authority(project_state_root, &session.id) {
+        Ok(preflight) => {
+            let owner = StartupRestoreOwnerKey {
+                repository_target: preflight.repository_target.clone(),
+                owner_number: preflight.owner_number,
+            };
+            let class = match preflight.state {
+                gwt::AgentExecutionContinuationPreflightState::CurrentBound => {
+                    StartupRestoreCandidateClass::CurrentBound(owner)
+                }
+                gwt::AgentExecutionContinuationPreflightState::Recoverable => {
+                    StartupRestoreCandidateClass::Recoverable(owner)
+                }
+            };
+            (class, Some(preflight))
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session.id,
+                code = ?error.code,
+                error = %error,
+                "startup restore authority preflight rejected the candidate"
+            );
+            (StartupRestoreCandidateClass::NeedsRecovery, None)
+        }
+    }
+}
+
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
     let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
         session.update_status(gwt_agent::AgentStatus::Stopped);
@@ -325,7 +443,7 @@ impl AppRuntime {
         });
 
         let now = chrono::Utc::now();
-        let mut resumed_native_sessions = std::collections::HashSet::new();
+        let mut candidates = Vec::new();
         for session in sessions {
             // The startup prune plan is the authoritative fixed snapshot of
             // detached intake paths that are about to be removed. Exclude
@@ -357,11 +475,16 @@ impl AppRuntime {
             if !session.worktree_path.exists() {
                 continue;
             }
-            let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
+            let placeholders = self.paused_placeholders_for_session(&session.id);
+            if placeholders.len() > 1 {
+                let _ = self.mark_startup_restore_needs_recovery(&session.id);
+                continue;
+            }
+            let placeholder = placeholders.into_iter().next();
             // Orphan sessions (workspace lost the window) keep the conservative
             // status / freshness gates so old, windowless sessions are not
             // resurrected; placeholder sessions restore regardless (Issue #2942).
-            if placeholder_tab.is_none() {
+            if placeholder.is_none() {
                 if !startup_auto_resume_window_was_open(&session) {
                     continue;
                 }
@@ -375,9 +498,6 @@ impl AppRuntime {
             let Some(native_session_id) = session.exact_resume_session_id() else {
                 continue;
             };
-            if !resumed_native_sessions.insert(native_session_id.to_string()) {
-                continue;
-            }
             if self
                 .active_agent_sessions
                 .values()
@@ -385,8 +505,10 @@ impl AppRuntime {
             {
                 continue;
             }
-            let Some(tab_id) =
-                placeholder_tab.or_else(|| self.auto_resume_tab_id_for_session(&session))
+            let Some(tab_id) = placeholder
+                .as_ref()
+                .map(|(tab_id, _, _)| tab_id.clone())
+                .or_else(|| self.auto_resume_tab_id_for_session(&session))
             else {
                 continue;
             };
@@ -409,12 +531,38 @@ impl AppRuntime {
                 Some(session.branch.as_str()),
                 &session.worktree_path,
             ));
-            self.pending_startup_auto_resume_sessions
-                .push(PendingStartupAutoResumeSession {
+            let (class, authority_preflight) = startup_restore_candidate_class(&session);
+            candidates.push((
+                native_session_id.to_string(),
+                class,
+                PendingStartupAutoResumeSession {
                     tab_id,
+                    startup_restore: StartupRestoreLaunch {
+                        source_session_id: session.id.clone(),
+                        authority_preflight,
+                        placeholder_raw_id: placeholder.map(|(_, raw_id, _)| raw_id),
+                    },
                     session,
                     workspace_resume_context,
-                });
+                    auto_resume: false,
+                },
+            ));
+        }
+
+        let classes = candidates
+            .iter()
+            .map(|(_, class, _)| class.clone())
+            .collect::<Vec<_>>();
+        let selected = select_startup_restore_candidates(&classes);
+        let mut resumed_native_sessions = std::collections::HashSet::new();
+        for ((native_session_id, _class, mut pending), selected) in
+            candidates.into_iter().zip(selected)
+        {
+            pending.auto_resume = selected && resumed_native_sessions.insert(native_session_id);
+            if !pending.auto_resume && pending.startup_restore.placeholder_raw_id.is_some() {
+                let _ = self.mark_startup_restore_needs_recovery(&pending.session.id);
+            }
+            self.pending_startup_auto_resume_sessions.push(pending);
         }
     }
 
@@ -432,14 +580,88 @@ impl AppRuntime {
         for (index, pending_session) in pending.into_iter().enumerate() {
             let fallback_geometry =
                 startup_auto_resume_window_geometry(index, total, bounds.clone());
-            let mut spawned = self.spawn_restored_agent_session(
-                &pending_session.tab_id,
-                pending_session.session,
-                pending_session.workspace_resume_context,
-                fallback_geometry,
-            );
-            events.append(&mut spawned);
+            if pending_session.auto_resume {
+                let mut spawned = self.spawn_restored_agent_session(
+                    &pending_session.tab_id,
+                    pending_session.session,
+                    pending_session.workspace_resume_context,
+                    pending_session.startup_restore,
+                    fallback_geometry,
+                );
+                events.append(&mut spawned);
+            } else {
+                events.append(
+                    &mut self.materialize_startup_restore_needs_recovery(
+                        &pending_session.tab_id,
+                        &pending_session.session,
+                        pending_session
+                            .startup_restore
+                            .placeholder_raw_id
+                            .as_deref(),
+                        fallback_geometry,
+                    ),
+                );
+            }
         }
+        events
+    }
+
+    pub(super) fn materialize_startup_restore_needs_recovery(
+        &mut self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+        placeholder_raw_id: Option<&str>,
+        geometry: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        if placeholder_raw_id.is_some() {
+            let window_ids = self.mark_startup_restore_needs_recovery(&session.id);
+            let mut events = vec![self.workspace_state_broadcast()];
+            for window_id in window_ids {
+                events.extend(Self::status_events(
+                    window_id,
+                    WindowProcessStatus::Stopped,
+                    Some(STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string()),
+                ));
+            }
+            return events;
+        }
+
+        let title = if !session.display_name.trim().is_empty() {
+            session.display_name.clone()
+        } else {
+            session.agent_id.command().to_string()
+        };
+        let Some(tab) = self.tab_mut(tab_id) else {
+            return Vec::new();
+        };
+        let window = tab.workspace.add_window_at_geometry_with_title(
+            WindowPreset::Agent,
+            title,
+            true,
+            geometry,
+        );
+        let _ = tab
+            .workspace
+            .set_agent_id(&window.id, session.agent_id.command().to_string());
+        let _ = tab
+            .workspace
+            .set_session_id(&window.id, Some(session.id.clone()));
+        let _ = tab
+            .workspace
+            .set_status(&window.id, WindowProcessStatus::Stopped);
+        let window_id = combined_window_id(tab_id, &window.id);
+        self.register_window(tab_id, &window.id);
+        self.window_details.insert(
+            window_id.clone(),
+            STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string(),
+        );
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(Self::status_events(
+            window_id,
+            WindowProcessStatus::Stopped,
+            Some(STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string()),
+        ));
         events
     }
 
@@ -454,36 +676,48 @@ impl AppRuntime {
         tab_id: &str,
         session: gwt_agent::Session,
         workspace_resume_context: Option<WorkspaceResumeContext>,
+        startup_restore: StartupRestoreLaunch,
         fallback_geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         let config = launch_config_from_persisted_session(&session);
-        let geometry = self
-            .remove_stale_paused_agent_window(tab_id, &session.id)
+        let geometry = startup_restore
+            .placeholder_raw_id
+            .as_deref()
+            .and_then(|raw_id| {
+                self.tab(tab_id)
+                    .and_then(|tab| tab.workspace.window(raw_id))
+                    .map(|window| window.geometry.clone())
+            })
             .unwrap_or(fallback_geometry);
-        // Snapshot the window registry *after* the paused placeholder is
-        // removed: the freshly spawned window may reuse the placeholder's id
-        // (ids are assigned lowest-free), so a pre-removal snapshot would fail
-        // to detect it and the source session would never be retired.
+        // Keep a persisted placeholder intact while the asynchronous launch
+        // prepares. It becomes Running only after authority admission and PTY
+        // creation both succeed.
         let existing_windows = self
             .window_lookup
             .keys()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
+        let placeholder_window_id = startup_restore
+            .placeholder_raw_id
+            .as_deref()
+            .map(|raw_id| combined_window_id(tab_id, raw_id));
         match self.spawn_agent_window_at_geometry(
             tab_id,
             config,
             geometry,
             workspace_resume_context,
+            Some(startup_restore.clone()),
         ) {
             Ok(events) => {
-                if let Some(window_id) = self
-                    .window_lookup
-                    .keys()
-                    .find(|window_id| !existing_windows.contains(*window_id))
-                    .cloned()
-                {
+                let window_id = placeholder_window_id.or_else(|| {
+                    self.window_lookup
+                        .keys()
+                        .find(|window_id| !existing_windows.contains(*window_id))
+                        .cloned()
+                });
+                if let Some(window_id) = window_id {
                     self.pending_auto_resume_sources
-                        .insert(window_id, session.id);
+                        .insert(window_id, startup_restore.source_session_id);
                 }
                 events
             }
@@ -532,11 +766,25 @@ impl AppRuntime {
             Some(session.branch.as_str()),
             &session.worktree_path,
         ));
+        let (class, authority_preflight) = startup_restore_candidate_class(&session);
+        if matches!(class, StartupRestoreCandidateClass::NeedsRecovery) {
+            let _ = self.mark_startup_restore_needs_recovery(&session.id);
+            return Self::status_events(
+                combined_window_id(tab_id, raw_id),
+                WindowProcessStatus::Stopped,
+                Some(STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string()),
+            );
+        }
         let mut events = vec![self.workspace_state_broadcast()];
         events.append(&mut self.spawn_restored_agent_session(
             tab_id,
-            session,
+            session.clone(),
             workspace_resume_context,
+            StartupRestoreLaunch {
+                source_session_id: session.id,
+                authority_preflight,
+                placeholder_raw_id: Some(raw_id.to_string()),
+            },
             fallback_geometry,
         ));
         events
@@ -569,6 +817,7 @@ impl AppRuntime {
         };
 
         let mut events = Vec::new();
+        let mut agent_candidates = Vec::new();
         for window in windows {
             let combined = combined_window_id(tab_id, &window.id);
             // A window with a live PTY/runtime is already running (e.g. when an
@@ -605,20 +854,52 @@ impl AppRuntime {
                     Some(session.branch.as_str()),
                     &session.worktree_path,
                 ));
-                let fallback_geometry = window.geometry.clone();
-                let mut spawned = self.spawn_restored_agent_session(
-                    tab_id,
-                    session,
+                let (class, authority_preflight) = startup_restore_candidate_class(&session);
+                agent_candidates.push((
+                    class,
+                    window.geometry.clone(),
+                    session.clone(),
                     workspace_resume_context,
-                    fallback_geometry,
-                );
-                events.append(&mut spawned);
+                    StartupRestoreLaunch {
+                        source_session_id: session.id,
+                        authority_preflight,
+                        placeholder_raw_id: Some(window.id),
+                    },
+                ));
             } else {
                 events.extend(self.start_window(
                     tab_id,
                     &window.id,
                     window.preset,
                     window.geometry.clone(),
+                ));
+            }
+        }
+        let selected = select_startup_restore_candidates(
+            &agent_candidates
+                .iter()
+                .map(|(class, _, _, _, _)| class.clone())
+                .collect::<Vec<_>>(),
+        );
+        for (
+            (_, fallback_geometry, session, workspace_resume_context, startup_restore),
+            selected,
+        ) in agent_candidates.into_iter().zip(selected)
+        {
+            if selected {
+                events.append(&mut self.spawn_restored_agent_session(
+                    tab_id,
+                    session,
+                    workspace_resume_context,
+                    startup_restore,
+                    fallback_geometry,
+                ));
+            } else {
+                events.append(&mut self.materialize_startup_restore_needs_recovery(
+                    tab_id,
+                    &session,
+                    startup_restore.placeholder_raw_id.as_deref(),
+                    fallback_geometry,
                 ));
             }
         }
@@ -629,48 +910,39 @@ impl AppRuntime {
     /// window backed by `session_id`. Its presence proves the user did not
     /// explicitly close that window (Issue #2942), so the session must restore
     /// regardless of status drift or age.
-    fn paused_placeholder_tab_for_session(&self, session_id: &str) -> Option<String> {
+    fn paused_placeholders_for_session(
+        &self,
+        session_id: &str,
+    ) -> Vec<(String, String, WindowGeometry)> {
         self.tabs
             .iter()
             .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
-            .find(|tab| {
-                tab.workspace.persisted().windows.iter().any(|window| {
-                    window.status == WindowProcessStatus::Stopped
-                        && crate::runtime_support::window_is_agent_pane(window)
-                        && window.session_id.as_deref() == Some(session_id)
-                })
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| {
+                        window.status == WindowProcessStatus::Stopped
+                            && crate::runtime_support::window_is_agent_pane(window)
+                            && window.session_id.as_deref() == Some(session_id)
+                    })
+                    .map(|window| (tab.id.clone(), window.id.clone(), window.geometry.clone()))
             })
-            .map(|tab| tab.id.clone())
+            .collect()
     }
 
-    fn remove_stale_paused_agent_window(
-        &mut self,
-        tab_id: &str,
-        session_id: &str,
-    ) -> Option<WindowGeometry> {
-        let tab = self.tab_mut(tab_id)?;
-        // SPEC-1921 Phase 65 (T337): stale placeholder removal must cover the
-        // full Agent-family preset set (`Agent`, `Claude`, `Codex`), not just
-        // the legacy `Agent` preset — otherwise a resumed Claude/Codex window
-        // spawns next to its surviving placeholder and loses the restored
-        // geometry.
-        let stale = tab
-            .workspace
-            .persisted()
-            .windows
-            .iter()
-            .find(|w| {
-                crate::runtime_support::window_is_agent_pane(w)
-                    && w.status == WindowProcessStatus::Stopped
-                    && w.session_id.as_deref() == Some(session_id)
-            })
-            .map(|w| (w.id.clone(), w.geometry.clone()));
-        let (raw_id, geometry) = stale?;
-        tab.workspace.close_window(&raw_id);
-        let combined = combined_window_id(tab_id, &raw_id);
-        self.window_lookup.remove(&combined);
-        self.window_details.remove(&combined);
-        Some(geometry)
+    pub(super) fn mark_startup_restore_needs_recovery(&mut self, session_id: &str) -> Vec<String> {
+        let mut window_ids = Vec::new();
+        for (tab_id, raw_id, _) in self.paused_placeholders_for_session(session_id) {
+            let window_id = combined_window_id(&tab_id, &raw_id);
+            self.window_details.insert(
+                window_id.clone(),
+                STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string(),
+            );
+            window_ids.push(window_id);
+        }
+        window_ids
     }
 
     fn auto_resume_tab_id_for_session(&self, session: &gwt_agent::Session) -> Option<String> {
@@ -749,5 +1021,72 @@ impl AppRuntime {
     /// can request an immediate re-poll.
     pub(crate) fn set_usage_refresh(&mut self, refresh: std::sync::Arc<tokio::sync::Notify>) {
         self.usage_refresh = Some(refresh);
+    }
+}
+
+#[cfg(test)]
+mod startup_authority_restore_tests {
+    use super::*;
+
+    fn owner(number: u64) -> StartupRestoreOwnerKey {
+        StartupRestoreOwnerKey {
+            repository_target: "repo-scope".to_string(),
+            owner_number: number,
+        }
+    }
+
+    #[test]
+    fn exact_current_candidate_wins_over_same_owner_recoverable_candidates() {
+        let owner = owner(3431);
+        let selected = select_startup_restore_candidates(&[
+            StartupRestoreCandidateClass::CurrentBound(owner.clone()),
+            StartupRestoreCandidateClass::Recoverable(owner),
+        ]);
+
+        assert_eq!(selected, vec![true, false]);
+    }
+
+    #[test]
+    fn one_unambiguous_recoverable_candidate_is_selected() {
+        let selected =
+            select_startup_restore_candidates(&[StartupRestoreCandidateClass::Recoverable(owner(
+                3431,
+            ))]);
+
+        assert_eq!(selected, vec![true]);
+    }
+
+    #[test]
+    fn same_owner_recoverable_duplicates_remain_paused() {
+        let owner = owner(3431);
+        let selected = select_startup_restore_candidates(&[
+            StartupRestoreCandidateClass::Recoverable(owner.clone()),
+            StartupRestoreCandidateClass::Recoverable(owner),
+        ]);
+
+        assert_eq!(selected, vec![false, false]);
+    }
+
+    #[test]
+    fn ambiguous_current_duplicates_and_unavailable_candidates_remain_paused() {
+        let owner = owner(3431);
+        let selected = select_startup_restore_candidates(&[
+            StartupRestoreCandidateClass::CurrentBound(owner.clone()),
+            StartupRestoreCandidateClass::CurrentBound(owner),
+            StartupRestoreCandidateClass::NeedsRecovery,
+        ]);
+
+        assert_eq!(selected, vec![false, false, false]);
+    }
+
+    #[test]
+    fn independent_owners_and_unowned_sessions_can_each_restore() {
+        let selected = select_startup_restore_candidates(&[
+            StartupRestoreCandidateClass::Recoverable(owner(3431)),
+            StartupRestoreCandidateClass::CurrentBound(owner(3494)),
+            StartupRestoreCandidateClass::Unowned,
+        ]);
+
+        assert_eq!(selected, vec![true, true, true]);
     }
 }

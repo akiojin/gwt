@@ -18,8 +18,8 @@
 use base64::Engine as _;
 
 use super::{
-    AppRuntime, BackendEvent, LaunchFeedbackContext, LaunchWizardSession, OutboundEvent,
-    WindowProcessStatus,
+    close_window_from_workspace, AppRuntime, BackendEvent, LaunchFeedbackContext,
+    LaunchWizardSession, OutboundEvent, WindowProcessStatus,
 };
 
 /// Agents whose missing-binary launch failure should be rewritten into an
@@ -54,6 +54,68 @@ const MISSING_BINARY_INSTALL_HINTS: &[(&str, &str)] = &[
 ];
 
 impl AppRuntime {
+    pub(super) fn startup_restore_failed_events(
+        &mut self,
+        window_id: &str,
+        technical_detail: &str,
+    ) -> Option<Vec<OutboundEvent>> {
+        let source_session_id = self.pending_auto_resume_sources.remove(window_id)?;
+        self.log_window_launch_error("startup_restore", window_id, technical_detail);
+        self.pending_workspace_resume_contexts.remove(window_id);
+        self.pending_launch_feedback_contexts.remove(window_id);
+        self.revoke_agent_capability_for_window(window_id);
+        self.active_agent_sessions.remove(window_id);
+        self.stop_window_runtime_without_session_projection(window_id);
+
+        let mut placeholder_ids = self.mark_startup_restore_needs_recovery(&source_session_id);
+        if placeholder_ids
+            .iter()
+            .any(|candidate| candidate == window_id)
+        {
+            if let Some(address) = self.window_lookup.get(window_id).cloned() {
+                self.set_window_status(
+                    &address.tab_id,
+                    &address.raw_id,
+                    WindowProcessStatus::Stopped,
+                );
+            }
+        } else if placeholder_ids.is_empty() {
+            // An orphaned restored Session has no persisted Stopped pane to
+            // fall back to. Keep the candidate itself as the contextual
+            // recovery surface instead of leaving it Starting or routing the
+            // technical authority failure through the global error UI.
+            if let Some(address) = self.window_lookup.get(window_id).cloned() {
+                self.set_window_status(
+                    &address.tab_id,
+                    &address.raw_id,
+                    WindowProcessStatus::Stopped,
+                );
+                self.window_details.insert(
+                    window_id.to_string(),
+                    super::startup::STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string(),
+                );
+                placeholder_ids.push(window_id.to_string());
+            }
+        } else {
+            let _ = close_window_from_workspace(
+                &mut self.tabs,
+                &mut self.window_lookup,
+                &mut self.window_details,
+                window_id,
+            );
+        }
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        for placeholder_id in placeholder_ids {
+            events.extend(Self::status_events(
+                placeholder_id,
+                WindowProcessStatus::Stopped,
+                Some(super::startup::STARTUP_RESTORE_NEEDS_RECOVERY_DETAIL.to_string()),
+            ));
+        }
+        Some(events)
+    }
+
     pub(super) fn launch_wizard_action_error_stage(
         action: &gwt::LaunchWizardAction,
     ) -> &'static str {
