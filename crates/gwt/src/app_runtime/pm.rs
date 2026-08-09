@@ -637,7 +637,7 @@ impl AppRuntime {
         if !worktree.exists() {
             return;
         }
-        let manager = gwt_git::WorktreeManager::new(project_root);
+        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
         match manager.ephemeral_worktree_has_local_work(&worktree) {
             Ok(false) => {
                 if let Err(error) = manager.remove_force_twice(&worktree) {
@@ -805,11 +805,22 @@ impl AppRuntime {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let manager = gwt_git::WorktreeManager::new(project_root);
+        let manager = gwt_git::WorktreeManager::new(Self::pm_git_root(project_root));
         manager
             .create_detached("HEAD", &path)
             .map_err(|error| error.to_string())?;
         Ok(path)
+    }
+
+    /// Issue #3497: the opened project root is not always a repository — the
+    /// bare layout (`parent/` holding `parent/<name>.git` plus worktrees) is
+    /// exactly what the launch paths already resolve through
+    /// `main_worktree_root`. Every PM `WorktreeManager` goes through the same
+    /// resolution, or `git worktree` dies with "not a git repository" and the
+    /// PM silently never comes up.
+    fn pm_git_root(project_root: &Path) -> PathBuf {
+        gwt_git::worktree::main_worktree_root(project_root)
+            .unwrap_or_else(|_| project_root.to_path_buf())
     }
 }
 
