@@ -17814,6 +17814,9 @@ No viable candidates found in PATH \
 
 #[test]
 fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
@@ -17861,6 +17864,9 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
 
 #[test]
 fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
@@ -42651,5 +42657,54 @@ fn pm_wake_defers_to_an_active_human_conversation() {
             .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:02:00Z")
             .is_some(),
         "the retained signal wakes once the conversation has gone quiet"
+    );
+}
+
+/// Issue #3497: the PM must come up on a bare-layout project — a project
+/// root that is not itself a git repository but contains the bare `<name>.git`
+/// the worktrees hang off. The launch paths resolve this layout through
+/// `main_worktree_root`; the PM worktree preparation used the raw project
+/// root and died with "not a git repository", leaving the PM silently absent.
+#[test]
+fn pm_spawn_prepares_the_worktree_for_a_bare_layout_project() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    // A seed repository with one commit, cloned bare into the layout the
+    // user actually opens: parent/ (not a repo) containing parent/repo.git.
+    let seed = temp.path().join("seed");
+    fs::create_dir_all(&seed).expect("seed dir");
+    init_repo_with_initial_commit(&seed);
+    let parent = temp.path().join("parent");
+    fs::create_dir_all(&parent).expect("parent dir");
+    let clone = gwt_core::process::hidden_command("git")
+        .args([
+            "clone",
+            "--bare",
+            seed.to_str().expect("seed utf8"),
+            parent.join("repo.git").to_str().expect("bare utf8"),
+        ])
+        .output()
+        .expect("run git clone");
+    assert!(
+        clone.status.success(),
+        "bare clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", parent.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Explicit);
+
+    assert!(
+        !runtime.pending_pm_launches.is_empty(),
+        "the PM spawn must survive the bare layout instead of dying on \
+         worktree preparation"
     );
 }
