@@ -323,7 +323,8 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
       .issue-monitor-card__state-badge[data-state="launched"] {
         color: var(--color-state-active);
       }
-      .issue-monitor-card__state-badge[data-state="blocked_by_claim"] {
+      .issue-monitor-card__state-badge[data-state="blocked_by_claim"],
+      .issue-monitor-card__state-badge[data-state="needs_human"] {
         color: var(--color-state-needs-input);
       }
       .issue-monitor-card__state-badge[data-state="launch_failed"] {
@@ -646,6 +647,14 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
         return "Agent failed";
       case "skipped":
         return "Skipped";
+      // Issue #3478: these three are NOT queued. Falling through to the default
+      // told the operator a parked or excluded Issue was still in line to run.
+      case "needs_human":
+        return "Needs human";
+      case "not_ready":
+        return "Not ready";
+      case "hold_excluded":
+        return "On hold";
       default:
         return "Queued";
     }
@@ -878,6 +887,28 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
           );
           autoMeta.dataset.needsHuman = autonomousEntry.needs_human ? "true" : "false";
           issue.appendChild(autoMeta);
+        }
+        // Issue #3478 AC-9: when the park was caused by a confirmation
+        // question, show WHAT is being waited on so a human can unblock the
+        // queue without opening the agent window.
+        const pending = autonomousEntry.pending_question;
+        if (pending && pending.question) {
+          const questionParts = [`⏸ Waiting on: ${pending.question}`];
+          if (Array.isArray(pending.options) && pending.options.length) {
+            questionParts.push(`Options: ${pending.options.join(" / ")}`);
+          }
+          questionParts.push(`Reason: ${pending.reason_code || "unclassified"}`);
+          questionParts.push(`Session: ${pending.session_id || "unknown"}`);
+          questionParts.push(pending.resumable ? "Resumable" : "Not resumable");
+          const questionBlock = element(
+            "div",
+            "issue-monitor-card__autonomous-question",
+            questionParts.join(" | "),
+          );
+          questionBlock.dataset.handoffId = pending.handoff_id || "";
+          questionBlock.dataset.reasonCode = pending.reason_code || "unclassified";
+          questionBlock.dataset.resumable = pending.resumable ? "true" : "false";
+          issue.appendChild(questionBlock);
         }
       }
       const metaParts = [];

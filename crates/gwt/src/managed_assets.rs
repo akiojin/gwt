@@ -6,6 +6,7 @@ use std::{
 use crate::cli::gwtd_resolver::default_installed_candidates;
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_agent::AgentId;
+use gwt_skills::pm_guidance::{generate_pm_guidance_for_claude, generate_pm_guidance_for_codex};
 use gwt_skills::{
     distribute_to_worktree_for_targets_with_policy, generate_codex_hooks_for_mode,
     generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
@@ -82,7 +83,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
 /// worktrees keep the embedded-bundle override (#3374). (The launch path does
 /// NOT use this: it passes `config.is_ephemeral` directly.)
 fn worktree_is_ephemeral(worktree: &Path) -> bool {
-    crate::worktree_form::is_ephemeral_intake_worktree(worktree)
+    crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
 fn materialize_managed_gwt_assets_for_targets(
@@ -121,6 +122,13 @@ fn materialize_managed_gwt_assets_for_targets(
     if targets.is_empty() {
         return Ok(());
     }
+    // SPEC-3431 T-052: gwt-pm is generated, not bundled, so the prune above
+    // deletes it like any other unknown `gwt-*` skill. Regenerating here — the
+    // one funnel every launch, resume, and refresh passes through — is what
+    // makes the `$gwt-pm` bootstrap prompt resolvable at all. The predicate is
+    // structural (canonical PM worktree path), so no other worktree can be
+    // handed the PM contract by an ambient value.
+    let is_pm = crate::pm_registry::is_pm_worktree(worktree);
     regenerate_managed_hook_configs_for_targets(worktree, targets, codex_hook_discovery_mode)?;
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         generate_coordination_guidance_for_claude(worktree).map_err(|error| {
@@ -128,6 +136,11 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to generate Claude coordination skill: {error}"
             ))
         })?;
+        if is_pm {
+            generate_pm_guidance_for_claude(worktree).map_err(|error| {
+                io::Error::other(format!("failed to generate Claude PM skill: {error}"))
+            })?;
+        }
     }
     if targets.contains(&ManagedAssetTarget::Codex) {
         generate_coordination_guidance_for_codex(worktree).map_err(|error| {
@@ -135,6 +148,11 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to generate Codex coordination skill: {error}"
             ))
         })?;
+        if is_pm {
+            generate_pm_guidance_for_codex(worktree).map_err(|error| {
+                io::Error::other(format!("failed to generate Codex PM skill: {error}"))
+            })?;
+        }
     }
     Ok(())
 }

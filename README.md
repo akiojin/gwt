@@ -341,6 +341,31 @@ Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
 persist per project. The human-gated baseline is SPEC
 [#3165](https://github.com/akiojin/gwt/issues/3165).
 
+## PM agent
+
+Each project also runs one resident **PM agent** pane. It is the single
+conversational window: you describe what you want in natural language, and the
+PM decomposes it into Issues, registers them, plans the design-required ones,
+decides the semantic execution order, and tells the Issue Monitor which Issue
+to take next. It reports progress and brings `NeedsHuman` escalations back to
+you in the same conversation.
+
+The PM never launches implementation agents itself — it moves an Issue to the
+front of the queue and asks for a scan, and the Issue Monitor's existing
+claim/slot path does the launching, so the duplicate-launch protections are
+unchanged.
+
+- It starts automatically when you open a project, and there is a per-project
+  opt-out.
+- Closing the PM pane stops it; it will not restart itself. A crash does
+  auto-resume, with a backoff so a crash loop cannot spin.
+- Only the PM may turn the Issue Monitor's `enabled` / `autonomous_mode` on
+  from the CLI; every other agent session must use the GUI. Merges are
+  unaffected — the strong automated gate above still decides every merge.
+
+The design lives in SPEC
+[#3431](https://github.com/akiojin/gwt/issues/3431).
+
 ## Knowledge, Search, and Managed Skills
 
 gwt keeps project knowledge close to the agent workspace:

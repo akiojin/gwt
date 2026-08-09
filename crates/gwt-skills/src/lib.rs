@@ -7,6 +7,7 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
+pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
 pub mod settings_local;

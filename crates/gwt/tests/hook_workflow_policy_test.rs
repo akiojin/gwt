@@ -1634,6 +1634,9 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         ),
         ("pane.list", json!({})),
         ("pane.read", json!({ "id": "pane-1" })),
+        // SPEC-3431: PM diagnostics must stay diagnosable before an owner is
+        // linked (ownerless-safe, read-only).
+        ("pm.status", json!({})),
     ] {
         let event = event(
             "Bash",

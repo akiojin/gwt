@@ -34,6 +34,7 @@ pub(crate) mod memory;
 pub mod open;
 mod pane;
 mod plan;
+mod pm;
 mod pr;
 pub(crate) mod register;
 pub(crate) mod search;
@@ -182,6 +183,8 @@ pub enum CliCommand {
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    /// SPEC-3431: `pm.*` PM agent diagnostics.
+    Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
     /// SPEC-1942 US-15: `search` JSON operation.
@@ -199,7 +202,12 @@ pub enum DaemonCommand {
     /// subscribe to one or more broadcast channels, and print received events
     /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
     /// fan-out pipeline.
-    Subscribe { channels: Vec<String> },
+    Subscribe {
+        channels: Vec<String>,
+        /// SPEC-3431 FR-025: bound the read so an unattended caller can run
+        /// subscribe → reconcile in a loop without an external supervisor.
+        timeout_seconds: Option<u64>,
+    },
 }
 
 /// SPEC-2359 command model for `workspace.*` JSON operations.
@@ -705,6 +713,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };

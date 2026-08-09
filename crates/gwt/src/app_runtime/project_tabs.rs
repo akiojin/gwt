@@ -268,6 +268,12 @@ impl AppRuntime {
                 // their agent panes stayed `Stopped`.
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
                     events.extend(self.restore_open_project_windows(&active_tab_id));
+                    // SPEC-3431 FR-002: the resident PM pane follows the same
+                    // "open the project, get the pane" rule as window restore.
+                    events.extend(self.ensure_pm_agent_for_tab(
+                        &active_tab_id,
+                        crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+                    ));
                 }
                 // SPEC-2359 W-16 (FR-387): run the cross-machine intake for
                 // the opened project; its completion event reconciles the

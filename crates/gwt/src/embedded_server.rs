@@ -191,6 +191,8 @@ struct PreparedOutbound {
     class: QueueClass,
 }
 
+const KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS: u64 = 5_000;
+
 fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
     let kind = event.event_kind();
     let (coalesce_key, repair_pane_id) = match event {
@@ -208,6 +210,57 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         repair_pane_id,
         class: queue_class_for_kind(kind),
     }
+}
+
+/// Serialize private Knowledge wire metadata without changing the public
+/// `BackendEvent` construction/destructuring shape.
+fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbound {
+    let mut prepared = prepare_outbound(&outbound.event);
+    let Some(metadata) = outbound.knowledge_wire_metadata.as_ref() else {
+        return prepared;
+    };
+    let mut payload = serde_json::to_value(&outbound.event).expect("backend event value");
+    let object = payload
+        .as_object_mut()
+        .expect("internally tagged backend event must serialize as an object");
+    match metadata {
+        crate::app_runtime::KnowledgeWireMetadata::SemanticRetry(semantic_retry) => {
+            if !matches!(
+                outbound.event,
+                gwt::BackendEvent::KnowledgeSearchResults { .. }
+            ) || !semantic_retry.retryable
+                || !matches!(
+                    semantic_retry.error_code.as_str(),
+                    "INDEX_NOT_READY" | "SEARCH_UNAVAILABLE"
+                )
+                || semantic_retry.retry_after_ms != KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS
+            {
+                return prepared;
+            }
+            object.insert(
+                "semantic_retry".to_string(),
+                serde_json::to_value(semantic_retry).expect("knowledge semantic retry value"),
+            );
+        }
+        crate::app_runtime::KnowledgeWireMetadata::NonSemanticError => {
+            if !matches!(
+                outbound.event,
+                gwt::BackendEvent::KnowledgeError {
+                    request_id: Some(_),
+                    query: Some(_),
+                    ..
+                }
+            ) {
+                return prepared;
+            }
+            object.insert(
+                "error_domain".to_string(),
+                serde_json::Value::String("non_semantic".to_string()),
+            );
+        }
+    }
+    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared
 }
 
 struct QueuedOutbound {
@@ -564,7 +617,7 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
-            let prepared = prepare_outbound(&outbound.event);
+            let prepared = prepare_outbound_event(&outbound);
             match outbound.target {
                 DispatchTarget::Broadcast => {
                     for (client_id, queue, receives_broadcasts) in &snapshot {
@@ -3396,8 +3449,8 @@ mod tests {
     };
     use futures_util::{Sink, SinkExt, StreamExt};
     use gwt::{
-        AttachmentProgressPhase, BackendEvent, FrontendEvent, RuntimeHookEvent,
-        RuntimeHookEventKind,
+        AttachmentProgressPhase, BackendEvent, FrontendEvent, KnowledgeKind,
+        KnowledgeSemanticRetry, RuntimeHookEvent, RuntimeHookEventKind,
     };
     use gwt_core::test_support::ScopedEnvVar;
     use reqwest::StatusCode as HttpStatusCode;
@@ -3413,12 +3466,13 @@ mod tests {
 
     use super::{
         agent_bridge_bind_ip, bearer_token, handle_frontend_message, prepare_outbound,
-        queue_class_for_kind, send_agent_self_close_acceptance, websocket_origin_authorized,
-        AgentCapabilityGrant, AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
-        AgentPaneSessionScope, AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub,
-        ClientQueue, ClientSessionScope, DrainStep, EmbeddedServer, HookForwardTarget,
-        PreparedOutbound, QueueClass, ScopedFrontendRequest, ServerState, DRAIN_LOW_WATER,
-        LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        prepare_outbound_event, queue_class_for_kind, send_agent_self_close_acceptance,
+        websocket_origin_authorized, AgentCapabilityGrant, AgentCapabilityIssuer,
+        AgentCapabilityRegistry, AgentFrontendRequest, AgentPaneSessionScope,
+        AgentSelfCloseDirectAcceptance, AgentSessionPrincipal, ClientHub, ClientQueue,
+        ClientSessionScope, DrainStep, EmbeddedServer, HookForwardTarget, PreparedOutbound,
+        QueueClass, ScopedFrontendRequest, ServerState, DRAIN_LOW_WATER,
+        KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     struct FailingMessageSink;
@@ -5962,6 +6016,240 @@ mod tests {
             }
         }
         (payloads, repairs)
+    }
+
+    fn knowledge_search_results() -> BackendEvent {
+        BackendEvent::KnowledgeSearchResults {
+            id: "tab-1::issue-1".to_string(),
+            knowledge_kind: KnowledgeKind::Issue,
+            query: "silent recovery".to_string(),
+            request_id: 7,
+            entries: Vec::new(),
+            selected_number: None,
+            empty_message: None,
+            refresh_enabled: true,
+        }
+    }
+
+    fn semantic_retry_directive() -> KnowledgeSemanticRetry {
+        KnowledgeSemanticRetry {
+            error_code: "SEARCH_UNAVAILABLE".to_string(),
+            retryable: true,
+            retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+        }
+    }
+
+    #[test]
+    fn client_hub_injects_exact_semantic_retry_metadata_on_knowledge_search_wire() {
+        let hub = ClientHub::default();
+        let queue = hub.register("knowledge-client".to_string());
+        hub.dispatch(vec![OutboundEvent::reply_with_knowledge_semantic_retry(
+            "knowledge-client",
+            knowledge_search_results(),
+            Some(semantic_retry_directive()),
+        )]);
+
+        let (payloads, repairs) = drain_all(&queue);
+        assert!(repairs.is_empty());
+        assert_eq!(payloads.len(), 1);
+        let value: serde_json::Value =
+            serde_json::from_str(&payloads[0]).expect("knowledge search wire payload");
+        let directive = value
+            .get("semantic_retry")
+            .expect("typed retry directive on outbound wire");
+        assert_eq!(
+            directive
+                .get("error_code")
+                .and_then(serde_json::Value::as_str),
+            Some("SEARCH_UNAVAILABLE")
+        );
+        assert_eq!(
+            directive
+                .get("retryable")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            directive
+                .get("retry_after_ms")
+                .and_then(serde_json::Value::as_u64),
+            Some(KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS)
+        );
+        assert_eq!(
+            directive.as_object().map(serde_json::Map::len),
+            Some(3),
+            "wire directive must contain no raw diagnostic: {directive}"
+        );
+    }
+
+    #[test]
+    fn client_hub_omits_absent_semantic_retry_metadata() {
+        let hub = ClientHub::default();
+        let queue = hub.register("knowledge-client".to_string());
+        hub.dispatch(vec![OutboundEvent::reply_with_knowledge_semantic_retry(
+            "knowledge-client",
+            knowledge_search_results(),
+            None,
+        )]);
+
+        let (payloads, _) = drain_all(&queue);
+        assert_eq!(payloads.len(), 1);
+        let value: serde_json::Value =
+            serde_json::from_str(&payloads[0]).expect("knowledge search wire payload");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "None metadata must be absent from the wire: {value}"
+        );
+    }
+
+    #[test]
+    fn outbound_marks_correlated_nonsemantic_knowledge_errors_on_the_private_wire() {
+        let outbound = OutboundEvent::reply_with_nonsemantic_knowledge_error(
+            "knowledge-client",
+            BackendEvent::KnowledgeError {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                request_id: Some(7),
+                query: Some("silent recovery".to_string()),
+                message: "failed to read issue cache".to_string(),
+            },
+        );
+
+        let prepared = prepare_outbound_event(&outbound);
+        let value: serde_json::Value =
+            serde_json::from_str(&prepared.payload).expect("knowledge error wire payload");
+        assert_eq!(
+            value
+                .get("error_domain")
+                .and_then(serde_json::Value::as_str),
+            Some("non_semantic")
+        );
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "non-semantic errors must never carry retry metadata: {value}"
+        );
+    }
+
+    #[test]
+    fn outbound_wire_accepts_both_allowlisted_semantic_retry_codes() {
+        for error_code in ["INDEX_NOT_READY", "SEARCH_UNAVAILABLE"] {
+            let outbound = OutboundEvent::reply_with_knowledge_semantic_retry(
+                "knowledge-client",
+                knowledge_search_results(),
+                Some(KnowledgeSemanticRetry {
+                    error_code: error_code.to_string(),
+                    retryable: true,
+                    retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+                }),
+            );
+            let prepared = prepare_outbound_event(&outbound);
+            let value: serde_json::Value =
+                serde_json::from_str(&prepared.payload).expect("knowledge search wire payload");
+            assert_eq!(
+                value
+                    .get("semantic_retry")
+                    .and_then(|directive| directive.get("error_code"))
+                    .and_then(serde_json::Value::as_str),
+                Some(error_code)
+            );
+        }
+    }
+
+    #[test]
+    fn outbound_wire_omits_invalid_semantic_retry_directives() {
+        let cases = [
+            (
+                "unknown code",
+                KnowledgeSemanticRetry {
+                    error_code: "FUTURE_CODE".to_string(),
+                    retryable: true,
+                    retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+                },
+            ),
+            (
+                "non-retryable flag",
+                KnowledgeSemanticRetry {
+                    error_code: "INDEX_NOT_READY".to_string(),
+                    retryable: false,
+                    retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
+                },
+            ),
+            (
+                "zero delay",
+                KnowledgeSemanticRetry {
+                    error_code: "SEARCH_UNAVAILABLE".to_string(),
+                    retryable: true,
+                    retry_after_ms: 0,
+                },
+            ),
+            (
+                "unexpected delay",
+                KnowledgeSemanticRetry {
+                    error_code: "SEARCH_UNAVAILABLE".to_string(),
+                    retryable: true,
+                    retry_after_ms: 30_000,
+                },
+            ),
+        ];
+
+        for (case, directive) in cases {
+            let outbound = OutboundEvent::reply_with_knowledge_semantic_retry(
+                "knowledge-client",
+                knowledge_search_results(),
+                Some(directive),
+            );
+            let prepared = prepare_outbound_event(&outbound);
+            let value: serde_json::Value =
+                serde_json::from_str(&prepared.payload).expect("knowledge search wire payload");
+            assert!(
+                value.get("semantic_retry").is_none(),
+                "{case} must not cross the wire: {value}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "requires KnowledgeSearchResults")]
+    fn outbound_rejects_semantic_retry_metadata_for_non_knowledge_events() {
+        let _ = OutboundEvent::reply_with_knowledge_semantic_retry(
+            "knowledge-client",
+            BackendEvent::KnowledgeError {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                request_id: Some(7),
+                query: Some("silent recovery".to_string()),
+                message: "visible non-semantic failure".to_string(),
+            },
+            Some(semantic_retry_directive()),
+        );
+    }
+
+    #[test]
+    fn prepare_outbound_ignores_invalid_private_metadata_defensively() {
+        let outbound = OutboundEvent {
+            target: crate::DispatchTarget::Client("knowledge-client".to_string()),
+            event: BackendEvent::KnowledgeError {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                request_id: Some(7),
+                query: Some("silent recovery".to_string()),
+                message: "visible non-semantic failure".to_string(),
+            },
+            knowledge_wire_metadata: Some(
+                crate::app_runtime::KnowledgeWireMetadata::SemanticRetry(semantic_retry_directive()),
+            ),
+        };
+        let prepared = prepare_outbound_event(&outbound);
+        let value: serde_json::Value =
+            serde_json::from_str(&prepared.payload).expect("non-knowledge wire payload");
+        assert!(
+            value.get("semantic_retry").is_none(),
+            "defensive serializer must ignore invalid metadata: {value}"
+        );
+        assert!(
+            value.get("error_domain").is_none(),
+            "legacy/untyped errors must not gain a non-semantic marker: {value}"
+        );
     }
 
     // SPEC-2359 W-17 (FR-394/FR-395): queue pressure must never disconnect a

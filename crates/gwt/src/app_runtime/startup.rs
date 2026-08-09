@@ -308,6 +308,11 @@ impl AppRuntime {
             }
             let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
         }
+        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
+        // pane once the canvas reports bounds (same deferral rule as startup
+        // auto-resume — agent panes never spawn before the canvas is ready).
+        // Projects opened later get it from `open_project_path_events`.
+        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
         let _ = self.persist();
     }
 
@@ -423,7 +428,7 @@ impl AppRuntime {
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if self.pending_startup_auto_resume_sessions.is_empty() {
-            return Vec::new();
+            return self.startup_pm_ensure_ready_events();
         }
 
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
@@ -440,6 +445,27 @@ impl AppRuntime {
             );
             events.append(&mut spawned);
         }
+        events.extend(self.startup_pm_ensure_ready_events());
+        events
+    }
+
+    /// SPEC-3431 FR-002: drain the bootstrap-queued PM ensure once the canvas
+    /// is ready. Runs after the auto-resume drain so a resumable PM session
+    /// (which the resume queue may already have restarted) is seen as live by
+    /// the singleton gate instead of being spawned twice.
+    fn startup_pm_ensure_ready_events(&mut self) -> Vec<OutboundEvent> {
+        if self.pending_startup_pm_tabs.is_empty() {
+            return Vec::new();
+        }
+        let tabs = std::mem::take(&mut self.pending_startup_pm_tabs);
+        tracing::info!(tabs = tabs.len(), "PM ensure: canvas ready, draining queue");
+        let mut events = Vec::new();
+        for tab_id in tabs {
+            events.extend(self.ensure_pm_agent_for_tab(
+                &tab_id,
+                crate::app_runtime::pm::PmEnsureTrigger::Automatic,
+            ));
+        }
         events
     }
 
@@ -449,7 +475,7 @@ impl AppRuntime {
     /// "restore everything the user did not explicitly close" rule. Records the
     /// source session in `pending_auto_resume_sources` so the lifecycle handler
     /// retires the old session once the resumed window reports its own id.
-    fn spawn_restored_agent_session(
+    pub(super) fn spawn_restored_agent_session(
         &mut self,
         tab_id: &str,
         session: gwt_agent::Session,

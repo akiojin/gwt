@@ -58,6 +58,7 @@ fn auto_issue() -> IssueMonitorIssue {
         state: IssueMonitorIssueState::Open,
         body: Some(BODY.to_string()),
         url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
     }
 }
 

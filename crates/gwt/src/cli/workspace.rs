@@ -1732,6 +1732,13 @@ fn workspace_ensure_agent_identity_matches(
     }
 }
 
+/// Canonicalize a stored Work owner onto the durable `SPEC-<n>` spelling.
+///
+/// Two legacy spellings reach the same SPEC owner and are safe to upgrade:
+/// `Issue #<n>` (a Work started as a plain Issue that later gained the
+/// `gwt-spec` label) and `SPEC #<n>` (SPEC #3431 FR-070 — the spelling the
+/// knowledge-launch wizard stamped before it was aligned with the binding).
+/// Both are one-way: nothing downgrades a durable SPEC owner.
 fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str>) -> bool {
     let Some(stored) = stored else {
         return false;
@@ -1739,16 +1746,21 @@ fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str
     let Some(durable) = durable else {
         return false;
     };
-    let stored_number = stored
-        .strip_prefix("Issue #")
-        .and_then(|number| number.parse::<u64>().ok());
-    let durable_number = durable
-        .strip_prefix("SPEC-")
-        .and_then(|number| number.parse::<u64>().ok());
-    let (Some(stored_number), Some(durable_number)) = (stored_number, durable_number) else {
+    let Some((prefix, stored_number)) = ["Issue #", "SPEC #"].into_iter().find_map(|prefix| {
+        stored
+            .strip_prefix(prefix)
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| (prefix, number))
+    }) else {
         return false;
     };
-    stored == format!("Issue #{stored_number}")
+    let Some(durable_number) = durable
+        .strip_prefix("SPEC-")
+        .and_then(|number| number.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    stored == format!("{prefix}{stored_number}")
         && durable == format!("SPEC-{durable_number}")
         && stored_number == durable_number
 }
@@ -2834,6 +2846,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// True once the buffer holds a full HTTP request: headers terminated and,
+    /// when `Content-Length` is declared, the whole body received.
+    fn request_is_complete(buffer: &[u8]) -> bool {
+        let Some(header_end) = buffer
+            .windows(4)
+            .position(|window| {
+                window
+                    == b"
+
+"
+            })
+            .map(|index| index + 4)
+        else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        buffer.len() - header_end >= content_length
+    }
+
     struct WorkspaceUpdateSuccessProbe {
         forward_url: String,
         requested: mpsc::Receiver<()>,
@@ -2862,9 +2898,29 @@ pub(crate) mod tests {
                 while !thread_stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                            let mut request = [0_u8; 8192];
-                            let _ = stream.read(&mut request);
+                            // The listener polls non-blocking, and on Windows
+                            // the accepted socket inherits that mode. Reading
+                            // non-blocking returns WouldBlock immediately, so
+                            // the probe would answer and close before the
+                            // client finished writing its request and the
+                            // client would see a transport failure instead of
+                            // the 200. Read the request to completion first.
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                            let mut request = Vec::new();
+                            let mut chunk = [0_u8; 8192];
+                            loop {
+                                match stream.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(read) => {
+                                        request.extend_from_slice(&chunk[..read]);
+                                        if request_is_complete(&request) {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
                             requested_tx.send(()).expect("record update probe request");
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -6097,6 +6153,32 @@ pub(crate) mod tests {
             (Some("Issue #3412"), Some("SPEC-9999")),
             (Some("SPEC-3412"), Some("Issue #3412")),
             (Some("Issue #3412"), None),
+        ] {
+            assert!(
+                !workspace_ensure_can_upgrade_owner(stored, durable),
+                "unexpected owner upgrade: stored={stored:?}, durable={durable:?}"
+            );
+        }
+    }
+
+    /// SPEC #3431 FR-070: heal Work items the knowledge-launch wizard stamped
+    /// with the non-canonical `SPEC #<n>` spelling. No resolver emits that
+    /// form, so without this bridge every such Work is permanently wedged at
+    /// `workspace.ensure` and its agent can never persist a title-summary.
+    #[test]
+    fn workspace_ensure_owner_upgrade_heals_legacy_spec_hash_spelling() {
+        assert!(workspace_ensure_can_upgrade_owner(
+            Some("SPEC #3412"),
+            Some("SPEC-3412")
+        ));
+        for (stored, durable) in [
+            (Some("SPEC #03412"), Some("SPEC-3412")),
+            (Some("SPEC #3412 "), Some("SPEC-3412")),
+            (Some("SPEC#3412"), Some("SPEC-3412")),
+            (Some("SPEC #3412"), Some("SPEC-9999")),
+            (Some("SPEC #3412"), Some("Issue #3412")),
+            (Some("SPEC-3412"), Some("SPEC #3412")),
+            (Some("SPEC #3412"), None),
         ] {
             assert!(
                 !workspace_ensure_can_upgrade_owner(stored, durable),

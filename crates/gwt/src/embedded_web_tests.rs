@@ -1692,31 +1692,68 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
 }
 
 #[test]
-fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
+fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
     let paths: Vec<&str> = root_js_module_assets()
         .iter()
         .map(|asset| asset.path)
         .collect();
     assert!(
-        paths.contains(&"/window-lane-identity.js"),
-        "window lane identity helper must be served as a root JS module"
+        paths.contains(&"/window-worktree-form.js"),
+        "window worktree form helper must be served as a root JS module"
     );
+    assert!(
+        !paths.contains(&"/window-lane-identity.js"),
+        "legacy lane identity module must not remain registered"
+    );
+    let form_module = root_js_module_assets()
+        .iter()
+        .find(|asset| asset.path == "/window-worktree-form.js")
+        .expect("registered worktree form module");
     let js = app_js();
     let shell_js = project_shell_surface_js();
     let styles = frontend_styles_bundle();
     assert!(
-        js.contains("applyWindowLaneData(element, windowData)")
-            && js.contains("renderWindowLaneBadge"),
-        "app.js must put data-lane-kind and the titlebar lane badge on workspace windows"
+        form_module.source.contains("lane_kind")
+            && form_module.source.contains("laneKind")
+            && form_module.source.contains("ephemeral")
+            && form_module.source.contains("branch-backed"),
+        "worktree form adapter must translate the legacy wire fixture to semantic values"
     );
     assert!(
-        shell_js.contains("window-list-lane"),
-        "window list rows must render lane identity"
+        js.contains("applyWindowWorktreeData(element, windowData)")
+            && js.contains("renderWindowWorktreeBadge"),
+        "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        styles.contains(".window-lane-badge")
-            && styles.contains(".fleet-minimap__cell[data-lane-symbol]::before"),
-        "titlebar/list/minimap lane badge styling must ship in embedded CSS"
+        shell_js.contains("window-list-worktree"),
+        "window list rows must render worktree form"
+    );
+    assert!(
+        styles.contains(".window-worktree-badge")
+            && styles.contains(".fleet-minimap__cell[data-worktree-symbol]::before"),
+        "titlebar/list/minimap worktree badge styling must ship in embedded CSS"
+    );
+    let consumer_wiring = format!("{js}\n{shell_js}");
+    for legacy in [
+        "window-lane-identity",
+        "WindowLane",
+        "windowLane",
+        "window-lane-badge",
+        "window-list-lane",
+        "data-lane-kind",
+        "data-lane-label",
+        "data-lane-symbol",
+        "Intake lane",
+        "Execution lane",
+    ] {
+        assert!(
+            !consumer_wiring.contains(legacy) && !styles.contains(legacy),
+            "old production lane vocabulary must be absent: {legacy}"
+        );
+    }
+    assert!(
+        !consumer_wiring.contains("lane_kind") && !consumer_wiring.contains("laneKind"),
+        "legacy backend fields must be read only by the worktree-form adapter"
     );
 }
 
@@ -2288,9 +2325,26 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
         html.contains("request_id"),
         "expected semantic search requests to carry request ids for stale-response guards",
     );
+    let knowledge_status_block = html
+        .split("function renderKnowledgeStatusOnly")
+        .nth(1)
+        .and_then(|tail| tail.split("function renderIssueRow").next())
+        .expect("knowledge status renderer");
     assert!(
-        html.contains("Searching semantic index"),
-        "expected semantic search to expose an in-progress state",
+        knowledge_status_block.contains("!issueSurface && state.searching")
+            && knowledge_status_block.contains("Searching semantic index"),
+        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+    );
+    let direct_send_block = html
+        .split("function sendKnowledgeSemanticSearchNow")
+        .nth(1)
+        .and_then(|tail| tail.split("const uiTraceWiring").next())
+        .expect("semantic direct-send helper");
+    assert!(
+        direct_send_block.contains("activeSocket.readyState !== WebSocket.OPEN")
+            && direct_send_block.contains("activeSocket.send(JSON.stringify(message))")
+            && !direct_send_block.contains("pendingMessages.push"),
+        "expected semantic search to use an OPEN-only direct send that cannot enter the generic queue",
     );
     assert!(
         html.contains("% match"),
@@ -2420,9 +2474,10 @@ fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results
         "expected semantic search state to track the single in-flight backend request",
     );
     assert!(
-        html.contains("queuedSearchQuery")
-            && html.contains("const nextQuery = state.queuedSearchQuery;"),
-        "expected semantic search state to coalesce additional input to the latest query",
+        html.contains("searchGeneration")
+            && html.contains("inFlightSearchIntent")
+            && html.contains("queuedSearchIntent"),
+        "expected semantic search to coalesce one physical request plus one generation-fenced latest intent",
     );
     assert!(
             !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
@@ -2442,9 +2497,27 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
         html.contains("request_id: requestId,\n          number,"),
         "expected select_knowledge_bridge_entry requests to carry the detail request id",
     );
+    let load_request_block = html
+        .split("function requestKnowledgeBridge")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
+                .next()
+        })
+        .expect("knowledge load request block");
+    let pr_compatibility_block = load_request_block
+        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n        }").next())
+        .expect("PR compatibility reset block");
     assert!(
-        html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
-        "expected new cache loads to invalidate older detail response ids",
+        load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
+            && load_request_block
+                .matches("state.detailRequestId = 0;")
+                .count()
+                == 1
+            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
+        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
