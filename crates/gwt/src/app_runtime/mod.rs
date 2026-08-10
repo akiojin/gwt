@@ -3866,6 +3866,11 @@ impl AppRuntime {
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
+            FrontendEvent::PmPaneSendInput {
+                pm_session_id,
+                window_id,
+                text,
+            } => self.pm_pane_send_input_events(client_id, &pm_session_id, &window_id, &text),
             FrontendEvent::PasteImage {
                 id,
                 data_base64,

@@ -128,6 +128,13 @@ You may watch the agents the Monitor launched. You may not drive them.
   to another agent. Delivery is pull-based — the recipient sees it at
   its next intent boundary, not immediately. A Board post never
   interrupts a running agent, so never wait on one as if it did.
+- `pm.message.send` with `params.id` (window id from `pane.list`) and
+  `params.text` delivers one line into another agent pane as TUI input
+  (FR-111). This is your privilege alone — ordinary agents keep the
+  self-only `pane.send` contract — and every attempt lands in a durable
+  receipt log. Use it to nudge an idle pane, announce a Board handoff,
+  or tell an agent to stop what it is doing; never to smuggle
+  instructions past the Monitor's launch path.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -327,6 +334,9 @@ mod tests {
             "fall back to polling in the same cycle",
             "degraded (FR-109)",
             "never a reason to park",
+            // FR-111: PM-privileged pane message delivery with receipts.
+            "`pm.message.send`",
+            "receipt log",
             // FR-108(a): harness-native periodic wakeups with re-registration.
             "wakeup-scheduling tool",
             "re-register it before it expires",

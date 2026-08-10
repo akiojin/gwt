@@ -42881,3 +42881,83 @@ fn scheduled_tick_scans_enabled_projects_and_skips_disabled_ones() {
         "the tick must produce a monitor status snapshot for the enabled project"
     );
 }
+
+/// SPEC-3431 FR-111 (T-206): the server-side PM principal gate for pane
+/// message delivery — re-verified immediately before the injection. Ordinary
+/// sessions, stale registrations, and unknown windows are refused with a
+/// typed reply and zero writes; only the live registered PM reaches the
+/// authorized injection path.
+#[test]
+fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (_repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let target_window = "tab-1::other-window".to_string();
+
+    let refusal_of = |events: &[OutboundEvent]| -> String {
+        events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    error: Some(error),
+                    ..
+                } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("a refused send must reply with a typed error")
+    };
+
+    // A non-PM session is refused: the self-only world stays intact and the
+    // privileged path does not open for it.
+    let events = runtime.pm_pane_send_input_events(
+        "client-1".to_string(),
+        "other-session",
+        &target_window,
+        "hello\r",
+    );
+    assert!(
+        refusal_of(&events).contains("not the registered PM"),
+        "foreign principals must be refused"
+    );
+
+    // An unknown window is refused before any principal work.
+    let events = runtime.pm_pane_send_input_events(
+        "client-1".to_string(),
+        "pm-session-live",
+        "tab-9::ghost",
+        "hello\r",
+    );
+    assert!(refusal_of(&events).contains("unknown pane"));
+
+    // The live registered PM passes the gate; with no PTY runtime in the
+    // harness the write itself reports the missing runtime, which proves the
+    // authorized injection path was reached (not a principal refusal).
+    let events = runtime.pm_pane_send_input_events(
+        "client-1".to_string(),
+        "pm-session-live",
+        &target_window,
+        "hello\r",
+    );
+    assert!(
+        refusal_of(&events).contains("no live runtime"),
+        "the live PM must reach the injection path"
+    );
+
+    // A stale registration (PM pane gone) is refused at the liveness check.
+    runtime.active_agent_sessions.remove(&pm_window_id);
+    let events = runtime.pm_pane_send_input_events(
+        "client-1".to_string(),
+        "pm-session-live",
+        &target_window,
+        "hello\r",
+    );
+    assert!(
+        refusal_of(&events).contains("no live pane"),
+        "a stale PM registration must not deliver"
+    );
+}
