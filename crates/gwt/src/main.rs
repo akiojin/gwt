@@ -7787,7 +7787,6 @@ fn main() -> std::io::Result<()> {
     board_projection_watchers.sync(&app, proxy.clone());
     let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
     workspace_projection_watchers.sync(&app, proxy.clone());
-    #[cfg(unix)]
     // Issue #3505: GUI-owned scheduled scan cadence. Without this tick no
     // component in the production topology ever runs scheduled scans, so
     // autonomous launches silently never happen.
@@ -7811,6 +7810,7 @@ fn main() -> std::io::Result<()> {
             })
             .ok();
     }
+    #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
     board_daemon_subscribers.sync(&app, proxy.clone());
