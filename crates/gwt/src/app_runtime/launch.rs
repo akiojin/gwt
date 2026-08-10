@@ -41,7 +41,7 @@ use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_windows_host_shell_wrapper, combined_window_id,
     detect_shell_program, finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
-    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
+    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_worktree_path,
     launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
@@ -1666,7 +1666,132 @@ fn launch_argv_summary(args: &[String]) -> String {
 /// SPEC-2359 W-17 (FR-398): dedup window for launches that are past window
 /// registration but not yet live. Entries also clear on launch completion.
 const INFLIGHT_LAUNCH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-const CONTINUE_WORK_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Issue #3475: base deadline for the authenticated SessionStart receipt of a
+/// candidate launch, measured from the PTY handoff. The previous fixed 60s
+/// aborted a healthy launch that resumed a 12.5 MB Codex conversation in
+/// ~60.3s, so the base now carries real headroom before the progress-aware
+/// extensions below take over.
+const CONTINUE_WORK_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Issue #3475: one extension granted when the deadline arrives and the pane
+/// process is still alive.
+const CONTINUE_WORK_READY_EXTENSION: std::time::Duration = std::time::Duration::from_secs(60);
+/// Issue #3475: absolute cap on extensions (90s + 4 × 60s = 330s). Bounds the
+/// wait for an agent that never reports SessionStart no matter how busy it looks.
+const CONTINUE_WORK_READY_MAX_EXTENSIONS: u32 = 4;
+/// Issue #3475: cap on *consecutive* extensions granted without new PTY output
+/// (90s + 2 × 60s = 210s). New output resets the streak, so a pane that is
+/// visibly working keeps the full budget above while a wedged one gives up sooner.
+const CONTINUE_WORK_READY_MAX_SILENT_EXTENSIONS: u32 = 2;
+
+/// Issue #3475: progress-aware state for one authenticated SessionStart
+/// readiness deadline.
+///
+/// It rides on the correlated timer event rather than living in an
+/// `AppRuntime` map, so an extension needs no extra teardown path and a late
+/// timer for a superseded launch stays as harmless as it was before. `waited`
+/// is derived from the granted extension count instead of a measured clock so
+/// tests never depend on wall-clock absolutes (Issue #3339).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinueWorkReadinessWatch {
+    /// The launch operation this deadline is correlated with.
+    pub operation_id: String,
+    /// Extensions already granted; `0` is the base deadline.
+    pub extensions: u32,
+    /// Consecutive extensions granted without new PTY output.
+    pub silent_extensions: u32,
+    /// Cumulative PTY output bytes observed when this deadline was armed.
+    pub observed_output_bytes: u64,
+}
+
+impl ContinueWorkReadinessWatch {
+    pub(crate) fn new(operation_id: String) -> Self {
+        Self {
+            operation_id,
+            extensions: 0,
+            silent_extensions: 0,
+            observed_output_bytes: 0,
+        }
+    }
+
+    /// How long the launch has already waited when this deadline fires.
+    fn waited(&self) -> std::time::Duration {
+        CONTINUE_WORK_READY_TIMEOUT + CONTINUE_WORK_READY_EXTENSION * self.extensions
+    }
+
+    /// How long this deadline sleeps before firing.
+    fn delay(&self) -> std::time::Duration {
+        if self.extensions == 0 {
+            CONTINUE_WORK_READY_TIMEOUT
+        } else {
+            CONTINUE_WORK_READY_EXTENSION
+        }
+    }
+}
+
+/// Issue #3475: what a fired readiness deadline should do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadinessDeadlineDecision {
+    /// Keep waiting; re-arm with this updated watch.
+    Extend(ContinueWorkReadinessWatch),
+    /// Give up. `detail` names the total wait and what never happened.
+    Abort { detail: String },
+}
+
+/// Issue #3475: decide a fired readiness deadline from evidence instead of a
+/// fixed expiry. A dead pane aborts immediately; a live one buys an extension,
+/// and new PTY output resets the silent streak so a busy bootstrap keeps the
+/// larger budget. Both budgets are capped, so a launch that never reports
+/// SessionStart still terminates.
+///
+/// Pure so the policy is unit-testable without a PTY or a clock.
+pub(crate) fn continue_work_readiness_decision(
+    watch: &ContinueWorkReadinessWatch,
+    pane_alive: bool,
+    output_bytes: u64,
+) -> ReadinessDeadlineDecision {
+    let waited = watch.waited().as_secs();
+    if !pane_alive {
+        return ReadinessDeadlineDecision::Abort {
+            detail: readiness_timeout_detail(waited, "the agent process is no longer running"),
+        };
+    }
+    if watch.extensions >= CONTINUE_WORK_READY_MAX_EXTENSIONS {
+        return ReadinessDeadlineDecision::Abort {
+            detail: readiness_timeout_detail(
+                waited,
+                "the agent process kept running but never reported an authenticated SessionStart",
+            ),
+        };
+    }
+    let silent_extensions = if output_bytes > watch.observed_output_bytes {
+        0
+    } else {
+        watch.silent_extensions + 1
+    };
+    if silent_extensions > CONTINUE_WORK_READY_MAX_SILENT_EXTENSIONS {
+        return ReadinessDeadlineDecision::Abort {
+            detail: readiness_timeout_detail(
+                waited,
+                if output_bytes > 0 {
+                    "the agent process is still running but stopped producing output before reporting an authenticated SessionStart"
+                } else {
+                    "the agent process is still running but never produced any output"
+                },
+            ),
+        };
+    }
+    ReadinessDeadlineDecision::Extend(ContinueWorkReadinessWatch {
+        operation_id: watch.operation_id.clone(),
+        extensions: watch.extensions + 1,
+        silent_extensions,
+        observed_output_bytes: output_bytes,
+    })
+}
+
+fn readiness_timeout_detail(waited_secs: u64, observation: &str) -> String {
+    format!("authenticated SessionStart readiness timed out after {waited_secs}s: {observation}")
+}
 
 /// Identity of a launch for in-flight dedup. Includes the agent and the
 /// resume conversation so parallel restores of *different* Sessions on the
@@ -2014,6 +2139,9 @@ impl AppRuntime {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        // SPEC-3431 FR-001: a PM launch registers its session once it exists.
+        // Removed unconditionally so a failed launch leaves no stale marker.
+        let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -2134,15 +2262,7 @@ impl AppRuntime {
                     let operation_id = pending.operation_id.clone();
                     self.pending_fresh_execution_launches
                         .insert(window_id.clone(), pending);
-                    let timeout_proxy = self.proxy.clone();
-                    let timeout_window_id = window_id.clone();
-                    thread::spawn(move || {
-                        thread::sleep(CONTINUE_WORK_READY_TIMEOUT);
-                        timeout_proxy.send(UserEvent::ContinueWorkReadyTimeout {
-                            window_id: timeout_window_id,
-                            operation_id,
-                        });
-                    });
+                    self.arm_continue_work_readiness_deadline(&window_id, operation_id);
                 }
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     self.revoke_unbound_agent_capability(issued_capability_token.as_deref());
@@ -2229,8 +2349,30 @@ impl AppRuntime {
                         .workspace
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
                 }
+                // SPEC-3431 FR-001/FR-003: write the PM registration for a
+                // launch the ensure gate marked as PM, or for any resume whose
+                // source session is the registered PM (succession keeps the
+                // singleton pointing at the live conversation).
+                let pm_registration_root = pending_pm_project_root.or_else(|| {
+                    let source = auto_resume_source_session_id.as_ref()?;
+                    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+                    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).ok()?;
+                    (prefs.registration?.session_id == *source).then(|| project_root.clone())
+                });
                 if let Some(source_session_id) = auto_resume_source_session_id {
                     mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                }
+                // SPEC-3431 FR-026: a completed PM launch is the moment
+                // "running as" becomes true, so the settings panel is
+                // refreshed from the post-spawn state below.
+                let pm_launch_registered = pm_registration_root.is_some();
+                if let Some(pm_project_root) = pm_registration_root {
+                    self.register_pm_after_launch(
+                        &pm_project_root,
+                        &session_id_for_restore,
+                        agent_id.command(),
+                        &worktree_path,
+                    );
                 }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
@@ -2268,15 +2410,7 @@ impl AppRuntime {
                                 .get(&window_id)
                                 .map(|pending| pending.operation_id.clone())
                             {
-                                let timeout_proxy = self.proxy.clone();
-                                let timeout_window_id = window_id.clone();
-                                thread::spawn(move || {
-                                    thread::sleep(CONTINUE_WORK_READY_TIMEOUT);
-                                    timeout_proxy.send(UserEvent::ContinueWorkReadyTimeout {
-                                        window_id: timeout_window_id,
-                                        operation_id,
-                                    });
-                                });
+                                self.arm_continue_work_readiness_deadline(&window_id, operation_id);
                             }
                         }
                         if !is_fresh_execution_launch {
@@ -2443,6 +2577,9 @@ impl AppRuntime {
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
+                        if pm_launch_registered {
+                            events.extend(self.pm_status_broadcast_events());
+                        }
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
@@ -2797,6 +2934,52 @@ impl AppRuntime {
             },
         );
         Ok(())
+    }
+
+    /// Issue #3475: start the authenticated SessionStart readiness deadline for
+    /// a candidate launch. The deadline is progress-aware from here on — see
+    /// [`continue_work_readiness_decision`].
+    pub(crate) fn arm_continue_work_readiness_deadline(
+        &self,
+        window_id: &str,
+        operation_id: String,
+    ) {
+        let mut watch = ContinueWorkReadinessWatch::new(operation_id);
+        watch.observed_output_bytes = self.observed_window_output_bytes(window_id);
+        self.rearm_continue_work_readiness_deadline(window_id, watch);
+    }
+
+    pub(crate) fn rearm_continue_work_readiness_deadline(
+        &self,
+        window_id: &str,
+        watch: ContinueWorkReadinessWatch,
+    ) {
+        let delay = watch.delay();
+        let timeout_proxy = self.proxy.clone();
+        let timeout_window_id = window_id.to_string();
+        thread::spawn(move || {
+            thread::sleep(delay);
+            timeout_proxy.send(UserEvent::ContinueWorkReadyTimeout {
+                window_id: timeout_window_id,
+                watch,
+            });
+        });
+    }
+
+    /// Issue #3475: liveness evidence for a fired readiness deadline. A pane is
+    /// alive only while gwt still owns its PTY runtime *and* the process watcher
+    /// has not reported an exit or error.
+    pub(crate) fn readiness_pane_is_alive(&self, window_id: &str) -> bool {
+        self.runtimes.contains_key(window_id)
+            && self.window_pty_statuses.get(window_id) == Some(&WindowProcessStatus::Running)
+    }
+
+    /// Issue #3475: progress evidence for a fired readiness deadline.
+    pub(crate) fn observed_window_output_bytes(&self, window_id: &str) -> u64 {
+        self.window_output_bytes
+            .get(window_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(crate) fn spawn_agent_window(
@@ -3676,13 +3859,13 @@ impl AppRuntime {
             return;
         };
         self.revoke_agent_capability_for_window(window_id);
-        // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
+        // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
         // when dirty so uncommitted work is never lost. Skip the Paused-Work /
         // projection persistence entirely.
-        if self.is_ephemeral_intake_session(&session) {
-            self.finalize_ephemeral_intake_worktree(&session);
+        if self.session_uses_ephemeral_worktree(&session) {
+            self.finalize_ephemeral_worktree(&session);
             let _ = gwt_agent::persist_session_status(
                 &self.sessions_dir,
                 &session.session_id,
@@ -3802,14 +3985,15 @@ impl AppRuntime {
         session
     }
 
-    /// SPEC-3214 (codex #3235 review): whether a stopped session is an
-    /// ephemeral intake session. The `.intake-*` basename alone is not enough —
+    /// SPEC-3214 (codex #3235 review): whether a stopped session uses an
+    /// ephemeral worktree. The `.intake-*` basename alone is not enough —
     /// a normal branch worktree a user happens to name `.intake-*` must keep its
-    /// Paused-Work / resume behavior. The definitive signal is that the intake
-    /// worktree is DETACHED (branchless), which only `create_detached` produces.
+    /// Paused-Work / resume behavior. The definitive signal is that the
+    /// ephemeral worktree is DETACHED (branchless), which only
+    /// `create_detached` produces.
     /// A worktree that is already gone is treated as ephemeral (it was reaped).
-    pub(super) fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
-        if !is_ephemeral_intake_worktree(&session.worktree_path) {
+    pub(super) fn session_uses_ephemeral_worktree(&self, session: &ActiveAgentSession) -> bool {
+        if !is_ephemeral_worktree_path(&session.worktree_path) {
             return false;
         }
         let Some(main_repo_path) = self
@@ -3823,7 +4007,7 @@ impl AppRuntime {
             Ok(worktrees) => worktrees
                 .iter()
                 .find(|info| same_worktree_path(&info.path, &session.worktree_path))
-                // On a branch → a real worktree, not intake. Detached → intake.
+                // On a branch → a real worktree. Detached → ephemeral.
                 .is_none_or(|info| info.branch.is_none()),
             // Cannot enumerate: fall back to "gone means it was ephemeral".
             Err(_) => !session.worktree_path.exists(),
@@ -3841,11 +4025,11 @@ impl AppRuntime {
         self.revoke_unbound_agent_capability(token.as_deref());
     }
 
-    /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
+    /// SPEC-3214 (FR-002): tear down an ephemeral worktree when its
     /// session ends. A clean worktree is force-removed; a dirty one is kept and
     /// logged so uncommitted work is never destroyed (the user-facing retention
     /// notice ships with the intake UI in a later phase).
-    fn finalize_ephemeral_intake_worktree(&self, session: &ActiveAgentSession) {
+    fn finalize_ephemeral_worktree(&self, session: &ActiveAgentSession) {
         let worktree_path = session.worktree_path.as_path();
         let main_repo_path = self
             .tab(&session.tab_id)
@@ -3860,7 +4044,7 @@ impl AppRuntime {
             Ok(true) => {
                 tracing::warn!(
                     worktree_path = %worktree_path.display(),
-                    "ephemeral intake worktree has local work (changes, ignored files, or commits); keeping it so nothing is lost"
+                    "ephemeral worktree has local work (changes, ignored files, or commits); keeping it so nothing is lost"
                 );
                 return;
             }
@@ -3870,7 +4054,7 @@ impl AppRuntime {
                 tracing::warn!(
                     worktree_path = %worktree_path.display(),
                     error = %error,
-                    "could not determine intake worktree cleanliness; keeping it"
+                    "could not determine ephemeral worktree cleanliness; keeping it"
                 );
                 return;
             }
@@ -3880,12 +4064,12 @@ impl AppRuntime {
             tracing::warn!(
                 worktree_path = %worktree_path.display(),
                 error = %error,
-                "failed to remove clean ephemeral intake worktree"
+                "failed to remove clean ephemeral worktree"
             );
         }
     }
 
-    /// Compatibility hook for the runtime-status path. Current intake cleanup
+    /// Compatibility hook for the runtime-status path. Current ephemeral-worktree cleanup
     /// runs synchronously in `mark_agent_session_stopped()` after classifying
     /// the session by detached `.intake-*` worktree state, so there is no
     /// deferred queue to drain here.
