@@ -19079,6 +19079,346 @@ fn startup_restore_retires_source_only_after_workspace_projection_succeeds() {
 }
 
 #[test]
+fn startup_pm_registration_failure_preserves_source_and_pauses_successor() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_root = temp.path().join("workspace-home");
+    let (bare, _develop_worktree) = init_managed_workspace_with_develop_worktree(&project_root);
+    let worktree = project_root.join("work").join("issue-3431");
+    fs::create_dir_all(worktree.parent().expect("worktree parent"))
+        .expect("create worktree parent");
+    run_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/issue-3431",
+            worktree.to_str().expect("worktree path"),
+            "develop",
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut candidate = sample_window(
+        "agent-startup-pm",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    candidate.agent_id = Some("codex".to_string());
+    candidate.session_id = Some("session-startup-pm-source".to_string());
+    persisted.windows.push(candidate);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-startup-pm".to_string(),
+        title: "Startup PM".to_string(),
+        project_root: project_root.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-startup-pm"));
+    let window_id = combined_window_id("tab-startup-pm", "agent-startup-pm");
+    runtime
+        .pending_auto_resume_sources
+        .insert(window_id.clone(), "session-startup-pm-source".to_string());
+    runtime
+        .pending_pm_launches
+        .insert(window_id.clone(), project_root.clone());
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        super::workspace_resume_context_for_work_item(
+            &project_root,
+            Some("work/issue-3431"),
+            &worktree,
+        ),
+    );
+    let mut source =
+        gwt_agent::Session::new(&worktree, "work/issue-3431", gwt_agent::AgentId::Codex);
+    source.id = "session-startup-pm-source".to_string();
+    source.restore_window_on_startup = true;
+    source.update_status(gwt_agent::AgentStatus::Running);
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save startup PM source Session");
+
+    super::pm::set_pm_registration_commit_hook_for_test(|| {
+        Err("forced PM registration commit failure".to_string())
+    });
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(worktree.clone()),
+            },
+            "session-startup-pm-successor".to_string(),
+            "work/issue-3431".to_string(),
+            "Codex".to_string(),
+            worktree.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(3431),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            gwt_agent::SessionMode::Resume,
+            false,
+            project_root.display().to_string(),
+        )),
+    );
+
+    let durable_source =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-startup-pm-source.toml"))
+            .expect("reload startup PM source Session");
+    assert_eq!(durable_source.status, gwt_agent::AgentStatus::Running);
+    assert!(durable_source.restore_window_on_startup);
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped)
+    );
+    assert!(runtime
+        .window_details
+        .get(&window_id)
+        .is_some_and(|detail| detail.contains("Needs recovery")));
+    assert!(events.iter().all(|event| {
+        !matches!(
+            &event.event,
+            BackendEvent::TerminalOutput { .. }
+                | BackendEvent::LaunchWizardOpenError { .. }
+                | BackendEvent::TerminalStatus {
+                    status: WindowProcessStatus::Error,
+                    ..
+                }
+        )
+    }));
+    let resume_events = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+        .expect("load Work projection after PM registration refusal")
+        .map(|projection| {
+            projection
+                .work_items
+                .iter()
+                .flat_map(|item| &item.events)
+                .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Resume)
+                .count()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        resume_events, 0,
+        "PM registration refusal must reject the staged Work Resume"
+    );
+    let tracked_events = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+    assert!(
+        !tracked_events.exists(),
+        "a rejected PM registration must not publish tracked Work events"
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+    assert_eq!(
+        gwt::pm_registry::load_pm_prefs(&prefs_path)
+            .expect("load PM prefs after registration refusal")
+            .registration,
+        None,
+        "a definite PM registration refusal must not leave PM authority"
+    );
+}
+
+#[test]
+fn startup_pm_registration_and_work_resume_commit_together_once() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_root = temp.path().join("workspace-home");
+    let (bare, _develop_worktree) = init_managed_workspace_with_develop_worktree(&project_root);
+    let worktree = project_root.join("work").join("issue-3431");
+    fs::create_dir_all(worktree.parent().expect("worktree parent"))
+        .expect("create worktree parent");
+    run_git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/issue-3431",
+            worktree.to_str().expect("worktree path"),
+            "develop",
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut candidate = sample_window(
+        "agent-startup-pm-success",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    candidate.agent_id = Some("codex".to_string());
+    candidate.session_id = Some("session-startup-pm-success-source".to_string());
+    persisted.windows.push(candidate);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-startup-pm-success".to_string(),
+        title: "Startup PM Success".to_string(),
+        project_root: project_root.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-startup-pm-success"));
+    let window_id = combined_window_id("tab-startup-pm-success", "agent-startup-pm-success");
+    runtime.pending_auto_resume_sources.insert(
+        window_id.clone(),
+        "session-startup-pm-success-source".to_string(),
+    );
+    runtime
+        .pending_pm_launches
+        .insert(window_id.clone(), project_root.clone());
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        super::workspace_resume_context_for_work_item(
+            &project_root,
+            Some("work/issue-3431"),
+            &worktree,
+        ),
+    );
+    let mut source =
+        gwt_agent::Session::new(&worktree, "work/issue-3431", gwt_agent::AgentId::Codex);
+    source.id = "session-startup-pm-success-source".to_string();
+    source.restore_window_on_startup = true;
+    source.update_status(gwt_agent::AgentStatus::Running);
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save startup PM source Session");
+
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "ping -n 31 127.0.0.1 >NUL".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    };
+    let events = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(worktree.clone()),
+            },
+            "session-startup-pm-successor".to_string(),
+            "work/issue-3431".to_string(),
+            "Codex".to_string(),
+            worktree.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(3431),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            gwt_agent::SessionMode::Resume,
+            false,
+            project_root.display().to_string(),
+        )),
+    );
+
+    let durable_source = gwt_agent::Session::load(
+        &runtime
+            .sessions_dir
+            .join("session-startup-pm-success-source.toml"),
+    )
+    .expect("reload startup PM source Session");
+    assert_eq!(durable_source.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!durable_source.restore_window_on_startup);
+    assert!(runtime.window_status(&window_id).is_some_and(|status| {
+        !matches!(
+            status,
+            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+        )
+    }));
+    assert!(!runtime.pending_pm_launches.contains_key(&window_id));
+    assert!(!runtime.pending_auto_resume_sources.contains_key(&window_id));
+    assert!(events.iter().all(|event| {
+        !matches!(
+            &event.event,
+            BackendEvent::TerminalOutput { .. }
+                | BackendEvent::LaunchWizardOpenError { .. }
+                | BackendEvent::TerminalStatus {
+                    status: WindowProcessStatus::Error,
+                    ..
+                }
+        )
+    }));
+
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+    let registration = gwt::pm_registry::load_pm_prefs(&prefs_path)
+        .expect("load committed PM prefs")
+        .registration
+        .expect("successor PM registration");
+    assert_eq!(registration.session_id, "session-startup-pm-successor");
+    assert_eq!(registration.agent_id, "codex");
+    assert_eq!(registration.worktree_path, worktree.to_string_lossy());
+    assert_eq!(
+        runtime.pm_sessions.get(&project_root).map(String::as_str),
+        Some("session-startup-pm-successor")
+    );
+
+    let resume_events = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+        .expect("load committed Work projection")
+        .expect("Work projection exists")
+        .work_items
+        .iter()
+        .flat_map(|item| &item.events)
+        .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Resume)
+        .count();
+    assert_eq!(resume_events, 1, "Work Resume commits exactly once");
+    let tracked_events =
+        fs::read_to_string(gwt_core::paths::gwt_repo_local_work_events_path(&worktree))
+            .expect("load tracked Work events");
+    let tracked_resume_events = tracked_events
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<gwt_core::workspace_projection::WorkEvent>(line)
+                .expect("parse tracked Work event")
+        })
+        .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Resume)
+        .count();
+    assert_eq!(
+        tracked_resume_events, 1,
+        "tracked Work Resume commits exactly once"
+    );
+}
+
+#[test]
 fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection() {
     let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
@@ -41791,6 +42131,95 @@ fn pm_registration_fixture(session_id: &str, worktree: &Path) -> gwt::pm_registr
         consecutive_crashes: 0,
         next_not_before: None,
     }
+}
+
+#[test]
+fn pm_registration_preflight_rejects_live_same_session_with_different_identity() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = "pm-session-same".to_string();
+    runtime.active_agent_sessions.insert(window_id, active);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-session-same", &repo),
+        |_| false,
+    )
+    .expect("seed live registration");
+
+    let error = runtime
+        .prepare_pm_registration_after_launch(
+            &repo,
+            "pm-session-same",
+            "codex",
+            &repo.join("different-worktree"),
+        )
+        .expect_err("same session id with different identity must not replace a live PM");
+
+    assert!(
+        error.contains("another live PM"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn pm_succession_commit_rejects_when_the_source_registration_disappears() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("pm-source", &repo),
+        |_| false,
+    )
+    .expect("seed source registration");
+    let prepared = runtime
+        .prepare_pm_succession_after_launch(
+            &repo,
+            "pm-source",
+            "pm-successor",
+            "codex",
+            &repo.join("successor-worktree"),
+        )
+        .expect("prepare succession")
+        .expect("source owns the PM registration");
+    gwt::pm_registry::deregister_pm(&prefs_path, "pm-source")
+        .expect("remove source registration before commit");
+
+    let error = runtime
+        .commit_prepared_pm_registration(&prepared)
+        .expect_err("a disappeared source must fail the PM succession CAS");
+
+    assert!(error.contains("changed before succession"));
+    assert_eq!(
+        gwt::pm_registry::load_pm_prefs(&prefs_path)
+            .expect("load PM prefs")
+            .registration,
+        None
+    );
 }
 
 #[test]

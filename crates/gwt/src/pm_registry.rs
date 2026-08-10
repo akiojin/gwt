@@ -160,6 +160,8 @@ pub struct PmPrefs {
 pub enum PmRegisterOutcome {
     /// No prior registration; the candidate is now registered.
     Registered,
+    /// The exact candidate was already registered. No durable write occurred.
+    AlreadyRegistered,
     /// A stale (dead) registration was replaced by the candidate.
     ReplacedStale { previous: PmRegistration },
     /// A live PM already exists; the candidate was rejected and the stored
@@ -373,6 +375,13 @@ pub fn load_pm_prefs(path: &Path) -> io::Result<PmPrefs> {
     load_pm_prefs_unlocked(path)
 }
 
+/// Read the durable registration while holding the same stable sibling lock
+/// used by singleton writers. Callers use this for authoritative response-loss
+/// reconciliation without racing an in-flight registration update.
+pub fn load_pm_registration_locked(path: &Path) -> io::Result<Option<PmRegistration>> {
+    with_pm_prefs_lock(path, || Ok(load_pm_prefs_unlocked(path)?.registration))
+}
+
 pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
     with_pm_prefs_lock(path, || save_pm_prefs_unlocked(path, prefs))
 }
@@ -402,6 +411,9 @@ pub fn try_register_pm(
 ) -> io::Result<(PmPrefs, PmRegisterOutcome)> {
     with_pm_prefs_lock(path, || {
         let mut prefs = load_pm_prefs_unlocked(path)?;
+        if prefs.registration.as_ref() == Some(&candidate) {
+            return Ok((prefs, PmRegisterOutcome::AlreadyRegistered));
+        }
         let outcome = match prefs.registration.take() {
             Some(existing) if is_live(&existing) => {
                 // Rejected attempts must leave the canonical bytes untouched:
@@ -415,6 +427,29 @@ pub fn try_register_pm(
         prefs.registration = Some(candidate);
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, outcome))
+    })
+}
+
+/// Replace one exact registration snapshot with `candidate` under the PM
+/// lock. The exact candidate is an idempotent success for response-loss
+/// retries; missing or changed authority is a conflict and leaves bytes
+/// untouched.
+pub fn compare_and_swap_pm_registration(
+    path: &Path,
+    expected: &PmRegistration,
+    candidate: PmRegistration,
+) -> io::Result<(PmPrefs, bool)> {
+    with_pm_prefs_lock(path, || {
+        let mut prefs = load_pm_prefs_unlocked(path)?;
+        if prefs.registration.as_ref() == Some(&candidate) {
+            return Ok((prefs, true));
+        }
+        if prefs.registration.as_ref() != Some(expected) {
+            return Ok((prefs, false));
+        }
+        prefs.registration = Some(candidate);
+        save_pm_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, true))
     })
 }
 
@@ -727,6 +762,50 @@ mod tests {
             prefs.registration.map(|r| r.session_id),
             Some("session-b".to_string())
         );
+    }
+
+    #[test]
+    fn registering_the_exact_candidate_is_idempotent_without_rewriting_prefs() {
+        let (_dir, path) = temp_prefs_path();
+        let candidate = registration("session-a");
+        try_register_pm(&path, candidate.clone(), |_| false).expect("seed");
+        let before = fs::read(&path).expect("read seeded prefs");
+
+        let (prefs, outcome) =
+            try_register_pm(&path, candidate.clone(), |_| true).expect("retry registration");
+
+        assert_eq!(outcome, PmRegisterOutcome::AlreadyRegistered);
+        assert_eq!(prefs.registration, Some(candidate));
+        assert_eq!(fs::read(&path).expect("read retried prefs"), before);
+    }
+
+    #[test]
+    fn compare_and_swap_requires_the_exact_predecessor_and_retries_idempotently() {
+        let (_dir, path) = temp_prefs_path();
+        let source = registration("session-source");
+        let successor = registration("session-successor");
+        try_register_pm(&path, source.clone(), |_| false).expect("seed source");
+
+        let (prefs, replaced) = compare_and_swap_pm_registration(
+            &path,
+            &registration("foreign-source"),
+            successor.clone(),
+        )
+        .expect("conflicting CAS");
+        assert!(!replaced);
+        assert_eq!(prefs.registration, Some(source.clone()));
+
+        let (prefs, replaced) =
+            compare_and_swap_pm_registration(&path, &source, successor.clone()).expect("exact CAS");
+        assert!(replaced);
+        assert_eq!(prefs.registration, Some(successor.clone()));
+        let before_retry = fs::read(&path).expect("read committed CAS");
+
+        let (prefs, replaced) = compare_and_swap_pm_registration(&path, &source, successor.clone())
+            .expect("response-loss retry");
+        assert!(replaced);
+        assert_eq!(prefs.registration, Some(successor));
+        assert_eq!(fs::read(&path).expect("read retried CAS"), before_retry);
     }
 
     #[test]

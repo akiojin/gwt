@@ -303,6 +303,7 @@ impl AppRuntime {
         detail: String,
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
+        self.pending_pm_launches.remove(&window_id);
         self.log_window_launch_error("launch_complete", &window_id, &detail);
         let user_detail = Self::user_facing_launch_error_detail(&detail);
         let issue_monitor_issue_number = launch_feedback_context

@@ -160,8 +160,9 @@ use ui_trace::save_ui_trace_to_log_dir;
 use workspace::{
     active_agent_summary_from_session, merge_active_sessions_into_projection,
     retain_live_workspace_agents, save_shell_work_projection, save_workspace_launch_projection,
-    workspace_cleanup_candidate_for_projection, workspace_projection_for_current_resume,
-    workspace_projection_owner_title, WorkspaceLaunchProjectionKind,
+    save_workspace_launch_projection_with_commit, workspace_cleanup_candidate_for_projection,
+    workspace_projection_for_current_resume, workspace_projection_owner_title,
+    WorkspaceLaunchProjectionKind,
 };
 use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,

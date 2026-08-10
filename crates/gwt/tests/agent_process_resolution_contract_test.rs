@@ -52,7 +52,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
     assert!(policy.contains("health_report"));
     assert!(policy.contains("version_output"));
 
-    let launch = function_source(&source, "spawn_agent_window_async");
+    let launch = function_source(&source, "spawn_agent_window_async_with_startup_restore");
     assert_eq!(
         launch
             .matches("resolve_host_runner_health_checked(")

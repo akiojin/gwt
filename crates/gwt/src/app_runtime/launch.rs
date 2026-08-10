@@ -35,8 +35,9 @@ use super::continuation::{
     durable_launch_recovery_exists, durable_launch_recovery_session_identity,
     pending_execution_activation_status, pending_fresh_execution_activation_status,
     persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
-    DurableLaunchRecoveryKind,
+    resolve_split_workspace_state_external_commit, DurableLaunchRecoveryKind,
 };
+use super::pm::PreparedPmRegistration;
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_windows_host_shell_wrapper, combined_window_id,
@@ -45,11 +46,13 @@ use super::{
     launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
-    save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
-    AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    save_workspace_launch_projection_with_commit, ActiveAgentSession, AgentCapabilityIssuer,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
     PendingContinueWork, PendingFreshExecutionLaunch, StartupRestoreLaunch, UserEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 
 #[cfg(test)]
@@ -2185,6 +2188,95 @@ impl AppRuntime {
             .collect()
     }
 
+    fn reconcile_prepared_pm_workspace_commit(
+        &mut self,
+        prepared: &PreparedPmRegistration,
+        initial_error: String,
+    ) -> Result<(), String> {
+        let registration_matches =
+            self.prepared_pm_registration_matches(prepared)
+                .map_err(|readback_error| {
+                    format!(
+                        "{initial_error}; {readback_error}; staged Work Resume remains unpublished"
+                    )
+                })?;
+        let decision = if registration_matches {
+            gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Commit
+        } else {
+            gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject
+        };
+        let resolution = resolve_split_workspace_state_external_commit(
+            prepared.project_root(),
+            prepared.work_event_root(),
+            prepared.operation_id(),
+            decision,
+        )
+        .map_err(|error| {
+            format!("{initial_error}; PM/Work transaction reconciliation failed: {error}")
+        })?;
+        match (registration_matches, resolution) {
+            (
+                true,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed,
+            ) => Ok(()),
+            (
+                false,
+                gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
+                | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing,
+            ) => Err(initial_error),
+            _ => Err(format!(
+                "{initial_error}; PM/Work transaction resolved unexpectedly as {resolution:?}"
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_workspace_launch_projection_with_pm_registration(
+        &mut self,
+        prepared: &PreparedPmRegistration,
+        project_root: &Path,
+        session: &ActiveAgentSession,
+        base_branch: Option<&str>,
+        linked_issue_number: Option<u64>,
+        workspace_resume_context: Option<&WorkspaceResumeContext>,
+        launch_kind: WorkspaceLaunchProjectionKind,
+        live_session_ids: &std::collections::HashSet<String>,
+    ) -> Result<(), String> {
+        let transaction = save_workspace_launch_projection_with_commit(
+            project_root,
+            session,
+            base_branch,
+            linked_issue_number,
+            workspace_resume_context,
+            launch_kind,
+            live_session_ids,
+            prepared.operation_id(),
+            || self.commit_prepared_pm_registration(prepared),
+        );
+        if let Err(error) = transaction {
+            self.reconcile_prepared_pm_workspace_commit(prepared, error)?;
+        }
+        self.sync_prepared_pm_registration_cache(prepared);
+        Ok(())
+    }
+
+    fn commit_standalone_pm_registration(
+        &mut self,
+        prepared: &PreparedPmRegistration,
+    ) -> Result<(), String> {
+        if let Err(error) = self.commit_prepared_pm_registration(prepared) {
+            match self.prepared_pm_registration_matches(prepared) {
+                Ok(true) => {}
+                Ok(false) => return Err(error),
+                Err(readback_error) => {
+                    return Err(format!("{error}; {readback_error}"));
+                }
+            }
+        }
+        self.sync_prepared_pm_registration_cache(prepared);
+        Ok(())
+    }
+
     pub(crate) fn handle_launch_complete(
         &mut self,
         window_id: String,
@@ -2195,9 +2287,9 @@ impl AppRuntime {
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id =
             self.pending_auto_resume_sources.get(&window_id).cloned();
-        // SPEC-3431 FR-001: a PM launch registers its session once it exists.
-        // Removed unconditionally so a failed launch leaves no stale marker.
-        let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        // SPEC-3431 FR-001: keep the PM launch marker until registration is
+        // durably committed or the launch is routed through terminal failure.
+        let pending_pm_project_root = self.pending_pm_launches.get(&window_id).cloned();
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -2409,16 +2501,46 @@ impl AppRuntime {
                 // launch the ensure gate marked as PM, or for any resume whose
                 // source session is the registered PM (succession keeps the
                 // singleton pointing at the live conversation).
-                let pm_registration_root = pending_pm_project_root.or_else(|| {
-                    let source = auto_resume_source_session_id.as_ref()?;
-                    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&project_root);
-                    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).ok()?;
-                    (prefs.registration?.session_id == *source).then(|| project_root.clone())
-                });
+                let prepared_pm_registration = match pending_pm_project_root.as_ref() {
+                    Some(pm_project_root) => match self.prepare_pm_registration_after_launch(
+                        pm_project_root,
+                        &session_id_for_restore,
+                        agent_id.command(),
+                        &worktree_path,
+                    ) {
+                        Ok(prepared) => Some(prepared),
+                        Err(error) => {
+                            return self.launch_error_events_with_continue_work(
+                                window_id,
+                                error,
+                                launch_feedback_context,
+                            );
+                        }
+                    },
+                    None => match auto_resume_source_session_id.as_deref() {
+                        Some(source_session_id) => match self.prepare_pm_succession_after_launch(
+                            &project_root,
+                            source_session_id,
+                            &session_id_for_restore,
+                            agent_id.command(),
+                            &worktree_path,
+                        ) {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                return self.launch_error_events_with_continue_work(
+                                    window_id,
+                                    error,
+                                    launch_feedback_context,
+                                );
+                            }
+                        },
+                        None => None,
+                    },
+                };
                 // SPEC-3431 FR-026: a completed PM launch is the moment
                 // "running as" becomes true, so the settings panel is
                 // refreshed only after PTY + Work publication both succeed.
-                let pm_launch_registered = pm_registration_root.is_some();
+                let pm_launch_registered = prepared_pm_registration.is_some();
                 self.refresh_launch_wizard_session_cache(&window_id);
 
                 // SPEC-2809 — Launch Wizard always spawns an AI agent
@@ -2484,6 +2606,7 @@ impl AppRuntime {
                         }
                         let mut workspace_projection_updated = false;
                         let mut workspace_projection_error = None;
+                        let mut pm_registration_committed = false;
                         let live_session_ids: std::collections::HashSet<String> = self
                             .active_agent_sessions
                             .values()
@@ -2492,16 +2615,38 @@ impl AppRuntime {
                         let active_session = self.active_agent_sessions[&window_id].clone();
                         if !is_continue_work && !is_fresh_execution_launch {
                             if let Some(base_branch) = base_branch.as_deref() {
-                                match save_start_work_workspace_projection(
-                                    &project_root,
-                                    &active_session,
-                                    base_branch,
-                                    linked_issue_number,
-                                    workspace_resume_context.as_ref(),
-                                    &live_session_ids,
-                                ) {
+                                let projection = match prepared_pm_registration.as_ref() {
+                                    Some(prepared)
+                                        if workspace_resume_context.is_some()
+                                            || linked_issue_number.is_some() =>
+                                    {
+                                        self.save_workspace_launch_projection_with_pm_registration(
+                                            prepared,
+                                            &project_root,
+                                            &active_session,
+                                            Some(base_branch),
+                                            linked_issue_number,
+                                            workspace_resume_context.as_ref(),
+                                            WorkspaceLaunchProjectionKind::StartWork,
+                                            &live_session_ids,
+                                        )
+                                    }
+                                    _ => save_start_work_workspace_projection(
+                                        &project_root,
+                                        &active_session,
+                                        base_branch,
+                                        linked_issue_number,
+                                        workspace_resume_context.as_ref(),
+                                        &live_session_ids,
+                                    ),
+                                };
+                                match projection {
                                     Ok(()) => {
                                         workspace_projection_updated = true;
+                                        pm_registration_committed = prepared_pm_registration
+                                            .is_some()
+                                            && (workspace_resume_context.is_some()
+                                                || linked_issue_number.is_some());
                                     }
                                     Err(error) => {
                                         workspace_projection_error = Some(error.to_string());
@@ -2514,16 +2659,36 @@ impl AppRuntime {
                                     }
                                 }
                             } else if let Some(context) = workspace_resume_context.as_ref() {
-                                match save_resumed_workspace_projection(
-                                    &project_root,
-                                    &active_session,
-                                    None,
-                                    linked_issue_number,
-                                    context,
-                                    &live_session_ids,
-                                ) {
+                                let projection = match prepared_pm_registration.as_ref() {
+                                    Some(prepared) => self
+                                        .save_workspace_launch_projection_with_pm_registration(
+                                            prepared,
+                                            &project_root,
+                                            &active_session,
+                                            None,
+                                            linked_issue_number,
+                                            Some(context),
+                                            WorkspaceLaunchProjectionKind::Resume {
+                                                created_by_start_work: active_session
+                                                    .branch_name
+                                                    .starts_with("work/"),
+                                            },
+                                            &live_session_ids,
+                                        ),
+                                    None => save_resumed_workspace_projection(
+                                        &project_root,
+                                        &active_session,
+                                        None,
+                                        linked_issue_number,
+                                        context,
+                                        &live_session_ids,
+                                    ),
+                                };
+                                match projection {
                                     Ok(()) => {
                                         workspace_projection_updated = true;
+                                        pm_registration_committed =
+                                            prepared_pm_registration.is_some();
                                     }
                                     Err(error) => {
                                         workspace_projection_error = Some(error.to_string());
@@ -2619,11 +2784,23 @@ impl AppRuntime {
                                 );
                             }
                         }
+                        if let Some(prepared) = prepared_pm_registration
+                            .as_ref()
+                            .filter(|_| !pm_registration_committed)
+                        {
+                            if let Err(error) = self.commit_standalone_pm_registration(prepared) {
+                                return self.launch_error_events_with_continue_work(
+                                    window_id,
+                                    error,
+                                    launch_feedback_context,
+                                );
+                            }
+                        }
                         // Startup restore is not committed at PTY creation:
-                        // Work/Issue projection can still reject the resumed
-                        // launch. Retain the source and failure routing until
-                        // every fallible launch-readiness publication above
-                        // has succeeded.
+                        // Work/Issue projection and PM registration can still
+                        // reject the resumed launch. Retain its source until
+                        // every fallible readiness publication has succeeded.
+                        self.pending_pm_launches.remove(&window_id);
                         self.pending_auto_resume_sources.remove(&window_id);
                         if let Some(source_session_id) = auto_resume_source_session_id.as_deref() {
                             if source_session_id != session_id_for_restore {
@@ -2632,14 +2809,6 @@ impl AppRuntime {
                                     source_session_id,
                                 );
                             }
-                        }
-                        if let Some(pm_project_root) = pm_registration_root.as_ref() {
-                            self.register_pm_after_launch(
-                                pm_project_root,
-                                &session_id_for_restore,
-                                agent_id.command(),
-                                &worktree_path,
-                            );
                         }
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
@@ -2740,6 +2909,7 @@ impl AppRuntime {
         detail: String,
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
+        self.pending_pm_launches.remove(&window_id);
         if let Some(events) = self.startup_restore_failed_events(&window_id, &detail) {
             return events;
         }

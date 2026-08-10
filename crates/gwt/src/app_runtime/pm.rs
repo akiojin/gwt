@@ -104,6 +104,64 @@ pub(crate) enum PmEnsureTrigger {
     Explicit,
 }
 
+#[cfg(test)]
+type PmRegistrationCommitHook = Box<dyn FnOnce() -> Result<(), String> + 'static>;
+
+#[cfg(test)]
+thread_local! {
+    static PM_REGISTRATION_COMMIT_HOOK:
+        std::cell::RefCell<Option<PmRegistrationCommitHook>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+#[cfg(test)]
+pub(crate) fn set_pm_registration_commit_hook_for_test(
+    hook: impl FnOnce() -> Result<(), String> + 'static,
+) {
+    PM_REGISTRATION_COMMIT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn invoke_pm_registration_commit_hook() -> Result<(), String> {
+    PM_REGISTRATION_COMMIT_HOOK.with(|slot| slot.borrow_mut().take().map_or(Ok(()), |hook| hook()))
+}
+
+#[cfg(not(test))]
+fn invoke_pm_registration_commit_hook() -> Result<(), String> {
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedPmRegistration {
+    project_root: PathBuf,
+    work_event_root: PathBuf,
+    prefs_path: PathBuf,
+    candidate: PmRegistration,
+    commit_mode: PmRegistrationCommitMode,
+    operation_id: String,
+}
+
+#[derive(Debug, Clone)]
+enum PmRegistrationCommitMode {
+    ReplaceStaleOrEmpty,
+    ReplaceExact(PmRegistration),
+}
+
+impl PreparedPmRegistration {
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub(crate) fn work_event_root(&self) -> &Path {
+        &self.work_event_root
+    }
+
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+}
+
 impl AppRuntime {
     /// SPEC-3431 FR-001/FR-002: ensure the resident PM pane for `tab_id`.
     ///
@@ -212,12 +270,8 @@ impl AppRuntime {
         if let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) {
             if session.worktree_path.exists() {
                 let before = self.pm_window_ids(tab_id);
-                let events = self.spawn_registered_agent_session(
-                    tab_id,
-                    session,
-                    None,
-                    PM_WINDOW_GEOMETRY,
-                );
+                let events =
+                    self.spawn_registered_agent_session(tab_id, session, None, PM_WINDOW_GEOMETRY);
                 self.mark_new_pm_windows(tab_id, &before, &project_root);
                 return events;
             }
@@ -543,48 +597,185 @@ impl AppRuntime {
             })
     }
 
-    /// SPEC-3431 FR-001: called by `handle_launch_complete` once the PM
-    /// launch produced a real session. Writes the durable registration,
-    /// replacing a stale one; a concurrently live PM (which the ensure gate
-    /// should have prevented) is left untouched and logged.
-    pub(crate) fn register_pm_after_launch(
-        &mut self,
+    /// Resolve every fallible PM-registration input before a Work transition
+    /// is staged. The actual singleton CAS remains a separate commit so the
+    /// Workspace transaction can publish Resume only after both resources
+    /// agree on the launch.
+    pub(crate) fn prepare_pm_registration_after_launch(
+        &self,
         project_root: &Path,
         session_id: &str,
         agent_id: &str,
         worktree_path: &Path,
-    ) {
+    ) -> Result<PreparedPmRegistration, String> {
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
-        let existing_alive = match pm_registry::load_pm_prefs(&prefs_path) {
-            Ok(prefs) => prefs
-                .registration
-                .as_ref()
-                .is_some_and(|existing| self.pm_registration_is_live(existing)),
-            Err(_) => false,
-        };
-        let candidate = PmRegistration {
-            session_id: session_id.to_string(),
-            agent_id: agent_id.to_string(),
-            worktree_path: worktree_path.to_string_lossy().into_owned(),
-            created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-            consecutive_crashes: 0,
-            next_not_before: None,
-        };
-        match pm_registry::try_register_pm(&prefs_path, candidate, |_| existing_alive) {
-            Ok((_, pm_registry::PmRegisterOutcome::RejectedLive { existing })) => {
-                tracing::warn!(
-                    existing_session = %existing.session_id,
-                    new_session = %session_id,
-                    "PM launch completed while another live PM is registered; keeping existing"
-                );
-            }
-            Ok((prefs, _)) => {
-                self.sync_pm_session_cache(project_root, prefs.registration.as_ref());
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to write PM registration after launch");
-            }
+        let prefs = pm_registry::load_pm_registration_locked(&prefs_path)
+            .map_err(|error| format!("PM registration preflight failed: {error}"))?;
+        let worktree_path_text = worktree_path.to_string_lossy().into_owned();
+        let exact_candidate = prefs.as_ref().is_some_and(|existing| {
+            existing.session_id == session_id
+                && existing.agent_id == agent_id
+                && existing.worktree_path == worktree_path_text
+        });
+        if let Some(existing) = prefs
+            .as_ref()
+            .filter(|existing| !exact_candidate && self.pm_registration_is_live(existing))
+        {
+            tracing::warn!(
+                existing_session = %existing.session_id,
+                new_session = %session_id,
+                "PM launch completed while another live PM is registered; keeping existing"
+            );
+            return Err("PM registration refused because another live PM owns the project".into());
         }
+        let candidate = match prefs {
+            Some(existing)
+                if existing.session_id == session_id
+                    && existing.agent_id == agent_id
+                    && existing.worktree_path == worktree_path_text =>
+            {
+                existing
+            }
+            _ => PmRegistration {
+                session_id: session_id.to_string(),
+                agent_id: agent_id.to_string(),
+                worktree_path: worktree_path_text,
+                created_at: Some(
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+        };
+        Ok(PreparedPmRegistration {
+            project_root: project_root.to_path_buf(),
+            work_event_root: worktree_path.to_path_buf(),
+            prefs_path,
+            candidate,
+            commit_mode: PmRegistrationCommitMode::ReplaceStaleOrEmpty,
+            operation_id: format!("pm-launch-registration-{session_id}"),
+        })
+    }
+
+    /// Prepare succession only while the durable PM registration names the
+    /// exact source Session (or already names the exact successor after a
+    /// response-loss retry). The full predecessor snapshot becomes the CAS
+    /// precondition used by the external commit.
+    pub(crate) fn prepare_pm_succession_after_launch(
+        &self,
+        project_root: &Path,
+        source_session_id: &str,
+        successor_session_id: &str,
+        agent_id: &str,
+        worktree_path: &Path,
+    ) -> Result<Option<PreparedPmRegistration>, String> {
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let Some(existing) = pm_registry::load_pm_registration_locked(&prefs_path)
+            .map_err(|error| format!("PM succession preflight failed: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let worktree_path_text = worktree_path.to_string_lossy().into_owned();
+        let candidate = if existing.session_id == successor_session_id
+            && existing.agent_id == agent_id
+            && existing.worktree_path == worktree_path_text
+        {
+            existing.clone()
+        } else if existing.session_id == source_session_id {
+            PmRegistration {
+                session_id: successor_session_id.to_string(),
+                agent_id: agent_id.to_string(),
+                worktree_path: worktree_path_text,
+                created_at: Some(
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ),
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedPmRegistration {
+            project_root: project_root.to_path_buf(),
+            work_event_root: worktree_path.to_path_buf(),
+            prefs_path,
+            candidate,
+            commit_mode: PmRegistrationCommitMode::ReplaceExact(existing),
+            operation_id: format!("pm-launch-registration-{successor_session_id}"),
+        }))
+    }
+
+    /// The external logical commit paired with a staged Workspace Resume.
+    /// It re-evaluates the actual registration under the PM lock so a PM that
+    /// appeared after preflight can never be replaced.
+    pub(crate) fn commit_prepared_pm_registration(
+        &mut self,
+        prepared: &PreparedPmRegistration,
+    ) -> Result<(), String> {
+        invoke_pm_registration_commit_hook()?;
+        let candidate = prepared.candidate.clone();
+        let prefs = match &prepared.commit_mode {
+            PmRegistrationCommitMode::ReplaceStaleOrEmpty => {
+                let (prefs, outcome) = pm_registry::try_register_pm(
+                    &prepared.prefs_path,
+                    candidate.clone(),
+                    |existing| self.pm_registration_is_live(existing),
+                )
+                .map_err(|error| format!("PM registration commit failed: {error}"))?;
+                if let pm_registry::PmRegisterOutcome::RejectedLive { existing } = outcome {
+                    tracing::warn!(
+                        existing_session = %existing.session_id,
+                        new_session = %candidate.session_id,
+                        "PM launch completed while another live PM is registered; keeping existing"
+                    );
+                    return Err(
+                        "PM registration refused because another live PM owns the project".into(),
+                    );
+                }
+                prefs
+            }
+            PmRegistrationCommitMode::ReplaceExact(expected) => {
+                let (prefs, replaced) = pm_registry::compare_and_swap_pm_registration(
+                    &prepared.prefs_path,
+                    expected,
+                    candidate.clone(),
+                )
+                .map_err(|error| format!("PM succession commit failed: {error}"))?;
+                if !replaced {
+                    return Err(
+                        "PM registration changed before succession could commit".to_string()
+                    );
+                }
+                prefs
+            }
+        };
+        if prefs.registration.as_ref() != Some(&candidate) {
+            return Err(
+                "PM registration commit readback did not match the launched session".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Classify an ambiguous registration response from a locked durable
+    /// readback. Volatile state is published only after the Workspace owner
+    /// resolves the paired transaction.
+    pub(crate) fn prepared_pm_registration_matches(
+        &self,
+        prepared: &PreparedPmRegistration,
+    ) -> Result<bool, String> {
+        let registration = pm_registry::load_pm_registration_locked(&prepared.prefs_path)
+            .map_err(|error| format!("PM registration readback failed: {error}"))?;
+        Ok(registration.as_ref() == Some(&prepared.candidate))
+    }
+
+    /// Publish the volatile PM marker only after the paired Workspace commit
+    /// has become visible. The durable registration remains the authority.
+    pub(crate) fn sync_prepared_pm_registration_cache(
+        &mut self,
+        prepared: &PreparedPmRegistration,
+    ) {
+        self.sync_pm_session_cache(&prepared.project_root, Some(&prepared.candidate));
     }
 
     /// Keep the per-broadcast PM marker in step with the durable record.

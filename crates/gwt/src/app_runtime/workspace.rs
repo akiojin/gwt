@@ -254,6 +254,49 @@ pub(super) fn save_workspace_launch_projection(
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn save_workspace_launch_projection_with_commit(
+    project_root: &Path,
+    session: &ActiveAgentSession,
+    base_branch: Option<&str>,
+    linked_issue_number: Option<u64>,
+    workspace_resume_context: Option<&WorkspaceResumeContext>,
+    launch_kind: WorkspaceLaunchProjectionKind,
+    live_session_ids: &std::collections::HashSet<String>,
+    external_operation_id: &str,
+    commit: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        project_root,
+        Some(session.branch_name.as_str()),
+        Some(session.worktree_path.as_path()),
+    );
+    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root_with_commit(
+        project_root,
+        &session.worktree_path,
+        external_operation_id,
+        |projection, _work_items, _work_items_persisted| {
+            let work_event = apply_workspace_launch_transition(
+                projection,
+                session,
+                WorkspaceLaunchTransition {
+                    work_id,
+                    base_branch,
+                    linked_issue_number,
+                    resume_context: workspace_resume_context,
+                    kind: launch_kind,
+                    live_session_ids,
+                    now,
+                },
+            );
+            Ok(((), vec![work_event]))
+        },
+        || commit().map_err(gwt_core::error::GwtError::Other),
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub(super) fn apply_workspace_launch_transition(
     projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
     session: &ActiveAgentSession,
