@@ -185,6 +185,13 @@ Hard limits, no exceptions:
 
 ## Resident loop (unattended)
 
+- Periodic wakeups (FR-108): if your harness has a native scheduler
+  (Claude Code exposes a wakeup-scheduling tool), register a periodic
+  wakeup job for your loop interval at the start of residency, and
+  re-register it before it expires — a lapsed schedule is a silently
+  dead loop. On runtimes without a scheduler (Codex), gwt itself wakes
+  you on the scheduled monitor tick, so no manual setup is needed;
+  treat an injected `[gwt]` wake prompt as the start of a normal cycle.
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
   `issue_monitor` (and optionally `board`) channels with
   `params.timeout_seconds` set, so the stream ends and hands control
@@ -320,6 +327,10 @@ mod tests {
             "fall back to polling in the same cycle",
             "degraded (FR-109)",
             "never a reason to park",
+            // FR-108(a): harness-native periodic wakeups with re-registration.
+            "wakeup-scheduling tool",
+            "re-register it before it expires",
+            "scheduled monitor tick",
             // FR-023: observation of the other agents.
             "`board.show`",
             "`pane.list`",
