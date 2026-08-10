@@ -3554,6 +3554,48 @@ impl AppRuntime {
         events
     }
 
+    /// Issue #3505: production runs GUI-only — no external daemon exists to
+    /// own the scan cadence, so nothing ever ran the scheduled scans and
+    /// autonomous launches silently never happened. The GUI owns the tick:
+    /// each call drives the fence-aware local monitor once per enabled open
+    /// project (the existing choke point keeps remote-effect authority
+    /// honest when a real daemon does hold the fence), then gives the
+    /// resident PM its periodic supervision wake (FR-108(b), T-201).
+    pub(crate) fn issue_monitor_scheduled_tick_events(&mut self) -> Vec<OutboundEvent> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.issue_monitor_scheduled_tick_events_at(&now)
+    }
+
+    pub(crate) fn issue_monitor_scheduled_tick_events_at(
+        &mut self,
+        now: &str,
+    ) -> Vec<OutboundEvent> {
+        let project_roots: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .map(|tab| tab.project_root.clone())
+            .collect();
+        let mut events = Vec::new();
+        for project_root in project_roots {
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+            let enabled = gwt::load_issue_monitor_prefs(&prefs_path)
+                .map(|prefs| prefs.enabled)
+                .unwrap_or(false);
+            if !enabled {
+                continue;
+            }
+            events.extend(self.local_issue_monitor_events_with_policy_for_project(
+                None,
+                &project_root,
+                IssueMonitorScanPolicy::Scan,
+                |_| {},
+            ));
+            events.extend(self.pm_periodic_wake_events_at(&project_root, now));
+        }
+        events
+    }
+
     fn issue_monitor_snapshot_events_for(
         &mut self,
         client_id: Option<&str>,

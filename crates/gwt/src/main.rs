@@ -1120,6 +1120,9 @@ enum UserEvent {
         project_root: PathBuf,
         items: Vec<gwt::IssueMonitorInboxItem>,
     },
+    /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
+    /// tick — drives local scans and the PM periodic wake.
+    IssueMonitorScheduledTick,
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -7785,6 +7788,29 @@ fn main() -> std::io::Result<()> {
     let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
     workspace_projection_watchers.sync(&app, proxy.clone());
     #[cfg(unix)]
+    // Issue #3505: GUI-owned scheduled scan cadence. Without this tick no
+    // component in the production topology ever runs scheduled scans, so
+    // autonomous launches silently never happen.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        let interval = std::time::Duration::from_secs(
+            gwt::IssueMonitorConfig::default()
+                .poll_interval_secs
+                .max(60),
+        );
+        std::thread::Builder::new()
+            .name("issue-monitor-scheduled-tick".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(interval);
+                if tick_proxy
+                    .send_event(UserEvent::IssueMonitorScheduledTick)
+                    .is_err()
+                {
+                    break;
+                }
+            })
+            .ok();
+    }
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
     board_daemon_subscribers.sync(&app, proxy.clone());
@@ -8206,6 +8232,10 @@ fn main() -> std::io::Result<()> {
                     linked_issue_kind,
                     delivery_id,
                 );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
+                let events = app.issue_monitor_scheduled_tick_events();
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
