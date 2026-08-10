@@ -195,6 +195,11 @@ pub struct PmLoopState {
     /// `stop_hook_active` chain that a different Stop gate started.
     #[serde(default)]
     pub pending_own_block: bool,
+    /// The last prompt injection by a wake path (delta or periodic). Both
+    /// wake flavours stamp it so they cannot double-fire within one quiet
+    /// window, without touching the Stop-gate floor clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_at: Option<String>,
 }
 
 /// `pm-loop.json` path derived from the PM worktree itself. The hook's cwd is
