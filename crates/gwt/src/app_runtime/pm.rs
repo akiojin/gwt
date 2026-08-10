@@ -87,6 +87,7 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
     };
     instant_is_quiet(state.last_continued_at.as_deref())
         && instant_is_quiet(state.last_user_prompt_at.as_deref())
+        && instant_is_quiet(state.last_wake_at.as_deref())
 }
 
 /// Who asked for the PM.
@@ -447,12 +448,16 @@ impl AppRuntime {
         }
         self.pm_wake_seen
             .insert(project_root.to_path_buf(), signals);
-        // Re-arm the budget: new actionable work is exactly what the park was
-        // waiting for (the injected prompt's UserPromptSubmit re-arms too;
-        // doing it here keeps the state right even if hook wiring drifts).
-        if let Err(error) =
-            pm_registry::save_pm_loop_state(&loop_path, &pm_registry::PmLoopState::default())
-        {
+        // Re-arm the budget and stamp the wake clock: new actionable work is
+        // exactly what the park was waiting for, and the stamp keeps the
+        // periodic wake from stacking a second prompt in the same window.
+        if let Err(error) = pm_registry::save_pm_loop_state(
+            &loop_path,
+            &pm_registry::PmLoopState {
+                last_wake_at: Some(now.to_string()),
+                ..pm_registry::PmLoopState::default()
+            },
+        ) {
             tracing::warn!(%error, "PM wake could not re-arm the loop budget");
         }
         let mut reasons = fresh;
@@ -466,6 +471,91 @@ impl AppRuntime {
                 reasons.join(", ")
             ),
         })
+    }
+
+    /// FR-108(b) (T-201, Issue #3505): the periodic wake — re-arm a quiet
+    /// resident PM on the scheduled tick even when no new monitor signal
+    /// arrived, as long as there is standing supervision work (running
+    /// launches or a non-empty queue). The delta wake (T-093) covers "new
+    /// things happened"; this covers "old things still need watching".
+    ///
+    /// The same quiet gate as the delta wake keeps the two from double-firing:
+    /// an actively-looping or freshly-prompted PM is never interrupted, and a
+    /// wake re-arms the loop so the next tick inside the interval is quiet-
+    /// gated out.
+    pub(crate) fn pm_periodic_wake_decision_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let monitor_prefs = gwt::load_issue_monitor_prefs(&monitor_prefs_path).ok()?;
+        if !monitor_prefs.enabled {
+            return None;
+        }
+        let status =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), monitor_prefs)
+                .agent_status();
+        if status.active_launches.is_empty()
+            && status.queue.is_empty()
+            && status.needs_human.is_empty()
+        {
+            return None;
+        }
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
+        let registration = prefs.registration?;
+        let window_id = self.live_pm_window_id(&registration.session_id)?;
+        let interval_secs = prefs.settings.loop_interval_secs_clamped();
+        let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
+        let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+            return None;
+        }
+        if let Err(error) = pm_registry::save_pm_loop_state(
+            &loop_path,
+            &pm_registry::PmLoopState {
+                last_wake_at: Some(now.to_string()),
+                ..pm_registry::PmLoopState::default()
+            },
+        ) {
+            tracing::warn!(%error, "PM periodic wake could not re-arm the loop budget");
+        }
+        Some(PmWakeDecision {
+            window_id,
+            prompt: "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
+                     fresh `issue.monitor.status` snapshot, check the running agents' \
+                     `last_activity_at` and any NeedsHuman rows, and report the milestone \
+                     digest.\r"
+                .to_string(),
+        })
+    }
+
+    /// Execute the periodic wake against the resolved PM pane.
+    pub(crate) fn pm_periodic_wake_events_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(decision) = self.pm_periodic_wake_decision_at(project_root, now) else {
+            return Vec::new();
+        };
+        match self.write_pm_wake_prompt(&decision) {
+            Ok(()) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "periodic wake re-armed the resident PM"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_id = %decision.window_id,
+                    "PM periodic wake prompt injection failed"
+                );
+            }
+        }
+        Vec::new()
     }
 
     /// Execute the wake: inject the prompt into the registered PM's pane. A
