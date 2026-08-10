@@ -1692,31 +1692,68 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
 }
 
 #[test]
-fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
+fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
     let paths: Vec<&str> = root_js_module_assets()
         .iter()
         .map(|asset| asset.path)
         .collect();
     assert!(
-        paths.contains(&"/window-lane-identity.js"),
-        "window lane identity helper must be served as a root JS module"
+        paths.contains(&"/window-worktree-form.js"),
+        "window worktree form helper must be served as a root JS module"
     );
+    assert!(
+        !paths.contains(&"/window-lane-identity.js"),
+        "legacy lane identity module must not remain registered"
+    );
+    let form_module = root_js_module_assets()
+        .iter()
+        .find(|asset| asset.path == "/window-worktree-form.js")
+        .expect("registered worktree form module");
     let js = app_js();
     let shell_js = project_shell_surface_js();
     let styles = frontend_styles_bundle();
     assert!(
-        js.contains("applyWindowLaneData(element, windowData)")
-            && js.contains("renderWindowLaneBadge"),
-        "app.js must put data-lane-kind and the titlebar lane badge on workspace windows"
+        form_module.source.contains("lane_kind")
+            && form_module.source.contains("laneKind")
+            && form_module.source.contains("ephemeral")
+            && form_module.source.contains("branch-backed"),
+        "worktree form adapter must translate the legacy wire fixture to semantic values"
     );
     assert!(
-        shell_js.contains("window-list-lane"),
-        "window list rows must render lane identity"
+        js.contains("applyWindowWorktreeData(element, windowData)")
+            && js.contains("renderWindowWorktreeBadge"),
+        "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        styles.contains(".window-lane-badge")
-            && styles.contains(".fleet-minimap__cell[data-lane-symbol]::before"),
-        "titlebar/list/minimap lane badge styling must ship in embedded CSS"
+        shell_js.contains("window-list-worktree"),
+        "window list rows must render worktree form"
+    );
+    assert!(
+        styles.contains(".window-worktree-badge")
+            && styles.contains(".fleet-minimap__cell[data-worktree-symbol]::before"),
+        "titlebar/list/minimap worktree badge styling must ship in embedded CSS"
+    );
+    let consumer_wiring = format!("{js}\n{shell_js}");
+    for legacy in [
+        "window-lane-identity",
+        "WindowLane",
+        "windowLane",
+        "window-lane-badge",
+        "window-list-lane",
+        "data-lane-kind",
+        "data-lane-label",
+        "data-lane-symbol",
+        "Intake lane",
+        "Execution lane",
+    ] {
+        assert!(
+            !consumer_wiring.contains(legacy) && !styles.contains(legacy),
+            "old production lane vocabulary must be absent: {legacy}"
+        );
+    }
+    assert!(
+        !consumer_wiring.contains("lane_kind") && !consumer_wiring.contains("laneKind"),
+        "legacy backend fields must be read only by the worktree-form adapter"
     );
 }
 

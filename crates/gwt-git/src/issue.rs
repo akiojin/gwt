@@ -21,6 +21,12 @@ pub struct Issue {
     pub assignee: Option<String>,
     pub body: Option<String>,
     pub url: String,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+fn issue_list_json_fields() -> &'static str {
+    "number,title,state,labels,assignees,body,url,updatedAt"
 }
 
 /// File-based cache for GitHub Issues.
@@ -111,7 +117,7 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
             "--state",
             "open",
             "--json",
-            "number,title,state,labels,assignees,body,url",
+            issue_list_json_fields(),
             "--limit",
             GITHUB_ISSUE_LIST_LIMIT,
         ],
@@ -151,6 +157,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
             .map(String::from);
         let body = v["body"].as_str().map(String::from);
         let url = v["url"].as_str().unwrap_or("").to_string();
+        let updated_at = v["updatedAt"].as_str().map(String::from);
 
         issues.push(Issue {
             number,
@@ -160,6 +167,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
             assignee,
             body,
             url,
+            updated_at,
         });
     }
 
@@ -180,7 +188,8 @@ mod tests {
                 "labels": [{"name": "bug"}],
                 "assignees": [{"login": "alice"}],
                 "body": "Description",
-                "url": "https://github.com/owner/repo/issues/42"
+                "url": "https://github.com/owner/repo/issues/42",
+                "updatedAt": "2026-08-05T10:00:00Z"
             },
             {
                 "number": 43,
@@ -189,7 +198,8 @@ mod tests {
                 "labels": [],
                 "assignees": [],
                 "body": null,
-                "url": "https://github.com/owner/repo/issues/43"
+                "url": "https://github.com/owner/repo/issues/43",
+                "updatedAt": "2026-08-05T10:01:00Z"
             }
         ]"#;
 
@@ -199,15 +209,34 @@ mod tests {
         assert_eq!(issues[0].title, "Fix bug");
         assert_eq!(issues[0].labels, vec!["bug"]);
         assert_eq!(issues[0].assignee.as_deref(), Some("alice"));
+        assert_eq!(
+            issues[0].updated_at.as_deref(),
+            Some("2026-08-05T10:00:00Z")
+        );
         assert_eq!(issues[1].number, 43);
         assert!(issues[1].assignee.is_none());
         assert!(issues[1].body.is_none());
+        assert_eq!(
+            issues[1].updated_at.as_deref(),
+            Some("2026-08-05T10:01:00Z")
+        );
     }
 
     #[test]
     fn parse_gh_issues_json_empty() {
         let issues = parse_gh_issues_json("[]").unwrap();
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn parse_gh_issues_json_accepts_missing_updated_at() {
+        let issues =
+            parse_gh_issues_json(r#"[{"number":42,"title":"Legacy payload","state":"OPEN"}]"#)
+                .expect("parse legacy payload");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 42);
+        assert!(issues[0].updated_at.is_none());
     }
 
     #[test]
@@ -219,6 +248,17 @@ mod tests {
     #[test]
     fn issue_list_limit_is_high_enough_for_large_repositories() {
         assert_eq!(GITHUB_ISSUE_LIST_LIMIT, "1000");
+    }
+
+    #[test]
+    fn issue_list_fields_request_updated_at() {
+        let fields = issue_list_json_fields().split(',').collect::<Vec<_>>();
+
+        assert!(fields.contains(&"updatedAt"));
+        assert_eq!(
+            fields.iter().filter(|field| **field == "updatedAt").count(),
+            1
+        );
     }
 
     #[test]
@@ -238,6 +278,7 @@ mod tests {
             assignee: Some("alice".into()),
             body: Some("body".into()),
             url: "https://example.com".into(),
+            updated_at: None,
         }];
         cache.write("owner", "repo", &issues).unwrap();
 
@@ -284,6 +325,7 @@ mod tests {
             assignee: None,
             body: None,
             url: "https://example.com".into(),
+            updated_at: None,
         }];
 
         // Malicious owner/repo should not escape cache directory

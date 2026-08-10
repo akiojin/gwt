@@ -175,6 +175,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
+        "issue.monitor.questions" => CliCommand::Issue(IssueCommand::MonitorQuestions {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.question.answer" | "issue.monitor.question-answer" => {
+            CliCommand::Issue(IssueCommand::MonitorQuestionAnswer {
+                project_root: optional_path(params, "project_root")?,
+                handoff_id: required_string(params, "handoff_id")?,
+                answer: required_string(params, "answer")?,
+            })
+        }
         "issue.monitor.priority.move" | "issue.monitor.priority-move" => {
             CliCommand::Issue(IssueCommand::MonitorPriorityMove {
                 project_root: optional_path(params, "project_root")?,
@@ -182,6 +192,31 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 position: issue_monitor_priority_position(params)?,
             })
         }
+        "issue.monitor.launch_now" | "issue.monitor.launch-now" => {
+            CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+            })
+        }
+        "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            // FR-031: an unexplained stop is not auditable.
+            reason: required_string(params, "reason")?,
+            // Which identity components are required is a property of the live
+            // launch, not of the request shape, so the state layer decides.
+            claim_id: optional_string(params, "claim_id")?,
+            delivery_id: optional_string(params, "delivery_id")?,
+            window_id: optional_string(params, "window_id")?,
+        }),
+        "issue.monitor.failover" => CliCommand::Issue(IssueCommand::MonitorFailover {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            reason: required_string(params, "reason")?,
+            claim_id: optional_string(params, "claim_id")?,
+            delivery_id: optional_string(params, "delivery_id")?,
+            window_id: optional_string(params, "window_id")?,
+        }),
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -197,15 +232,23 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "enabled|autonomous_mode|max_active",
                 ));
             }
-            if enabled == Some(true) {
-                return Err(CliParseError::InvalidJson(
-                    "enabled=true requires an explicit GUI action".to_string(),
-                ));
-            }
-            if autonomous_mode == Some(true) {
-                return Err(CliParseError::InvalidJson(
-                    "autonomous_mode=true requires an explicit GUI action".to_string(),
-                ));
+            // SPEC-3431 FR-008/FR-009: Issue #3357's asymmetric boundary keeps
+            // applying to every agent session — raising a switch stays a GUI
+            // action — except for the project's registered PM, which the SPEC
+            // grants full authority. Merges are unaffected either way: SPEC
+            // #3200's fail-closed merge gate still decides every merge.
+            let pm_privileged = params_caller_is_registered_pm(params);
+            if !pm_privileged {
+                if enabled == Some(true) {
+                    return Err(CliParseError::InvalidJson(
+                        "enabled=true requires an explicit GUI action".to_string(),
+                    ));
+                }
+                if autonomous_mode == Some(true) {
+                    return Err(CliParseError::InvalidJson(
+                        "autonomous_mode=true requires an explicit GUI action".to_string(),
+                    ));
+                }
             }
             if max_active == Some(0) {
                 return Err(CliParseError::InvalidJson(
@@ -418,6 +461,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
+        }),
+        "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
+            project_root: optional_string(params, "project_root")?,
         }),
         "workflow.bypass" => CliCommand::Workflow(WorkflowCommand::Bypass {
             mode: WorkflowBypassMode::parse(&required_string(params, "mode")?).ok_or(
@@ -789,7 +835,17 @@ fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
     if channels.is_empty() {
         return Err(CliParseError::MissingFlag("channels"));
     }
-    Ok(CliCommand::Daemon(DaemonCommand::Subscribe { channels }))
+    let timeout_seconds = optional_u64(params, "timeout_seconds")?;
+    if timeout_seconds == Some(0) {
+        return Err(CliParseError::InvalidValue {
+            flag: "timeout_seconds",
+            reason: "must be at least 1 second",
+        });
+    }
+    Ok(CliCommand::Daemon(DaemonCommand::Subscribe {
+        channels,
+        timeout_seconds,
+    }))
 }
 
 fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1137,6 +1193,34 @@ fn required_u64_vec(
         )));
     }
     optional_u64_vec(params, key)
+}
+
+/// SPEC-3431 FR-009: is this caller the project's registered PM?
+///
+/// The identity comes from the ambient `GWT_SESSION_ID` only — params may
+/// name the project, never the subject — so no caller can claim PM authority
+/// it does not hold. The project is the explicit `project_root` when given,
+/// otherwise the current directory, matching how the handler resolves it.
+/// Anything unresolvable is not privileged (fail-closed).
+fn params_caller_is_registered_pm(params: &Map<String, Value>) -> bool {
+    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
+        return false;
+    };
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return false;
+    }
+    let project_root = match params.get("project_root").and_then(Value::as_str) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(_) => return false,
+        },
+    };
+    crate::pm_registry::session_is_registered_pm(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(&project_root),
+        &session_id,
+    )
 }
 
 fn issue_monitor_priority_position(
@@ -1704,6 +1788,242 @@ mod tests {
         ));
     }
 
+    // SPEC-3431 T-030 (FR-008/FR-009): the #3357 asymmetric boundary keeps
+    // applying to every agent session; only the project's registered PM may
+    // raise the switches. The privileged subject comes from the ambient
+    // session id, never from params, so a caller cannot claim it.
+    #[test]
+    fn issue_monitor_config_set_on_direction_is_pm_only() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        crate::pm_registry::try_register_pm(
+            &prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: project_root.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+
+        let params = json!({
+            "project_root": project_root.to_string_lossy(),
+            "autonomous_mode": true,
+        });
+
+        // positive: a non-PM session is still refused, with the GUI guidance.
+        let _other = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "other-session",
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", params.clone()),
+            CliParseError::InvalidJson(message) if message.contains("requires an explicit GUI action")
+        ));
+        drop(_other);
+
+        // ...and so is a session with no ambient identity at all.
+        let _unset = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert!(matches!(
+            err("issue.monitor.config.set", params.clone()),
+            CliParseError::InvalidJson(_)
+        ));
+        drop(_unset);
+
+        // false-positive negative: the registered PM is allowed through.
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        assert_eq!(
+            ok("issue.monitor.config.set", params),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: Some(project_root.clone()),
+                enabled: None,
+                autonomous_mode: Some(true),
+                max_active: None,
+            })
+        );
+
+        // OFF direction stays open to everyone, PM or not.
+        assert!(matches!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"project_root": project_root.to_string_lossy(), "autonomous_mode": false})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet { .. })
+        ));
+    }
+
+    // SPEC-3431 T-020 (FR-006): launch_now is the PM's launch instruction —
+    // priority head-move plus an immediate scan. It never spawns anything
+    // itself; the Monitor's claim/slot path stays the only launcher.
+    #[test]
+    fn issue_monitor_launch_now_parses() {
+        assert_eq!(
+            ok("issue.monitor.launch_now", json!({"number": 42})),
+            CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                project_root: None,
+                number: 42,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.launch-now",
+                json!({"project_root": "/tmp/project", "number": 7})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorLaunchNow {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 7,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.launch_now", json!({})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC-3431 FR-033 / T-087b: the PM's stop instruction.
+    ///
+    /// The identity components are optional in the wire format because a
+    /// materializing launch has no window and a launched one has no delivery.
+    /// Which of them must be present is decided against the live state, not by
+    /// the parser — the parser cannot know, and guessing here would either
+    /// reject valid stops or let an under-specified one through.
+    #[test]
+    fn issue_monitor_stop_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.stop",
+                json!({
+                    "number": 42,
+                    "reason": "provider rate limit",
+                    "window_id": "tab-1::agent-1",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root: None,
+                number: 42,
+                reason: "provider rate limit".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.stop",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 7,
+                    "reason": "switch provider",
+                    "claim_id": "claim-1",
+                    "delivery_id": "launch:effect-1",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 7,
+                reason: "switch provider".to_string(),
+                claim_id: Some("claim-1".to_string()),
+                delivery_id: Some("launch:effect-1".to_string()),
+                window_id: None,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.stop", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        // FR-031: an unexplained stop is not auditable, so the reason is not
+        // optional even though every identity component is.
+        assert!(matches!(
+            err("issue.monitor.stop", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.stop", json!({"number": 42, "reason": "  "})),
+            CliParseError::MissingFlag("reason")
+        ));
+    }
+
+    /// SPEC-3431 FR-029〜031 / T-081: the failover takes the same request shape
+    /// as the stop, because it enforces the same identity — only the outcome
+    /// differs.
+    #[test]
+    fn issue_monitor_failover_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.failover",
+                json!({
+                    "number": 3476,
+                    "reason": "codex rate limit",
+                    "claim_id": "claim-1",
+                    "window_id": "tab-1::agent-1",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorFailover {
+                project_root: None,
+                number: 3476,
+                reason: "codex rate limit".to_string(),
+                claim_id: Some("claim-1".to_string()),
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.failover", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.failover", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// Issue #3478 (AC-5/AC-9): the canonical operations a human uses to see
+    /// and answer what an autonomous agent is waiting on.
+    #[test]
+    fn issue_monitor_question_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.questions", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorQuestions { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.question.answer",
+                json!({"handoff_id": "handoff-1", "answer": "Yes"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorQuestionAnswer {
+                project_root: None,
+                handoff_id: "handoff-1".to_string(),
+                answer: "Yes".to_string(),
+            })
+        );
+        // An answer can never be attached to an unidentified parked question,
+        // and an identified one can never be answered with nothing.
+        assert!(matches!(
+            err("issue.monitor.question.answer", json!({"answer": "Yes"})),
+            CliParseError::MissingFlag(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.question.answer",
+                json!({"handoff_id": "handoff-1"})
+            ),
+            CliParseError::MissingFlag(_)
+        ));
+    }
+
     #[test]
     fn issue_monitor_queue_operations_parse() {
         assert_eq!(
@@ -1923,6 +2243,21 @@ mod tests {
             ),
             CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
         ));
+    }
+
+    // SPEC-3431: PM agent diagnostics parse variants.
+    #[test]
+    fn pm_status_variants() {
+        assert!(matches!(
+            ok("pm.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::Status { project_root: None })
+        ));
+        match ok("pm.status", json!({"project_root": "/tmp/elsewhere"})) {
+            CliCommand::Pm(crate::cli::pm::PmCommand::Status { project_root }) => {
+                assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     // SPEC-3248 P8a: execution settlement parse variants.
@@ -2182,6 +2517,37 @@ mod tests {
             CliParseError::MissingFlag(flag) => assert_eq!(flag, "channels"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SPEC-3431 FR-025: the PM's resident loop subscribes, then reconciles
+    /// against a fresh snapshot. That only works if the subscribe returns.
+    #[test]
+    fn daemon_subscribe_accepts_a_bounded_timeout() {
+        assert!(matches!(
+            ok(
+                "daemon.subscribe",
+                json!({"channels": ["issue_monitor"], "timeout_seconds": 30})
+            ),
+            CliCommand::Daemon(DaemonCommand::Subscribe {
+                timeout_seconds: Some(30),
+                ..
+            })
+        ));
+        assert!(matches!(
+            ok("daemon.subscribe", json!({"channels": ["board"]})),
+            CliCommand::Daemon(DaemonCommand::Subscribe {
+                timeout_seconds: None,
+                ..
+            })
+        ));
+        // Zero would mean "return before reading anything", which is never
+        // what a caller wants and silently degrades the loop to a busy poll.
+        assert!(err(
+            "daemon.subscribe",
+            json!({"channels": ["board"], "timeout_seconds": 0})
+        )
+        .to_string()
+        .contains("timeout_seconds"));
     }
 
     #[test]

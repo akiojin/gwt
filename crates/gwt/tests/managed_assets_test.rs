@@ -696,6 +696,126 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
     );
 }
 
+/// Materialize managed assets into a canonical PM worktree under an isolated
+/// gwt home, returning the worktree so the caller can inspect the result of a
+/// full distribution — the state a PM agent actually starts in.
+fn materialize_into_pm_worktree(
+    home: &Path,
+    agent_id: &AgentId,
+    seed: impl FnOnce(&Path),
+) -> std::path::PathBuf {
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home);
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    run_git(&repo, &["init", "-q"]);
+
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    std::fs::create_dir_all(&worktree).expect("create pm worktree");
+    run_git(&worktree, &["init", "-q"]);
+
+    seed(&worktree);
+
+    let _env_guard = env_lock();
+    let cli_bin = home.join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        agent_id,
+        CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("materialize managed assets");
+    worktree
+}
+
+/// SPEC-3431 FR-001 / T-052 regression: the `$gwt-pm` bootstrap prompt only
+/// resolves if the gwt-pm skill survives the launch's own asset refresh.
+///
+/// The original implementation wrote the skill just before spawning, and the
+/// launch thread's `prune_managed_asset_roots_for_targets` then deleted it
+/// (it removes every `gwt-*` skill dir absent from the embedded bundle, and
+/// gwt-pm is generated rather than bundled). The PM booted as a plain agent
+/// with a dangling prompt. Asserting the post-distribution state is the whole
+/// point — the old synchronous-existence assertion passed while this was live.
+#[test]
+fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::ClaudeCode, |worktree| {
+        gwt_skills::pm_guidance::generate_pm_guidance(worktree).expect("pre-write guidance");
+    });
+
+    let skill = std::fs::read_to_string(worktree.join(".claude/skills/gwt-pm/SKILL.md"))
+        .expect("gwt-pm skill must survive distribution");
+    assert_eq!(skill, gwt_skills::pm_guidance::render_skill_md());
+}
+
+/// The resume path never pre-writes the skill, and a binary upgrade must not
+/// leave a PM running an obsolete contract. Both cases are the same
+/// requirement: distribution owns the file's content, unconditionally.
+#[test]
+fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::ClaudeCode, |_| {});
+    let path = worktree.join(".claude/skills/gwt-pm/SKILL.md");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("guidance generated without a pre-write"),
+        gwt_skills::pm_guidance::render_skill_md()
+    );
+
+    std::fs::write(&path, "stale contract").expect("tamper");
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _env_guard = env_lock();
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", home.path().join("bin/gwtd"));
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &AgentId::ClaudeCode,
+        CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("re-materialize");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("guidance restored"),
+        gwt_skills::pm_guidance::render_skill_md(),
+        "a tampered or stale contract must be rewritten from the canonical source"
+    );
+}
+
+/// Per-target isolation holds for gwt-pm exactly as it does for
+/// gwt-coordination: a Codex PM gets the Codex mirror only.
+#[test]
+fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::Codex, |_| {});
+    assert!(worktree.join(".codex/skills/gwt-pm/SKILL.md").exists());
+    assert!(
+        !worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+        "a Codex-only target must not write the Claude mirror"
+    );
+}
+
+/// The PM contract must never reach an implementation agent. Its description
+/// shares gwt-coordination's "use proactively at the start of every
+/// conversation" stem, so an agent that picked it up would adopt "you never
+/// implement production code yourself" and silently refuse to implement.
+#[test]
+fn non_pm_worktree_never_receives_gwt_pm_guidance() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("materialize managed assets");
+
+    assert!(!dir.path().join(".claude/skills/gwt-pm").exists());
+    assert!(!dir.path().join(".codex/skills/gwt-pm").exists());
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let output = hidden_command("git")
         .args(args)

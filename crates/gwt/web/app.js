@@ -71,6 +71,9 @@
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
       import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
+      // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
+      // Settings window — the PM is configured where it is seen.
+      import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createAutonomousNotifications } from "/autonomous-notifications.js";
       import { createToastStack } from "/toast-host.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
@@ -154,12 +157,12 @@
         windowRuntimeLabel,
       } from "/window-runtime-state.js";
       import {
-        applyWindowLaneData,
-        renderWindowLaneBadge,
-        shouldShowWindowLaneBadge,
-        windowLaneBadgeView,
-        windowLaneKind,
-      } from "/window-lane-identity.js";
+        applyWindowWorktreeData,
+        renderWindowWorktreeBadge,
+        shouldShowWindowWorktreeBadge,
+        windowWorktreeBadgeView,
+        windowWorktreeForm,
+      } from "/window-worktree-form.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -186,7 +189,7 @@
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
         applyRuntimeHealth: (snapshot) =>
           applyRuntimeHealth(document, snapshot, {
-            focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+            focusWindow: (windowId) => requestWindowFrame(windowId),
           }),
       };
 
@@ -205,6 +208,14 @@
       const alignButton = document.getElementById("align-button");
       const worldGrid = document.getElementById("canvas-world-grid");
       const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
+      // SPEC-3431 FR-018: both PM launchers share one handler so the rail and
+      // the canvas CTA can never drift apart.
+      for (const id of ["op-pm-entry", "canvas-pm-launcher"]) {
+        document.getElementById(id)?.addEventListener("click", (event) => {
+          event.preventDefault();
+          openPmAgent();
+        });
+      }
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -543,8 +554,8 @@
           appendRenderKeyPart(parts, windowData?.agent_id || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, windowData?.agent_color || "");
-          appendRenderKeyPart(parts, "lane_kind");
-          appendRenderKeyPart(parts, windowLaneKind(windowData));
+          appendRenderKeyPart(parts, "worktree_form");
+          appendRenderKeyPart(parts, windowWorktreeForm(windowData));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, windowData?.status || "");
           appendRenderKeyPart(parts, "geometry");
@@ -612,8 +623,8 @@
         appendRenderKeyPart(parts, windowData.agent_id || "");
         appendRenderKeyPart(parts, "agent_color");
         appendRenderKeyPart(parts, windowData.agent_color || "");
-        appendRenderKeyPart(parts, "lane_kind");
-        appendRenderKeyPart(parts, windowLaneKind(windowData));
+        appendRenderKeyPart(parts, "worktree_form");
+        appendRenderKeyPart(parts, windowWorktreeForm(windowData));
         appendRenderKeyPart(parts, "status");
         appendRenderKeyPart(parts, windowData.status || "");
         appendRenderKeyPart(parts, "runtime_state");
@@ -669,8 +680,8 @@
           appendRenderKeyPart(parts, tab.agent_id || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, tab.agent_color || "");
-          appendRenderKeyPart(parts, "lane_kind");
-          appendRenderKeyPart(parts, windowLaneKind(tab));
+          appendRenderKeyPart(parts, "worktree_form");
+          appendRenderKeyPart(parts, windowWorktreeForm(tab));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, tab.status || "");
           appendRenderKeyPart(parts, "tab_group_id");
@@ -1548,6 +1559,8 @@
       }
 
       function windowRoleBadgeLabel(windowData) {
+        // FR-020: the PM's badge names its role, not its provider.
+        if (windowData?.is_pm) return PM_ROLE_BADGE;
         const displayTitle = windowDisplayTitle(windowData);
         const isAgentWindow = isAgentWindowPreset(windowData?.preset);
         const label = isAgentWindow
@@ -1579,6 +1592,13 @@
         return "Normal";
       }
 
+      // SPEC-3431 FR-020. The PM runs Claude like any other agent pane, so
+      // without an explicit identity its chrome reads "Claude Code / Execution
+      // / Claude Code" — indistinguishable from a worker (observed in review,
+      // 2026-08-05). The role name leads; the PM's own focus follows it.
+      const PM_WINDOW_TITLE = "Project Manager";
+      const PM_ROLE_BADGE = "PM";
+
       function windowDisplayTitle(windowData) {
         const candidates = [
           windowData?.dynamic_title,
@@ -1586,6 +1606,16 @@
           windowData?.title,
           windowData?.agent_id,
         ];
+        if (windowData?.is_pm) {
+          // Keep the identity fixed and append whatever the PM is currently
+          // focused on, so the window never stops saying what it is.
+          const focus = String(
+            windowData?.dynamic_title || windowData?.purpose_title || "",
+          ).trim();
+          return focus && focus !== PM_WINDOW_TITLE
+            ? `${PM_WINDOW_TITLE} — ${focus}`
+            : PM_WINDOW_TITLE;
+        }
         for (const value of candidates) {
           const title = String(value || "").trim();
           if (title) return title;
@@ -2169,6 +2199,49 @@
         }
         animateViewportTo(target, { animate });
         scheduleWindowFrameClamp(windowId, { animate });
+      }
+
+      // A window the user asked to frame that is not mounted yet (it is being
+      // launched, or lives in a tab that has not rendered). Resolved on the
+      // next workspace render.
+      let pendingFrameWindowId = null;
+
+      // SPEC-2008 camera-focus is LOCAL: `viewport-sync` adopts a server
+      // viewport exactly once per scope (FR-095, per-viewer camera) and
+      // discards every later one, so asking the backend to centre a window and
+      // waiting for the viewport to come back never moves this client's camera.
+      // Every "take me to that window" affordance must go through here.
+      function requestWindowFrame(windowId) {
+        if (!windowId) {
+          return;
+        }
+        if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+          pendingFrameWindowId = null;
+          frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
+          return;
+        }
+        // Not on the canvas yet — frame it as soon as it lands.
+        pendingFrameWindowId = windowId;
+        focusWindowRemotely(windowId);
+      }
+
+      // Called after each workspace render, once `windowMap` reflects the new
+      // state, so a frame requested before the window existed still happens.
+      function resolvePendingWindowFrames() {
+        if (pendingFrameWindowId) {
+          const windowId = pendingFrameWindowId;
+          if (workspaceWindowById(windowId) && windowMap.has(windowId)) {
+            pendingFrameWindowId = null;
+            frameWindow(windowId, { animate: shouldAnimateWindowFrame() });
+          }
+        }
+        // FR-019: a freshly launched PM is created at a fixed world position,
+        // so it appears off-screen whenever the camera has been panned. The
+        // click that started it still owes the user a landing.
+        if (pendingPmFrame && pmWindowId && windowMap.has(pmWindowId)) {
+          pendingPmFrame = false;
+          frameWindow(pmWindowId, { animate: shouldAnimateWindowFrame() });
+        }
       }
 
       let focusedWindowViewportReframeFrame = null;
@@ -3092,6 +3165,69 @@
         }
       }
 
+      // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
+      // the backend marked `is_pm`; null while no PM pane exists.
+      let pmWindowId = null;
+
+      function updatePmLauncher(workspace) {
+        const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
+        const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
+        pmWindowId = pmWindow?.id ?? null;
+
+        const railEntry = document.getElementById("op-pm-entry");
+        if (railEntry) {
+          // FR-021: absent (never started / closed) vs stopped (pane present
+          // but its runtime exited) vs running.
+          const state = !pmWindow
+            ? "absent"
+            : pmWindow.status === "stopped" || pmWindow.status === "error"
+              ? "stopped"
+              : "running";
+          railEntry.dataset.pmState = state;
+          railEntry.title =
+            state === "running"
+              ? "Project Manager"
+              : state === "stopped"
+                ? "Project Manager (stopped) — click to resume"
+                : "Project Manager — click to start";
+        }
+
+        const floating = document.getElementById("canvas-pm-launcher");
+        if (floating) {
+          // FR-018: only surface the floating launcher when the PM is not
+          // reachable on screen, so a visible PM never gets a duplicate CTA.
+          floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
+        }
+      }
+
+      // True when the window's rectangle intersects the visible canvas area.
+      function isWindowWithinViewport(windowData) {
+        const geometry = windowData?.geometry;
+        if (!geometry) return false;
+        const bounds = visibleBounds();
+        if (!bounds) return true;
+        return (
+          geometry.x < bounds.x + bounds.width &&
+          geometry.x + geometry.width > bounds.x &&
+          geometry.y < bounds.y + bounds.height &&
+          geometry.y + geometry.height > bounds.y
+        );
+      }
+
+      // FR-019: one click always lands the user on the PM — an existing pane is
+      // framed now, a missing one is framed as soon as its launch puts it on
+      // the canvas (`resolvePendingWindowFrames`).
+      let pendingPmFrame = false;
+
+      function openPmAgent() {
+        if (pmWindowId && windowMap.has(pmWindowId)) {
+          requestWindowFrame(pmWindowId);
+          return;
+        }
+        pendingPmFrame = true;
+        send({ kind: "open_pm_agent" });
+      }
+
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
         // SPEC-2008 camera-focus / FR-094: rebuild the Fleet Minimap cells from
@@ -3446,11 +3582,14 @@
         }
       }
 
-      function focusWindowRemotely(windowId, { center = false } = {}) {
+      // Highlight + z-order only. There is deliberately no `center` option:
+      // sending `bounds` asks the backend to compute a viewport that
+      // `viewport-sync` then discards (FR-095, per-viewer camera), which
+      // silently did nothing for three separate affordances. Moving the camera
+      // is `requestWindowFrame`'s job.
+      function focusWindowRemotely(windowId) {
         focusWindowLocally(windowId);
-        const payload = { kind: "focus_window", id: windowId };
-        if (center) payload.bounds = visibleBounds();
-        send(payload);
+        send({ kind: "focus_window", id: windowId });
       }
 
       // SPEC-2008 camera-focus: toggleMinimizeWindow / toggleMaximizeWindow
@@ -3506,6 +3645,8 @@
             : presetRoleLabel(windowData.preset),
           runtimeLabel: isAgentWindow ? windowRuntimeLabel(runtimeState) : "",
           running: isAgentWindow && runtimeState === "running",
+          // SPEC-3431 FR-022: closing the PM means "stop it until next open".
+          isPm: Boolean(windowData.is_pm),
         };
         renderWindowCloseConfirm();
       }
@@ -4562,8 +4703,18 @@
       const issueMonitorSurface = createIssueMonitorSurface({
         document,
         send,
-        focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+        focusWindow: (windowId) => requestWindowFrame(windowId),
       });
+
+      // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
+      // `pm_status` hydration that arrives with the initial sync has somewhere
+      // to land.
+      const pmSettingsPanel = createPmSettingsPanel({
+        document,
+        send,
+        confirm: (message) => window.confirm(message),
+      });
+      pmSettingsPanel.mount();
 
       // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
       // scrollable side-toast stack so nothing is missed while the operator is
@@ -4944,7 +5095,7 @@
             <div class="titlebar">
               <div class="title">
                 <span class="title-text"></span>
-                <span class="window-lane-badge"></span>
+                <span class="window-worktree-badge"></span>
                 <span class="window-role-badge"></span>
                 <span class="status-chip running">
                   <span class="status-dot"></span>
@@ -5161,9 +5312,19 @@
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         const titleText = element.querySelector(".title-text");
         titleText.title = windowTitleTooltip(windowData);
-        applyWindowLaneData(element, windowData);
-        renderWindowLaneBadge(element.querySelector(".window-lane-badge"), windowData);
+        applyWindowWorktreeData(element, windowData);
+        renderWindowWorktreeBadge(
+          element.querySelector(".window-worktree-badge"),
+          windowData,
+        );
         setWindowRoleBadge(element.querySelector(".window-role-badge"), windowData);
+        // SPEC-3431 FR-020: the resident PM gets its own chrome (left accent
+        // bar + filled role badge) so it never reads as just another agent.
+        if (windowData.is_pm) {
+          element.dataset.pm = "true";
+        } else {
+          delete element.dataset.pm;
+        }
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
@@ -5512,6 +5673,7 @@
         logsSurface,
         agentKanbanSurface,
         issueMonitorSurface,
+        pmSettingsPanel,
         autonomousNotifications,
         knowledgeSettingsSurface,
       });
@@ -5524,6 +5686,12 @@
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
+            // floating CTA in step with every canvas render.
+            updatePmLauncher(activeWorkspace());
+            // FR-019: `windowMap` is current now, so a frame requested for a
+            // window that had not been mounted yet can finally run.
+            resolvePendingWindowFrames();
             sendStartupAutoResumeReady();
             break;
           }
@@ -5609,6 +5777,10 @@
             break;
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
+            break;
+          case "pm_status":
+            // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
+            frontendUnits.pmSettingsPanel.applyStatus(event);
             break;
           case "issue_monitor_status":
             frontendUnits.issueMonitorSurface.applyStatus(event.status || {});
@@ -6528,9 +6700,11 @@
         cellTooltip: windowActivityLabel,
         // windowData.agent_color already IS the data-agent-color value.
         cellAgentColor: (windowData) => windowData?.agent_color || "",
-        cellLaneKind: windowLaneKind,
-        cellLaneBadge: (windowData) =>
-          shouldShowWindowLaneBadge(windowData) ? windowLaneBadgeView(windowData) : null,
+        cellWorktreeForm: windowWorktreeForm,
+        cellWorktreeBadge: (windowData) =>
+          shouldShowWindowWorktreeBadge(windowData)
+            ? windowWorktreeBadgeView(windowData)
+            : null,
         // Only agent panes carry a Living Telemetry state; other surfaces
         // render a neutral cell with no telemetry dot.
         cellTelemetryState: (windowData) =>
@@ -6879,6 +7053,11 @@
             return;
           case "stop-all-windows":
             requestStopAllWindows();
+            return;
+          case "pm-settings":
+            // SPEC-3431 FR-026: the gear is a hover affordance, so the palette
+            // is the keyboard-only path to the same panel.
+            frontendUnits.pmSettingsPanel.open();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
