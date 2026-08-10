@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
+import { shouldShowWindowWorktreeBadge } from "../window-worktree-form.js";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
@@ -114,14 +116,16 @@ test("FR-020: PM ウィンドウは『何であるか』を文字で名乗る", 
   assert.match(appJs, /PM_ROLE_BADGE\s*=\s*"PM"/);
 });
 
-test("FR-020: PM ウィンドウは lane badge を出さない", () => {
-  // PM は Execution/Intake という実行レーンの住人ではないので、lane badge は
-  // 意味を持たないノイズになる（実機で "Execution" が出て PM 表示と競合した）。
-  const laneIdentity = readFileSync(resolve(here, "../window-lane-identity.js"), "utf8");
-  assert.match(
-    laneIdentity,
-    /shouldShowWindowLaneBadge[\s\S]*?is_pm/,
-    "PM 窓では lane badge を抑止する",
+test("FR-020: PM ウィンドウは worktree-form badge を出さない", () => {
+  // PM は作業 worktree の形態を表す worker ではないため、worktree-form badge は
+  // 意味を持たないノイズになる。
+  assert.equal(
+    shouldShowWindowWorktreeBadge({
+      is_pm: true,
+      preset: "agent",
+      lane_kind: "execution",
+    }),
+    false,
   );
 });
 

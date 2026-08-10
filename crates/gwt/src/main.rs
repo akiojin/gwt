@@ -113,13 +113,13 @@ pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
     current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, knowledge_kind_for_preset,
+    intake_hook_config_is_disposable, is_ephemeral_worktree_path, knowledge_kind_for_preset,
     local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
     prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
     run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
     synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
-    INTAKE_WORKTREE_PREFIX,
+    EPHEMERAL_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -1875,7 +1875,7 @@ mod tests {
             dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
-            lane_kind: gwt::WindowLaneKind::Unknown,
+            worktree_form: gwt::WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,

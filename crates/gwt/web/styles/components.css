@@ -6218,8 +6218,8 @@ button.workspace-board-ref:focus-visible {
   box-shadow: 0 0 0 1px var(--color-focus-ring);
 }
 
-.fleet-minimap__cell[data-lane-symbol]::before {
-  content: attr(data-lane-symbol);
+.fleet-minimap__cell[data-worktree-symbol]::before {
+  content: attr(data-worktree-symbol);
   position: absolute;
   left: 2px;
   bottom: 2px;
@@ -6237,12 +6237,12 @@ button.workspace-board-ref:focus-visible {
   text-align: center;
 }
 
-.fleet-minimap__cell[data-lane-kind="intake"]::before {
+.fleet-minimap__cell[data-worktree-form="ephemeral"]::before {
   border-color: var(--color-state-needs-input);
   color: var(--color-state-needs-input);
 }
 
-.fleet-minimap__cell[data-lane-kind="execution"]::before {
+.fleet-minimap__cell[data-worktree-form="branch-backed"]::before {
   border-color: var(--color-state-active);
   color: var(--color-state-active);
 }

@@ -65,7 +65,8 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     await installPhase2Backend(page);
     await page.goto(APP_URL);
 
-    // (a) Fleet Minimap cell tooltip: title attribute reads "Title · detail".
+    // (a) Fleet Minimap cell tooltip keeps the dynamic detail and appends the
+    // worktree-form label supplied by the visual-identity contract.
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible({ timeout: 10_000 });
     const detailCell = minimap.locator(
@@ -74,7 +75,11 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     await expect(detailCell).toHaveCount(1);
     await expect(detailCell).toHaveAttribute(
       "title",
-      "Refactor auth · editing src/auth/login.rs",
+      "Refactor auth · editing src/auth/login.rs - Unknown worktree form",
+    );
+    await expect(detailCell).toHaveAttribute(
+      "data-worktree-label",
+      "Unknown worktree form",
     );
 
     // (b) Window Switcher row: opening the popover surfaces the live activity

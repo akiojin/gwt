@@ -1135,7 +1135,7 @@ fn sample_window(
         dynamic_title_detail: None,
         agent_id: None,
         agent_color: None,
-        lane_kind: gwt::WindowLaneKind::Unknown,
+        worktree_form: gwt::WindowWorktreeForm::Unknown,
         tab_group_id: None,
         tab_group_active: false,
         session_id: None,
@@ -17925,6 +17925,9 @@ No viable candidates found in PATH \
 
 #[test]
 fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
@@ -17972,6 +17975,9 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
 
 #[test]
 fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     init_repo_with_initial_commit(temp.path());
     let tab = sample_project_tab_with_window_at(
@@ -35105,7 +35111,7 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
 }
 
 #[test]
-fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_windows() {
+fn app_state_view_projects_agent_window_worktree_form_without_guessing_restored_windows() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -35118,20 +35124,20 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
     run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
 
     let mut tab_workspace = empty_workspace_state();
-    let mut intake = sample_window(
-        "agent-intake",
+    let mut ephemeral = sample_window(
+        "agent-ephemeral",
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    intake.title = "Codex".to_string();
-    intake.agent_id = Some("codex".to_string());
-    let mut execution = sample_window(
-        "agent-exec",
+    ephemeral.title = "Codex".to_string();
+    ephemeral.agent_id = Some("codex".to_string());
+    let mut branch_backed = sample_window(
+        "agent-branch-backed",
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    execution.title = "Codex".to_string();
-    execution.agent_id = Some("codex".to_string());
+    branch_backed.title = "Codex".to_string();
+    branch_backed.agent_id = Some("codex".to_string());
     let mut restored = sample_window(
         "agent-restored",
         WindowPreset::Agent,
@@ -35139,7 +35145,9 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
     );
     restored.title = "Codex".to_string();
     restored.agent_id = Some("codex".to_string());
-    tab_workspace.windows.extend([intake, execution, restored]);
+    tab_workspace
+        .windows
+        .extend([ephemeral, branch_backed, restored]);
     tab_workspace.next_z_index = 4;
     let tab = ProjectTabRuntime {
         id: "tab-1".to_string(),
@@ -35151,31 +35159,35 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let intake_id = combined_window_id("tab-1", "agent-intake");
-    let execution_id = combined_window_id("tab-1", "agent-exec");
+    let ephemeral_id = combined_window_id("tab-1", "agent-ephemeral");
+    let branch_backed_id = combined_window_id("tab-1", "agent-branch-backed");
     let manager = gwt_git::WorktreeManager::new(&repo);
-    let intake_worktree = temp.path().join(".intake-lane");
+    let ephemeral_worktree = temp.path().join(".intake-ephemeral");
     manager
-        .create_detached("HEAD", &intake_worktree)
-        .expect("create detached intake worktree");
-    let execution_worktree = temp.path().join(".intake-real-lane");
+        .create_detached("HEAD", &ephemeral_worktree)
+        .expect("create detached ephemeral worktree");
+    let branch_backed_worktree = temp.path().join(".intake-branch-backed");
     manager
-        .create_from_base("HEAD", "feature/lane-real", &execution_worktree)
-        .expect("create branch worktree with intake-like basename");
+        .create_from_base(
+            "HEAD",
+            "feature/worktree-form-real",
+            &branch_backed_worktree,
+        )
+        .expect("create branch worktree with an ephemeral-like basename");
 
-    let mut intake_session = sample_active_agent_session("tab-1", &intake_id);
-    intake_session.branch_name = "work".to_string();
-    intake_session.worktree_path = intake_worktree;
+    let mut ephemeral_session = sample_active_agent_session("tab-1", &ephemeral_id);
+    ephemeral_session.branch_name = "work".to_string();
+    ephemeral_session.worktree_path = ephemeral_worktree;
     runtime
         .active_agent_sessions
-        .insert(intake_id.clone(), intake_session);
+        .insert(ephemeral_id.clone(), ephemeral_session);
 
-    let mut execution_session = sample_active_agent_session("tab-1", &execution_id);
-    execution_session.branch_name = "feature/lane-real".to_string();
-    execution_session.worktree_path = execution_worktree;
+    let mut branch_backed_session = sample_active_agent_session("tab-1", &branch_backed_id);
+    branch_backed_session.branch_name = "feature/worktree-form-real".to_string();
+    branch_backed_session.worktree_path = branch_backed_worktree;
     runtime
         .active_agent_sessions
-        .insert(execution_id.clone(), execution_session);
+        .insert(branch_backed_id.clone(), branch_backed_session);
 
     let view = runtime.app_state_view();
     let windows = &view
@@ -35185,24 +35197,24 @@ fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_wind
         .expect("tab")
         .workspace
         .windows;
-    let lane = |raw_id: &str| {
+    let form = |raw_id: &str| {
         windows
             .iter()
             .find(|window| window.id == combined_window_id("tab-1", raw_id))
-            .map(|window| window.lane_kind)
+            .map(|window| window.worktree_form)
             .expect("projected window")
     };
 
-    assert_eq!(lane("agent-intake"), gwt::WindowLaneKind::Intake);
+    assert_eq!(form("agent-ephemeral"), gwt::WindowWorktreeForm::Ephemeral);
     assert_eq!(
-        lane("agent-exec"),
-        gwt::WindowLaneKind::Execution,
-        "a named branch worktree with an .intake-* basename must not be mislabeled as Intake",
+        form("agent-branch-backed"),
+        gwt::WindowWorktreeForm::BranchBacked,
+        "a named branch worktree with an .intake-* basename must not be classified as ephemeral",
     );
     assert_eq!(
-        lane("agent-restored"),
-        gwt::WindowLaneKind::Unknown,
-        "restored agent windows without an active lane signal must not be mislabeled as Execution",
+        form("agent-restored"),
+        gwt::WindowWorktreeForm::Unknown,
+        "restored agent windows without an active session signal must remain unknown",
     );
 }
 
@@ -43527,5 +43539,54 @@ fn pm_wake_defers_to_an_active_human_conversation() {
             .pm_wake_decision_at(&repo, &escalated, "2026-08-08T01:02:00Z")
             .is_some(),
         "the retained signal wakes once the conversation has gone quiet"
+    );
+}
+
+/// Issue #3497: the PM must come up on a bare-layout project — a project
+/// root that is not itself a git repository but contains the bare `<name>.git`
+/// the worktrees hang off. The launch paths resolve this layout through
+/// `main_worktree_root`; the PM worktree preparation used the raw project
+/// root and died with "not a git repository", leaving the PM silently absent.
+#[test]
+fn pm_spawn_prepares_the_worktree_for_a_bare_layout_project() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    // A seed repository with one commit, cloned bare into the layout the
+    // user actually opens: parent/ (not a repo) containing parent/repo.git.
+    let seed = temp.path().join("seed");
+    fs::create_dir_all(&seed).expect("seed dir");
+    init_repo_with_initial_commit(&seed);
+    let parent = temp.path().join("parent");
+    fs::create_dir_all(&parent).expect("parent dir");
+    let clone = gwt_core::process::hidden_command("git")
+        .args([
+            "clone",
+            "--bare",
+            seed.to_str().expect("seed utf8"),
+            parent.join("repo.git").to_str().expect("bare utf8"),
+        ])
+        .output()
+        .expect("run git clone");
+    assert!(
+        clone.status.success(),
+        "bare clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", parent.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Explicit);
+
+    assert!(
+        !runtime.pending_pm_launches.is_empty(),
+        "the PM spawn must survive the bare layout instead of dying on \
+         worktree preparation"
     );
 }

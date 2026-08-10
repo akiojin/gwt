@@ -189,7 +189,7 @@ pub fn resolve_ephemeral_launch_worktree(
     let worktrees = manager.list().map_err(|err| err.to_string())?;
 
     let layout_root = main_repo_path.parent().unwrap_or(main_repo_path.as_path());
-    let preferred_path = layout_root.join(INTAKE_WORKTREE_PREFIX);
+    let preferred_path = layout_root.join(EPHEMERAL_WORKTREE_PREFIX);
     let worktree_path = first_available_worktree_path(&preferred_path, &worktrees)
         .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
 
@@ -279,9 +279,7 @@ pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntak
     };
     let worktree_paths = worktrees
         .into_iter()
-        .filter(|worktree| {
-            is_ephemeral_intake_worktree(&worktree.path) && worktree.branch.is_none()
-        })
+        .filter(|worktree| is_ephemeral_worktree_path(&worktree.path) && worktree.branch.is_none())
         .map(|worktree| worktree.path)
         .collect();
     Some(OrphanIntakePrunePlan {

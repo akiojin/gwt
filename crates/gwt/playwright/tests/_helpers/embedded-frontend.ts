@@ -84,8 +84,8 @@ const ROOT_MODULES = new Set([
   // SPEC-3015 — generated protocol enum contract + extracted window runtime
   // state helpers.
   "protocol-enums.js",
-  // SPEC-3214 — shared Intake/Execution lane identity helpers.
-  "window-lane-identity.js",
+  // SPEC-3245 — shared semantic worktree form presentation helpers.
+  "window-worktree-form.js",
   "window-runtime-state.js",
   // SPEC #2780 — Release Notes window opened from #app-version label.
   "release-notes-window.js",

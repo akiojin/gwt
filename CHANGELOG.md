@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.75.1] - 2026-08-09
+
+### Bug Fixes
+
+- **pm:** Bare リポジトリ層構成で PM worktree 作成が失敗し PM が無言不起動になるのを修正する (#3497)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3431 M-A slice の terminal Work event を記録する
+- **work:** Issue #3497 修正 slice の Work event を記録する
+
+### Testing
+
+- **pm:** Stop/failover の IPC 層 failure injection と残 matrix を固定する (SPEC #3431 T-087d/T-080/T-081)
+- **index:** Deadline-reap fake runner の cold-start 競合 flake を根治する
+- **gwt:** HOME 依存の issue monitor テストに env lock を追加して並走 flake を止める
+
 ## [9.75.0] - 2026-08-09
 
 ### Bug Fixes
