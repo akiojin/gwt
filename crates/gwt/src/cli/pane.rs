@@ -103,6 +103,125 @@ async fn run_async(
         PaneCommand::Send { id, text } => {
             send_pane_input(ws_url, project_root, id.as_deref(), &text).await
         }
+        PaneCommand::PmSend { id, text } => {
+            send_pm_pane_input(ws_url, project_root, &id, &text).await
+        }
+    }
+}
+
+/// SPEC-3431 FR-111 (T-206): PM-privileged delivery into another agent pane
+/// of the same project. Not a loosened `pane.send`: the SPEC-3050 self-only
+/// contract stays intact for every ordinary agent, and this path exists only
+/// for the live registered PM. The client verifies the durable registration
+/// up front (fast, typed refusal), the server re-verifies the live principal
+/// immediately before the injection, and the outcome is appended to a
+/// durable per-project receipt log either way.
+async fn send_pm_pane_input(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: &str,
+    text: &str,
+) -> Result<String, String> {
+    let session_id = std::env::var(GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!("{GWT_SESSION_ID_ENV} is not set; pm.message.send requires the PM session")
+        })?;
+    let project_path = std::path::PathBuf::from(project_root);
+    let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_path);
+    if !crate::pm_registry::session_is_registered_pm(&prefs_path, &session_id) {
+        let refusal =
+            "pm.message.send refused: the calling session is not the registered PM for this \
+             project (FR-111; ordinary agents keep the self-only pane.send contract)"
+                .to_string();
+        append_pm_message_receipt(
+            &project_path,
+            &session_id,
+            requested_id,
+            false,
+            Some(&refusal),
+        );
+        return Err(refusal);
+    }
+
+    let windows = request_window_list(ws_url, project_root).await?;
+    let Some(window_id) = resolve_window_id(&windows, requested_id) else {
+        let refusal = format!("pm.message.send: unknown pane {requested_id}");
+        append_pm_message_receipt(
+            &project_path,
+            &session_id,
+            requested_id,
+            false,
+            Some(&refusal),
+        );
+        return Err(refusal);
+    };
+    let window_id = window_id.to_string();
+    let line = ensure_trailing_submit(text);
+
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
+    let _scoped = next_workspace_windows(&mut socket, project_root, "pm pane send").await?;
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "pm_pane_send_input",
+            "pm_session_id": session_id,
+            "window_id": window_id,
+            "text": line,
+        }),
+    )
+    .await?;
+
+    for _ in 0..128 {
+        let value = next_backend_json(&mut socket).await?;
+        let Some(reply) = parse_pane_send_result(&value)? else {
+            continue;
+        };
+        return if reply.ok {
+            let delivered = reply.window_id.unwrap_or(window_id);
+            append_pm_message_receipt(&project_path, &session_id, &delivered, true, None);
+            Ok(format!("pm message delivered to {delivered}\n"))
+        } else {
+            let error = reply.error.unwrap_or_else(|| "unknown error".to_string());
+            append_pm_message_receipt(&project_path, &session_id, &window_id, false, Some(&error));
+            Err(format!("pm message refused: {error}"))
+        };
+    }
+    let error = "pm pane send: backend did not return pane_send_result".to_string();
+    append_pm_message_receipt(&project_path, &session_id, &window_id, false, Some(&error));
+    Err(error)
+}
+
+/// FR-111 audit trail: one JSONL line per delivery attempt, durable beside
+/// the project state so refusals are as visible as deliveries.
+fn append_pm_message_receipt(
+    project_root: &std::path::Path,
+    pm_session_id: &str,
+    window_id: &str,
+    delivered: bool,
+    error: Option<&str>,
+) {
+    let path = gwt_core::paths::gwt_project_dir_for_repo_path(project_root)
+        .join("project-state/pm-messages.jsonl");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "pm_session_id": pm_session_id,
+        "window_id": window_id,
+        "delivered": delivered,
+        "error": error,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{line}");
     }
 }
 
