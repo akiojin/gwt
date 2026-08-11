@@ -21,12 +21,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
 use gwt::PmAgentOption;
 
-use super::{AppRuntime, BackendEvent, OutboundEvent};
+use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent};
 
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
@@ -589,20 +590,85 @@ impl AppRuntime {
         Vec::new()
     }
 
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into an
+    /// agent pane. The general SPEC-3050 self-only contract is untouched —
+    /// this separate path exists only for the live registered PM, and the
+    /// principal is re-verified here, immediately before the injection:
+    /// the presented session must be the durable `pm.json` registration of
+    /// the project that owns the target window, and that registration's own
+    /// pane must be live right now. Everything else is refused with a typed
+    /// reply and no write.
+    pub(crate) fn pm_pane_send_input_events(
+        &mut self,
+        client_id: ClientId,
+        pm_session_id: &str,
+        window_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let refuse = |error: String| {
+            vec![OutboundEvent::reply(
+                client_id.clone(),
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id.to_string()),
+                    error: Some(error),
+                },
+            )]
+        };
+        // The window's owning tab decides which project's PM registration is
+        // the authority — a PM can never reach a pane of another project.
+        let Some(project_root) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.workspace.persisted().windows.iter().any(|window| {
+                    crate::runtime_support::combined_window_id(&tab.id, &window.id) == window_id
+                })
+            })
+            .map(|tab| tab.project_root.clone())
+        else {
+            return refuse(format!(
+                "pm pane send: unknown pane {window_id} (FR-111 refuses cross-project delivery)"
+            ));
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        let registration = match pm_registry::load_pm_prefs(&prefs_path) {
+            Ok(prefs) => prefs.registration,
+            Err(error) => {
+                return refuse(format!("pm pane send: pm registration unreadable: {error}"))
+            }
+        };
+        let Some(registration) = registration else {
+            return refuse(
+                "pm pane send: no registered PM for this project (FR-111 requires the live PM principal)"
+                    .to_string(),
+            );
+        };
+        if registration.session_id != pm_session_id {
+            return refuse(
+                "pm pane send: presented session is not the registered PM (FR-111 refuses foreign principals)"
+                    .to_string(),
+            );
+        }
+        if self.live_pm_window_id(&registration.session_id).is_none() {
+            return refuse(
+                "pm pane send: the registered PM has no live pane (stale registration; FR-111 refuses)"
+                    .to_string(),
+            );
+        }
+        self.pane_send_input_to_window_events(client_id, window_id, text)
+    }
+
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
         match self.runtimes.get(&decision.window_id) {
             None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => runtime
-                .pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| {
-                    pane.write_input(decision.prompt.as_bytes())
-                        .map_err(|error| error.to_string())
-                }),
+            Some(runtime) => {
+                let pane = Arc::clone(&runtime.pane);
+                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+            }
         }
     }
 
