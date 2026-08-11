@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.77.0] - 2026-08-11
+
+### Bug Fixes
+
+- **pm:** Wake prompt と PM 送達の CR を独立した書き込みにして submit を成立させる (SPEC #3431 FR-108c / T-218)
+
+### Documentation
+
+- **agents:** GUI/フロントエンド変更で Headed ブラウザ E2E テストを必須化する
+- **pm:** FR-108(a) の harness スケジューラ契約を PM guidance へ追補する (SPEC #3431 T-202)
+
+### Features
+
+- **pm:** FR-111 PM 特権の pane メッセージ送達 pm.message.send を実装する (SPEC #3431 T-206)
+
+
 ## [9.76.0] - 2026-08-10
 
 ### Bug Fixes

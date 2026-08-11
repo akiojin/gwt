@@ -363,6 +363,16 @@ pub enum FrontendEvent {
         session_id: String,
         text: String,
     },
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
+    /// agent pane of the same project. Carries the PM's own session id so the
+    /// server re-verifies the live PM principal immediately before the
+    /// injection; the general self-only contract of
+    /// [`FrontendEvent::PaneSendInput`] is unchanged for every other caller.
+    PmPaneSendInput {
+        pm_session_id: String,
+        window_id: String,
+        text: String,
+    },
     PasteImage {
         id: String,
         data_base64: String,
