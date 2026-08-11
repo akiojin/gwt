@@ -192,6 +192,12 @@ Hard limits, no exceptions:
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- If the subscribe fails (for example `no daemon registered` — a known
+  endpoint-registration gap), do not treat the cycle as failed and do
+  not stop early: fall back to polling in the same cycle. Read the
+  fresh `issue.monitor.status` snapshot directly, complete the same
+  reconcile contract, and note in your digest that push subscription is
+  degraded (FR-109). Subscribe failures are never a reason to park.
 - Every cycle, also check the agents that are running. Read the Board
   for what they reported themselves, and use `pane.read` on any launch
   whose inbox row looks wrong (stuck in the same state, an
@@ -310,6 +316,10 @@ mod tests {
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
+            // FR-109: subscribe failure degrades to same-cycle polling.
+            "fall back to polling in the same cycle",
+            "degraded (FR-109)",
+            "never a reason to park",
             // FR-023: observation of the other agents.
             "`board.show`",
             "`pane.list`",

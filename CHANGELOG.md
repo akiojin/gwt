@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.76.0] - 2026-08-10
+
+### Bug Fixes
+
+- Enforce worktree marker and badge boundaries
+- Account for minimap cell border
+- **gui:** Scheduled tick の挿入で cfg(unix) 属性が board registry から外れたのを修正する
+
+### Features
+
+- **pm:** 常駐ループの穴 3 件を塞ぎ GUI に scheduled scan tick を実装する (SPEC #3431 FR-108〜110 / #3505)
+
+### Miscellaneous Tasks
+
+- **work:** Record develop pane work events
+- **work:** Record verification progress
+- **work:** Record issue 3384 completion
+- **work:** SPEC #3431 常駐ループ修正 slice の terminal Work event を記録する
+- **work:** SPEC #3431 常駐ループ修正 slice の terminal Work event を記録する
+
+### Refactor
+
+- Adopt Rust worktree-form vocabulary
+- Adopt frontend worktree-form vocabulary
+
+### Testing
+
+- Enforce worktree badge overflow coverage
+- Align minimap tooltip worktree form coverage
+- **gwt:** Git 依存の wizard branch 解決テストに env lock を追加して並走 flake を止める
+
 ## [9.75.1] - 2026-08-09
 
 ### Bug Fixes
@@ -435,9 +467,6 @@ All notable changes to this project will be documented in this file.
 - **gwt:** Bookkeeping パス判定テストの OS 前提を修正する
 - **lane:** Pin intake lane-file preservation for env-less rematerialization
 
-# Changelog
-
-All notable changes to this project will be documented in this file.
 ## [9.69.1] - 2026-07-27
 
 ### Bug Fixes
