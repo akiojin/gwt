@@ -187,8 +187,6 @@ root_js_modules! {
     // interaction guard, field builders, transitions, renderLaunchWizard,
     // chrome listeners) extracted from app.js.
     "launch-wizard-surface.js" => "createLaunchWizardSurface",
-    // SPEC-3165 — Issue auto-improve monitor card, inbox, and toast surface.
-    "issue-monitor-surface.js" => "createIssueMonitorSurface",
     // SPEC-3431 FR-026 — PM settings panel anchored to the rail launcher.
     // app.js imports this at module top level, so the asset MUST be registered
     // or the ES module load 404s and the splash hangs.
