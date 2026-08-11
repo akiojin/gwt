@@ -3890,6 +3890,25 @@ impl AppRuntime {
         project_root: &Path,
         monitor: &mut gwt::IssueMonitorState,
     ) -> Vec<OutboundEvent> {
+        let _local_lease = match gwt::try_acquire_issue_monitor_local_fallback_lease(prefs_path) {
+            Ok(lease) => lease,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                tracing::debug!(
+                    prefs_path = %prefs_path.display(),
+                    "local Issue Monitor claim execution deferred to the current authority"
+                );
+                return Vec::new();
+            }
+            Err(error) => {
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                monitor.record_scan_error(
+                    now,
+                    format!("Issue Monitor local authority acquisition failed: {error}"),
+                );
+                tracing::warn!(%error, "local Issue Monitor authority acquisition failed");
+                return Vec::new();
+            }
+        };
         let execution = execute_local_issue_monitor_claim_effects(
             prefs_path,
             owner,

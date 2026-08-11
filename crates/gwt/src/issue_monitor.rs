@@ -1863,9 +1863,9 @@ pub fn establish_issue_monitor_authority_fence(
 /// owns only one bounded scan/effect pass. Holding the same lifetime lock as a
 /// daemon closes the gap between the fence pre-check and remote submission,
 /// while the prefs lock preserves the daemon's `prefs.lock -> authority.lock`
-/// ordering. Any durable fence remains fail-closed, including legacy shutdown
-/// revocations and stale-looking identities; canonical daemon recovery owns
-/// replacing those records.
+/// ordering. A free lifetime lock proves a v2 fence is stale, so the fallback
+/// revokes its epoch and removes it before proceeding. Legacy fences remain
+/// fail-closed because they did not carry lifetime-lock liveness.
 pub fn try_acquire_issue_monitor_local_fallback_lease(
     prefs_path: &Path,
 ) -> io::Result<IssueMonitorAuthorityLease> {
@@ -1890,6 +1890,21 @@ pub fn try_acquire_issue_monitor_local_fallback_lease(
         };
         match load_issue_monitor_authority_fence(prefs_path)? {
             IssueMonitorAuthorityFenceState::Missing => Ok(lease),
+            IssueMonitorAuthorityFenceState::Active(existing)
+                if existing.version == ISSUE_MONITOR_AUTHORITY_FENCE_VERSION =>
+            {
+                let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
+                prefs.advance_effect_authority_epoch().ok_or_else(|| {
+                    io::Error::other(
+                        "Issue Monitor authority epoch exhausted during local fence recovery",
+                    )
+                })?;
+                save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+                let fence_path = issue_monitor_authority_fence_path(prefs_path);
+                fs::remove_file(&fence_path)?;
+                sync_parent_directory(&fence_path)?;
+                Ok(lease)
+            }
             IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
             | IssueMonitorAuthorityFenceState::Active(_) => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -9254,6 +9269,42 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         drop(daemon_lease);
+    }
+
+    #[test]
+    fn local_fallback_lease_recovers_an_unlocked_v2_fence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 11,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence::current_process(),
+        )
+        .expect("seed stale v2 fence without its lifetime lock");
+
+        let lease = try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("a free lifetime lock makes the v2 fence recoverable");
+
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("load recovered prefs")
+                .effect_authority_epoch,
+            12,
+            "stale daemon effects must be revoked before GUI fallback execution"
+        );
+        assert_eq!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("load recovered fence"),
+            IssueMonitorAuthorityFenceState::Missing,
+            "the bounded GUI lease must not leave a durable daemon fence"
+        );
+        drop(lease);
     }
 
     #[test]
