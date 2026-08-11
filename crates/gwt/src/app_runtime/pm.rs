@@ -21,12 +21,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
 use gwt::PmAgentOption;
 
-use super::{AppRuntime, BackendEvent, OutboundEvent};
+use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent};
 
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
@@ -483,6 +484,7 @@ impl AppRuntime {
     /// an actively-looping or freshly-prompted PM is never interrupted, and a
     /// wake re-arms the loop so the next tick inside the interval is quiet-
     /// gated out.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn pm_periodic_wake_decision_at(
         &mut self,
         project_root: &Path,
@@ -490,12 +492,21 @@ impl AppRuntime {
     ) -> Option<PmWakeDecision> {
         let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let monitor_prefs = gwt::load_issue_monitor_prefs(&monitor_prefs_path).ok()?;
-        if !monitor_prefs.enabled {
+        let monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), monitor_prefs);
+        self.pm_periodic_wake_decision_for_monitor_at(project_root, &monitor, now)
+    }
+
+    pub(crate) fn pm_periodic_wake_decision_for_monitor_at(
+        &mut self,
+        project_root: &Path,
+        monitor: &gwt::IssueMonitorState,
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        if !monitor.config.enabled {
             return None;
         }
-        let status =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), monitor_prefs)
-                .agent_status();
+        let status = monitor.agent_status();
         if status.active_launches.is_empty()
             && status.queue.is_empty()
             && status.needs_human.is_empty()
@@ -531,20 +542,22 @@ impl AppRuntime {
         })
     }
 
-    /// Execute the periodic wake against the resolved PM pane.
-    pub(crate) fn pm_periodic_wake_events_at(
+    pub(crate) fn pm_periodic_wake_events_for_monitor_at(
         &mut self,
         project_root: &Path,
+        monitor: &gwt::IssueMonitorState,
         now: &str,
     ) -> Vec<OutboundEvent> {
-        let Some(decision) = self.pm_periodic_wake_decision_at(project_root, now) else {
+        let Some(decision) =
+            self.pm_periodic_wake_decision_for_monitor_at(project_root, monitor, now)
+        else {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
             Ok(()) => {
                 tracing::info!(
                     window_id = %decision.window_id,
-                    "periodic wake re-armed the resident PM"
+                    "periodic wake re-armed the resident PM from the scheduled snapshot"
                 );
             }
             Err(error) => {
@@ -556,6 +569,19 @@ impl AppRuntime {
             }
         }
         Vec::new()
+    }
+
+    pub(crate) fn pm_periodic_wake_events_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Vec<OutboundEvent> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        self.pm_periodic_wake_events_for_monitor_at(project_root, &monitor, now)
     }
 
     /// Execute the wake: inject the prompt into the registered PM's pane. A
@@ -589,20 +615,85 @@ impl AppRuntime {
         Vec::new()
     }
 
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into an
+    /// agent pane. The general SPEC-3050 self-only contract is untouched —
+    /// this separate path exists only for the live registered PM, and the
+    /// principal is re-verified here, immediately before the injection:
+    /// the presented session must be the durable `pm.json` registration of
+    /// the project that owns the target window, and that registration's own
+    /// pane must be live right now. Everything else is refused with a typed
+    /// reply and no write.
+    pub(crate) fn pm_pane_send_input_events(
+        &mut self,
+        client_id: ClientId,
+        pm_session_id: &str,
+        window_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let refuse = |error: String| {
+            vec![OutboundEvent::reply(
+                client_id.clone(),
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id.to_string()),
+                    error: Some(error),
+                },
+            )]
+        };
+        // The window's owning tab decides which project's PM registration is
+        // the authority — a PM can never reach a pane of another project.
+        let Some(project_root) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.workspace.persisted().windows.iter().any(|window| {
+                    crate::runtime_support::combined_window_id(&tab.id, &window.id) == window_id
+                })
+            })
+            .map(|tab| tab.project_root.clone())
+        else {
+            return refuse(format!(
+                "pm pane send: unknown pane {window_id} (FR-111 refuses cross-project delivery)"
+            ));
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        let registration = match pm_registry::load_pm_prefs(&prefs_path) {
+            Ok(prefs) => prefs.registration,
+            Err(error) => {
+                return refuse(format!("pm pane send: pm registration unreadable: {error}"))
+            }
+        };
+        let Some(registration) = registration else {
+            return refuse(
+                "pm pane send: no registered PM for this project (FR-111 requires the live PM principal)"
+                    .to_string(),
+            );
+        };
+        if registration.session_id != pm_session_id {
+            return refuse(
+                "pm pane send: presented session is not the registered PM (FR-111 refuses foreign principals)"
+                    .to_string(),
+            );
+        }
+        if self.live_pm_window_id(&registration.session_id).is_none() {
+            return refuse(
+                "pm pane send: the registered PM has no live pane (stale registration; FR-111 refuses)"
+                    .to_string(),
+            );
+        }
+        self.pane_send_input_to_window_events(client_id, window_id, text)
+    }
+
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
         match self.runtimes.get(&decision.window_id) {
             None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => runtime
-                .pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| {
-                    pane.write_input(decision.prompt.as_bytes())
-                        .map_err(|error| error.to_string())
-                }),
+            Some(runtime) => {
+                let pane = Arc::clone(&runtime.pane);
+                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+            }
         }
     }
 

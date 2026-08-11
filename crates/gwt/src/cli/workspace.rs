@@ -1219,7 +1219,130 @@ pub(super) fn run<E: CliEnv>(
                 out,
             )
         }
+        WorkspaceCommand::WorkPrune {
+            dry_run,
+            ids,
+            project_root,
+        } => {
+            let target = project_root
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or_else(|| env.repo_path());
+            run_work_prune(target, dry_run, &ids, out)
+        }
     }
+}
+
+/// Issue #3448 AC-1: settle incomplete Works whose owner Issue is already
+/// closed. Reads the local Issue cache for owner state, so a cache miss keeps
+/// the Work (fail-closed via [`classify_stale_works`]). Closing goes through
+/// the canonical `emit_workspace_done_event_if_absent`, which is idempotent
+/// and keeps `works.json` a pure fold of the event log.
+fn run_work_prune(
+    repo_path: &Path,
+    dry_run: bool,
+    ids: &[String],
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let all_works: Vec<WorkItem> = load_workspace_work_items_from_path(&work_items_path)
+        .map_err(core_error)?
+        .map(|projection| projection.work_items)
+        .unwrap_or_default();
+    let works: Vec<WorkItem> = if ids.is_empty() {
+        all_works
+    } else {
+        all_works
+            .into_iter()
+            .filter(|item| ids.iter().any(|id| id == &item.id))
+            .collect()
+    };
+
+    let cache =
+        crate::issue_cache::issue_cache_root_for_repo_path(repo_path).map(gwt_github::Cache::new);
+    let plan = classify_stale_works(&works, |number| {
+        let cache = cache.as_ref()?;
+        let entry = cache.load_entry(gwt_github::IssueNumber(number))?;
+        Some(entry.snapshot.state == gwt_github::client::IssueState::Open)
+    });
+
+    let mode = if dry_run { "DRY-RUN" } else { "APPLIED" };
+    let mut closed = 0usize;
+    let mut failed = 0usize;
+    for candidate in &plan.candidates {
+        out.push_str(&format!(
+            "  close {} — owner #{} (closed) — {}\n",
+            candidate.work_id, candidate.owner_number, candidate.title
+        ));
+        if dry_run {
+            continue;
+        }
+        match gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+            repo_path,
+            &candidate.work_id,
+            Utc::now(),
+        ) {
+            Ok(_) => closed += 1,
+            Err(error) => {
+                failed += 1;
+                out.push_str(&format!(
+                    "  ! {} could not be closed: {error}\n",
+                    candidate.work_id
+                ));
+            }
+        }
+    }
+
+    // Second pass: orphaned worktree-scan placeholders. They are discarded
+    // rather than completed — they never represented work.
+    let orphans = classify_orphaned_backfill_works(&works, |path| path.exists());
+    let mut discarded = 0usize;
+    for candidate in &orphans.candidates {
+        out.push_str(&format!(
+            "  discard {} — orphaned worktree placeholder — {}\n",
+            candidate.work_id, candidate.title
+        ));
+        if dry_run {
+            continue;
+        }
+        match gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
+            repo_path,
+            &candidate.work_id,
+            Utc::now(),
+        ) {
+            Ok(_) => discarded += 1,
+            Err(error) => {
+                failed += 1;
+                out.push_str(&format!(
+                    "  ! {} could not be discarded: {error}\n",
+                    candidate.work_id
+                ));
+            }
+        }
+    }
+
+    let mut reasons: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    for skip in &plan.skipped {
+        *reasons.entry(skip.reason.as_str()).or_default() += 1;
+    }
+    let skip_detail = reasons
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    out.push_str(&format!(
+        "{mode}: closed_candidates={} closed={} discard_candidates={} discarded={} failed={} skipped={} [{skip_detail}]\n",
+        plan.candidates.len(),
+        closed,
+        orphans.candidates.len(),
+        discarded,
+        failed,
+        plan.skipped.len(),
+    ));
+    if failed > 0 {
+        return Ok(1);
+    }
+    Ok(0)
 }
 
 /// SPEC-2359 US-41 (FR-153): implement `workspace.projection_list` over a
@@ -2797,9 +2920,475 @@ fn string_error(error: String) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(error))
 }
 
+/// Issue #3448: one incomplete Work whose owner Issue is already closed, plus
+/// the evidence that made it a candidate. Reported before anything is written
+/// so a dry run can be reviewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleWorkCandidate {
+    pub(crate) work_id: String,
+    pub(crate) title: String,
+    pub(crate) owner: String,
+    pub(crate) owner_number: u64,
+}
+
+/// A Work that is deliberately left alone, with the reason. Every non-candidate
+/// lands here so the operator can audit why nothing happened to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedWork {
+    pub(crate) work_id: String,
+    pub(crate) reason: StaleWorkSkipReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaleWorkSkipReason {
+    /// Already Done or explicitly discarded — nothing to settle.
+    AlreadyTerminal,
+    /// No owner recorded, so there is no Issue whose state could justify a
+    /// close. Fail-closed: an ownerless Work is never auto-closed.
+    OwnerMissing,
+    /// The owner is recorded but its Issue state is unknown locally (absent
+    /// from the Issue cache). Fail-closed for the same reason.
+    OwnerStateUnknown,
+    /// The owner Issue is still open, so the Work is legitimately active.
+    OwnerOpen,
+    /// The Work carries real state (owner, attached agent, or non-backfill
+    /// history), so the placeholder rule does not apply to it.
+    CarriesRealState,
+    /// The placeholder still projects an existing worktree.
+    WorktreePresent,
+}
+
+impl StaleWorkSkipReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyTerminal => "already_terminal",
+            Self::OwnerMissing => "owner_missing",
+            Self::OwnerStateUnknown => "owner_state_unknown",
+            Self::OwnerOpen => "owner_open",
+            Self::CarriesRealState => "carries_real_state",
+            Self::WorktreePresent => "worktree_present",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StaleWorkPlan {
+    pub(crate) candidates: Vec<StaleWorkCandidate>,
+    pub(crate) skipped: Vec<SkippedWork>,
+}
+
+/// Issue #3448 AC-2: Work owners are recorded with drifting spellings — the
+/// same Issue appears as `3327`, `Issue #3327`, `SPEC-3327`, and `SPEC #3327`.
+/// Normalize to the Issue number so one Issue is one owner. Anything without a
+/// number resolves to `None` and is treated as ownerless.
+pub(crate) fn owner_issue_number(owner: Option<&str>) -> Option<u64> {
+    let owner = owner?.trim();
+    if owner.is_empty() {
+        return None;
+    }
+    let digits: String = owner
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse::<u64>().ok()
+}
+
+/// Issue #3448 AC-1/AC-5: decide which incomplete Works belong to an already
+/// closed owner Issue. Pure: `issue_is_open` answers "is Issue N open?" and
+/// returns `None` when the state cannot be determined locally.
+///
+/// Fail-closed by construction — a Work is a candidate only when its owner
+/// resolves to an Issue that is *known* to be closed. Missing owner, unknown
+/// state, and open owners all skip with a recorded reason, so a cache miss can
+/// never close live work.
+pub(crate) fn classify_stale_works<F>(works: &[WorkItem], issue_is_open: F) -> StaleWorkPlan
+where
+    F: Fn(u64) -> Option<bool>,
+{
+    let mut plan = StaleWorkPlan::default();
+    for work in works {
+        if work.is_terminal() {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::AlreadyTerminal,
+            });
+            continue;
+        }
+        let Some(number) = owner_issue_number(work.owner.as_deref()) else {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::OwnerMissing,
+            });
+            continue;
+        };
+        match issue_is_open(number) {
+            Some(false) => plan.candidates.push(StaleWorkCandidate {
+                work_id: work.id.clone(),
+                title: work.title.clone(),
+                owner: work.owner.clone().unwrap_or_default(),
+                owner_number: number,
+            }),
+            Some(true) => plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::OwnerOpen,
+            }),
+            None => plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::OwnerStateUnknown,
+            }),
+        }
+    }
+    plan
+}
+
+/// Issue #3448 / #3447: worktree scanning materializes one placeholder Work per
+/// branch (`kind: backfill`, title = branch name, no owner, no agents). When the
+/// worktree is later removed the placeholder survives as pure derived noise —
+/// 470 of 788 rows on real data. Such a row is `discarded`, not `done`: it never
+/// represented work, so marking it complete would be a lie.
+///
+/// Pure: `worktree_exists` answers "does this path still exist?". Fail-closed —
+/// an owner, an attached agent, any non-backfill event, or a still-present
+/// worktree each keeps the Work.
+pub(crate) fn classify_orphaned_backfill_works<F>(
+    works: &[WorkItem],
+    worktree_exists: F,
+) -> StaleWorkPlan
+where
+    F: Fn(&Path) -> bool,
+{
+    let mut plan = StaleWorkPlan::default();
+    for work in works {
+        if work.is_terminal() {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::AlreadyTerminal,
+            });
+            continue;
+        }
+        let placeholder = work
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+            && work.agents.is_empty()
+            && !work.events.is_empty()
+            && work
+                .events
+                .iter()
+                .all(|event| event.kind == WorkEventKind::Backfill);
+        if !placeholder {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::CarriesRealState,
+            });
+            continue;
+        }
+        let paths: Vec<&Path> = work
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.worktree_path.as_deref())
+            .collect();
+        // No recorded path means the placeholder cannot be proven orphaned.
+        if paths.is_empty() || paths.iter().any(|path| worktree_exists(path)) {
+            plan.skipped.push(SkippedWork {
+                work_id: work.id.clone(),
+                reason: StaleWorkSkipReason::WorktreePresent,
+            });
+            continue;
+        }
+        plan.candidates.push(StaleWorkCandidate {
+            work_id: work.id.clone(),
+            title: work.title.clone(),
+            owner: String::new(),
+            owner_number: 0,
+        });
+    }
+    plan
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use gwt_core::workspace_projection::WorkAgentRef;
+
+    // Issue #3448 AC-1/AC-2/AC-5: closed-owner Work stagnation. `classify_stale_works`
+    // is the pure decision core: it names which incomplete Works belong to an
+    // owner Issue that is already closed, and — fail-closed — which ones must be
+    // skipped because their owner cannot be resolved or an agent may still hold
+    // them. Owner spelling is normalized so `3327` / `Issue #3327` / `SPEC-3327`
+    // resolve to the same Issue (AC-2).
+    mod stale_work_classification {
+        use super::*;
+
+        fn work(id: &str, owner: Option<&str>, status: WorkspaceStatusCategory) -> WorkItem {
+            let now = Utc::now();
+            WorkItem {
+                id: id.to_string(),
+                title: id.to_string(),
+                intent: None,
+                summary: None,
+                progress_summary: None,
+                status_category: status,
+                owner: owner.map(str::to_string),
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+                agents: Vec::new(),
+                execution_containers: Vec::new(),
+                board_refs: Vec::new(),
+                related_work_item_ids: Vec::new(),
+                events: Vec::new(),
+                legacy_metadata_snapshot: None,
+                legacy_metadata_authoritative: false,
+                legacy_metadata_snapshot_at: None,
+                duplicate_event_containers: Default::default(),
+                discarded: false,
+                discarded_at: None,
+            }
+        }
+
+        #[test]
+        fn owner_spelling_variants_resolve_to_the_same_issue() {
+            for spelling in ["3327", "Issue #3327", "SPEC-3327", "SPEC #3327", "#3327"] {
+                assert_eq!(
+                    super::super::owner_issue_number(Some(spelling)),
+                    Some(3327),
+                    "owner spelling must normalize: {spelling}"
+                );
+            }
+            assert_eq!(super::super::owner_issue_number(None), None);
+            assert_eq!(super::super::owner_issue_number(Some("   ")), None);
+        }
+
+        #[test]
+        fn closed_owner_work_is_a_candidate_and_open_owner_is_kept() {
+            let works = vec![
+                work(
+                    "w-closed",
+                    Some("Issue #3327"),
+                    WorkspaceStatusCategory::Active,
+                ),
+                work("w-open", Some("2359"), WorkspaceStatusCategory::Active),
+            ];
+            let plan = super::super::classify_stale_works(&works, |number| match number {
+                3327 => Some(false),
+                2359 => Some(true),
+                _ => None,
+            });
+
+            let candidates: Vec<&str> = plan
+                .candidates
+                .iter()
+                .map(|item| item.work_id.as_str())
+                .collect();
+            assert_eq!(candidates, vec!["w-closed"]);
+            assert!(
+                plan.skipped.iter().any(|item| item.work_id == "w-open"),
+                "an open owner keeps its Work active"
+            );
+        }
+
+        #[test]
+        fn unresolvable_owner_fails_closed() {
+            let works = vec![
+                work("w-no-owner", None, WorkspaceStatusCategory::Active),
+                work(
+                    "w-unknown",
+                    Some("Issue #9999"),
+                    WorkspaceStatusCategory::Active,
+                ),
+            ];
+            let plan = super::super::classify_stale_works(&works, |_| None);
+
+            assert!(
+                plan.candidates.is_empty(),
+                "a Work whose owner cannot be resolved is never closed automatically"
+            );
+            assert_eq!(plan.skipped.len(), 2);
+        }
+
+        // Issue #3448 AC-5: the operation must never widen its own blast radius.
+        // A live-looking Work whose owner is closed is still a candidate, but a
+        // Work the caller did not name via `ids` must never be touched — the
+        // filter is applied before classification, not after.
+        // Issue #3448 / #3447: worktree scanning materializes a placeholder Work
+        // per branch (`kind: backfill`, title = branch, no owner, no agents).
+        // When the worktree is later removed the placeholder is left behind as
+        // pure derived noise — 470 of 788 rows on real data. They are discarded,
+        // not "done": they never represented work.
+        #[test]
+        fn orphaned_backfill_placeholder_is_a_discard_candidate() {
+            let mut item = work(
+                "work-work-issue-3403-bc4a663e",
+                None,
+                WorkspaceStatusCategory::Idle,
+            );
+            item.title = "work/issue-3403".to_string();
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3403".to_string()),
+                worktree_path: Some(std::path::PathBuf::from(
+                    "/definitely/absent/work/issue-3403",
+                )),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-work-issue-3403-bc4a663e",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_orphaned_backfill_works(&[item], |path| {
+                let _ = path;
+                false
+            });
+
+            assert_eq!(plan.candidates.len(), 1);
+            assert_eq!(plan.candidates[0].work_id, "work-work-issue-3403-bc4a663e");
+        }
+
+        // Fail-closed: while the worktree still exists the placeholder is the
+        // legitimate projection of a live worktree and must survive.
+        #[test]
+        fn backfill_placeholder_with_a_live_worktree_is_kept() {
+            let mut item = work(
+                "work-work-issue-3245-aaa",
+                None,
+                WorkspaceStatusCategory::Idle,
+            );
+            item.title = "work/issue-3245".to_string();
+            item.execution_containers = vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3245".to_string()),
+                worktree_path: Some(std::path::PathBuf::from("/present/work/issue-3245")),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }];
+            item.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "work-work-issue-3245-aaa",
+                Utc::now(),
+            )];
+
+            let plan = super::super::classify_orphaned_backfill_works(&[item], |_| true);
+
+            assert!(
+                plan.candidates.is_empty(),
+                "a live worktree keeps its placeholder"
+            );
+        }
+
+        // Real Work must never be swept by the placeholder rule, even when its
+        // worktree is gone: an owner, an agent, or any non-backfill event all
+        // prove it carried real state.
+        #[test]
+        fn real_work_is_never_swept_as_a_placeholder() {
+            let mut owned = work(
+                "w-owner",
+                Some("Issue #3327"),
+                WorkspaceStatusCategory::Idle,
+            );
+            owned.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "w-owner",
+                Utc::now(),
+            )];
+            let mut with_agent = work("w-agent", None, WorkspaceStatusCategory::Idle);
+            with_agent.events = vec![WorkEvent::new(
+                WorkEventKind::Backfill,
+                "w-agent",
+                Utc::now(),
+            )];
+            with_agent.agents = vec![WorkAgentRef {
+                session_id: "s1".to_string(),
+                agent_id: Some("codex".to_string()),
+                display_name: Some("Codex".to_string()),
+                updated_at: Utc::now(),
+                attached_by: None,
+            }];
+            let mut started = work("w-started", None, WorkspaceStatusCategory::Idle);
+            started.events = vec![
+                WorkEvent::new(WorkEventKind::Backfill, "w-started", Utc::now()),
+                WorkEvent::new(WorkEventKind::Start, "w-started", Utc::now()),
+            ];
+
+            let plan = super::super::classify_orphaned_backfill_works(
+                &[owned, with_agent, started],
+                |_| false,
+            );
+
+            assert!(
+                plan.candidates.is_empty(),
+                "owner / agent / non-backfill history each disqualify the placeholder rule"
+            );
+        }
+
+        #[test]
+        fn id_filter_scopes_the_plan_to_named_works() {
+            let works = [
+                work("w-a", Some("3327"), WorkspaceStatusCategory::Active),
+                work("w-b", Some("3327"), WorkspaceStatusCategory::Active),
+            ];
+            let named: Vec<WorkItem> = works
+                .iter()
+                .filter(|item| item.id == "w-a")
+                .cloned()
+                .collect();
+            let plan = super::super::classify_stale_works(&named, |_| Some(false));
+
+            assert_eq!(plan.candidates.len(), 1);
+            assert_eq!(plan.candidates[0].work_id, "w-a");
+            assert!(
+                !plan.skipped.iter().any(|item| item.work_id == "w-b"),
+                "an unnamed Work must not even appear in the plan"
+            );
+        }
+
+        // Issue #3448: the skip reasons are the audit trail. A cache miss and a
+        // genuinely open owner are different situations and must stay
+        // distinguishable in the report.
+        #[test]
+        fn skip_reasons_distinguish_unknown_state_from_open_owner() {
+            let works = vec![
+                work("w-unknown", Some("4242"), WorkspaceStatusCategory::Active),
+                work("w-open", Some("2359"), WorkspaceStatusCategory::Active),
+            ];
+            let plan = super::super::classify_stale_works(&works, |number| match number {
+                2359 => Some(true),
+                _ => None,
+            });
+
+            let reason = |id: &str| {
+                plan.skipped
+                    .iter()
+                    .find(|item| item.work_id == id)
+                    .map(|item| item.reason.as_str())
+            };
+            assert_eq!(reason("w-unknown"), Some("owner_state_unknown"));
+            assert_eq!(reason("w-open"), Some("owner_open"));
+        }
+
+        #[test]
+        fn already_terminal_work_is_not_reclosed() {
+            let mut done = work("w-done", Some("3327"), WorkspaceStatusCategory::Done);
+            done.completed_at = Some(Utc::now());
+            let mut discarded = work("w-discarded", Some("3327"), WorkspaceStatusCategory::Active);
+            discarded.discarded = true;
+            let works = vec![done, discarded];
+
+            let plan = super::super::classify_stale_works(&works, |_| Some(false));
+
+            assert!(
+                plan.candidates.is_empty(),
+                "terminal Works are already settled; closing them again emits nothing"
+            );
+        }
+    }
+
     use crate::cli::env::TestEnv;
     use gwt_core::workspace_projection::{
         load_workspace_projection, load_workspace_work_items, record_workspace_work_event,

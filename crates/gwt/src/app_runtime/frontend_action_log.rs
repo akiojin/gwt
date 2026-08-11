@@ -666,6 +666,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
+        FrontendEvent::PmPaneSendInput { window_id, .. } => {
+            FrontendUserActionLog::new("pm_pane_send_input", "terminal").target(window_id)
+        }
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })

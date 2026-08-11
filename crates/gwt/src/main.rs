@@ -67,7 +67,8 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
+    ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1123,6 +1124,12 @@ enum UserEvent {
     /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
     /// tick — drives local scans and the PM periodic wake.
     IssueMonitorScheduledTick,
+    IssueMonitorScheduledScanComplete {
+        project_root: PathBuf,
+        prefs_path: PathBuf,
+        now: String,
+        outcome: Result<ScheduledIssueMonitorScanOutcome, String>,
+    },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -2646,6 +2653,7 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
@@ -7798,7 +7806,7 @@ fn main() -> std::io::Result<()> {
                 .poll_interval_secs
                 .max(60),
         );
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("issue-monitor-scheduled-tick".to_string())
             .spawn(move || loop {
                 std::thread::sleep(interval);
@@ -7809,7 +7817,9 @@ fn main() -> std::io::Result<()> {
                     break;
                 }
             })
-            .ok();
+        {
+            tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+        }
     }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
@@ -8237,6 +8247,20 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
                 let events = app.issue_monitor_scheduled_tick_events();
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
+                project_root,
+                prefs_path,
+                now,
+                outcome,
+            }) => {
+                let events = app.issue_monitor_scheduled_scan_complete_events(
+                    &project_root,
+                    &prefs_path,
+                    &now,
+                    outcome,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
