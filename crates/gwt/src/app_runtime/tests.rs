@@ -32747,6 +32747,52 @@ fn local_fallback_transaction_preserves_the_background_worker_deadline() {
 }
 
 #[test]
+fn sibling_local_fallback_transactions_preserve_the_background_worker_deadline() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let background_deadline = Instant::now() + Duration::from_secs(5);
+    let _deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(background_deadline);
+
+    let rebase_observed =
+        super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |_| {
+            gwt_core::operation_deadline::current()
+        });
+    let (_, control_observed) = runtime
+        .commit_local_issue_monitor_control_for_project(&repo, |_| {
+            gwt_core::operation_deadline::current()
+        })
+        .expect("fallback control commit");
+    let (_, authorizing_observed) = runtime
+        .commit_local_issue_monitor_authorizing_control(|_| {
+            Ok::<_, String>(gwt_core::operation_deadline::current())
+        })
+        .expect("authorizing fallback control commit");
+
+    assert_eq!(
+        [rebase_observed, control_observed, authorizing_observed],
+        [Some(background_deadline); 3],
+        "every sibling helper must preserve the outer background deadline"
+    );
+}
+
+#[test]
 fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
     let temp = tempdir().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");
