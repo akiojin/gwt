@@ -483,6 +483,7 @@ impl AppRuntime {
     /// an actively-looping or freshly-prompted PM is never interrupted, and a
     /// wake re-arms the loop so the next tick inside the interval is quiet-
     /// gated out.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn pm_periodic_wake_decision_at(
         &mut self,
         project_root: &Path,
@@ -490,12 +491,21 @@ impl AppRuntime {
     ) -> Option<PmWakeDecision> {
         let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let monitor_prefs = gwt::load_issue_monitor_prefs(&monitor_prefs_path).ok()?;
-        if !monitor_prefs.enabled {
+        let monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), monitor_prefs);
+        self.pm_periodic_wake_decision_for_monitor_at(project_root, &monitor, now)
+    }
+
+    pub(crate) fn pm_periodic_wake_decision_for_monitor_at(
+        &mut self,
+        project_root: &Path,
+        monitor: &gwt::IssueMonitorState,
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        if !monitor.config.enabled {
             return None;
         }
-        let status =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), monitor_prefs)
-                .agent_status();
+        let status = monitor.agent_status();
         if status.active_launches.is_empty()
             && status.queue.is_empty()
             && status.needs_human.is_empty()
@@ -531,20 +541,22 @@ impl AppRuntime {
         })
     }
 
-    /// Execute the periodic wake against the resolved PM pane.
-    pub(crate) fn pm_periodic_wake_events_at(
+    pub(crate) fn pm_periodic_wake_events_for_monitor_at(
         &mut self,
         project_root: &Path,
+        monitor: &gwt::IssueMonitorState,
         now: &str,
     ) -> Vec<OutboundEvent> {
-        let Some(decision) = self.pm_periodic_wake_decision_at(project_root, now) else {
+        let Some(decision) =
+            self.pm_periodic_wake_decision_for_monitor_at(project_root, monitor, now)
+        else {
             return Vec::new();
         };
         match self.write_pm_wake_prompt(&decision) {
             Ok(()) => {
                 tracing::info!(
                     window_id = %decision.window_id,
-                    "periodic wake re-armed the resident PM"
+                    "periodic wake re-armed the resident PM from the scheduled snapshot"
                 );
             }
             Err(error) => {
@@ -556,6 +568,19 @@ impl AppRuntime {
             }
         }
         Vec::new()
+    }
+
+    pub(crate) fn pm_periodic_wake_events_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Vec<OutboundEvent> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        self.pm_periodic_wake_events_for_monitor_at(project_root, &monitor, now)
     }
 
     /// Execute the wake: inject the prompt into the registered PM's pane. A

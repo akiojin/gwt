@@ -1857,6 +1857,48 @@ pub fn establish_issue_monitor_authority_fence(
     })
 }
 
+/// Acquire short-lived Issue Monitor effect authority for the GUI fallback.
+///
+/// The local driver deliberately does not publish a durable daemon fence: it
+/// owns only one bounded scan/effect pass. Holding the same lifetime lock as a
+/// daemon closes the gap between the fence pre-check and remote submission,
+/// while the prefs lock preserves the daemon's `prefs.lock -> authority.lock`
+/// ordering. Any durable fence remains fail-closed, including legacy shutdown
+/// revocations and stale-looking identities; canonical daemon recovery owns
+/// replacing those records.
+pub fn try_acquire_issue_monitor_local_fallback_lease(
+    prefs_path: &Path,
+) -> io::Result<IssueMonitorAuthorityLease> {
+    with_issue_monitor_prefs_lock(prefs_path, || {
+        let authority_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(issue_monitor_authority_lock_path(prefs_path))?;
+        if let Err(error) = FileExt::try_lock_exclusive(&authority_lock) {
+            if gwt_core::operation_deadline::is_lock_contended(&error) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Issue Monitor daemon authority lease is already held",
+                ));
+            }
+            return Err(error);
+        }
+        let lease = IssueMonitorAuthorityLease {
+            lock: authority_lock,
+        };
+        match load_issue_monitor_authority_fence(prefs_path)? {
+            IssueMonitorAuthorityFenceState::Missing => Ok(lease),
+            IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
+            | IssueMonitorAuthorityFenceState::Active(_) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Issue Monitor daemon authority fence excludes the local fallback",
+            )),
+        }
+    })
+}
+
 pub fn clear_issue_monitor_authority_fence(
     prefs_path: &Path,
     expected: &IssueMonitorAuthorityFence,
@@ -9195,6 +9237,43 @@ mod tests {
                 .expect("dropping the lease makes the persisted current fence recoverable");
         assert_eq!(recovered.effect_authority_epoch, 1);
         drop(second_lease);
+    }
+
+    #[test]
+    fn local_fallback_lease_rejects_live_daemon_authority() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let daemon = IssueMonitorAuthorityFence::current_process();
+        let (_, daemon_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+                .expect("daemon authority");
+
+        let error = try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect_err("live daemon authority must exclude the GUI fallback");
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(daemon_lease);
+    }
+
+    #[test]
+    fn local_fallback_lease_blocks_daemon_start_until_drop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        let local_lease = try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("GUI fallback authority");
+        let daemon = IssueMonitorAuthorityFence::current_process();
+
+        let blocked = establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+            .expect_err("daemon startup must not overlap a local remote effect");
+        assert_eq!(blocked.kind(), io::ErrorKind::WouldBlock);
+
+        drop(local_lease);
+        let (_, daemon_lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+                .expect("daemon starts after the local effect boundary closes");
+        drop(daemon_lease);
     }
 
     #[test]
