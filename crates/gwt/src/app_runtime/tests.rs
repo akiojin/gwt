@@ -6220,7 +6220,9 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     assert_eq!(view.selected_reasoning, "high");
     assert_eq!(view.selected_version, "latest");
     assert_eq!(view.selected_execution_mode, "continue");
-    assert!(!view.skip_permissions);
+    // Issue #3462: Continue inherits the persisted Skip Permissions preference.
+    assert!(view.skip_permissions);
+    // Toggle visibility still follows the manual-setup launch path.
     assert!(!view.show_skip_permissions);
     assert!(view.codex_fast_mode);
 }
