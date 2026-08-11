@@ -21,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
@@ -664,14 +665,10 @@ impl AppRuntime {
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
         match self.runtimes.get(&decision.window_id) {
             None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => runtime
-                .pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| {
-                    pane.write_input(decision.prompt.as_bytes())
-                        .map_err(|error| error.to_string())
-                }),
+            Some(runtime) => {
+                let pane = Arc::clone(&runtime.pane);
+                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+            }
         }
     }
 
