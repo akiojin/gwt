@@ -128,6 +128,13 @@ You may watch the agents the Monitor launched. You may not drive them.
   to another agent. Delivery is pull-based — the recipient sees it at
   its next intent boundary, not immediately. A Board post never
   interrupts a running agent, so never wait on one as if it did.
+- `pm.message.send` with `params.id` (window id from `pane.list`) and
+  `params.text` delivers one line into another agent pane as TUI input
+  (FR-111). This is your privilege alone — ordinary agents keep the
+  self-only `pane.send` contract — and every attempt lands in a durable
+  receipt log. Use it to nudge an idle pane, announce a Board handoff,
+  or tell an agent to stop what it is doing; never to smuggle
+  instructions past the Monitor's launch path.
 
 You may also stop one. There are two ways, and they mean different
 things:
@@ -185,6 +192,13 @@ Hard limits, no exceptions:
 
 ## Resident loop (unattended)
 
+- Periodic wakeups (FR-108): if your harness has a native scheduler
+  (Claude Code exposes a wakeup-scheduling tool), register a periodic
+  wakeup job for your loop interval at the start of residency, and
+  re-register it before it expires — a lapsed schedule is a silently
+  dead loop. On runtimes without a scheduler (Codex), gwt itself wakes
+  you on the scheduled monitor tick, so no manual setup is needed;
+  treat an injected `[gwt]` wake prompt as the start of a normal cycle.
 - Run a bounded subscribe in the background: `daemon.subscribe` on the
   `issue_monitor` (and optionally `board`) channels with
   `params.timeout_seconds` set, so the stream ends and hands control
@@ -192,6 +206,12 @@ Hard limits, no exceptions:
   `issue.monitor.status` — the broadcast ring is lossy, so the snapshot
   is the truth — then act on the differences: triage newly arrived
   issues, re-evaluate order, and issue launch instructions.
+- If the subscribe fails (for example `no daemon registered` — a known
+  endpoint-registration gap), do not treat the cycle as failed and do
+  not stop early: fall back to polling in the same cycle. Read the
+  fresh `issue.monitor.status` snapshot directly, complete the same
+  reconcile contract, and note in your digest that push subscription is
+  degraded (FR-109). Subscribe failures are never a reason to park.
 - Every cycle, also check the agents that are running. Read the Board
   for what they reported themselves, and use `pane.read` on any launch
   whose inbox row looks wrong (stuck in the same state, an
@@ -310,6 +330,17 @@ mod tests {
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
             "the snapshot is the truth",
+            // FR-109: subscribe failure degrades to same-cycle polling.
+            "fall back to polling in the same cycle",
+            "degraded (FR-109)",
+            "never a reason to park",
+            // FR-111: PM-privileged pane message delivery with receipts.
+            "`pm.message.send`",
+            "receipt log",
+            // FR-108(a): harness-native periodic wakeups with re-registration.
+            "wakeup-scheduling tool",
+            "re-register it before it expires",
+            "scheduled monitor tick",
             // FR-023: observation of the other agents.
             "`board.show`",
             "`pane.list`",

@@ -469,6 +469,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
+        "pm.message.send" | "pm.pane.send" => CliCommand::Pane(PaneCommand::PmSend {
+            id: required_string(params, "id")?,
+            text: required_string(params, "text")?,
+        }),
         "pm.status" => CliCommand::Pm(crate::cli::pm::PmCommand::Status {
             project_root: optional_string(params, "project_root")?,
         }),
@@ -1994,6 +1998,30 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.failover", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC-3431 FR-111 (T-206): the PM's privileged pane delivery is its own
+    /// operation with a mandatory exact target — never a loosened pane.send.
+    #[test]
+    fn pm_message_send_parses_with_mandatory_target_and_text() {
+        assert_eq!(
+            ok(
+                "pm.message.send",
+                json!({"id": "tab-1::agent-1", "text": "please report status"})
+            ),
+            CliCommand::Pane(PaneCommand::PmSend {
+                id: "tab-1::agent-1".to_string(),
+                text: "please report status".to_string(),
+            })
+        );
+        assert!(matches!(
+            err("pm.message.send", json!({"text": "hello"})),
+            CliParseError::MissingFlag("id")
+        ));
+        assert!(matches!(
+            err("pm.message.send", json!({"id": "tab-1::agent-1"})),
+            CliParseError::MissingFlag("text")
         ));
     }
 

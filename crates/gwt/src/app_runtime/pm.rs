@@ -21,12 +21,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 use gwt::pm_registry::{self, PmLaunchProfile, PmRegistration};
 use gwt::PmAgentOption;
 
-use super::{AppRuntime, BackendEvent, OutboundEvent};
+use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent};
 
 /// Fixed geometry for a freshly spawned PM pane.
 const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
@@ -87,6 +88,7 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
     };
     instant_is_quiet(state.last_continued_at.as_deref())
         && instant_is_quiet(state.last_user_prompt_at.as_deref())
+        && instant_is_quiet(state.last_wake_at.as_deref())
 }
 
 /// Who asked for the PM.
@@ -447,12 +449,16 @@ impl AppRuntime {
         }
         self.pm_wake_seen
             .insert(project_root.to_path_buf(), signals);
-        // Re-arm the budget: new actionable work is exactly what the park was
-        // waiting for (the injected prompt's UserPromptSubmit re-arms too;
-        // doing it here keeps the state right even if hook wiring drifts).
-        if let Err(error) =
-            pm_registry::save_pm_loop_state(&loop_path, &pm_registry::PmLoopState::default())
-        {
+        // Re-arm the budget and stamp the wake clock: new actionable work is
+        // exactly what the park was waiting for, and the stamp keeps the
+        // periodic wake from stacking a second prompt in the same window.
+        if let Err(error) = pm_registry::save_pm_loop_state(
+            &loop_path,
+            &pm_registry::PmLoopState {
+                last_wake_at: Some(now.to_string()),
+                ..pm_registry::PmLoopState::default()
+            },
+        ) {
             tracing::warn!(%error, "PM wake could not re-arm the loop budget");
         }
         let mut reasons = fresh;
@@ -466,6 +472,116 @@ impl AppRuntime {
                 reasons.join(", ")
             ),
         })
+    }
+
+    /// FR-108(b) (T-201, Issue #3505): the periodic wake — re-arm a quiet
+    /// resident PM on the scheduled tick even when no new monitor signal
+    /// arrived, as long as there is standing supervision work (running
+    /// launches or a non-empty queue). The delta wake (T-093) covers "new
+    /// things happened"; this covers "old things still need watching".
+    ///
+    /// The same quiet gate as the delta wake keeps the two from double-firing:
+    /// an actively-looping or freshly-prompted PM is never interrupted, and a
+    /// wake re-arms the loop so the next tick inside the interval is quiet-
+    /// gated out.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn pm_periodic_wake_decision_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let monitor_prefs = gwt::load_issue_monitor_prefs(&monitor_prefs_path).ok()?;
+        let monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), monitor_prefs);
+        self.pm_periodic_wake_decision_for_monitor_at(project_root, &monitor, now)
+    }
+
+    pub(crate) fn pm_periodic_wake_decision_for_monitor_at(
+        &mut self,
+        project_root: &Path,
+        monitor: &gwt::IssueMonitorState,
+        now: &str,
+    ) -> Option<PmWakeDecision> {
+        if !monitor.config.enabled {
+            return None;
+        }
+        let status = monitor.agent_status();
+        if status.active_launches.is_empty()
+            && status.queue.is_empty()
+            && status.needs_human.is_empty()
+        {
+            return None;
+        }
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
+        let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
+        let registration = prefs.registration?;
+        let window_id = self.live_pm_window_id(&registration.session_id)?;
+        let interval_secs = prefs.settings.loop_interval_secs_clamped();
+        let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
+        let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+            return None;
+        }
+        if let Err(error) = pm_registry::save_pm_loop_state(
+            &loop_path,
+            &pm_registry::PmLoopState {
+                last_wake_at: Some(now.to_string()),
+                ..pm_registry::PmLoopState::default()
+            },
+        ) {
+            tracing::warn!(%error, "PM periodic wake could not re-arm the loop budget");
+        }
+        Some(PmWakeDecision {
+            window_id,
+            prompt: "[gwt] Scheduled supervision tick: run one PM reconcile cycle now — read a \
+                     fresh `issue.monitor.status` snapshot, check the running agents' \
+                     `last_activity_at` and any NeedsHuman rows, and report the milestone \
+                     digest.\r"
+                .to_string(),
+        })
+    }
+
+    pub(crate) fn pm_periodic_wake_events_for_monitor_at(
+        &mut self,
+        project_root: &Path,
+        monitor: &gwt::IssueMonitorState,
+        now: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(decision) =
+            self.pm_periodic_wake_decision_for_monitor_at(project_root, monitor, now)
+        else {
+            return Vec::new();
+        };
+        match self.write_pm_wake_prompt(&decision) {
+            Ok(()) => {
+                tracing::info!(
+                    window_id = %decision.window_id,
+                    "periodic wake re-armed the resident PM from the scheduled snapshot"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    window_id = %decision.window_id,
+                    "PM periodic wake prompt injection failed"
+                );
+            }
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn pm_periodic_wake_events_at(
+        &mut self,
+        project_root: &Path,
+        now: &str,
+    ) -> Vec<OutboundEvent> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) else {
+            return Vec::new();
+        };
+        let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        self.pm_periodic_wake_events_for_monitor_at(project_root, &monitor, now)
     }
 
     /// Execute the wake: inject the prompt into the registered PM's pane. A
@@ -499,20 +615,85 @@ impl AppRuntime {
         Vec::new()
     }
 
+    /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into an
+    /// agent pane. The general SPEC-3050 self-only contract is untouched —
+    /// this separate path exists only for the live registered PM, and the
+    /// principal is re-verified here, immediately before the injection:
+    /// the presented session must be the durable `pm.json` registration of
+    /// the project that owns the target window, and that registration's own
+    /// pane must be live right now. Everything else is refused with a typed
+    /// reply and no write.
+    pub(crate) fn pm_pane_send_input_events(
+        &mut self,
+        client_id: ClientId,
+        pm_session_id: &str,
+        window_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let refuse = |error: String| {
+            vec![OutboundEvent::reply(
+                client_id.clone(),
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id.to_string()),
+                    error: Some(error),
+                },
+            )]
+        };
+        // The window's owning tab decides which project's PM registration is
+        // the authority — a PM can never reach a pane of another project.
+        let Some(project_root) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.workspace.persisted().windows.iter().any(|window| {
+                    crate::runtime_support::combined_window_id(&tab.id, &window.id) == window_id
+                })
+            })
+            .map(|tab| tab.project_root.clone())
+        else {
+            return refuse(format!(
+                "pm pane send: unknown pane {window_id} (FR-111 refuses cross-project delivery)"
+            ));
+        };
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        let registration = match pm_registry::load_pm_prefs(&prefs_path) {
+            Ok(prefs) => prefs.registration,
+            Err(error) => {
+                return refuse(format!("pm pane send: pm registration unreadable: {error}"))
+            }
+        };
+        let Some(registration) = registration else {
+            return refuse(
+                "pm pane send: no registered PM for this project (FR-111 requires the live PM principal)"
+                    .to_string(),
+            );
+        };
+        if registration.session_id != pm_session_id {
+            return refuse(
+                "pm pane send: presented session is not the registered PM (FR-111 refuses foreign principals)"
+                    .to_string(),
+            );
+        }
+        if self.live_pm_window_id(&registration.session_id).is_none() {
+            return refuse(
+                "pm pane send: the registered PM has no live pane (stale registration; FR-111 refuses)"
+                    .to_string(),
+            );
+        }
+        self.pane_send_input_to_window_events(client_id, window_id, text)
+    }
+
     /// The one PTY write the wake path performs, against the window id the
     /// decision resolved from the PM registration — mirrors
     /// `pane_send_input_to_window_events` without a client reply.
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<(), String> {
         match self.runtimes.get(&decision.window_id) {
             None => Err(format!("no live runtime for pane {}", decision.window_id)),
-            Some(runtime) => runtime
-                .pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| {
-                    pane.write_input(decision.prompt.as_bytes())
-                        .map_err(|error| error.to_string())
-                }),
+            Some(runtime) => {
+                let pane = Arc::clone(&runtime.pane);
+                super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)
+            }
         }
     }
 

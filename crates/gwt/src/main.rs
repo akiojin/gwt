@@ -67,7 +67,8 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
+    ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1119,6 +1120,15 @@ enum UserEvent {
     IssueMonitorDaemonInbox {
         project_root: PathBuf,
         items: Vec<gwt::IssueMonitorInboxItem>,
+    },
+    /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
+    /// tick — drives local scans and the PM periodic wake.
+    IssueMonitorScheduledTick,
+    IssueMonitorScheduledScanComplete {
+        project_root: PathBuf,
+        prefs_path: PathBuf,
+        now: String,
+        outcome: Result<ScheduledIssueMonitorScanOutcome, String>,
     },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
@@ -2643,6 +2653,7 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
@@ -7784,6 +7795,31 @@ fn main() -> std::io::Result<()> {
     board_projection_watchers.sync(&app, proxy.clone());
     let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
     workspace_projection_watchers.sync(&app, proxy.clone());
+    // Issue #3505: GUI-owned scheduled scan cadence. Without this tick no
+    // component in the production topology ever runs scheduled scans, so
+    // autonomous launches silently never happen.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        let interval = std::time::Duration::from_secs(
+            gwt::IssueMonitorConfig::default()
+                .poll_interval_secs
+                .max(60),
+        );
+        if let Err(error) = std::thread::Builder::new()
+            .name("issue-monitor-scheduled-tick".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(interval);
+                if tick_proxy
+                    .send_event(UserEvent::IssueMonitorScheduledTick)
+                    .is_err()
+                {
+                    break;
+                }
+            })
+        {
+            tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+        }
+    }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
@@ -8205,6 +8241,24 @@ fn main() -> std::io::Result<()> {
                     issue_number,
                     linked_issue_kind,
                     delivery_id,
+                );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
+                let events = app.issue_monitor_scheduled_tick_events();
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
+                project_root,
+                prefs_path,
+                now,
+                outcome,
+            }) => {
+                let events = app.issue_monitor_scheduled_scan_complete_events(
+                    &project_root,
+                    &prefs_path,
+                    &now,
+                    outcome,
                 );
                 clients.dispatch(events);
             }
