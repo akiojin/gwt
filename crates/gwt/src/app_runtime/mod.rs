@@ -860,6 +860,9 @@ pub struct AppRuntime {
     /// captured by full load/search/refresh augmentation and reused verbatim
     /// by the detail-only selection path.
     pub(crate) knowledge_related_snapshot: knowledge::KnowledgeRelatedSnapshot,
+    /// SPEC #3214 Phase 15: latest complete Issue Monitor projection per
+    /// project root, joined into cache-backed Knowledge rows by issue number.
+    pub(crate) knowledge_monitor_snapshot: knowledge::KnowledgeMonitorSnapshot,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
@@ -1814,6 +1817,7 @@ impl AppRuntime {
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             knowledge_related_snapshot: Default::default(),
+            knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
             pty_writers,
@@ -3668,6 +3672,7 @@ impl AppRuntime {
         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
         // Cache-backed quick view: a read model, not monitor-driven activity —
         // it must not feed (or reset) the PM wake fingerprint.
+        self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
         self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
     }
 
@@ -4114,6 +4119,7 @@ impl AppRuntime {
         // inbox would reset the wake baseline and replay old rows as news.
         let mut events = Vec::new();
         if let Some(project_root) = project_root {
+            self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
             events.extend(self.pm_wake_events(project_root, &monitor.inbox));
         }
         events.extend(self.issue_monitor_snapshot_events_without_wake(

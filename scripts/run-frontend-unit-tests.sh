@@ -25,11 +25,11 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/kanban-dnd.test.mjs \
   crates/gwt/web/__tests__/kanban-drawer.test.mjs \
   crates/gwt/web/__tests__/knowledge-kanban-load-recovery.test.mjs \
+  crates/gwt/web/__tests__/knowledge-issue-monitor.test.mjs \
   crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
   crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \
-  crates/gwt/web/__tests__/issue-monitor-surface.test.mjs \
   crates/gwt/web/__tests__/connection-overlay.test.mjs \
   crates/gwt/web/__tests__/update-button.test.mjs \
   crates/gwt/web/__tests__/window-docking.test.mjs \

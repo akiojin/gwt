@@ -276,13 +276,19 @@ PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ
 選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
-## Issue Monitor
+## Issue サーフェスと Issue Monitor
 
-Issue Monitor はプロジェクトの open な GitHub Issue を監視し、エージェント作業に
-変換します。既定（human-gated）モードでは候補を inbox に取り込み、Issue ごとに
-`Launch` を押すと、gwt が起動時に `work/issue-N` のブランチ/worktree を作成し、
-`gwt-execute #N` でエージェントを開始します。起動失敗はエラーとともに inbox に残り、
-`Launch now` で明示的に再試行できます。
+Add Window から `Issue` を開くと、キャッシュ済み GitHub Issue の閲覧と Issue
+Monitor の操作を単一サーフェスで行えます。各行には実行状態、キュー位置、除外理由が
+表示され、ツールバーから同時実行数、monitor の起動状態、Autonomous モード、Quick
+issue 登録を操作できます。従来の `issue_monitor` preset もこの正本 Issue
+サーフェスを開きます。
+
+Monitor はプロジェクトの open な GitHub Issue を監視し、エージェント作業に変換します。
+既定（human-gated）モードでは候補を Issue キューに取り込み、行の `Launch now` を
+押すと、gwt が起動時に `work/issue-N` のブランチ/worktree を作成し、
+`gwt-execute #N` でエージェントを開始します。起動失敗は実行状態として Issue 行に
+残ります。
 
 Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`、
 `issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
@@ -299,7 +305,7 @@ Autonomous モードはループ全体を無人で実行します: 適格 Issue 
 独立レビュー → 強い自動ゲート → 自動マージ。**既定では無効**で、**二段階の
 opt-in** が必要です:
 
-1. Issue Monitor ツールバーの `Autonomous` トグルを有効化（プロジェクト単位）。
+1. Issue サーフェスの `Autonomous` トグルを有効化（プロジェクト単位）。
 2. 自律処理したい各 Issue に `auto-merge` ラベルを付与。
 
 さらに、機械検証可能な受け入れ基準（本文の `## Acceptance Criteria`
