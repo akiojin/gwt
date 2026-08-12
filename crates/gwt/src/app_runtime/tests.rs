@@ -9753,6 +9753,92 @@ fn persisted_session_launch_config_restores_path_independent_tool_runtime_proven
     );
 }
 
+/// Issue #3527: a pre-provenance Claude Session restored through the production
+/// async launch path must keep using its healthy installed runner. A healthy
+/// direct probe intentionally resolves no package provenance, so there is no
+/// lazy migration to stage and the source Session must remain byte-identical.
+#[cfg(windows)]
+#[test]
+fn legacy_claude_resume_with_healthy_direct_runner_completes_without_provenance_migration() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _home_env = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile_env = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo-legacy-claude-resume");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&bin).expect("create bin");
+    init_repo(&repo);
+    let direct = write_fake_agent_command(&bin, "claude");
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let mut source =
+        gwt_agent::Session::new(&repo, "work/issue-3527", gwt_agent::AgentId::ClaudeCode);
+    source.schema_version = 0;
+    source.agent_session_id = Some("legacy-claude-conversation".to_string());
+    source.launch_command = direct.display().to_string();
+    source.save(&sessions_dir).expect("save legacy source");
+    let source_path = sessions_dir.join(format!("{}.toml", source.id));
+    let source_bytes = fs::read(&source_path).expect("read legacy source bytes");
+
+    let mut config = super::launch_config_from_persisted_session(&source);
+    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    assert!(config.tool_runtime_provenance.is_none());
+    config.command = direct.display().to_string();
+    let (proxy, events) = AppEventProxy::stub();
+
+    AppRuntime::spawn_agent_window_async(
+        proxy,
+        sessions_dir.clone(),
+        repo.display().to_string(),
+        "tab-1::legacy-claude-resume".to_string(),
+        config,
+        temp.path().join("missing-profile-config.toml"),
+        None,
+    );
+
+    let recorded = events.lock().expect("event log");
+    let completion = recorded
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::LaunchComplete {
+                result: Ok(completion),
+                ..
+            } => Some(completion),
+            _ => None,
+        })
+        .expect("healthy legacy resume LaunchComplete");
+    assert!(
+        completion.0.pending_tool_runtime_migration.is_none(),
+        "a healthy direct runner has no package provenance to migrate"
+    );
+    assert_ne!(
+        completion.1, source.id,
+        "resume must persist a target Session"
+    );
+    assert_eq!(completion.9, gwt_agent::SessionMode::Resume);
+    assert_eq!(
+        fs::read(&source_path).expect("read legacy source after launch"),
+        source_bytes,
+        "skipping provenance migration must leave the source Session byte-identical"
+    );
+    assert!(gwt_agent::Session::load(&source_path)
+        .expect("reload legacy source")
+        .tool_runtime_provenance
+        .is_none());
+    assert!(
+        gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", completion.1)))
+            .expect("load resumed target Session")
+            .tool_runtime_provenance
+            .is_none(),
+        "the resumed target must not invent package provenance"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_success() {
