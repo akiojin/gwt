@@ -89,7 +89,7 @@ an old browser tab.
 
      is_checkout_local_hook_bin() {
        [ -n "$1" ] \
-         && printf '%s\n' "$1" | rg -qi -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
+         && printf '%s\n' "$1" | grep -qiE -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
      }
 
      CHECK_HOOK_BIN="${GWT_HOOK_BIN:-}"
