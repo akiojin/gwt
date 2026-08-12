@@ -4306,6 +4306,41 @@ impl IssueMonitorState {
         }
     }
 
+    /// The claim slots still open, paired with the ordered queue entries a
+    /// proposal may consult to fill them.
+    ///
+    /// Issue #3528: a completion probe costs one `gh` process per issue, so a
+    /// scan that probes every open issue burns its whole deadline before it can
+    /// commit anything. The planner below only ever walks this list, so a scan
+    /// only ever needs to probe this list.
+    pub fn claim_probe_plan(&self, active_cap: usize) -> (usize, Vec<u64>) {
+        let max_active = self.config.max_active.max(1).min(active_cap);
+        if !self.config.enabled || max_active == 0 {
+            return (0, Vec::new());
+        }
+        let pending_claims = self
+            .pending_effects
+            .iter()
+            .filter_map(|effect| match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let available = max_active
+            .saturating_sub(self.active_launches.len())
+            .saturating_sub(pending_claims.len());
+        if available == 0 {
+            return (0, Vec::new());
+        }
+        let candidates = self
+            .queue
+            .iter()
+            .copied()
+            .filter(|issue_number| !pending_claims.contains(issue_number))
+            .collect();
+        (available, candidates)
+    }
+
     /// Fallible proposal planner for deadline-integral scan transactions. A
     /// probe error is returned to the scan owner instead of being collapsed to
     /// `false`; callers discard the cloned proposal state on error.
@@ -4316,32 +4351,18 @@ impl IssueMonitorState {
         active_cap: usize,
         mut completed_probe: impl FnMut(u64) -> Result<bool, E>,
     ) -> Result<usize, E> {
-        let max_active = self.config.max_active.max(1).min(active_cap);
-        if !self.config.enabled || !self.gui_connected || max_active == 0 {
+        if !self.gui_connected {
             return Ok(0);
         }
-        let pending_claims = self
-            .pending_effects
-            .iter()
-            .filter_map(|effect| match effect.payload {
-                IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(issue_number),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut available = max_active
-            .saturating_sub(self.active_launches.len())
-            .saturating_sub(pending_claims.len());
+        let (mut available, candidates) = self.claim_probe_plan(active_cap);
         if available == 0 {
             return Ok(0);
         }
 
         let mut prepared = 0;
-        for issue_number in self.queue.iter().copied().collect::<Vec<_>>() {
+        for issue_number in candidates {
             if available == 0 {
                 break;
-            }
-            if pending_claims.contains(&issue_number) {
-                continue;
             }
             let Some(issue) = self.inbox_item(issue_number).map(|item| item.issue.clone()) else {
                 continue;
