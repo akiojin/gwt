@@ -16560,6 +16560,7 @@ exit 1
                             crate::cli::verification_record::WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
                         session_id: "sess-status".to_string(),
                         execution_binding: Some(binding.clone()),
+                        pending_delivery: None,
                         obligation_open,
                         status: status.clone(),
                         updated_at: Utc::now(),

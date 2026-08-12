@@ -1539,8 +1539,8 @@ fn persist_authenticated_workspace_update(
             Ok(())
         },
         |event, journal_entry| {
-            work_event_id = Some(event.id.clone());
             if !transaction.opens_work_settlement {
+                work_event_id = Some(event.id.clone());
                 return Ok(());
             }
             let trusted_dir = settlement_trusted_dir.ok_or_else(|| {
@@ -1556,7 +1556,9 @@ fn persist_authenticated_workspace_update(
                 event,
                 journal_entry,
             )
-            .map(|_| ())
+            .map(|_| {
+                work_event_id = Some(event.id.clone());
+            })
             .map_err(|error| {
                 settlement_prepare_failed = true;
                 GwtError::Other(format!(
@@ -3664,7 +3666,7 @@ mod tests {
         current: Vec<u8>,
         journal: Vec<u8>,
         works: Vec<u8>,
-        tracked_events: Vec<u8>,
+        tracked_events: Vec<(PathBuf, Vec<u8>)>,
     }
 
     impl WorkMutationSnapshot {
@@ -3686,10 +3688,7 @@ mod tests {
                     ),
                 )
                 .expect("read Work projection snapshot"),
-                tracked_events: std::fs::read(gwt_core::paths::gwt_repo_local_work_events_path(
-                    work_event_root,
-                ))
-                .expect("read tracked Work events snapshot"),
+                tracked_events: snapshot_tracked_work_events(work_event_root),
             }
         }
 
@@ -3709,6 +3708,24 @@ mod tests {
             }
             changed
         }
+    }
+
+    fn snapshot_tracked_work_events(work_event_root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let legacy = gwt_core::paths::gwt_repo_local_work_events_path(work_event_root);
+        if let Ok(bytes) = std::fs::read(&legacy) {
+            files.push((PathBuf::from("events.jsonl"), bytes));
+        }
+        let shards = gwt_core::paths::gwt_repo_local_work_events_dir(work_event_root);
+        if shards.is_dir() {
+            files.extend(
+                snapshot_regular_files(&shards)
+                    .into_iter()
+                    .map(|(path, bytes)| (PathBuf::from("events").join(path), bytes)),
+            );
+        }
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        files
     }
 
     #[derive(Debug, PartialEq, Eq)]

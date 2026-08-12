@@ -238,6 +238,21 @@ mod tests {
     }
 
     #[test]
+    fn canonical_work_event_shards_and_writer_temp_residue_remain_skipped() {
+        let root = Path::new("/repo");
+        let policy = default_index_path_policy();
+        let gi = build_gitignore(root);
+
+        for relative in [
+            format!(".gwt/work/events/{}.jsonl", "a".repeat(64)),
+            format!(".gwt/work/events/.{}.jsonl.create-123-test", "b".repeat(64)),
+        ] {
+            let path = root.join(relative);
+            assert!(is_ignored(&policy, &gi, root, &path), "{}", path.display());
+        }
+    }
+
+    #[test]
     fn tasks_todo_md_remains_skipped() {
         let root = Path::new("/repo");
         let path = root.join("tasks/todo.md");

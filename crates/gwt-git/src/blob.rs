@@ -1,14 +1,92 @@
 //! SPEC-2359 W-16 (FR-387): checkout-free blob access for the cross-machine
 //! work events intake.
 //!
-//! Spawn budget (plan §Architecture Decisions 4): one `cat-file
-//! --batch-check` resolves the `events.jsonl` blob oid for ANY number of
-//! refs (object list rides stdin), then one `cat-file --batch` reads every
-//! not-yet-ingested unique blob.
+//! The legacy batch API remains intact. Canonical event shards add one
+//! checkout-free `ls-tree -r -z` per unique commit; shared commits and blob
+//! oids are deduplicated before the single `cat-file --batch` content read.
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use gwt_core::{GwtError, Result};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeBlobEntry {
+    pub path: String,
+    pub oid: String,
+    pub mode: String,
+}
+
+/// Enumerate every blob below `path_in_tree` for each commit without checking
+/// it out. Duplicate commits are listed once and fanned back out in input
+/// order; blob contents remain the responsibility of [`read_blobs_batch`].
+pub fn tree_blob_entries_batch(
+    repo_path: &Path,
+    commits: &[String],
+    path_in_tree: &str,
+) -> Result<Vec<Vec<TreeBlobEntry>>> {
+    let mut entries_by_commit = HashMap::<String, Vec<TreeBlobEntry>>::new();
+    for commit in commits {
+        if entries_by_commit.contains_key(commit) {
+            continue;
+        }
+        let output = gwt_core::process::run_git_logged(
+            &["ls-tree", "-r", "-z", commit, "--", path_in_tree],
+            Some(repo_path),
+        )
+        .map_err(|error| GwtError::Git(format!("ls-tree {commit}: {error}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(GwtError::Git(format!("ls-tree {commit}: {stderr}")));
+        }
+        let entries = parse_tree_blob_entries(&output.stdout)?;
+        entries_by_commit.insert(commit.clone(), entries);
+    }
+    commits
+        .iter()
+        .map(|commit| {
+            entries_by_commit.get(commit).cloned().ok_or_else(|| {
+                GwtError::Git(format!("ls-tree {commit}: missing enumerated commit"))
+            })
+        })
+        .collect()
+}
+
+fn parse_tree_blob_entries(output: &[u8]) -> Result<Vec<TreeBlobEntry>> {
+    output
+        .split(|byte| *byte == b'\0')
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let separator = record
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or_else(|| GwtError::Git("ls-tree: missing path separator".to_string()))?;
+            let (metadata, path_with_separator) = record.split_at(separator);
+            let path = &path_with_separator[1..];
+            let metadata = std::str::from_utf8(metadata)
+                .map_err(|error| GwtError::Git(format!("ls-tree: invalid metadata: {error}")))?;
+            let mut fields = metadata.split_whitespace();
+            let mode = fields.next();
+            let kind = fields.next();
+            let oid = fields.next();
+            if !matches!(mode, Some("100644" | "100755"))
+                || kind != Some("blob")
+                || oid.is_none()
+                || fields.next().is_some()
+            {
+                return Err(GwtError::Git(format!(
+                    "ls-tree: unexpected entry metadata: {metadata}"
+                )));
+            }
+            let path = std::str::from_utf8(path)
+                .map_err(|error| GwtError::Git(format!("ls-tree: invalid path: {error}")))?;
+            Ok(TreeBlobEntry {
+                path: path.to_string(),
+                oid: oid.unwrap().to_string(),
+                mode: mode.unwrap().to_string(),
+            })
+        })
+        .collect()
+}
 
 /// Resolve the blob oid of `path_in_tree` for each commit sha in `commits`,
 /// in ONE `git cat-file --batch-check` spawn. Returns one entry per input
@@ -75,6 +153,17 @@ pub fn read_blob(repo_path: &Path, oid: &str) -> Result<String> {
 /// oids. Callers that fan one blob out to many refs may deduplicate the input
 /// first to avoid repeating large payloads on the batch protocol.
 pub fn read_blobs_batch(repo_path: &Path, oids: &[String]) -> Result<Vec<String>> {
+    read_blob_bytes_batch(repo_path, oids).map(|contents| {
+        contents
+            .into_iter()
+            .map(|content| String::from_utf8_lossy(&content).into_owned())
+            .collect()
+    })
+}
+
+/// Byte-preserving variant of [`read_blobs_batch`] for callers that must
+/// validate UTF-8 and exact record framing themselves.
+pub fn read_blob_bytes_batch(repo_path: &Path, oids: &[String]) -> Result<Vec<Vec<u8>>> {
     if oids.is_empty() {
         return Ok(Vec::new());
     }
@@ -92,7 +181,7 @@ pub fn read_blobs_batch(repo_path: &Path, oids: &[String]) -> Result<Vec<String>
     parse_batch_blob_contents(&output.stdout, oids.len())
 }
 
-fn parse_batch_blob_contents(output: &[u8], expected: usize) -> Result<Vec<String>> {
+fn parse_batch_blob_contents(output: &[u8], expected: usize) -> Result<Vec<Vec<u8>>> {
     let mut cursor = 0usize;
     let mut contents = Vec::with_capacity(expected);
     for index in 0..expected {
@@ -133,7 +222,7 @@ fn parse_batch_blob_contents(output: &[u8], expected: usize) -> Result<Vec<Strin
                 "cat-file --batch: truncated content for blob {index}"
             )));
         }
-        contents.push(String::from_utf8_lossy(&output[content_start..content_end]).into_owned());
+        contents.push(output[content_start..content_end].to_vec());
         cursor = content_end + 1;
     }
     if cursor != output.len() {
@@ -279,6 +368,75 @@ mod tests {
     fn batch_reads_no_blobs_without_spawning() {
         let dir = init_repo();
         assert!(read_blobs_batch(dir.path(), &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_lists_tree_blobs_below_event_store_without_checkout() {
+        let dir = init_repo();
+        let repo = dir.path();
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "-b", "work/sharded-events"])
+            .current_dir(repo));
+        std::fs::create_dir_all(repo.join(".gwt/work/events")).expect("event store");
+        std::fs::write(repo.join(".gwt/work/events.jsonl"), "legacy\n").expect("legacy");
+        std::fs::write(repo.join(".gwt/work/events/aaaaaaaa.jsonl"), "first\n")
+            .expect("first shard");
+        std::fs::write(repo.join(".gwt/work/events/bbbbbbbb.jsonl"), "second\n")
+            .expect("second shard");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", ".gwt/work"])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "sharded events"])
+            .current_dir(repo));
+        let with_events = head_sha(repo);
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "main"])
+            .current_dir(repo));
+        let without_events = head_sha(repo);
+
+        let entries =
+            tree_blob_entries_batch(repo, &[with_events, without_events], ".gwt/work/events")
+                .expect("tree listing");
+
+        assert_eq!(entries.len(), 2);
+        let paths = entries[0]
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                ".gwt/work/events/aaaaaaaa.jsonl",
+                ".gwt/work/events/bbbbbbbb.jsonl",
+            ]
+        );
+        assert!(entries[0].iter().all(|entry| entry.oid.len() == 40));
+        assert!(entries[0].iter().all(|entry| entry.mode == "100644"));
+        assert!(entries[1].is_empty());
+    }
+
+    #[test]
+    fn tree_blob_parser_rejects_symlink_mode_even_when_object_kind_is_blob() {
+        let output = b"120000 blob 0123456789012345678901234567890123456789\t.gwt/work/events/aaaaaaaa.jsonl\0";
+
+        let error = parse_tree_blob_entries(output)
+            .expect_err("a Git symlink blob must not be exposed as a regular event shard");
+
+        assert!(
+            error.to_string().contains("unexpected entry metadata"),
+            "mode rejection should retain the ls-tree record context: {error}"
+        );
+    }
+
+    #[test]
+    fn tree_blob_parser_accepts_and_retains_executable_regular_blob_mode() {
+        let output = b"100755 blob 0123456789012345678901234567890123456789\t.gwt/work/events/aaaaaaaa.jsonl\0";
+
+        let entries = parse_tree_blob_entries(output).expect("executable regular blob");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].mode, "100755");
     }
 
     #[test]
