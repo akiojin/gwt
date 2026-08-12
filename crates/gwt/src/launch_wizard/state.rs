@@ -1424,8 +1424,14 @@ impl LaunchWizardState {
         }
     }
 
+    /// Issue #3462: Resume / Continue launches inherit the Skip Permissions
+    /// preference from the same source as Normal launches. The former
+    /// `mode == "normal"` gate silently dropped the flag on resume, leaving
+    /// restored agents stuck at permission prompts and persisting
+    /// `skip_permissions = false` into the relaunched Session, which then
+    /// poisoned every later restore of the same lineage.
     pub(super) fn effective_skip_permissions(&self) -> bool {
-        self.skip_permissions && self.mode == "normal"
+        self.skip_permissions
     }
 
     fn reset_default_launch_path(&mut self) {
@@ -2543,17 +2549,23 @@ mod tests {
         // SPEC-2014 FR-034: saved docker_service が現 context にあれば saved を採用する。
         assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
         assert_eq!(view.selected_docker_lifecycle, "restart");
+        // Issue #3462: Continue inherits the saved Skip Permissions preference.
         assert!(
             state.skip_permissions,
             "the saved preference remains stored"
         );
-        assert!(!view.skip_permissions);
+        assert!(view.skip_permissions);
+        // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+        assert!(
+            config.skip_permissions,
+            "a Continue launch must carry the inherited Skip Permissions preference"
+        );
         assert!(config.resume_session_id.is_none());
         assert_eq!(config.linked_issue_number, None);
     }
@@ -3094,11 +3106,13 @@ mod tests {
         assert_eq!(view.selected_reasoning, "medium");
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
+        // Issue #3462: the preserved preference is advertised on Continue.
         assert!(
             state.skip_permissions,
             "hydration preserves the saved preference"
         );
-        assert!(!view.skip_permissions);
+        assert!(view.skip_permissions);
+        // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
     }
@@ -3572,11 +3586,13 @@ mod tests {
         assert_eq!(codex_view.selected_reasoning, "high");
         assert_eq!(codex_view.selected_version, "0.110.0");
         assert_eq!(codex_view.selected_execution_mode, "continue");
+        // Issue #3462: the Codex draft's preference is advertised on Continue.
         assert!(
             state.skip_permissions,
             "the Codex draft retains its preference"
         );
-        assert!(!codex_view.skip_permissions);
+        assert!(codex_view.skip_permissions);
+        // Toggle visibility still follows the manual-setup launch path.
         assert!(!codex_view.show_skip_permissions);
         assert!(codex_view.codex_fast_mode);
 
