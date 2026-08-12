@@ -20081,6 +20081,51 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
     assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
 }
 
+/// #3474: the `.codex/hooks.json` committed before the guarded template landed
+/// reports ONLY `managed hook binary missing:` when its bare fallback cannot be
+/// resolved, so the loop breaker below skipped it on every launch and the file
+/// never converged. The missing `command -v` guard is now its own issue class,
+/// so a legacy config is repaired — and the repaired file no longer raises it,
+/// so this still cannot loop.
+#[test]
+fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let config = worktree.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    // The legacy template, pinned to a binary that no longer exists: the ONLY
+    // issue it can raise through the binary audit is `managed hook binary
+    // missing:`, which is exactly what the loop breaker skips.
+    fs::write(
+        &config,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart"}}]}}]}}}}"#,
+            missing_pin.display()
+        ),
+    )
+    .unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&missing_pin.display().to_string()),
+    );
+
+    let rendered = fs::read_to_string(&config).unwrap();
+    assert!(rendered.contains("command -v"), "{rendered}");
+
+    // A second pass over the converged file must be a no-op: the guard issue is
+    // gone and only the unresolvable pin remains, which the loop breaker skips.
+    let converged = fs::read(&config).unwrap();
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&missing_pin.display().to_string()),
+    );
+    assert_eq!(fs::read(&config).unwrap(), converged);
+}
+
 #[test]
 fn startup_self_heal_does_not_loop_on_missing_current_literal_fallback() {
     let _env_lock = crate::env_test_lock()
@@ -44044,6 +44089,99 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
             Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(scanned))),
         )
         .is_empty());
+}
+
+#[test]
+/// Issue #3528: a completion probe spawns one `gh` per issue, so probing the
+/// whole open list burned the scan's deadline on work it could never use. The
+/// planner only walks far enough to fill the free claim slots, so the scan
+/// must probe exactly that far and no further.
+fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
+    let candidates = (1..=50).collect::<Vec<u64>>();
+    let probed = std::cell::RefCell::new(Vec::new());
+
+    let completed = super::completed_claim_candidates(1, candidates.clone(), |issue_number| {
+        probed.borrow_mut().push(issue_number);
+        false
+    });
+
+    assert!(completed.is_empty());
+    assert_eq!(
+        probed.into_inner(),
+        vec![1],
+        "one free slot must cost exactly one probe, not one per open issue"
+    );
+
+    // A completed candidate frees no slot, so the walk continues past it
+    // exactly like the claim planner does.
+    let probed = std::cell::RefCell::new(Vec::new());
+    let completed = super::completed_claim_candidates(1, candidates, |issue_number| {
+        probed.borrow_mut().push(issue_number);
+        issue_number <= 2
+    });
+
+    assert_eq!(completed, std::collections::BTreeSet::from([1, 2]));
+    assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+}
+
+/// Issue #3528: the read/probe phase and the commit phase shared one deadline,
+/// so a scan slow enough to exhaust it failed at its own commit with
+/// `Issue Monitor authority commit check failed: operation deadline expired
+/// during file lock` — every tick threw away what it had just learned and the
+/// monitor never advanced. An exhausted read phase must degrade its findings,
+/// never block the commit.
+#[test]
+fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        "2026-08-12T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(30),
+    )
+    .expect("an exhausted read phase must not fail the commit");
+
+    let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
+        panic!("the scan holds authority, so it must commit its own findings");
+    };
+    let status = state.status_view();
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("deadline")),
+        "the degraded read phase must be reported, not swallowed: {:?}",
+        status.last_error
+    );
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-08-12T07:00:00Z"));
 }
 
 #[test]
