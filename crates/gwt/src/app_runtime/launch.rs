@@ -1493,22 +1493,33 @@ fn hydrate_tool_runtime_provenance_from_source_session(
     }
 }
 
+/// Stage the legacy provenance backfill for a source Session, when the launch
+/// actually resolved a provenance to backfill.
+///
+/// Issue #3527: runner resolution legitimately produces no provenance — a
+/// healthy direct runner returns early, and only the Windows targeted package
+/// plan mints one at all, so no macOS or Linux launch ever carries one. The
+/// migration exists to record what the launch resolved; with nothing resolved
+/// there is nothing to record, and that must degrade to "skip the migration"
+/// rather than abort the launch before PTY.
 fn pending_lazy_tool_runtime_provenance_migration(
     source: gwt_agent::Session,
     config: &gwt_agent::LaunchConfig,
     target_session_id: String,
-) -> Result<PendingToolRuntimeMigration, String> {
-    let provenance = config.tool_runtime_provenance.clone().ok_or_else(|| {
-        format!(
-            "tool runtime provenance resolution did not complete for Session {}",
-            source.id
-        )
-    })?;
-    Ok(PendingToolRuntimeMigration {
+) -> Result<Option<PendingToolRuntimeMigration>, String> {
+    let Some(provenance) = config.tool_runtime_provenance.clone() else {
+        tracing::debug!(
+            session = %source.id,
+            agent = %config.agent_id,
+            "launch resolved no tool runtime provenance; leaving the legacy Session unmigrated"
+        );
+        return Ok(None);
+    };
+    Ok(Some(PendingToolRuntimeMigration {
         source,
         provenance,
         target_session_id,
-    })
+    }))
 }
 
 fn persist_lazy_tool_runtime_provenance_migration(
@@ -3701,7 +3712,8 @@ impl AppRuntime {
                         session_id.clone(),
                     )
                 })
-                .transpose()?;
+                .transpose()?
+                .flatten();
             if pending_tool_runtime_migration
                 .as_ref()
                 .is_some_and(|pending| pending.source.id == session_id)
@@ -6410,7 +6422,8 @@ mod tool_runtime_integration_tests {
             &config,
             "target-session".to_string(),
         )
-        .expect("stage migration");
+        .expect("stage migration")
+        .expect("a resolved provenance stages a migration");
         assert!(
             gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
                 .expect("reload staged source")
@@ -6426,6 +6439,54 @@ mod tool_runtime_integration_tests {
                 .expect("reload migrated session")
                 .tool_runtime_provenance,
             config.tool_runtime_provenance
+        );
+    }
+
+    /// Issue #3527: a healthy direct runner resolves no package provenance —
+    /// `resolve_host_runner_health_checked` returns early for direct, non-Host,
+    /// and non-builtin launches. A legacy source Session then has nothing to
+    /// backfill, which must skip the migration rather than fail the launch
+    /// before PTY.
+    #[test]
+    fn unresolved_provenance_skips_the_legacy_migration_instead_of_failing_the_launch() {
+        let sessions_dir = tempfile::tempdir().expect("sessions dir");
+        let worktree = tempfile::tempdir().expect("worktree");
+        let session = gwt_agent::Session::new(
+            worktree.path(),
+            "work/issue-3527",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.save(sessions_dir.path()).expect("save session");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .tool_runtime_source_session_id(session.id.clone())
+            .build();
+
+        let migration =
+            hydrate_tool_runtime_provenance_from_source_session(sessions_dir.path(), &mut config)
+                .expect("load migration source")
+                .expect("legacy source");
+        assert!(
+            config.tool_runtime_provenance.is_none(),
+            "a direct runner launch resolves no package provenance"
+        );
+
+        let pending = pending_lazy_tool_runtime_provenance_migration(
+            migration,
+            &config,
+            "target-session".to_string(),
+        )
+        .expect("an unresolved provenance must not abort the launch");
+
+        assert!(
+            pending.is_none(),
+            "there is nothing to backfill, so no migration may be staged"
+        );
+        assert!(
+            gwt_agent::Session::load(&sessions_dir.path().join(format!("{}.toml", session.id)))
+                .expect("reload source session")
+                .tool_runtime_provenance
+                .is_none(),
+            "skipping the migration must leave the legacy Session untouched"
         );
     }
 
@@ -6476,7 +6537,8 @@ mod tool_runtime_integration_tests {
             &config,
             "target-session".to_string(),
         )
-        .expect("stage migration");
+        .expect("stage migration")
+        .expect("a resolved provenance stages a migration");
 
         let error = persist_lazy_tool_runtime_provenance_migration(sessions_dir.path(), &pending)
             .expect_err("stale migration must fail closed");
