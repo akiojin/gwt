@@ -292,14 +292,19 @@ On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
-## Issue Monitor
+## Issue surface and Issue Monitor
 
-The Issue Monitor watches the project's open GitHub Issues and turns them into
-agent work. In the default (human-gated) mode it scans candidates into an
-inbox, and you press `Launch` per issue: gwt then creates the
-`work/issue-N` branch/worktree at launch time and starts the agent with
-`gwt-execute #N`. Failed launches stay visible in the inbox with the error, and
-`Launch now` retries explicitly.
+Open `Issue` from Add Window to browse cached GitHub Issues and manage the Issue
+Monitor in one surface. Each row shows its execution state, queue position, and
+any exclusion reason; the toolbar controls queue concurrency, monitor state,
+Autonomous mode, and Quick issue registration. The legacy `issue_monitor`
+preset also opens this canonical Issue surface.
+
+The monitor watches the project's open GitHub Issues and turns them into agent
+work. In the default (human-gated) mode it scans candidates into the Issue
+queue, and `Launch now` on a row creates the `work/issue-N` branch/worktree at
+launch time and starts the agent with `gwt-execute #N`. Failed launches remain
+visible on their Issue rows with the execution state.
 
 Agents and automation can inspect and reprioritize the project queue through
 the `gwtd` JSON operations `issue.monitor.status`,
@@ -318,7 +323,7 @@ Autonomous mode runs the whole loop unattended: eligible issue → auto-launch �
 implementation → independent review → strong automated gate → auto-merge. It
 is **off by default** and requires a **two-stage opt-in**:
 
-1. Enable the `Autonomous` toggle in the Issue Monitor toolbar (per project).
+1. Enable the `Autonomous` toggle in the Issue surface toolbar (per project).
 2. Label each issue you want handled autonomously with `auto-merge`.
 
 An issue additionally qualifies only when it has machine-checkable acceptance

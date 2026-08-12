@@ -2705,6 +2705,7 @@ mod tests {
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             knowledge_related_snapshot: Default::default(),
+            knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -8300,6 +8301,7 @@ fn main() -> std::io::Result<()> {
             }) => {
                 // SPEC-3431 T-093: the wake decision runs before the frontend
                 // broadcast so a parked PM is revived by daemon-side activity.
+                app.replace_knowledge_monitor_snapshot(&project_root, &items);
                 let mut events = app.pm_wake_events(&project_root, &items);
                 events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                     items,

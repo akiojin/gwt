@@ -70,7 +70,6 @@
       // launch-controls / interaction-guard imports) moved to
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
-      import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
       // SPEC-3431 FR-026: PM settings live next to the PM launcher, not in the
       // Settings window — the PM is configured where it is seen.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
@@ -834,11 +833,13 @@
         if (preset === "logs") {
           return "logs";
         }
-        if (preset === "issue" || preset === "spec" || preset === "pr") {
+        if (
+          preset === "issue" ||
+          preset === "issue_monitor" ||
+          preset === "spec" ||
+          preset === "pr"
+        ) {
           return "knowledge";
-        }
-        if (preset === "issue_monitor") {
-          return "issue-monitor";
         }
         if (preset === "index") {
           return "index";
@@ -856,7 +857,7 @@
       }
 
       function knowledgeKindForPreset(preset) {
-        if (preset === "issue" || preset === "spec") {
+        if (preset === "issue" || preset === "issue_monitor" || preset === "spec") {
           return "issue";
         }
         if (preset === "pr") {
@@ -1488,7 +1489,7 @@
           logs: "Logs",
           agent_kanban: "Agent Kanban",
           issue: "Issue",
-          issue_monitor: "Issue Monitor",
+          issue_monitor: "Issue",
           spec: "Issue",
           workspace: "Work",
           board: "Board",
@@ -4418,6 +4419,8 @@
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
+        scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
       } = createKnowledgeKanbanSurface({
         send,
@@ -4700,12 +4703,6 @@
         requestWorkAdvisory,
       });
 
-      const issueMonitorSurface = createIssueMonitorSurface({
-        document,
-        send,
-        focusWindow: (windowId) => requestWindowFrame(windowId),
-      });
-
       // SPEC-3431 FR-026: mounted at startup (not lazily on first open) so the
       // `pm_status` hydration that arrives with the initial sync has somewhere
       // to land.
@@ -4851,7 +4848,6 @@
           "surface-board",
           "surface-logs",
           "surface-knowledge",
-          "surface-issue-monitor",
           "surface-index",
           "surface-work",
           "surface-improvement",
@@ -4991,11 +4987,6 @@
           // SPEC-3064 Phase 3 (E6d): the Knowledge window mount moved to
           // the knowledge kanban surface.
           mountKnowledgeWindow(windowData, body);
-          return;
-        }
-
-        if (surface === "issue-monitor") {
-          issueMonitorSurface.mount(body, windowData);
           return;
         }
 
@@ -5672,7 +5663,6 @@
         boardSurface,
         logsSurface,
         agentKanbanSurface,
-        issueMonitorSurface,
         pmSettingsPanel,
         autonomousNotifications,
         knowledgeSettingsSurface,
@@ -5783,17 +5773,16 @@
             frontendUnits.pmSettingsPanel.applyStatus(event);
             break;
           case "issue_monitor_status":
-            frontendUnits.issueMonitorSurface.applyStatus(event.status || {});
+            applyKnowledgeIssueMonitorStatus(event.status || {});
             window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
             break;
           case "issue_monitor_inbox":
-            frontendUnits.issueMonitorSurface.applyInbox(event.items || []);
+            scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_launch_failed":
-            frontendUnits.issueMonitorSurface.applyLaunchFailed(event);
+            scheduleIssueMonitorProjectionRefresh();
             break;
           case "issue_monitor_toast":
-            frontendUnits.issueMonitorSurface.showToast(event);
             // SPEC #3200 FR-034: also surface as a persistent, scrollable side
             // toast so unattended autonomous events accumulate where the
             // operator can review them later.
@@ -6980,6 +6969,9 @@
         if (preset === "spec") {
           return "issue";
         }
+        if (preset === "issue_monitor") {
+          return "issue";
+        }
         return preset;
       }
 
@@ -7039,7 +7031,7 @@
             focusOrSpawnPreset("index");
             return;
           case "open-issue-monitor":
-            focusOrSpawnPreset("issue_monitor");
+            focusOrSpawnPreset("issue");
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");
