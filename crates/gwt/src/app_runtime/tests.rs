@@ -20081,6 +20081,51 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
     assert!(!worktree.join(".gwt/managed-hook-self-healed").exists());
 }
 
+/// #3474: the `.codex/hooks.json` committed before the guarded template landed
+/// reports ONLY `managed hook binary missing:` when its bare fallback cannot be
+/// resolved, so the loop breaker below skipped it on every launch and the file
+/// never converged. The missing `command -v` guard is now its own issue class,
+/// so a legacy config is repaired — and the repaired file no longer raises it,
+/// so this still cannot loop.
+#[test]
+fn startup_self_heal_converges_legacy_config_without_a_runtime_guard() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    let missing_pin = root.path().join("missing/gwtd");
+    let config = worktree.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    // The legacy template, pinned to a binary that no longer exists: the ONLY
+    // issue it can raise through the binary audit is `managed hook binary
+    // missing:`, which is exactly what the loop breaker skips.
+    fs::write(
+        &config,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"gwt_bin=\"${{GWT_BIN_PATH:-{}}}\"; \"$gwt_bin\" hook event SessionStart"}}]}}]}}}}"#,
+            missing_pin.display()
+        ),
+    )
+    .unwrap();
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&missing_pin.display().to_string()),
+    );
+
+    let rendered = fs::read_to_string(&config).unwrap();
+    assert!(rendered.contains("command -v"), "{rendered}");
+
+    // A second pass over the converged file must be a no-op: the guard issue is
+    // gone and only the unresolvable pin remains, which the loop breaker skips.
+    let converged = fs::read(&config).unwrap();
+    super::startup::self_heal_managed_hooks_in_worktrees_with_expected(
+        [worktree.as_path()],
+        Some(&missing_pin.display().to_string()),
+    );
+    assert_eq!(fs::read(&config).unwrap(), converged);
+}
+
 #[test]
 fn startup_self_heal_does_not_loop_on_missing_current_literal_fallback() {
     let _env_lock = crate::env_test_lock()
