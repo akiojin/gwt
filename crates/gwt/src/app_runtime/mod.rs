@@ -1522,11 +1522,63 @@ pub(crate) enum ScheduledIssueMonitorScanOutcome {
     DeferredToLiveDaemon,
 }
 
+/// Issue #3528: probe merged-PR completion only as far as the claim planner
+/// will walk. Each probe spawns `gh`, so the scan pays for the slots it can
+/// actually fill instead of for every open issue. A completed candidate frees
+/// no slot, so the walk continues past it exactly like the planner does.
+fn completed_claim_candidates(
+    available: usize,
+    candidates: Vec<u64>,
+    mut completed_probe: impl FnMut(u64) -> bool,
+) -> std::collections::BTreeSet<u64> {
+    let mut completed = std::collections::BTreeSet::new();
+    let mut remaining = available;
+    for issue_number in candidates {
+        if remaining == 0 {
+            break;
+        }
+        if completed_probe(issue_number) {
+            completed.insert(issue_number);
+        } else {
+            remaining -= 1;
+        }
+    }
+    completed
+}
+
 fn run_scheduled_issue_monitor_scan(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
+) -> Result<ScheduledIssueMonitorScanOutcome, String> {
+    run_scheduled_issue_monitor_scan_with_budgets(
+        project_root,
+        expected_project_tab_id,
+        now,
+        issue_client_factory,
+        ISSUE_MONITOR_SCAN_BUDGET,
+        ISSUE_MONITOR_COMMIT_BUDGET,
+    )
+}
+
+/// The read/probe phase's own budget. Exceeding it degrades the scan's
+/// findings; it must never consume the budget the commit phase needs.
+const ISSUE_MONITOR_SCAN_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The authority lease + state commit budget, entered only after the
+/// read/probe phase has released its own. Issue #3528: sharing one budget let
+/// a slow scan expire before its own commit, so every tick threw away
+/// everything it had just learned and the monitor never advanced.
+const ISSUE_MONITOR_COMMIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn run_scheduled_issue_monitor_scan_with_budgets(
+    project_root: &Path,
+    expected_project_tab_id: Option<&str>,
+    now: &str,
+    issue_client_factory: &RuntimeIssueClientFactory,
+    scan_budget: std::time::Duration,
+    commit_budget: std::time::Duration,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
 
@@ -1549,23 +1601,28 @@ fn run_scheduled_issue_monitor_scan(
         return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
     }
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-    let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        std::time::Instant::now() + std::time::Duration::from_secs(60),
-    );
     let mut loaded_for_commit = None;
     let mut merge_reconciliation_error = None;
     let mut local_repo_identity = None;
     let mut local_claim_proposal = None;
 
-    match gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root) {
-        Ok((owner, repo)) => {
-            local_repo_identity = Some((owner.clone(), repo.clone()));
-            if cleanup_only {
-                // Disabling the monitor revokes acquisition authority but does
-                // not cancel its durable compensation journal. Cleanup owns no
-                // scan/proposal and may run while the monitor stays disabled.
-            } else {
-                match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
+    // The read/probe phase owns its budget alone. It is released before the
+    // commit phase below so a slow scan degrades its findings instead of
+    // discarding them (#3528).
+    {
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + scan_budget,
+        );
+
+        match gwt::issue_monitor_worker::github_remote_owner_and_repo(project_root) {
+            Ok((owner, repo)) => {
+                local_repo_identity = Some((owner.clone(), repo.clone()));
+                if cleanup_only {
+                    // Disabling the monitor revokes acquisition authority but does
+                    // not cancel its durable compensation journal. Cleanup owns no
+                    // scan/proposal and may run while the monitor stays disabled.
+                } else {
+                    match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                 project_root,
                 &owner,
                 &repo,
@@ -1588,18 +1645,16 @@ fn run_scheduled_issue_monitor_scan(
                             format!("issue monitor merge reconciliation failed: {error}")
                         });
                     if loaded.authorizes_remote_effects() {
-                        let completed_issues = loaded
-                            .issues
-                            .iter()
-                            .filter_map(|issue| {
+                        let (available, candidates) =
+                            monitor.claim_probe_plan(monitor.config.max_active.max(1));
+                        let completed_issues =
+                            completed_claim_candidates(available, candidates, |issue_number| {
                                 gwt::issue_monitor_worker::issue_completed_by_merged_pr(
                                     &owner,
                                     &repo,
-                                    issue.number,
+                                    issue_number,
                                 )
-                                .then_some(issue.number)
-                            })
-                            .collect();
+                            });
                         local_claim_proposal = Some((
                             format!("{}:{}", whoami::username(), std::process::id()),
                             completed_issues,
@@ -1611,14 +1666,18 @@ fn run_scheduled_issue_monitor_scan(
                     monitor.record_scan_error(now, format!("issue list failed: {error}"));
                 }
             }
+                }
             }
+            Err(error) => monitor.record_scan_error(now, error.to_string()),
         }
-        Err(error) => monitor.record_scan_error(now, error.to_string()),
     }
 
     // A daemon may have started while the side-effect-free scan was running.
     // The second lease acquisition is the commit-time authority decision; the
     // lease remains held through Prepared -> Attempting -> remote result.
+    let _commit_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + commit_budget,
+    );
     let _local_lease = match gwt::try_acquire_issue_monitor_local_fallback_lease(&prefs_path) {
         Ok(lease) => lease,
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

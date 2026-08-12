@@ -44204,6 +44204,99 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
 }
 
 #[test]
+/// Issue #3528: a completion probe spawns one `gh` per issue, so probing the
+/// whole open list burned the scan's deadline on work it could never use. The
+/// planner only walks far enough to fill the free claim slots, so the scan
+/// must probe exactly that far and no further.
+fn completion_probes_stop_once_the_free_claim_slots_are_filled() {
+    let candidates = (1..=50).collect::<Vec<u64>>();
+    let probed = std::cell::RefCell::new(Vec::new());
+
+    let completed = super::completed_claim_candidates(1, candidates.clone(), |issue_number| {
+        probed.borrow_mut().push(issue_number);
+        false
+    });
+
+    assert!(completed.is_empty());
+    assert_eq!(
+        probed.into_inner(),
+        vec![1],
+        "one free slot must cost exactly one probe, not one per open issue"
+    );
+
+    // A completed candidate frees no slot, so the walk continues past it
+    // exactly like the claim planner does.
+    let probed = std::cell::RefCell::new(Vec::new());
+    let completed = super::completed_claim_candidates(1, candidates, |issue_number| {
+        probed.borrow_mut().push(issue_number);
+        issue_number <= 2
+    });
+
+    assert_eq!(completed, std::collections::BTreeSet::from([1, 2]));
+    assert_eq!(probed.into_inner(), vec![1, 2, 3]);
+}
+
+/// Issue #3528: the read/probe phase and the commit phase shared one deadline,
+/// so a scan slow enough to exhaust it failed at its own commit with
+/// `Issue Monitor authority commit check failed: operation deadline expired
+/// during file lock` — every tick threw away what it had just learned and the
+/// monitor never advanced. An exhausted read phase must degrade its findings,
+/// never block the commit.
+#[test]
+fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+
+    let outcome = super::run_scheduled_issue_monitor_scan_with_budgets(
+        &repo,
+        Some("tab-1"),
+        "2026-08-12T07:00:00Z",
+        &super::default_issue_client_factory(),
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(30),
+    )
+    .expect("an exhausted read phase must not fail the commit");
+
+    let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
+        panic!("the scan holds authority, so it must commit its own findings");
+    };
+    let status = state.status_view();
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("deadline")),
+        "the degraded read phase must be reported, not swallowed: {:?}",
+        status.last_error
+    );
+    assert_eq!(status.last_scan_at.as_deref(), Some("2026-08-12T07:00:00Z"));
+}
+
+#[test]
 fn scheduled_scan_defers_to_live_daemon_without_remote_io_or_launch() {
     let _env_lock = env_test_lock()
         .lock()
