@@ -6589,7 +6589,7 @@ fn write_workspace_work_event_shard_bytes(
         temp.sync_all()?;
     }
 
-    match fs::hard_link(&temp_path, &shard_path) {
+    match fs::hard_link(&temp_path, shard_path) {
         Ok(()) => {
             fs::remove_file(&temp_path)?;
             sync_directory(parent)?;
@@ -6603,7 +6603,7 @@ fn write_workspace_work_event_shard_bytes(
                     shard_path.display()
                 )));
             }
-            let existing = fs::read(&shard_path)?;
+            let existing = fs::read(shard_path)?;
             if existing == canonical {
                 Ok(())
             } else {
