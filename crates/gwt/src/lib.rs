@@ -37,6 +37,7 @@ pub mod migration;
 pub mod native_app;
 pub(crate) mod path_filter;
 pub mod persistence;
+pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
@@ -117,17 +118,19 @@ pub use issue_monitor::{
     persist_issue_monitor_authority_fence, persist_legacy_issue_monitor_shutdown_revoke_fence,
     record_autonomous_question_handoff, save_issue_monitor_prefs, scan_issue_monitor_candidates,
     scan_issue_monitor_candidates_with_provenance, take_autonomous_resume_prompt_from_prefs,
-    try_mutate_issue_monitor_prefs, try_mutate_issue_monitor_prefs_without_authority_fence,
-    AutonomousHandoffResumption, AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase,
-    AutonomousReviewDispatch, EligibilityDecision, FailureClass, IssueMonitorAgentStatus,
-    IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
-    IssueMonitorCandidateSource, IssueMonitorConfig, IssueMonitorControlReceipt,
-    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
-    IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    try_acquire_issue_monitor_local_fallback_lease, try_mutate_issue_monitor_prefs,
+    try_mutate_issue_monitor_prefs_without_authority_fence, AutonomousHandoffResumption,
+    AutonomousIssueRecord, AutonomousPendingQuestion, AutonomousPhase, AutonomousReviewDispatch,
+    EligibilityDecision, FailureClass, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
+    IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
+    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
+    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorFailedIssue,
+    IssueMonitorFailoverOutcome, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
     IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource,
     IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
     IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorScanSummary, IssueMonitorState,
-    IssueMonitorStatusView, MonitorInboxState, PendingIssueMonitorEffect,
+    IssueMonitorStatusView, IssueMonitorStopMismatch, IssueMonitorStopOutcome,
+    IssueMonitorStopTarget, MonitorInboxState, PendingIssueMonitorEffect,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 pub use knowledge_bridge::{
@@ -165,8 +168,8 @@ pub use persistence::{
     project_title_from_path, save_session_state, save_workspace_state,
     save_workspace_state_durable, workspace_state_path, AgentKanbanLane, CanvasViewport,
     PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
-    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowLaneKind,
-    WindowPlacement, WindowProcessStatus, WindowState,
+    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowPlacement,
+    WindowProcessStatus, WindowState, WindowWorktreeForm,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -180,9 +183,9 @@ pub use protocol::{
     FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
     IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
     ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
-    ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
-    WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
     WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
     WorkspaceResumeSource, WorkspaceView,

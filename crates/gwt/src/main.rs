@@ -67,7 +67,8 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
+    ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -113,13 +114,13 @@ pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
     current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, knowledge_kind_for_preset,
+    intake_hook_config_is_disposable, is_ephemeral_worktree_path, knowledge_kind_for_preset,
     local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
     prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
     run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
     synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
-    INTAKE_WORKTREE_PREFIX,
+    EPHEMERAL_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -902,9 +903,12 @@ fn issue_monitor_daemon_user_event(
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorInbox { items },
-            )]))
+            // SPEC-3431 T-093: routed through the runtime (not straight to a
+            // broadcast) so the PM wake path observes daemon-driven activity.
+            Some(UserEvent::IssueMonitorDaemonInbox {
+                project_root: project_root.to_path_buf(),
+                items,
+            })
         }
         "toast" => {
             let toast = BackendEvent::IssueMonitorToast {
@@ -1110,6 +1114,21 @@ enum UserEvent {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+    },
+    /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
+    /// runtime so the PM wake path sees it before the broadcast.
+    IssueMonitorDaemonInbox {
+        project_root: PathBuf,
+        items: Vec<gwt::IssueMonitorInboxItem>,
+    },
+    /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
+    /// tick — drives local scans and the PM periodic wake.
+    IssueMonitorScheduledTick,
+    IssueMonitorScheduledScanComplete {
+        project_root: PathBuf,
+        prefs_path: PathBuf,
+        now: String,
+        outcome: Result<ScheduledIssueMonitorScanOutcome, String>,
     },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
@@ -1877,10 +1896,11 @@ mod tests {
             dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
-            lane_kind: gwt::WindowLaneKind::Unknown,
+            worktree_form: gwt::WindowWorktreeForm::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            is_pm: false,
         }
     }
 
@@ -2644,6 +2664,7 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
@@ -2651,6 +2672,10 @@ mod tests {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
+            pending_pm_launches: HashMap::new(),
+            pm_sessions: HashMap::new(),
+            pm_wake_seen: HashMap::new(),
+            pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
@@ -2674,6 +2699,7 @@ mod tests {
             window_output_bytes: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
+            last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -7801,6 +7827,31 @@ fn main() -> std::io::Result<()> {
     board_projection_watchers.sync(&app, proxy.clone());
     let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
     workspace_projection_watchers.sync(&app, proxy.clone());
+    // Issue #3505: GUI-owned scheduled scan cadence. Without this tick no
+    // component in the production topology ever runs scheduled scans, so
+    // autonomous launches silently never happen.
+    {
+        let tick_proxy = event_loop.create_proxy();
+        let interval = std::time::Duration::from_secs(
+            gwt::IssueMonitorConfig::default()
+                .poll_interval_secs
+                .max(60),
+        );
+        if let Err(error) = std::thread::Builder::new()
+            .name("issue-monitor-scheduled-tick".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(interval);
+                if tick_proxy
+                    .send_event(UserEvent::IssueMonitorScheduledTick)
+                    .is_err()
+                {
+                    break;
+                }
+            })
+        {
+            tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+        }
+    }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
@@ -8223,6 +8274,36 @@ fn main() -> std::io::Result<()> {
                     linked_issue_kind,
                     delivery_id,
                 );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledTick) => {
+                let events = app.issue_monitor_scheduled_tick_events();
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
+                project_root,
+                prefs_path,
+                now,
+                outcome,
+            }) => {
+                let events = app.issue_monitor_scheduled_scan_complete_events(
+                    &project_root,
+                    &prefs_path,
+                    &now,
+                    outcome,
+                );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
+                project_root,
+                items,
+            }) => {
+                // SPEC-3431 T-093: the wake decision runs before the frontend
+                // broadcast so a parked PM is revived by daemon-side activity.
+                let mut events = app.pm_wake_events(&project_root, &items);
+                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
+                    items,
+                }));
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorReviewDispatch {

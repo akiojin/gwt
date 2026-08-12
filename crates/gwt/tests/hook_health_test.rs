@@ -23,6 +23,12 @@ impl ScopedEnvVar {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnvVar {
@@ -685,6 +691,7 @@ fn managed_hook_health_reports_incomplete_codex_managed_entries() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _hook_bin = ScopedEnvVar::remove("GWT_HOOK_BIN");
     let worktree = tempfile::tempdir().expect("worktree");
     let bin_dir = worktree.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();

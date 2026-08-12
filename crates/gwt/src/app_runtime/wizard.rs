@@ -341,9 +341,12 @@ impl AppRuntime {
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        // SPEC #3431 FR-070: this must be the spelling the durable execution
+        // binding produces, not a display label. `workspace.ensure` compares
+        // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
         let owner_label = match linked_issue_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
-            LinkedIssueKind::Spec => format!("SPEC #{issue_number}"),
+            LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };
         let workspace_resume_context = Some(linked_issue_workspace_context(
             project_root,
@@ -3425,6 +3428,9 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_does_not_report_branch_zero_for_detached_nondefault_branch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");

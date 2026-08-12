@@ -41,7 +41,7 @@ use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_windows_host_shell_wrapper, combined_window_id,
     detect_shell_program, finalize_docker_agent_launch_config_with_runtime, geometry_to_pty_size,
-    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
+    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_worktree_path,
     launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_launch_spec_with_fallback, resolve_launch_worktree, same_worktree_path,
@@ -2277,6 +2277,9 @@ impl AppRuntime {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        // SPEC-3431 FR-001: a PM launch registers its session once it exists.
+        // Removed unconditionally so a failed launch leaves no stale marker.
+        let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
@@ -2486,8 +2489,30 @@ impl AppRuntime {
                         .workspace
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
                 }
+                // SPEC-3431 FR-001/FR-003: write the PM registration for a
+                // launch the ensure gate marked as PM, or for any resume whose
+                // source session is the registered PM (succession keeps the
+                // singleton pointing at the live conversation).
+                let pm_registration_root = pending_pm_project_root.or_else(|| {
+                    let source = auto_resume_source_session_id.as_ref()?;
+                    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+                    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).ok()?;
+                    (prefs.registration?.session_id == *source).then(|| project_root.clone())
+                });
                 if let Some(source_session_id) = auto_resume_source_session_id {
                     mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                }
+                // SPEC-3431 FR-026: a completed PM launch is the moment
+                // "running as" becomes true, so the settings panel is
+                // refreshed from the post-spawn state below.
+                let pm_launch_registered = pm_registration_root.is_some();
+                if let Some(pm_project_root) = pm_registration_root {
+                    self.register_pm_after_launch(
+                        &pm_project_root,
+                        &session_id_for_restore,
+                        agent_id.command(),
+                        &worktree_path,
+                    );
                 }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
@@ -2696,6 +2721,9 @@ impl AppRuntime {
                         let _ = self.persist();
                         self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
+                        if pm_launch_registered {
+                            events.extend(self.pm_status_broadcast_events());
+                        }
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
@@ -4012,13 +4040,13 @@ impl AppRuntime {
             return;
         };
         self.revoke_agent_capability_for_window(window_id);
-        // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
+        // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
         // when dirty so uncommitted work is never lost. Skip the Paused-Work /
         // projection persistence entirely.
-        if self.is_ephemeral_intake_session(&session) {
-            self.finalize_ephemeral_intake_worktree(&session);
+        if self.session_uses_ephemeral_worktree(&session) {
+            self.finalize_ephemeral_worktree(&session);
             let _ = gwt_agent::persist_session_status(
                 &self.sessions_dir,
                 &session.session_id,
@@ -4138,14 +4166,15 @@ impl AppRuntime {
         session
     }
 
-    /// SPEC-3214 (codex #3235 review): whether a stopped session is an
-    /// ephemeral intake session. The `.intake-*` basename alone is not enough —
+    /// SPEC-3214 (codex #3235 review): whether a stopped session uses an
+    /// ephemeral worktree. The `.intake-*` basename alone is not enough —
     /// a normal branch worktree a user happens to name `.intake-*` must keep its
-    /// Paused-Work / resume behavior. The definitive signal is that the intake
-    /// worktree is DETACHED (branchless), which only `create_detached` produces.
+    /// Paused-Work / resume behavior. The definitive signal is that the
+    /// ephemeral worktree is DETACHED (branchless), which only
+    /// `create_detached` produces.
     /// A worktree that is already gone is treated as ephemeral (it was reaped).
-    pub(super) fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
-        if !is_ephemeral_intake_worktree(&session.worktree_path) {
+    pub(super) fn session_uses_ephemeral_worktree(&self, session: &ActiveAgentSession) -> bool {
+        if !is_ephemeral_worktree_path(&session.worktree_path) {
             return false;
         }
         let Some(main_repo_path) = self
@@ -4159,7 +4188,7 @@ impl AppRuntime {
             Ok(worktrees) => worktrees
                 .iter()
                 .find(|info| same_worktree_path(&info.path, &session.worktree_path))
-                // On a branch → a real worktree, not intake. Detached → intake.
+                // On a branch → a real worktree. Detached → ephemeral.
                 .is_none_or(|info| info.branch.is_none()),
             // Cannot enumerate: fall back to "gone means it was ephemeral".
             Err(_) => !session.worktree_path.exists(),
@@ -4177,11 +4206,11 @@ impl AppRuntime {
         self.revoke_unbound_agent_capability(token.as_deref());
     }
 
-    /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
+    /// SPEC-3214 (FR-002): tear down an ephemeral worktree when its
     /// session ends. A clean worktree is force-removed; a dirty one is kept and
     /// logged so uncommitted work is never destroyed (the user-facing retention
     /// notice ships with the intake UI in a later phase).
-    fn finalize_ephemeral_intake_worktree(&self, session: &ActiveAgentSession) {
+    fn finalize_ephemeral_worktree(&self, session: &ActiveAgentSession) {
         let worktree_path = session.worktree_path.as_path();
         let main_repo_path = self
             .tab(&session.tab_id)
@@ -4196,7 +4225,7 @@ impl AppRuntime {
             Ok(true) => {
                 tracing::warn!(
                     worktree_path = %worktree_path.display(),
-                    "ephemeral intake worktree has local work (changes, ignored files, or commits); keeping it so nothing is lost"
+                    "ephemeral worktree has local work (changes, ignored files, or commits); keeping it so nothing is lost"
                 );
                 return;
             }
@@ -4206,7 +4235,7 @@ impl AppRuntime {
                 tracing::warn!(
                     worktree_path = %worktree_path.display(),
                     error = %error,
-                    "could not determine intake worktree cleanliness; keeping it"
+                    "could not determine ephemeral worktree cleanliness; keeping it"
                 );
                 return;
             }
@@ -4216,12 +4245,12 @@ impl AppRuntime {
             tracing::warn!(
                 worktree_path = %worktree_path.display(),
                 error = %error,
-                "failed to remove clean ephemeral intake worktree"
+                "failed to remove clean ephemeral worktree"
             );
         }
     }
 
-    /// Compatibility hook for the runtime-status path. Current intake cleanup
+    /// Compatibility hook for the runtime-status path. Current ephemeral-worktree cleanup
     /// runs synchronously in `mark_agent_session_stopped()` after classifying
     /// the session by detached `.intake-*` worktree state, so there is no
     /// deferred queue to drain here.
