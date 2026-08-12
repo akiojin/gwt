@@ -1,17 +1,17 @@
 //! SPEC-2359 W-16 (FR-387/FR-388): project-level work events ingest
 //! orchestrator.
 //!
-//! Collects `.gwt/work/events.jsonl` content from every reachable source —
+//! Collects legacy `.gwt/work/events.jsonl` and canonical immutable shards
+//! below `.gwt/work/events/` from every reachable source —
 //! local worktree filesystems (the base/main checkout included) and fetched
 //! `origin/*` refs (checkout-free blob reads) — and funnels each through the
 //! idempotent gwt-core intake into the home works projection. A fingerprint
 //! cache (`work-events-intake.json`) skips unchanged sources; correctness
 //! never depends on it (dedup is event-id based, SC-260).
 //!
-//! Spawn budget per run: 1 `git worktree list` (inventory) + 1
-//! `for-each-ref` + 1 `cat-file --batch-check` + at most 1 `cat-file --batch`
-//! for all not-yet-ingested unique event blobs. Callers run this off the UI
-//! thread.
+//! Git blob contents are OID-deduplicated and read in one `cat-file --batch`;
+//! tree enumeration is checkout-free and unique-commit deduplicated. Callers
+//! run this off the UI thread.
 
 use std::{
     collections::HashMap,
@@ -27,18 +27,27 @@ use gwt_core::work_events_intake::{
     save_work_events_intake_state, SharedWorkEventsSource,
 };
 use gwt_core::workspace_projection::WorkspaceExecutionContainerRef;
+use sha2::{Digest, Sha256};
 
 /// Where one ingested chunk of content came from (cache key prefix).
 const SOURCE_WORKTREE: &str = "worktree:";
 const SOURCE_REF: &str = "ref:";
 const SOURCE_LOCAL_LIFECYCLE: &str = "local-lifecycle:";
+const SOURCE_LIST: &str = "source-list:v1";
 
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
-const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v6-complete-project-transaction";
+const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v7-event-shard-dual-read";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
+const EVENTS_TREE_DIR: &str = ".gwt/work/events";
+
+#[derive(Debug, Clone, Copy)]
+enum WorkEventsSourceKind {
+    Legacy,
+    Shard,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkEventsIngestSummary {
@@ -70,6 +79,7 @@ struct PendingWorkEventsSource {
 #[derive(Debug)]
 struct ReloadableWorkEventsSource {
     events_path: PathBuf,
+    kind: WorkEventsSourceKind,
     container: Option<WorkspaceExecutionContainerRef>,
 }
 
@@ -78,11 +88,100 @@ struct PendingOriginBlob {
     key: String,
     fingerprint: String,
     oid: String,
+    path: String,
+    kind: WorkEventsSourceKind,
     container: Option<WorkspaceExecutionContainerRef>,
 }
 
 type SourceFingerprints = Vec<(String, String)>;
 type ReloadedWorkEventsSources = (Vec<SharedWorkEventsSource>, SourceFingerprints);
+
+fn read_work_event_source(path: &Path, kind: WorkEventsSourceKind) -> gwt_core::Result<String> {
+    let content = std::fs::read(path)?;
+    work_event_source_content(path, kind, content)
+}
+
+fn work_event_source_content(
+    path: &Path,
+    kind: WorkEventsSourceKind,
+    content: Vec<u8>,
+) -> gwt_core::Result<String> {
+    if matches!(kind, WorkEventsSourceKind::Shard) {
+        validate_work_event_shard(path, &content)?;
+    }
+    String::from_utf8(content).map_err(|error| {
+        gwt_core::GwtError::Other(format!(
+            "work event source {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn validate_work_event_shard(path: &Path, content: &[u8]) -> gwt_core::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            gwt_core::GwtError::Other(format!(
+                "work event shard has an invalid filename: {}",
+                path.display()
+            ))
+        })?;
+    let Some(hash) = name.strip_suffix(".jsonl") else {
+        return Err(gwt_core::GwtError::Other(format!(
+            "work event shard has an invalid filename: {}",
+            path.display()
+        )));
+    };
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(gwt_core::GwtError::Other(format!(
+            "work event shard has an invalid filename: {}",
+            path.display()
+        )));
+    }
+    if content.last() != Some(&b'\n') || content.iter().filter(|byte| **byte == b'\n').count() != 1
+    {
+        return Err(gwt_core::GwtError::Other(format!(
+            "work event shard must contain exactly one newline-terminated event: {}",
+            path.display()
+        )));
+    }
+    let payload = &content[..content.len() - 1];
+    gwt_core::workspace_projection::decode_workspace_work_event_line(payload).map_err(|error| {
+        gwt_core::GwtError::Other(format!(
+            "work event shard has an incompatible event schema {}: {error}",
+            path.display()
+        ))
+    })?;
+    let event: serde_json::Value = serde_json::from_slice(payload).map_err(|error| {
+        gwt_core::GwtError::Other(format!(
+            "work event shard contains invalid JSON {}: {error}",
+            path.display()
+        ))
+    })?;
+    let id = event
+        .as_object()
+        .and_then(|object| object.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            gwt_core::GwtError::Other(format!(
+                "work event shard payload has no string id: {}",
+                path.display()
+            ))
+        })?;
+    let expected = format!("{:x}", Sha256::digest(id.as_bytes()));
+    if hash != expected {
+        return Err(gwt_core::GwtError::Other(format!(
+            "work event shard filename does not match payload id: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
 
 fn load_pending_sources_for_rebuild(
     pending_sources: &[PendingWorkEventsSource],
@@ -98,7 +197,7 @@ fn load_pending_sources_for_rebuild(
             fingerprints.push((source.key.clone(), source.fingerprint.clone()));
             continue;
         };
-        let content = std::fs::read_to_string(&reload.events_path)?;
+        let content = read_work_event_source(&reload.events_path, reload.kind)?;
         fingerprints.push((
             source.key.clone(),
             source_fingerprint(&content_fingerprint(&content), reload.container.as_ref()),
@@ -172,7 +271,7 @@ where
                 return summary;
             }
         };
-    let rebuild_required = projection_requires_rebuild
+    let mut rebuild_required = projection_requires_rebuild
         || !state.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
     let mut pending_sources = Vec::new();
     let mut source_discovery_failed = false;
@@ -198,7 +297,7 @@ where
                 continue;
             }
         }
-        let content = match std::fs::read_to_string(&events_path) {
+        let content = match read_work_event_source(&events_path, source.kind) {
             Ok(content) => content,
             Err(error) => {
                 tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source read failed");
@@ -209,10 +308,6 @@ where
         let key = format!("{SOURCE_WORKTREE}{}", events_path.display());
         let source_container = source.container.as_ref();
         let fingerprint = source_fingerprint(&content_fingerprint(&content), source_container);
-        if !rebuild_required && state.is_current(&key, &fingerprint) {
-            summary.sources_skipped += 1;
-            continue;
-        }
         pending_sources.push(PendingWorkEventsSource {
             key,
             fingerprint,
@@ -220,6 +315,7 @@ where
             container: source.container.clone(),
             reload: Some(ReloadableWorkEventsSource {
                 events_path,
+                kind: source.kind,
                 container: source.container,
             }),
         });
@@ -236,19 +332,57 @@ where
                     let mut pending_blobs = Vec::new();
                     for ((refname, _), oid) in refs.iter().zip(oids) {
                         let Some(oid) = oid else { continue };
-                        let key = format!("{SOURCE_REF}{refname}");
+                        let key = format!("{SOURCE_REF}{refname}:{EVENTS_TREE_PATH}");
                         let source_container = origin_ref_execution_container(refname);
                         let fingerprint = source_fingerprint(&oid, source_container.as_ref());
-                        if !rebuild_required && state.is_current(&key, &fingerprint) {
-                            summary.sources_skipped += 1;
-                            continue;
-                        }
                         pending_blobs.push(PendingOriginBlob {
                             key,
                             fingerprint,
                             oid,
+                            path: EVENTS_TREE_PATH.to_string(),
+                            kind: WorkEventsSourceKind::Legacy,
                             container: source_container,
                         });
+                    }
+                    match gwt_git::blob::tree_blob_entries_batch(
+                        project_root,
+                        &commits,
+                        EVENTS_TREE_DIR,
+                    ) {
+                        Ok(entries_by_ref) => {
+                            for ((refname, _), entries) in refs.iter().zip(entries_by_ref) {
+                                let source_container = origin_ref_execution_container(refname);
+                                for entry in entries {
+                                    if !matches!(entry.mode.as_str(), "100644" | "100755")
+                                        || Path::new(&entry.path).parent()
+                                            != Some(Path::new(EVENTS_TREE_DIR))
+                                    {
+                                        tracing::warn!(
+                                            path = %entry.path,
+                                            mode = %entry.mode,
+                                            "work events ingest: ref shard tree entry is not a direct regular file"
+                                        );
+                                        source_discovery_failed = true;
+                                        continue;
+                                    }
+                                    pending_blobs.push(PendingOriginBlob {
+                                        key: format!("{SOURCE_REF}{refname}:{}", entry.path),
+                                        fingerprint: source_fingerprint(
+                                            &entry.oid,
+                                            source_container.as_ref(),
+                                        ),
+                                        oid: entry.oid,
+                                        path: entry.path,
+                                        kind: WorkEventsSourceKind::Shard,
+                                        container: source_container.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "work events ingest: ref shard tree listing failed");
+                            source_discovery_failed = true;
+                        }
                     }
                     let mut oid_indices = HashMap::new();
                     let mut unique_oids = Vec::new();
@@ -259,12 +393,8 @@ where
                         oid_indices.insert(pending.oid.clone(), unique_oids.len());
                         unique_oids.push(pending.oid.clone());
                     }
-                    match gwt_git::blob::read_blobs_batch(project_root, &unique_oids) {
+                    match gwt_git::blob::read_blob_bytes_batch(project_root, &unique_oids) {
                         Ok(contents) => {
-                            let contents = contents
-                                .into_iter()
-                                .map(Arc::<str>::from)
-                                .collect::<Vec<_>>();
                             for pending in pending_blobs {
                                 let Some(index) = oid_indices.get(&pending.oid).copied() else {
                                     source_discovery_failed = true;
@@ -274,10 +404,22 @@ where
                                     source_discovery_failed = true;
                                     continue;
                                 };
+                                let content = match work_event_source_content(
+                                    Path::new(&pending.path),
+                                    pending.kind,
+                                    content.clone(),
+                                ) {
+                                    Ok(content) => content,
+                                    Err(error) => {
+                                        tracing::warn!(%error, source = %pending.key, "work events ingest: ref source validation failed");
+                                        source_discovery_failed = true;
+                                        continue;
+                                    }
+                                };
                                 pending_sources.push(PendingWorkEventsSource {
                                     key: pending.key,
                                     fingerprint: pending.fingerprint,
-                                    content: Arc::clone(content),
+                                    content: Arc::from(content),
                                     container: pending.container,
                                     reload: None,
                                 });
@@ -305,19 +447,14 @@ where
     let close_path = work_items_path
         .parent()
         .map(|parent| parent.join("work-events-closed.jsonl"));
-    let pending_local_lifecycle = match close_path.as_ref().map(std::fs::read_to_string) {
+    let mut pending_local_lifecycle = match close_path.as_ref().map(std::fs::read_to_string) {
         Some(Ok(content)) if !content.is_empty() => {
             let key = format!(
                 "{SOURCE_LOCAL_LIFECYCLE}{}",
                 close_path.as_ref().unwrap().display()
             );
             let fingerprint = content_fingerprint(&content);
-            if !rebuild_required && state.is_current(&key, &fingerprint) {
-                summary.sources_skipped += 1;
-                None
-            } else {
-                Some((key, fingerprint))
-            }
+            Some((key, fingerprint))
         }
         Some(Ok(_)) | None => None,
         Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -327,6 +464,35 @@ where
         }
     };
 
+    let discovered_sources = pending_sources
+        .iter()
+        .map(|source| (source.key.clone(), source.fingerprint.clone()))
+        .collect::<Vec<_>>();
+    let discovered_source_list_fingerprint = source_list_fingerprint(&discovered_sources);
+    let had_source_list_fingerprint = state.sources.contains_key(SOURCE_LIST);
+    let source_list_changed = !state.is_current(SOURCE_LIST, &discovered_source_list_fingerprint);
+    if source_list_changed {
+        rebuild_required = true;
+    }
+
+    if !rebuild_required {
+        pending_sources.retain(|source| {
+            if state.is_current(&source.key, &source.fingerprint) {
+                summary.sources_skipped += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if pending_local_lifecycle
+            .as_ref()
+            .is_some_and(|(key, fingerprint)| state.is_current(key, fingerprint))
+        {
+            summary.sources_skipped += 1;
+            pending_local_lifecycle = None;
+        }
+    }
+
     if rebuild_required && source_discovery_failed {
         tracing::warn!(
             "work events ingest: projection rebuild deferred because source discovery was incomplete"
@@ -335,12 +501,17 @@ where
     }
 
     if pending_sources.is_empty() && pending_local_lifecycle.is_none() {
-        if rebuild_required {
+        let authoritative_empty_source_deletion =
+            rebuild_required && source_list_changed && had_source_list_fingerprint;
+        if rebuild_required && !authoritative_empty_source_deletion {
             tracing::warn!(
                 "work events ingest: projection rebuild deferred because no shared or local lifecycle source was readable"
             );
+            return summary;
         }
-        return summary;
+        if !authoritative_empty_source_deletion {
+            return summary;
+        }
     }
 
     before_intake();
@@ -390,6 +561,11 @@ where
                 shared_fingerprints.len() + usize::from(local_fingerprint.is_some());
             summary.events_applied = report.applied;
             summary.projection_rebuilt = rebuild_required;
+            let applied_source_list_fingerprint = if rebuild_required {
+                source_list_fingerprint(&shared_fingerprints)
+            } else {
+                discovered_source_list_fingerprint.clone()
+            };
             if rebuild_required {
                 // A semantics rebuild establishes a new source snapshot. A
                 // fingerprint retained for a source that was not actually
@@ -409,6 +585,7 @@ where
             if rebuild_required {
                 state.record_projection_version(SOURCE_CONTEXT_FINGERPRINT_VERSION);
             }
+            state.record(SOURCE_LIST, applied_source_list_fingerprint);
             if let Err(error) = save_work_events_intake_state(state_path, &state) {
                 tracing::warn!(%error, "work events ingest: state save failed");
             }
@@ -420,30 +597,100 @@ where
     summary
 }
 
-/// The events.jsonl file of every local worktree (main checkout included).
-fn worktree_event_sources(
-    project_root: &Path,
-) -> Result<Vec<WorkEventsSource>, gwt::worktree_inventory::InventoryError> {
-    gwt::worktree_inventory::enumerate_worktrees(project_root, None).map(|entries| {
-        entries
-            .into_iter()
-            .map(|entry| WorkEventsSource {
-                events_path: entry.path.join(EVENTS_TREE_PATH),
-                container: entry.branch.map(|branch| WorkspaceExecutionContainerRef {
-                    branch: Some(branch),
-                    worktree_path: Some(entry.path),
-                    pr_number: None,
-                    pr_url: None,
-                    pr_state: None,
-                }),
-            })
-            .collect()
-    })
+/// The legacy log and every canonical event shard in each local worktree.
+fn validate_work_event_store_path(events_dir: &Path) -> gwt_core::Result<bool> {
+    for managed_parent in events_dir.ancestors().skip(1).take(2) {
+        match std::fs::symlink_metadata(managed_parent) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(gwt_core::GwtError::Other(format!(
+                    "work event shard store parent is not a real directory: {}",
+                    managed_parent.display()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(gwt_core::GwtError::Other(format!(
+                    "work event shard store parent is missing: {}",
+                    managed_parent.display()
+                )))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match std::fs::symlink_metadata(events_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(gwt_core::GwtError::Other(format!(
+            "work event shard store is not a real directory: {}",
+            events_dir.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn worktree_event_sources(project_root: &Path) -> gwt_core::Result<Vec<WorkEventsSource>> {
+    let entries = gwt::worktree_inventory::enumerate_worktrees(project_root, None)
+        .map_err(|error| gwt_core::GwtError::Other(format!("worktree inventory: {error}")))?;
+    let mut sources = Vec::new();
+    for entry in entries {
+        let container = entry.branch.map(|branch| WorkspaceExecutionContainerRef {
+            branch: Some(branch),
+            worktree_path: Some(entry.path.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        sources.push(WorkEventsSource {
+            events_path: entry.path.join(EVENTS_TREE_PATH),
+            kind: WorkEventsSourceKind::Legacy,
+            container: container.clone(),
+        });
+        let events_dir = entry.path.join(EVENTS_TREE_DIR);
+        if !validate_work_event_store_path(&events_dir)? {
+            continue;
+        }
+        for shard in std::fs::read_dir(&events_dir)? {
+            let shard = shard?;
+            if !shard.file_type()?.is_file() {
+                return Err(gwt_core::GwtError::Other(format!(
+                    "work event shard is not a regular file: {}",
+                    shard.path().display()
+                )));
+            }
+            if is_work_event_writer_temp_residue(&shard.path()) {
+                continue;
+            }
+            sources.push(WorkEventsSource {
+                events_path: shard.path(),
+                kind: WorkEventsSourceKind::Shard,
+                container: container.clone(),
+            });
+        }
+    }
+    Ok(sources)
+}
+
+fn is_work_event_writer_temp_residue(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((hash, suffix)) = rest.split_once(".jsonl.create-") else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && !suffix.is_empty()
 }
 
 #[derive(Debug, Clone)]
 struct WorkEventsSource {
     events_path: PathBuf,
+    kind: WorkEventsSourceKind,
     container: Option<WorkspaceExecutionContainerRef>,
 }
 
@@ -476,10 +723,23 @@ fn source_fingerprint(
     ))
 }
 
+fn source_list_fingerprint(sources: &[(String, String)]) -> String {
+    let mut sources = sources.to_vec();
+    sources.sort();
+    content_fingerprint(
+        &sources
+            .into_iter()
+            .map(|(key, fingerprint)| format!("{key}\0{fingerprint}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gwt_core::work_events_intake::WorkEventsIntakeState;
+    use sha2::Digest;
     use std::process::Command;
 
     fn run(cmd: &mut Command) {
@@ -655,6 +915,884 @@ mod tests {
         assert_eq!(second.events_applied, 0);
         assert_eq!(second.sources_ingested, 0);
         assert!(second.sources_skipped >= 2, "fingerprint skip: {second:?}");
+    }
+
+    #[test]
+    fn ingest_dual_reads_local_legacy_and_canonical_shards_exactly_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+
+        let legacy_event = event_line(
+            "evt-dual-legacy",
+            "work-dual-legacy",
+            "Legacy work",
+            "2026-08-12T01:00:00Z",
+        );
+        let shard_event = event_line(
+            "evt-dual-shard",
+            "work-dual-shard",
+            "Shard work",
+            "2026-08-12T02:00:00Z",
+        );
+        let work_dir = repo.join(".gwt/work");
+        std::fs::create_dir_all(work_dir.join("events")).expect("event store");
+        std::fs::write(work_dir.join("events.jsonl"), format!("{legacy_event}\n"))
+            .expect("legacy source");
+        let shard_id = format!("{:x}", sha2::Sha256::digest(b"evt-dual-shard"));
+        std::fs::write(
+            work_dir.join("events").join(format!("{shard_id}.jsonl")),
+            format!("{shard_event}\n"),
+        )
+        .expect("shard source");
+        let duplicate_id = format!("{:x}", sha2::Sha256::digest(b"evt-dual-legacy"));
+        std::fs::write(
+            work_dir
+                .join("events")
+                .join(format!("{duplicate_id}.jsonl")),
+            format!("{legacy_event}\n"),
+        )
+        .expect("duplicate shard source");
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            summary.projection_rebuilt,
+            "initial dual-read rebuild: {summary:?}"
+        );
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load")
+                .expect("projection");
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-dual-legacy"));
+        let shard = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-dual-shard")
+            .expect("shard Work restored");
+        assert_eq!(shard.events.len(), 1, "one shard event is folded once");
+        let legacy = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-dual-legacy")
+            .expect("legacy Work restored");
+        assert_eq!(
+            legacy.events.len(),
+            1,
+            "legacy/shard duplicate is exact-once"
+        );
+    }
+
+    #[test]
+    fn ingest_restores_shard_committed_only_on_fetched_origin_ref() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "-b", "work/remote-shard"])
+            .current_dir(&repo));
+        let event = event_line(
+            "evt-remote-shard",
+            "work-remote-shard",
+            "Remote shard work",
+            "2026-08-12T03:00:00Z",
+        );
+        let hash = format!("{:x}", sha2::Sha256::digest(b"evt-remote-shard"));
+        let shard = repo.join(EVENTS_TREE_DIR).join(format!("{hash}.jsonl"));
+        std::fs::create_dir_all(shard.parent().unwrap()).expect("event store");
+        std::fs::write(&shard, format!("{event}\n")).expect("remote shard");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", ".gwt/work/events"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "remote shard"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "update-ref",
+                "refs/remotes/origin/work/remote-shard",
+                "HEAD",
+            ])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo));
+        assert!(!repo.join(EVENTS_TREE_DIR).exists(), "shard is ref-only");
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("complete local source discovery");
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(summary.projection_rebuilt, "ref shard rebuild: {summary:?}");
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-remote-shard")
+            .expect("ref shard Work restored");
+        assert!(item.execution_containers.iter().any(|container| {
+            container.branch.as_deref() == Some("work/remote-shard")
+                && container.worktree_path.is_none()
+        }));
+    }
+
+    #[test]
+    fn invalid_shard_defers_rebuild_and_preserves_existing_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-preserved",
+                    "work-preserved",
+                    "Preserved work",
+                    "2026-08-12T04:00:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let before = std::fs::read(&work_items_path).expect("projection before invalid shard");
+
+        let invalid = repo.join(EVENTS_TREE_DIR).join("not-a-sha256.jsonl");
+        std::fs::create_dir_all(invalid.parent().unwrap()).expect("event store");
+        std::fs::write(&invalid, b"{}\n").expect("invalid shard");
+        let mut stale = load_work_events_intake_state(&state_path);
+        stale.record_projection_version("source-context-v6-complete-project-transaction");
+        save_work_events_intake_state(&state_path, &stale).expect("force rebuild");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            !summary.projection_rebuilt,
+            "invalid shard must defer: {summary:?}"
+        );
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), before);
+        assert!(!load_work_events_intake_state(&state_path)
+            .projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION));
+    }
+
+    #[cfg(unix)]
+    fn assert_symlinked_local_managed_event_parent_defers(managed_parent: &str) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-symlink-parent-base",
+                    "work-symlink-parent-base",
+                    "Symlink parent base",
+                    "2026-08-12T04:05:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let projection_before = std::fs::read(&work_items_path).expect("projection before");
+        let state_before = std::fs::read(&state_path).expect("state before");
+
+        let external_parent = temp
+            .path()
+            .join(format!("external-{}", managed_parent.replace('/', "-")));
+        std::fs::create_dir_all(&external_parent).expect("external managed parent");
+        let link = repo.join(managed_parent);
+        std::fs::remove_dir_all(&link).expect("replace managed parent");
+        std::os::unix::fs::symlink(&external_parent, &link).expect("symlink managed parent");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_local_gwt_parent_defers_rebuild_without_mutation() {
+        assert_symlinked_local_managed_event_parent_defers(".gwt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_local_work_parent_defers_rebuild_without_mutation() {
+        assert_symlinked_local_managed_event_parent_defers(".gwt/work");
+    }
+
+    fn assert_missing_local_managed_event_parent_defers(managed_parent: &str) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-missing-parent-base",
+                    "work-missing-parent-base",
+                    "Missing parent base",
+                    "2026-08-12T04:07:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let projection_before = std::fs::read(&work_items_path).expect("projection before");
+        let state_before = std::fs::read(&state_path).expect("state before");
+
+        let missing = repo.join(managed_parent);
+        std::fs::remove_dir_all(&missing).expect("remove managed parent");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            !summary.projection_rebuilt,
+            "incomplete discovery must defer: {summary:?}"
+        );
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    }
+
+    #[test]
+    fn missing_local_gwt_parent_defers_rebuild_without_mutation() {
+        assert_missing_local_managed_event_parent_defers(".gwt");
+    }
+
+    #[test]
+    fn missing_local_work_parent_defers_rebuild_without_mutation() {
+        assert_missing_local_managed_event_parent_defers(".gwt/work");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_local_event_store_defers_rebuild_without_mutating_projection_or_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-symlink-root-base",
+                    "work-symlink-root-base",
+                    "Symlink root base",
+                    "2026-08-12T04:10:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let projection_before = std::fs::read(&work_items_path).expect("projection before");
+        let state_before = std::fs::read(&state_path).expect("state before");
+
+        let external = temp.path().join("external-events");
+        std::fs::create_dir_all(&external).expect("external event store");
+        let id = "evt-outside-symlink-root";
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        std::fs::write(
+            external.join(format!("{hash}.jsonl")),
+            format!(
+                "{}\n",
+                event_line(
+                    id,
+                    "work-outside-symlink-root",
+                    "Must stay outside",
+                    "2026-08-12T04:11:00Z",
+                )
+            ),
+        )
+        .expect("external shard");
+        std::os::unix::fs::symlink(&external, repo.join(EVENTS_TREE_DIR))
+            .expect("symlink event store");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_local_event_shard_defers_rebuild_without_mutating_projection_or_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-symlink-entry-base",
+                    "work-symlink-entry-base",
+                    "Symlink entry base",
+                    "2026-08-12T04:20:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let projection_before = std::fs::read(&work_items_path).expect("projection before");
+        let state_before = std::fs::read(&state_path).expect("state before");
+
+        let id = "evt-outside-symlink-entry";
+        let target = temp.path().join("outside-event.jsonl");
+        std::fs::write(
+            &target,
+            format!(
+                "{}\n",
+                event_line(
+                    id,
+                    "work-outside-symlink-entry",
+                    "Must stay outside",
+                    "2026-08-12T04:21:00Z",
+                )
+            ),
+        )
+        .expect("external shard");
+        let events_dir = repo.join(EVENTS_TREE_DIR);
+        std::fs::create_dir_all(&events_dir).expect("real event store");
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        std::os::unix::fs::symlink(&target, events_dir.join(format!("{hash}.jsonl")))
+            .expect("symlink shard");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    }
+
+    #[test]
+    fn nested_ref_shard_defers_rebuild_without_mutating_projection_or_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-nested-ref-base",
+                    "work-nested-ref-base",
+                    "Nested ref base",
+                    "2026-08-12T04:30:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let projection_before = std::fs::read(&work_items_path).expect("projection before");
+        let state_before = std::fs::read(&state_path).expect("state before");
+
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "-b", "work/nested-ref-shard"])
+            .current_dir(&repo));
+        let id = "evt-nested-ref-shard";
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        let nested = repo
+            .join(EVENTS_TREE_DIR)
+            .join("nested")
+            .join(format!("{hash}.jsonl"));
+        std::fs::create_dir_all(nested.parent().unwrap()).expect("nested event store");
+        std::fs::write(
+            &nested,
+            format!(
+                "{}\n",
+                event_line(
+                    id,
+                    "work-nested-ref-shard",
+                    "Nested ref shard",
+                    "2026-08-12T04:31:00Z",
+                )
+            ),
+        )
+        .expect("nested ref shard");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", ".gwt/work/events"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "nested ref shard"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "update-ref",
+                "refs/remotes/origin/work/nested-ref-shard",
+                "HEAD",
+            ])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo));
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_mode_ref_shard_defers_rebuild_without_mutating_projection_or_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-symlink-ref-base",
+                    "work-symlink-ref-base",
+                    "Symlink ref base",
+                    "2026-08-12T04:40:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let projection_before = std::fs::read(&work_items_path).expect("projection before");
+        let state_before = std::fs::read(&state_path).expect("state before");
+
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "-b", "work/symlink-ref-shard"])
+            .current_dir(&repo));
+        let id = "evt-symlink-ref-shard";
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        let shard = repo.join(EVENTS_TREE_DIR).join(format!("{hash}.jsonl"));
+        std::fs::create_dir_all(shard.parent().unwrap()).expect("event store");
+        let event = event_line(
+            id,
+            "work-symlink-ref-shard",
+            "Symlink ref shard",
+            "2026-08-12T04:41:00Z",
+        );
+        std::os::unix::fs::symlink(format!("{event}\n"), &shard)
+            .expect("event-shaped symlink target");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", ".gwt/work/events"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "symlink ref shard"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "update-ref",
+                "refs/remotes/origin/work/symlink-ref-shard",
+                "HEAD",
+            ])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo));
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
+        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+    }
+
+    #[test]
+    fn incomplete_event_schema_shard_defers_rebuild_and_preserves_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-schema-preserved",
+                    "work-schema-preserved",
+                    "Schema preserved work",
+                    "2026-08-12T04:30:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+        let before = std::fs::read(&work_items_path).expect("projection before invalid schema");
+
+        let id = "evt-id-only";
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        let invalid = repo.join(EVENTS_TREE_DIR).join(format!("{hash}.jsonl"));
+        std::fs::create_dir_all(invalid.parent().unwrap()).expect("event store");
+        std::fs::write(&invalid, format!("{{\"id\":\"{id}\"}}\n")).expect("incomplete event shard");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            !summary.projection_rebuilt,
+            "incomplete schema shard must defer: {summary:?}"
+        );
+        assert_eq!(std::fs::read(&work_items_path).unwrap(), before);
+    }
+
+    #[test]
+    fn future_opaque_event_shard_is_source_valid_and_skipped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-known-before-future",
+                    "work-known-before-future",
+                    "Known work",
+                    "2026-08-12T04:45:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+
+        let id = "evt-future-opaque";
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        let shard = repo.join(EVENTS_TREE_DIR).join(format!("{hash}.jsonl"));
+        std::fs::create_dir_all(shard.parent().unwrap()).expect("event store");
+        let future = serde_json::json!({
+            "id": id,
+            "work_item_id": "work-future-opaque",
+            "kind": "future_release_kind",
+            "updated_at": "2026-08-12T05:00:00Z",
+            "future_top_level": { "preserve": [1, 2, 3] },
+        });
+        let future_bytes = format!("{future}\n").into_bytes();
+        std::fs::write(&shard, &future_bytes).expect("future event shard");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            summary.projection_rebuilt,
+            "future shard is source-valid: {summary:?}"
+        );
+        assert_eq!(std::fs::read(&shard).unwrap(), future_bytes);
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-known-before-future"));
+        assert!(!projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-future-opaque"));
+    }
+
+    #[test]
+    fn shard_source_list_fingerprint_rebuilds_after_deletion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let events_dir = repo.join(EVENTS_TREE_DIR);
+        std::fs::create_dir_all(&events_dir).expect("event store");
+        let mut shards = Vec::new();
+        for (id, work_id, hour) in [
+            ("evt-kept-shard", "work-kept-shard", 5),
+            ("evt-deleted-shard", "work-deleted-shard", 6),
+        ] {
+            let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+            let path = events_dir.join(format!("{hash}.jsonl"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n",
+                    event_line(
+                        id,
+                        work_id,
+                        work_id,
+                        &format!("2026-08-12T{hour:02}:00:00Z"),
+                    )
+                ),
+            )
+            .expect("shard");
+            shards.push(path);
+        }
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+
+        std::fs::remove_file(&shards[1]).expect("delete shard");
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            summary.projection_rebuilt,
+            "deletion changes source snapshot: {summary:?}"
+        );
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-kept-shard"));
+        assert!(!projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-deleted-shard"));
+    }
+
+    #[test]
+    fn tracked_source_list_rebuilds_after_local_legacy_source_deletion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-local-legacy-delete",
+                    "work-local-legacy-delete",
+                    "Deleted local legacy",
+                    "2026-08-12T06:30:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+
+        std::fs::remove_file(&legacy).expect("delete local legacy source");
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            summary.projection_rebuilt,
+            "complete discovery of an empty source list is authoritative: {summary:?}"
+        );
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        assert!(!projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-local-legacy-delete"));
+    }
+
+    #[test]
+    fn tracked_source_list_rebuilds_after_origin_legacy_ref_deletion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "-b", "work/deleted-origin-legacy"])
+            .current_dir(&repo));
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("work dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-origin-legacy-delete",
+                    "work-origin-legacy-delete",
+                    "Deleted origin legacy",
+                    "2026-08-12T06:45:00Z",
+                )
+            ),
+        )
+        .expect("legacy source");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", EVENTS_TREE_PATH])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "origin legacy"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "update-ref",
+                "refs/remotes/origin/work/deleted-origin-legacy",
+                "HEAD",
+            ])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo));
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("complete local source discovery");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        assert!(
+            ingest_project_work_events_paths(&repo, &work_items_path, &state_path)
+                .projection_rebuilt
+        );
+
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "update-ref",
+                "-d",
+                "refs/remotes/origin/work/deleted-origin-legacy",
+            ])
+            .current_dir(&repo));
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            summary.projection_rebuilt,
+            "ref deletion changes source list: {summary:?}"
+        );
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        assert!(!projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-origin-legacy-delete"));
+    }
+
+    #[test]
+    fn local_source_discovery_ignores_only_recognized_writer_temp_residue() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let id = "evt-temp-residue";
+        let hash = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        let events_dir = repo.join(EVENTS_TREE_DIR);
+        std::fs::create_dir_all(&events_dir).expect("event store");
+        std::fs::write(
+            events_dir.join(format!("{hash}.jsonl")),
+            format!(
+                "{}\n",
+                event_line(
+                    id,
+                    "work-temp-residue",
+                    "Writer temp residue",
+                    "2026-08-12T07:00:00Z",
+                )
+            ),
+        )
+        .expect("canonical shard");
+        std::fs::write(
+            events_dir.join(format!(".{hash}.jsonl.create-123-concurrent")),
+            b"incomplete writer temp bytes",
+        )
+        .expect("writer temp residue");
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            summary.projection_rebuilt,
+            "recognized temp is ignored: {summary:?}"
+        );
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-temp-residue"));
     }
 
     #[test]
@@ -1179,6 +2317,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("complete local source discovery");
 
         let state_dir = temp.path().join("state");
         let work_items_path = state_dir.join("works.json");
@@ -1518,8 +2657,12 @@ mod tests {
         std::fs::write(&restored_events, restored_content).unwrap();
 
         let restored = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
-        assert_eq!(restored.sources_ingested, 1);
-        assert_eq!(restored.events_applied, 1);
+        assert!(
+            restored.projection_rebuilt,
+            "source addition changes the authoritative source list: {restored:?}"
+        );
+        assert_eq!(restored.sources_ingested, 2);
+        assert_eq!(restored.events_applied, 2);
         let projection =
             gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
                 .unwrap()

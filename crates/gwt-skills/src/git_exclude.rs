@@ -13,6 +13,8 @@ const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";
 const LEGACY_BEGIN_MARKER: &str = "# BEGIN gwt managed local assets";
 const LEGACY_END_MARKER: &str = "# END gwt managed local assets";
+const CANONICAL_WORK_EVENT_SHARD_GLOB: &str =
+    "!.gwt/work/events/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].jsonl";
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.
 ///
@@ -193,10 +195,11 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
         return patterns;
     }
     // project-local `.gwt/` holds gwt-managed files (project.toml,
-    // discussion.md, agent homes). Exclude its contents broadly, but carve out
-    // `.gwt/work/` so the tracked Work persistent core (`.gwt/work/events.jsonl`,
-    // `.gwt/work/board-remote-roots.jsonl`) is committed with the repo
-    // (SPEC-2359 Phase W-12). memory.md / discussions.md moved to the
+    // discussion.md, agent homes). Exclude its contents broadly, then carve out
+    // only the tracked Work persistent core: the frozen legacy event history,
+    // immutable per-event shards, and the board remote-root registry
+    // (SPEC-2359 W-33). Writer temp residue stays ignored. memory.md /
+    // discussions.md moved to the
     // machine-local home work-notes dir (SPEC-3214); a legacy repo-local copy
     // remains a read fallback. `.gwt/*` excludes the children without
     // excluding the `.gwt/` directory itself, so the later `!.gwt/work/`
@@ -204,6 +207,13 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
     // only when a parent directory is excluded).
     push_unique(&mut patterns, ".gwt/*");
     push_unique(&mut patterns, "!.gwt/work/");
+    push_unique(&mut patterns, ".gwt/work/*");
+    push_unique(&mut patterns, "!.gwt/work/events.jsonl");
+    push_unique(&mut patterns, "!.gwt/work/events/");
+    push_unique(&mut patterns, ".gwt/work/events/*");
+    push_unique(&mut patterns, CANONICAL_WORK_EVENT_SHARD_GLOB);
+    push_unique(&mut patterns, ".gwt/work/events/.*.jsonl.create-*");
+    push_unique(&mut patterns, "!.gwt/work/board-remote-roots.jsonl");
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         push_unique(&mut patterns, ".claude/skills/gwt-*");
         push_unique(&mut patterns, ".claude/commands/gwt-*");
@@ -287,6 +297,36 @@ mod tests {
         assert!(
             exclude_idx < carveout_idx,
             "`.gwt/*` must precede `!.gwt/work/` so the carve-out re-includes: {result}"
+        );
+
+        for pattern in [
+            ".gwt/work/*",
+            "!.gwt/work/events.jsonl",
+            "!.gwt/work/events/",
+            CANONICAL_WORK_EVENT_SHARD_GLOB,
+            ".gwt/work/events/.*.jsonl.create-*",
+            "!.gwt/work/board-remote-roots.jsonl",
+        ] {
+            assert!(
+                result.lines().any(|line| line == pattern),
+                "managed block must contain canonical Work tracking pattern {pattern:?}: {result}"
+            );
+        }
+
+        let work_exclude_idx = result.find("\n.gwt/work/*\n").unwrap();
+        let shard_dir_idx = result.find("\n!.gwt/work/events/\n").unwrap();
+        let shard_idx = result
+            .find(&format!("\n{CANONICAL_WORK_EVENT_SHARD_GLOB}\n"))
+            .unwrap();
+        let writer_temp_idx = result
+            .find("\n.gwt/work/events/.*.jsonl.create-*\n")
+            .unwrap();
+        assert!(
+            carveout_idx < work_exclude_idx
+                && work_exclude_idx < shard_dir_idx
+                && shard_dir_idx < shard_idx
+                && shard_idx < writer_temp_idx,
+            "Work exclusions must track immutable shards while the later writer-temp pattern stays ignored: {result}"
         );
     }
 

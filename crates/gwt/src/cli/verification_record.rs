@@ -540,13 +540,17 @@ pub(crate) fn worktree_fingerprint_excluding(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Exact tracked path whose delivery must settle before terminal mutations.
+/// Legacy tracked Work-event log kept as a read-only compatibility source.
 pub const WORK_EVENT_LOG_RELATIVE: &str = ".gwt/work/events.jsonl";
+/// Canonical immutable Work-event shard store whose delivery must settle
+/// before terminal mutations.
+pub const WORK_EVENT_STORE_RELATIVE: &str = ".gwt/work/events";
 
 const WORK_EVENT_SETTLEMENT_RECORD_FILE: &str = "work-event-settlement.json";
 const WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION: u64 = 1;
 const WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION: u64 = 2;
-pub(crate) const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 3;
+const WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION: u64 = 3;
+pub(crate) const WORK_EVENT_SETTLEMENT_SCHEMA_VERSION: u64 = 4;
 
 /// Independent dirty states reported for the exact tracked Work event path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -653,9 +657,25 @@ pub struct WorkEventSettlementRecord {
     /// records deserialize as `None` and are audit-only once a ledger exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<ExecutionBindingIdentity>,
+    /// Exact immutable shard whose delivery owns a schema-v4 obligation.
+    /// Kept independently from `status` so dirty/push diagnostics cannot
+    /// discard the identity before the exact shard reaches HEAD/upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_delivery: Option<PendingWorkEventDelivery>,
     pub obligation_open: bool,
     pub status: WorkEventSettlementStatus,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingWorkEventDelivery {
+    event_id: String,
+    work_id: String,
+    event_session_id: String,
+    #[serde(default)]
+    journal_entry_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    request_fingerprint: String,
 }
 
 /// Load the machine-local Work event settlement record. No worktree mirror
@@ -689,6 +709,7 @@ fn decode_work_event_settlement_record(
         record.schema_version,
         WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION
             | WORK_EVENT_SETTLEMENT_PRE_GENERATION_SCHEMA_VERSION
+            | WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION
             | WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
     ) {
         return Err(io::Error::new(
@@ -747,13 +768,15 @@ pub fn prepare_work_event_settlement_record(
     journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
 ) -> io::Result<WorkEventSettlementRecord> {
     let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
+    let mut event = event.clone();
+    let mut journal_entry = journal_entry.clone();
     crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
         prepare_work_event_settlement_record_with_held_lease(
             &trusted_dir,
             worktree,
             session_id,
-            event,
-            journal_entry,
+            &mut event,
+            &mut journal_entry,
         )
     })
 }
@@ -766,8 +789,8 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
     trusted_dir: &Path,
     worktree: &Path,
     session_id: &str,
-    event: &gwt_core::workspace_projection::WorkEvent,
-    journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+    event: &mut gwt_core::workspace_projection::WorkEvent,
+    journal_entry: &mut gwt_core::workspace_projection::WorkspaceJournalEntry,
 ) -> io::Result<WorkEventSettlementRecord> {
     if event.kind != gwt_core::workspace_projection::WorkEventKind::Done
         || event.id.trim().is_empty()
@@ -786,17 +809,54 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
 
     require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
     let current_binding = current_execution_context(worktree)?.1;
-    let (record_session_id, execution_binding) =
-        match load_work_event_settlement_record_from_resolved_dir(trusted_dir)?
-            .filter(|record| record.obligation_open)
-        {
-            Some(record) => (record.session_id, record.execution_binding),
-            None => (session_id.to_string(), current_binding),
-        };
+    let request_fingerprint = pending_delivery_request_fingerprint(event, journal_entry)?;
+    if let Some(record) = load_work_event_settlement_record_from_resolved_dir(trusted_dir)?
+        .filter(|record| record.obligation_open)
+    {
+        if let Some(delivery) = pending_delivery_for_record(&record) {
+            let same_event_identity = delivery.event_id == event.id
+                && delivery.work_id == event.work_item_id
+                && delivery.event_session_id == session_id;
+            let semantic_retry = !delivery.request_fingerprint.is_empty()
+                && delivery.request_fingerprint == request_fingerprint;
+            let early_v4_identity_retry = delivery.request_fingerprint.is_empty()
+                && delivery.journal_entry_id == journal_entry.id;
+            if same_event_identity && (semantic_retry || early_v4_identity_retry) {
+                journal_entry.id = delivery.journal_entry_id;
+                return Ok(record);
+            }
+            let exact_shard =
+                gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &delivery.event_id);
+            let shard_missing = match fs::symlink_metadata(exact_shard) {
+                Err(error) if error.kind() == ErrorKind::NotFound => true,
+                Ok(_) => false,
+                Err(error) => return Err(error),
+            };
+            if shard_missing
+                && !delivery.request_fingerprint.is_empty()
+                && delivery.request_fingerprint == request_fingerprint
+            {
+                event.id = delivery.event_id;
+                journal_entry.id = delivery.journal_entry_id;
+                return Ok(record);
+            }
+        }
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "an earlier terminal Work event is still awaiting delivery",
+        ));
+    }
     let record = WorkEventSettlementRecord {
         schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
-        session_id: record_session_id,
-        execution_binding,
+        session_id: session_id.to_string(),
+        execution_binding: current_binding,
+        pending_delivery: Some(PendingWorkEventDelivery {
+            event_id: event.id.clone(),
+            work_id: event.work_item_id.clone(),
+            event_session_id: session_id.to_string(),
+            journal_entry_id: journal_entry.id.clone(),
+            request_fingerprint,
+        }),
         obligation_open: true,
         status: WorkEventSettlementStatus::PendingMutation {
             event_id: event.id.clone(),
@@ -827,22 +887,42 @@ pub fn save_work_event_settlement_record(
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
         let previous = load_work_event_settlement_record_from_resolved_dir(&trusted_dir)?;
         if let Some(record) = previous.as_ref().filter(|record| record.obligation_open) {
-            if let WorkEventSettlementStatus::PendingMutation {
-                event_id,
-                work_id,
-                event_session_id,
-                ..
-            } = &record.status
-            {
-                match pending_work_event_is_persisted(worktree, event_id, work_id, event_session_id)
-                {
+            if let Some(delivery) = pending_delivery_for_record(record) {
+                match pending_work_event_is_persisted(
+                    worktree,
+                    record.schema_version,
+                    &delivery.event_id,
+                    &delivery.work_id,
+                    &delivery.event_session_id,
+                ) {
                     Ok(true) => {}
                     Ok(false) => return Ok(record.clone()),
                     Err(error) => return Err(error),
                 }
             }
         }
-        let status = evaluate_work_event_settlement(worktree);
+        let pending_delivery = previous
+            .as_ref()
+            .filter(|record| {
+                record.obligation_open
+                    && record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+            })
+            .and_then(pending_delivery_for_record);
+        let exact_event_path = pending_delivery
+            .as_ref()
+            .map(|delivery| pending_work_event_shard_relative_path(worktree, &delivery.event_id))
+            .transpose()?;
+        let mut status =
+            evaluate_work_event_settlement_for_path(worktree, exact_event_path.as_deref());
+        if status.is_settled() {
+            if let Some(delivery) = pending_delivery.as_ref() {
+                if !pending_work_event_shard_matches_head(worktree, &delivery.event_id)? {
+                    status = WorkEventSettlementStatus::Blocked(
+                        WorkEventSettlementBlocker::CommitNotPushed,
+                    );
+                }
+            }
+        }
         let current_binding = current_execution_context(worktree)?.1;
         let (previous_open, record_session_id, execution_binding) = match previous {
             Some(record) if record.obligation_open || !open_obligation => (
@@ -856,6 +936,7 @@ pub fn save_work_event_settlement_record(
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: record_session_id,
             execution_binding,
+            pending_delivery: (!status.is_settled()).then_some(pending_delivery).flatten(),
             obligation_open: !status.is_settled() && (open_obligation || previous_open),
             status: status.clone(),
             updated_at: Utc::now(),
@@ -864,6 +945,66 @@ pub fn save_work_event_settlement_record(
         persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
         Ok(record)
     })
+}
+
+fn pending_delivery_for_record(
+    record: &WorkEventSettlementRecord,
+) -> Option<PendingWorkEventDelivery> {
+    if record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION {
+        if let Some(delivery) = record.pending_delivery.as_ref() {
+            let mut delivery = delivery.clone();
+            if delivery.journal_entry_id.is_empty() {
+                if let WorkEventSettlementStatus::PendingMutation {
+                    journal_entry_id, ..
+                } = &record.status
+                {
+                    delivery.journal_entry_id = journal_entry_id.clone();
+                }
+            }
+            return Some(delivery);
+        }
+    }
+    {
+        let WorkEventSettlementStatus::PendingMutation {
+            event_id,
+            work_id,
+            event_session_id,
+            ..
+        } = &record.status
+        else {
+            return None;
+        };
+        Some(PendingWorkEventDelivery {
+            event_id: event_id.clone(),
+            work_id: work_id.clone(),
+            event_session_id: event_session_id.clone(),
+            journal_entry_id: String::new(),
+            request_fingerprint: String::new(),
+        })
+    }
+}
+
+fn pending_delivery_request_fingerprint(
+    event: &gwt_core::workspace_projection::WorkEvent,
+    journal_entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> io::Result<String> {
+    let mut event = serde_json::to_value(event)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let mut journal = serde_json::to_value(journal_entry)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    for value in [&mut event, &mut journal] {
+        let object = value.as_object_mut().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "terminal Work delivery fingerprint expected an object",
+            )
+        })?;
+        object.remove("id");
+        object.remove("updated_at");
+    }
+    let bytes = serde_json::to_vec(&(event, journal))
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 #[cfg(test)]
@@ -888,7 +1029,128 @@ fn persist_work_event_settlement_record_to_resolved_dir(
     )
 }
 
+pub(crate) fn pending_shard_refresh_failure_must_block(record: &WorkEventSettlementRecord) -> bool {
+    record.schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
+        && record.obligation_open
+        && pending_delivery_for_record(record).is_some()
+}
+
+pub(crate) fn pending_shard_refresh_failure_description() -> String {
+    "Work event settlement refused: the exact pending Work event shard could not be validated. Retry the terminal workspace.update to restore the canonical shard before retrying."
+        .to_string()
+}
+
 fn pending_work_event_is_persisted(
+    worktree: &Path,
+    receipt_schema_version: u64,
+    event_id: &str,
+    work_id: &str,
+    session_id: &str,
+) -> io::Result<bool> {
+    if receipt_schema_version >= WORK_EVENT_SETTLEMENT_SCHEMA_VERSION {
+        return pending_work_event_shard_is_persisted(worktree, event_id, work_id, session_id);
+    }
+    pending_legacy_work_event_is_persisted(worktree, event_id, work_id, session_id)
+}
+
+fn pending_work_event_shard_is_persisted(
+    worktree: &Path,
+    event_id: &str,
+    work_id: &str,
+    session_id: &str,
+) -> io::Result<bool> {
+    if !pending_work_event_store_ancestors_are_directories(worktree)? {
+        return Ok(false);
+    }
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard is not a regular file",
+        ));
+    }
+    let contents = fs::read(&path)?;
+    if contents.last() != Some(&b'\n')
+        || contents.iter().filter(|byte| **byte == b'\n').count() != 1
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard must contain exactly one newline-terminated event",
+        ));
+    }
+    let payload = &contents[..contents.len() - 1];
+    let decoded = gwt_core::workspace_projection::decode_workspace_work_event_line(payload)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+    let gwt_core::workspace_projection::DecodedWorkspaceWorkEvent::Known(event) = decoded else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event shard uses an unsupported event kind",
+        ));
+    };
+    if event.id != event_id
+        || event.work_item_id != work_id
+        || event.kind != gwt_core::workspace_projection::WorkEventKind::Done
+        || event.agent_session_id.as_deref() != Some(session_id)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "prepared Work event identity does not match the tracked shard",
+        ));
+    }
+    Ok(true)
+}
+
+fn pending_work_event_store_ancestors_are_directories(worktree: &Path) -> io::Result<bool> {
+    let root = gwt_core::paths::resolve_current_worktree_root(worktree);
+    for relative in [".gwt", ".gwt/work", WORK_EVENT_STORE_RELATIVE] {
+        match fs::symlink_metadata(root.join(relative)) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "prepared Work event store ancestor `{relative}` must be a real directory"
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn pending_work_event_shard_matches_head(worktree: &Path, event_id: &str) -> io::Result<bool> {
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let local = fs::read(&path)?;
+    let relative = pending_work_event_shard_relative_path(worktree, event_id)?;
+    let output = gwt_core::process::hidden_command("git")
+        .args(["show", &format!("HEAD:{relative}")])
+        .current_dir(worktree)
+        .output()?;
+    Ok(output.status.success() && output.stdout == local)
+}
+
+fn pending_work_event_shard_relative_path(worktree: &Path, event_id: &str) -> io::Result<String> {
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, event_id);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "prepared Work event shard path is not valid UTF-8",
+            )
+        })?;
+    Ok(format!("{WORK_EVENT_STORE_RELATIVE}/{file_name}"))
+}
+
+fn pending_legacy_work_event_is_persisted(
     worktree: &Path,
     event_id: &str,
     work_id: &str,
@@ -939,6 +1201,13 @@ fn pending_work_event_is_persisted(
 /// a failed probe as evidence of settlement.
 #[must_use]
 pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementStatus {
+    evaluate_work_event_settlement_for_path(worktree, None)
+}
+
+fn evaluate_work_event_settlement_for_path(
+    worktree: &Path,
+    exact_event_path: Option<&str>,
+) -> WorkEventSettlementStatus {
     let states = match work_event_path_states(worktree) {
         Ok(states) => states,
         Err(()) => {
@@ -968,16 +1237,14 @@ pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementSta
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
         }
     };
-    let event_commit = match git_stdout(
-        worktree,
-        &[
-            "rev-list",
-            "-1",
-            &head_commit,
-            "--",
-            WORK_EVENT_LOG_RELATIVE,
-        ],
-    ) {
+    let mut event_commit_args = vec!["rev-list", "-1", head_commit.as_str(), "--"];
+    if let Some(exact_event_path) = exact_event_path {
+        event_commit_args.push(exact_event_path);
+    } else {
+        event_commit_args.push(WORK_EVENT_LOG_RELATIVE);
+        event_commit_args.push(WORK_EVENT_STORE_RELATIVE);
+    }
+    let event_commit = match git_stdout(worktree, &event_commit_args) {
         Ok(commit) if !commit.is_empty() => commit,
         _ => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -1073,23 +1340,37 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             return None;
         }
     };
-    let path_exists = match fs::symlink_metadata(worktree.join(WORK_EVENT_LOG_RELATIVE)) {
-        Ok(_) => true,
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
+    let path_exists = [WORK_EVENT_LOG_RELATIVE, WORK_EVENT_STORE_RELATIVE]
+        .into_iter()
+        .try_fold(false, |exists, relative| {
+            match fs::symlink_metadata(worktree.join(relative)) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(exists),
+                Err(error) => Err(error),
+            }
+        });
+    let path_exists = match path_exists {
+        Ok(exists) => exists,
         Err(error) => {
             tracing::warn!(%error, "work event settlement path could not be inspected");
+            if receipt
+                .as_ref()
+                .is_some_and(pending_shard_refresh_failure_must_block)
+            {
+                return Some(pending_shard_refresh_failure_description());
+            }
             return None;
         }
     };
-    let path_tracked = if path_exists {
-        false
-    } else {
-        gwt_core::process::hidden_command("git")
-            .args(["ls-files", "--error-unmatch", "--", WORK_EVENT_LOG_RELATIVE])
-            .current_dir(worktree)
-            .output()
-            .is_ok_and(|output| output.status.success())
-    };
+    let path_tracked = [WORK_EVENT_LOG_RELATIVE, WORK_EVENT_STORE_RELATIVE]
+        .into_iter()
+        .any(|relative| {
+            gwt_core::process::hidden_command("git")
+                .args(["ls-files", "--error-unmatch", "--", relative])
+                .current_dir(worktree)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        });
     if receipt.is_none() && !path_exists && !path_tracked {
         return None;
     }
@@ -1121,6 +1402,9 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             Ok(refreshed) => refreshed.status,
             Err(error) => {
                 tracing::warn!(%error, "work event settlement receipt could not be refreshed");
+                if pending_shard_refresh_failure_must_block(&receipt) {
+                    return Some(pending_shard_refresh_failure_description());
+                }
                 return None;
             }
         }
@@ -1183,7 +1467,7 @@ pub(crate) fn work_event_settlement_pending_description(
     journal_entry_id: &str,
 ) -> String {
     format!(
-        "Work event settlement refused: terminal event `{event_id}` for Work `{work_id}` (journal `{journal_entry_id}`) has not been persisted to `{WORK_EVENT_LOG_RELATIVE}`. Retry the terminal workspace.update so Host recovery can finish, then commit and push the event log before retrying."
+        "Work event settlement refused: terminal event `{event_id}` for Work `{work_id}` (journal `{journal_entry_id}`) has not been persisted to its exact shard in `{WORK_EVENT_STORE_RELATIVE}/` (legacy receipts use `{WORK_EVENT_LOG_RELATIVE}`). Retry the terminal workspace.update so Host recovery can finish, then commit and push the event store before retrying."
     )
 }
 
@@ -1202,7 +1486,9 @@ pub(crate) fn work_event_settlement_blocker_description(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("`{WORK_EVENT_LOG_RELATIVE}` is dirty ({states})")
+            format!(
+                "the Work event store (`{WORK_EVENT_STORE_RELATIVE}/`, legacy `{WORK_EVENT_LOG_RELATIVE}`) is dirty ({states})"
+            )
         }
         WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment {
             states,
@@ -1219,7 +1505,7 @@ pub(crate) fn work_event_settlement_blocker_description(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "`{WORK_EVENT_LOG_RELATIVE}` is dirty ({states}), but remote reachability is unavailable ({environment:?})"
+                "the Work event store (`{WORK_EVENT_STORE_RELATIVE}/`, legacy `{WORK_EVENT_LOG_RELATIVE}`) is dirty ({states}), but remote reachability is unavailable ({environment:?})"
             )
         }
         WorkEventSettlementBlocker::CommitNotPushed => {
@@ -1232,7 +1518,9 @@ pub(crate) fn work_event_settlement_blocker_description(
             "the current HEAD and configured upstream have diverged".to_string()
         }
         WorkEventSettlementBlocker::GitStatusError => {
-            format!("Git could not prove the state of `{WORK_EVENT_LOG_RELATIVE}`")
+            format!(
+                "Git could not prove the state of `{WORK_EVENT_STORE_RELATIVE}/` and legacy `{WORK_EVENT_LOG_RELATIVE}`"
+            )
         }
         WorkEventSettlementBlocker::RemoteReadbackError => {
             "the configured upstream could not be fetched and read back".to_string()
@@ -1242,7 +1530,7 @@ pub(crate) fn work_event_settlement_blocker_description(
                 .to_string(),
     };
     format!(
-        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_LOG_RELATIVE}` with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry."
+        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry."
     )
 }
 
@@ -1254,6 +1542,7 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
             "--untracked-files=all",
             "--",
             WORK_EVENT_LOG_RELATIVE,
+            WORK_EVENT_STORE_RELATIVE,
         ])
         .current_dir(worktree)
         .output()
@@ -1316,7 +1605,11 @@ fn event_commit_has_non_bookkeeping_change(
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
     {
-        if path == WORK_EVENT_LOG_RELATIVE.as_bytes() {
+        if path == WORK_EVENT_LOG_RELATIVE.as_bytes()
+            || path
+                .strip_prefix(WORK_EVENT_STORE_RELATIVE.as_bytes())
+                .is_some_and(|suffix| suffix.first() == Some(&b'/'))
+        {
             saw_event_path = true;
         } else if !path.starts_with(b".gwt/") {
             saw_non_bookkeeping = true;
@@ -3286,6 +3579,7 @@ pub(crate) mod tests {
     }
 
     const WORK_EVENTS_PATH: &str = ".gwt/work/events.jsonl";
+    const WORK_EVENT_SHARDS_PATH: &str = ".gwt/work/events";
 
     pub(crate) struct WorkEventGitFixture {
         _root: tempfile::TempDir,
@@ -3296,6 +3590,19 @@ pub(crate) mod tests {
     impl WorkEventGitFixture {
         pub(crate) fn tracked() -> Self {
             Self::new(true)
+        }
+
+        fn tracked_shards() -> Self {
+            let fixture = Self::new(false);
+            fixture.write_event_shard(
+                "base",
+                br#"{"id":"base"}
+"#,
+            );
+            fixture.stage_event_shards();
+            fixture.commit("chore(work): seed immutable Work event store");
+            fixture.push();
+            fixture
         }
 
         fn without_tracked_event_log() -> Self {
@@ -3416,8 +3723,29 @@ pub(crate) mod tests {
             fs::write(path, contents).expect("append typed Work event");
         }
 
+        fn event_shard_path(&self, event_id: &str) -> PathBuf {
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&self.repo, event_id)
+        }
+
+        fn write_event_shard(&self, event_id: &str, contents: &[u8]) {
+            let path = self.event_shard_path(event_id);
+            fs::create_dir_all(path.parent().expect("event shard parent"))
+                .expect("create Work event shard directory");
+            fs::write(path, contents).expect("write Work event shard");
+        }
+
+        fn append_typed_event_shard(&self, event: &gwt_core::workspace_projection::WorkEvent) {
+            let mut bytes = serde_json::to_vec(event).expect("serialize Work event shard");
+            bytes.push(b'\n');
+            self.write_event_shard(&event.id, &bytes);
+        }
+
         pub(crate) fn stage_events(&self) {
             self.git_ok(&["add", "--", WORK_EVENTS_PATH]);
+        }
+
+        fn stage_event_shards(&self) {
+            self.git_ok(&["add", "--", WORK_EVENT_SHARDS_PATH]);
         }
 
         pub(crate) fn commit(&self, subject: &str) {
@@ -3429,7 +3757,14 @@ pub(crate) mod tests {
         }
 
         fn latest_event_commit(&self) -> String {
-            self.git_stdout(&["rev-list", "-1", "HEAD", "--", WORK_EVENTS_PATH])
+            self.git_stdout(&[
+                "rev-list",
+                "-1",
+                "HEAD",
+                "--",
+                WORK_EVENTS_PATH,
+                WORK_EVENT_SHARDS_PATH,
+            ])
         }
 
         fn upstream_ref(&self) -> String {
@@ -4485,6 +4820,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn work_event_settlement_rejects_dirty_immutable_event_shards() {
+        let untracked = WorkEventGitFixture::tracked_shards();
+        untracked.write_event_shard("untracked-shard", b"{}\n");
+        assert_path_dirty(&untracked, vec![WorkEventPathState::Untracked]);
+
+        let staged = WorkEventGitFixture::tracked_shards();
+        staged.write_event_shard("staged-shard", b"{}\n");
+        staged.stage_event_shards();
+        assert_path_dirty(&staged, vec![WorkEventPathState::Staged]);
+
+        let deleted = WorkEventGitFixture::tracked_shards();
+        fs::remove_file(deleted.event_shard_path("base")).expect("delete tracked Work event shard");
+        assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn work_event_settlement_refusal_detects_deleted_shard_only_store_without_a_receipt() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::remove_dir_all(fixture.repo.join(WORK_EVENT_SHARDS_PATH))
+            .expect("delete the tracked shard-only store");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo);
+
+        assert!(
+            refusal.is_some_and(|reason| reason.contains("dirty")),
+            "tracked shards must keep settlement in scope when the legacy monolith and store directory are both absent"
+        );
+    }
+
+    #[test]
     fn work_event_settlement_rejects_commit_that_has_not_reached_upstream() {
         let fixture = WorkEventGitFixture::tracked();
         fixture.append_event("committed-not-pushed");
@@ -4536,6 +4901,55 @@ pub(crate) mod tests {
         assert_eq!(
             evaluate_work_event_settlement(&fixture.repo),
             fixture.settled_status()
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_uses_latest_immutable_shard_commit_for_provenance_and_push() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fixture.write_event_shard("committed-shard", b"{}\n");
+        fs::write(
+            fixture.repo.join("src.txt"),
+            "source delivered with shard\n",
+        )
+        .expect("write source change");
+        fixture.git_ok(&["add", "--", WORK_EVENT_SHARDS_PATH, "src.txt"]);
+        fixture.commit("fix: deliver source with immutable Work event");
+
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed),
+            "the latest shard commit must remain blocked before its HEAD reaches upstream"
+        );
+
+        fixture.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status(),
+            "the pushed shard commit must become the settlement provenance"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_applies_work_only_commit_policy_to_immutable_shards() {
+        let valid = WorkEventGitFixture::tracked_shards();
+        valid.write_event_shard("valid-work-only-shard", b"{}\n");
+        valid.stage_event_shards();
+        valid.commit("chore(work): deliver immutable Work event");
+        valid.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&valid.repo),
+            valid.settled_status()
+        );
+
+        let invalid = WorkEventGitFixture::tracked_shards();
+        invalid.write_event_shard("invalid-work-only-shard", b"{}\n");
+        invalid.stage_event_shards();
+        invalid.commit("fix: misclassify immutable Work event bookkeeping");
+        invalid.push();
+        assert_eq!(
+            evaluate_work_event_settlement(&invalid.repo),
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit)
         );
     }
 
@@ -4909,7 +5323,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn pending_work_event_settlement_stays_open_until_the_exact_event_is_persisted_and_pushed() {
+    fn legacy_pending_work_event_settlement_accepts_the_exact_event_from_the_monolith() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4947,6 +5361,10 @@ pub(crate) mod tests {
             &journal_entry,
         )
         .expect("prepare write-ahead settlement receipt");
+        let mut legacy_prepared = prepared.clone();
+        legacy_prepared.schema_version = WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION;
+        persist_work_event_settlement_record(&fixture.repo, &legacy_prepared)
+            .expect("downgrade the fixture to the pre-shard receipt schema");
         assert!(prepared.obligation_open);
         assert_eq!(
             prepared.status,
@@ -4991,7 +5409,660 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn work_event_settlement_reader_accepts_v1_v2_and_refreshes_to_v3() {
+    fn pending_work_event_settlement_requires_the_exact_valid_immutable_shard() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-pending-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-pending-shard".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-pending-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-pending-shard".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-pending-shard",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare shard settlement receipt");
+
+        fixture.append_typed_event(&event);
+        let legacy_only =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh with only a legacy copy");
+        assert_eq!(
+            legacy_only.status, prepared.status,
+            "a new receipt must not accept a legacy append in place of its exact shard"
+        );
+        assert!(
+            work_event_settlement_refusal(&fixture.repo)
+                .is_some_and(|message| message.contains("exact shard")),
+            "a missing exact shard must keep terminal gates closed"
+        );
+
+        fixture.append_typed_event_shard(&event);
+        let persisted =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh after exact shard persistence");
+        assert_eq!(
+            persisted.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::PathDirty {
+                states: vec![WorkEventPathState::Untracked],
+            }),
+            "a validated exact shard must advance to ordinary delivery settlement"
+        );
+
+        fs::remove_file(fixture.event_path()).expect("remove rejected legacy-only copy");
+        fs::remove_file(fixture.event_shard_path(&event.id))
+            .expect("remove the validated but uncommitted exact shard");
+        let removed =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh after deleting the validated exact shard");
+        assert!(
+            removed.obligation_open && !removed.status.is_settled(),
+            "local validation must not discard exact delivery identity before commit/push"
+        );
+        fixture.append_typed_event_shard(&event);
+
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): settle prepared immutable Work event");
+        fixture.push();
+        let final_refresh =
+            save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)
+                .expect("refresh after the exact shard reaches upstream");
+        assert!(final_refresh.status.is_settled(), "{final_refresh:?}");
+        assert_eq!(work_event_settlement_refusal(&fixture.repo), None);
+    }
+
+    #[test]
+    fn pending_work_event_settlement_applies_provenance_to_the_exact_shard_commit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-exact-provenance",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-exact-provenance".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-exact-provenance".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-exact-provenance".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-exact-provenance",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare exact provenance receipt");
+        fixture.append_typed_event_shard(&event);
+        fixture.stage_event_shards();
+        fixture.commit("fix: invalid bookkeeping provenance for exact shard");
+        fixture.push();
+        fixture.write_event_shard("later-valid-shard", b"{}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): later unrelated Work event");
+        fixture.push();
+
+        let refreshed =
+            save_work_event_settlement_record(&fixture.repo, "session-exact-provenance", false)
+                .expect("refresh exact provenance receipt");
+
+        assert_eq!(
+            refreshed.status,
+            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::InvalidWorkOnlyCommit),
+            "a later valid shard commit must not substitute for the exact shard's provenance"
+        );
+        assert!(refreshed.obligation_open);
+    }
+
+    #[test]
+    fn prepare_work_event_settlement_preserves_an_existing_open_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut first = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-first-pending",
+            updated_at,
+        );
+        first.agent_session_id = Some("session-first-pending".to_string());
+        let first_journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-first-pending".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-first-pending".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-first-pending",
+            &first,
+            &first_journal,
+        )
+        .expect("prepare first identity");
+        let mut second = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-second-pending",
+            updated_at,
+        );
+        second.agent_session_id = Some("session-second-pending".to_string());
+        let mut second_journal = first_journal.clone();
+        second_journal.id = "journal-second-pending".to_string();
+        second_journal.agent_session_id = Some("session-second-pending".to_string());
+
+        let error = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-second-pending",
+            &second,
+            &second_journal,
+        )
+        .expect_err("a second event must not overwrite an undelivered receipt");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload existing receipt")
+                .expect("existing receipt remains"),
+            prepared
+        );
+    }
+
+    #[test]
+    fn prepare_work_event_settlement_requires_semantic_match_for_same_identity_retry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-same-identity-retry",
+            updated_at,
+        );
+        event.summary = Some("original terminal summary".to_string());
+        event.agent_session_id = Some("session-same-identity-retry".to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-same-identity-retry".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("original terminal summary".to_string()),
+            progress_summary: None,
+            agent_session_id: Some("session-same-identity-retry".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-same-identity-retry",
+            &event,
+            &journal,
+        )
+        .expect("prepare same-identity receipt");
+        let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+            .expect("settlement trusted dir");
+        let receipt_path = trusted_dir.join(WORK_EVENT_SETTLEMENT_RECORD_FILE);
+        let receipt_before = fs::read(&receipt_path).expect("read prepared receipt");
+
+        let identical = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-same-identity-retry",
+            &event,
+            &journal,
+        )
+        .expect("an identical retry must be idempotent");
+        assert_eq!(identical, prepared);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after identical retry"),
+            receipt_before,
+            "an identical retry must not rewrite its durable receipt"
+        );
+
+        let mut same_event = event.clone();
+        let mut regenerated_journal = journal.clone();
+        regenerated_journal.id = "journal-regenerated-for-same-event".to_string();
+        let recovered = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-same-identity-retry",
+            &mut same_event,
+            &mut regenerated_journal,
+        )
+        .expect("same semantic retry must recover the durable journal identity");
+        assert_eq!(recovered, prepared);
+        assert_eq!(same_event.id, event.id);
+        assert_eq!(regenerated_journal.id, journal.id);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after journal identity recovery"),
+            receipt_before,
+            "journal identity recovery must not rewrite its durable receipt"
+        );
+
+        let mut divergent_event = event.clone();
+        divergent_event.summary = Some("divergent terminal summary".to_string());
+        let mut divergent_journal = journal.clone();
+        divergent_journal.summary = Some("divergent terminal summary".to_string());
+        let error = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-same-identity-retry",
+            &divergent_event,
+            &divergent_journal,
+        )
+        .expect_err("the same ids must not authorize a semantically different retry");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after divergent retry"),
+            receipt_before,
+            "a divergent retry must leave the original receipt byte-exact"
+        );
+    }
+
+    #[test]
+    fn prepare_work_event_settlement_reuses_durable_identity_for_the_same_request_retry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut first = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-retry-pending",
+            updated_at,
+        );
+        first.agent_session_id = Some("session-retry-pending".to_string());
+        let first_journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-retry-pending-a".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-retry-pending".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-retry-pending",
+            &first,
+            &first_journal,
+        )
+        .expect("prepare first durable identity");
+
+        let retry_at = updated_at + chrono::TimeDelta::seconds(1);
+        let mut retry = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-retry-pending",
+            retry_at,
+        );
+        retry.agent_session_id = Some("session-retry-pending".to_string());
+        let retry_generated_id = retry.id.clone();
+        let mut retry_journal = first_journal.clone();
+        retry_journal.id = "journal-retry-pending-b".to_string();
+        retry_journal.updated_at = retry_at;
+        let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+            .expect("settlement trusted dir");
+
+        let recovered = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-retry-pending",
+            &mut retry,
+            &mut retry_journal,
+        )
+        .expect("same terminal request retry must recover the first identity");
+
+        assert_eq!(recovered, prepared);
+        assert_ne!(retry_generated_id, first.id);
+        assert_eq!(retry.id, first.id);
+        assert_eq!(retry_journal.id, first_journal.id);
+    }
+
+    #[test]
+    fn pending_work_event_settlement_rejects_malformed_or_mismatched_exact_shards() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-invalid-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-invalid-shard".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-invalid-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-invalid-shard".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-invalid-shard",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare invalid-shard settlement receipt");
+
+        fixture.write_event_shard(&event.id, b"{\"id\":\"truncated\"}");
+        assert!(
+            work_event_settlement_refusal(&fixture.repo)
+                .is_some_and(|message| message.contains("could not be validated")),
+            "Stop/terminal gates must refuse an invalid exact shard rather than fail open"
+        );
+        let malformed =
+            save_work_event_settlement_record(&fixture.repo, "session-invalid-shard", false)
+                .expect_err("an incomplete shard must fail closed");
+        assert_eq!(malformed.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload receipt after malformed shard")
+                .expect("receipt remains present"),
+            prepared,
+            "invalid shard validation must not mutate the pending receipt"
+        );
+
+        let mut mismatched = event.clone();
+        mismatched.id = "different-event-id".to_string();
+        let mut mismatched_bytes =
+            serde_json::to_vec(&mismatched).expect("serialize mismatched event");
+        mismatched_bytes.push(b'\n');
+        fixture.write_event_shard(&event.id, &mismatched_bytes);
+        let mismatch =
+            save_work_event_settlement_record(&fixture.repo, "session-invalid-shard", false)
+                .expect_err("a shard whose event id disagrees with its path must fail closed");
+        assert_eq!(mismatch.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("reload receipt after mismatched shard")
+                .expect("receipt remains present"),
+            prepared,
+            "mismatched shard validation must not mutate the pending receipt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_work_event_settlement_rejects_symlinked_store_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        for (index, ancestor) in [".gwt", ".gwt/work", WORK_EVENT_STORE_RELATIVE]
+            .into_iter()
+            .enumerate()
+        {
+            let fixture = WorkEventGitFixture::tracked_shards();
+            let session_id = format!("session-symlinked-store-{index}");
+            let updated_at = Utc::now();
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Done,
+                format!("work-symlinked-store-{index}"),
+                updated_at,
+            );
+            event.agent_session_id = Some(session_id.clone());
+            let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+                id: format!("journal-symlinked-store-{index}"),
+                project_root: fixture.repo.clone(),
+                title: None,
+                status_category: Some(
+                    gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+                ),
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                progress_summary: None,
+                agent_session_id: Some(session_id.clone()),
+                agent_current_focus: None,
+                agent_title_summary: None,
+                updated_at,
+            };
+            prepare_work_event_settlement_record(&fixture.repo, &session_id, &event, &journal)
+                .expect("prepare symlinked-store receipt");
+            let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+                .expect("settlement trusted dir");
+            let receipt_path = trusted_dir.join(WORK_EVENT_SETTLEMENT_RECORD_FILE);
+            let receipt_before = fs::read(&receipt_path).expect("read prepared receipt");
+
+            let exact_path =
+                gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &event.id);
+            let resolved_repo = gwt_core::paths::resolve_current_worktree_root(&fixture.repo);
+            let ancestor_path = resolved_repo.join(ancestor);
+            let descendant = exact_path
+                .strip_prefix(&ancestor_path)
+                .expect("exact shard descends from canonical ancestor");
+            fs::remove_dir_all(&ancestor_path).expect("remove canonical ancestor directory");
+            let external = tempfile::tempdir().expect("external event store");
+            let external_shard = external.path().join(descendant);
+            fs::create_dir_all(external_shard.parent().expect("external shard parent"))
+                .expect("create external shard parent");
+            let mut bytes = serde_json::to_vec(&event).expect("serialize external exact shard");
+            bytes.push(b'\n');
+            fs::write(&external_shard, bytes).expect("write external exact shard");
+            symlink(external.path(), &ancestor_path).expect("symlink canonical ancestor");
+
+            let error = save_work_event_settlement_record(&fixture.repo, &session_id, false)
+                .expect_err("a symlinked canonical ancestor must fail closed");
+
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{ancestor}");
+            assert_eq!(
+                fs::read(&receipt_path).expect("read receipt after rejected symlink"),
+                receipt_before,
+                "rejecting symlinked ancestor {ancestor} must preserve receipt bytes"
+            );
+            let retained = load_work_event_settlement_record(&fixture.repo)
+                .expect("reload retained receipt")
+                .expect("retained receipt exists");
+            assert!(
+                pending_shard_refresh_failure_must_block(&retained),
+                "Stop must remain blocked for symlinked ancestor {ancestor}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_work_event_settlement_refuses_when_the_exact_shard_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-unreadable-shard",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-unreadable-shard".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-unreadable-shard".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-unreadable-shard".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-unreadable-shard",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare unreadable shard settlement receipt");
+        fixture.append_typed_event_shard(&event);
+        let shard_dir = fixture
+            .event_shard_path(&event.id)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::set_permissions(&shard_dir, fs::Permissions::from_mode(0o000))
+            .expect("make exact shard unreadable");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo);
+
+        fs::set_permissions(&shard_dir, fs::Permissions::from_mode(0o700))
+            .expect("restore shard directory permissions");
+        assert!(
+            refusal.is_some_and(|message| message.contains("could not be validated")),
+            "an unreadable exact shard must keep terminal settlement closed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_work_event_settlement_refuses_when_the_event_store_is_uninspectable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-uninspectable-store",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-uninspectable-store".to_string());
+        let journal_entry = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-uninspectable-store".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-uninspectable-store".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-uninspectable-store",
+            &event,
+            &journal_entry,
+        )
+        .expect("prepare uninspectable store settlement receipt");
+        let work_dir = fixture.repo.join(".gwt/work");
+        fs::set_permissions(&work_dir, fs::Permissions::from_mode(0o000))
+            .expect("make Work store uninspectable");
+
+        let refusal = work_event_settlement_refusal(&fixture.repo);
+
+        fs::set_permissions(&work_dir, fs::Permissions::from_mode(0o700))
+            .expect("restore Work store permissions");
+        assert!(
+            refusal.is_some_and(|message| message.contains("could not be validated")),
+            "an uninspectable Work event store must keep terminal settlement closed"
+        );
+    }
+
+    #[test]
+    fn work_event_settlement_reader_accepts_v1_v2_v3_and_refreshes_to_v4() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5003,6 +6074,7 @@ pub(crate) mod tests {
             schema_version: WORK_EVENT_SETTLEMENT_LEGACY_SCHEMA_VERSION,
             session_id: "session-legacy".to_string(),
             execution_binding: None,
+            pending_delivery: None,
             obligation_open: false,
             status: fixture.settled_status(),
             updated_at: Utc::now(),
@@ -5026,13 +6098,139 @@ pub(crate) mod tests {
                 .expect("v2 receipt exists"),
             pre_generation
         );
+        let mut generation_scoped = legacy.clone();
+        generation_scoped.schema_version = WORK_EVENT_SETTLEMENT_GENERATION_SCHEMA_VERSION;
+        persist_work_event_settlement_record(&fixture.repo, &generation_scoped)
+            .expect("seed v3 settlement receipt");
+        assert_eq!(
+            load_work_event_settlement_record(&fixture.repo)
+                .expect("load v3 receipt")
+                .expect("v3 receipt exists"),
+            generation_scoped
+        );
         let refreshed = save_work_event_settlement_record(&fixture.repo, "session-legacy", false)
-            .expect("refresh v2 receipt");
+            .expect("refresh v3 receipt");
         assert_eq!(
             refreshed.schema_version,
             WORK_EVENT_SETTLEMENT_SCHEMA_VERSION
         );
         assert_eq!(refreshed.status, fixture.settled_status());
+    }
+
+    #[test]
+    fn work_event_settlement_reader_accepts_early_v4_pending_delivery_shape() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let updated_at = Utc::now();
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-early-v4",
+            updated_at,
+        );
+        event.agent_session_id = Some("session-early-v4".to_string());
+        let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
+            id: "journal-early-v4".to_string(),
+            project_root: fixture.repo.clone(),
+            title: None,
+            status_category: Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some("session-early-v4".to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+            updated_at,
+        };
+        let prepared = prepare_work_event_settlement_record(
+            &fixture.repo,
+            "session-early-v4",
+            &event,
+            &journal,
+        )
+        .expect("prepare v4 receipt");
+        let mut value = serde_json::to_value(&prepared).expect("serialize v4 receipt");
+        let pending = value
+            .get_mut("pending_delivery")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("pending delivery object");
+        pending.remove("journal_entry_id");
+        pending.remove("request_fingerprint");
+        let trusted_dir = required_work_event_settlement_trusted_dir(&fixture.repo)
+            .expect("trusted settlement dir");
+        let early_v4_bytes = serde_json::to_vec_pretty(&value).expect("serialize early v4 fixture");
+        let receipt_path = trusted_dir.join(WORK_EVENT_SETTLEMENT_RECORD_FILE);
+        gwt_github::cache::write_atomic(&receipt_path, &early_v4_bytes)
+            .expect("write early v4 fixture");
+
+        let loaded = load_work_event_settlement_record(&fixture.repo)
+            .expect("read early v4 receipt")
+            .expect("early v4 receipt exists");
+
+        assert_eq!(loaded.schema_version, WORK_EVENT_SETTLEMENT_SCHEMA_VERSION);
+        let delivery = pending_delivery_for_record(&loaded).expect("recover pending delivery");
+        assert_eq!(delivery.event_id, event.id);
+        assert_eq!(delivery.journal_entry_id, journal.id);
+
+        let mut exact_event = event.clone();
+        let mut exact_journal = journal.clone();
+        let retried = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-early-v4",
+            &mut exact_event,
+            &mut exact_journal,
+        )
+        .expect("early v4 may retry only with every durable id unchanged");
+        assert_eq!(retried, loaded);
+        assert_eq!(exact_event.id, event.id);
+        assert_eq!(exact_journal.id, journal.id);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after exact early v4 retry"),
+            early_v4_bytes,
+            "an exact early v4 retry must not rewrite its receipt"
+        );
+
+        let mut same_event = event.clone();
+        let mut regenerated_journal = journal.clone();
+        regenerated_journal.id = "journal-early-v4-regenerated".to_string();
+        let error = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-early-v4",
+            &mut same_event,
+            &mut regenerated_journal,
+        )
+        .expect_err("early v4 cannot prove a retry with a regenerated journal id");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(regenerated_journal.id, "journal-early-v4-regenerated");
+
+        let mut divergent_event = event.clone();
+        divergent_event.id = "event-early-v4-divergent".to_string();
+        divergent_event.summary = Some("divergent terminal request".to_string());
+        let mut divergent_journal = journal.clone();
+        divergent_journal.id = "journal-early-v4-divergent".to_string();
+        divergent_journal.summary = Some("divergent terminal request".to_string());
+        let error = prepare_work_event_settlement_record_with_held_lease(
+            &trusted_dir,
+            &fixture.repo,
+            "session-early-v4",
+            &mut divergent_event,
+            &mut divergent_journal,
+        )
+        .expect_err("early v4 cannot prove a semantically different request");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&receipt_path).expect("read receipt after rejected early v4 retries"),
+            early_v4_bytes,
+            "rejected early v4 retries must leave the receipt byte-exact"
+        );
     }
 
     #[test]
@@ -5071,6 +6269,7 @@ pub(crate) mod tests {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: "session-required-trusted-write".to_string(),
             execution_binding: None,
+            pending_delivery: None,
             obligation_open: true,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
             updated_at: Utc::now(),
@@ -5102,6 +6301,7 @@ pub(crate) mod tests {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: "session-from-leased-directory".to_string(),
             execution_binding: None,
+            pending_delivery: None,
             obligation_open: false,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
             updated_at: Utc::now(),
@@ -5172,6 +6372,7 @@ pub(crate) mod tests {
             schema_version: WORK_EVENT_SETTLEMENT_SCHEMA_VERSION,
             session_id: "session-before-identity-loss".to_string(),
             execution_binding: None,
+            pending_delivery: None,
             obligation_open: false,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
             updated_at: Utc::now(),

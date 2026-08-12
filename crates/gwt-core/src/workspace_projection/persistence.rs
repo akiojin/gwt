@@ -20,7 +20,8 @@ use crate::{
     coordination::{BoardEntry, BoardEntryKind},
     error::{GwtError, JsonDecodeKind, Result},
     paths::{
-        gwt_project_dir_for_repo_path, gwt_repo_local_work_events_path,
+        gwt_project_dir_for_repo_path, gwt_repo_local_work_events_dir,
+        gwt_repo_local_work_events_path, gwt_work_event_shard_path,
         gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
         gwt_workspace_work_events_closed_path_for_repo_path,
         gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
@@ -197,6 +198,12 @@ fn repo_local_work_events_path_with_migration(repo_path: &Path) -> Result<PathBu
 }
 
 fn repo_local_work_events_path_with_migration_locked(repo_path: &Path) -> Result<PathBuf> {
+    let events_path = migrate_repo_local_legacy_work_events(repo_path)?;
+    ensure_work_events_gitattributes(repo_path)?;
+    Ok(events_path)
+}
+
+fn migrate_repo_local_legacy_work_events(repo_path: &Path) -> Result<PathBuf> {
     let events_path = gwt_repo_local_work_events_path(repo_path);
     if !events_path.exists() {
         // Primary migration source: the home Project State event log.
@@ -212,8 +219,23 @@ fn repo_local_work_events_path_with_migration_locked(repo_path: &Path) -> Result
             &events_path,
         )?;
     }
-    ensure_work_events_gitattributes(repo_path)?;
     Ok(events_path)
+}
+
+/// Resolve the writable immutable event store after preserving any historical
+/// home event log in the frozen repo-local compatibility monolith.
+fn repo_local_work_event_store_dir_with_migration(repo_path: &Path) -> Result<PathBuf> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    with_workspace_work_items_lock(&work_items_path, || {
+        repo_local_work_event_store_dir_with_migration_locked(repo_path)
+    })
+}
+
+fn repo_local_work_event_store_dir_with_migration_locked(repo_path: &Path) -> Result<PathBuf> {
+    let events_dir = gwt_repo_local_work_events_dir(repo_path);
+    validate_workspace_work_event_store_path(&events_dir)?;
+    let _ = migrate_repo_local_legacy_work_events(repo_path)?;
+    Ok(events_dir)
 }
 
 /// SPEC-2359 Phase W-12 Slice 5b (FR-355): ensure the repo's `.gitattributes`
@@ -512,7 +534,7 @@ pub fn transact_workspace_state<T>(
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    let events_path = repo_local_work_event_store_dir_with_migration(repo_path)?;
     transact_workspace_state_at(
         &current_path,
         &work_items_path,
@@ -1319,6 +1341,8 @@ fn materialize_split_root_workspace_state_paths_locked(
     current_path: &Path,
     work_items_path: &Path,
 ) -> Result<PathBuf> {
+    let events_dir = gwt_repo_local_work_events_dir(work_event_root);
+    validate_workspace_work_event_store_path(&events_dir)?;
     copy_validated_workspace_projection_if_needed(
         &legacy_workspace_projection_path_for_repo_path(project_state_root),
         current_path,
@@ -1342,20 +1366,20 @@ fn materialize_split_root_workspace_state_paths_locked(
     // Preserve the destination root's normal migration precedence. Only if it
     // still has no tracked log do we consult the former single-root sources,
     // newest placement first.
-    let events_path = repo_local_work_events_path_with_migration_locked(work_event_root)?;
-    if !events_path.exists() {
+    let legacy_events_path = migrate_repo_local_legacy_work_events(work_event_root)?;
+    if !legacy_events_path.exists() {
         for source in [
             gwt_repo_local_work_events_path(project_state_root),
             gwt_workspace_work_events_path_for_repo_path(project_state_root),
             legacy_workspace_work_events_path_for_repo_path(project_state_root),
         ] {
-            copy_legacy_workspace_file_if_needed(&source, &events_path)?;
-            if events_path.exists() {
+            copy_legacy_workspace_file_if_needed(&source, &legacy_events_path)?;
+            if legacy_events_path.exists() {
                 break;
             }
         }
     }
-    Ok(events_path)
+    Ok(events_dir)
 }
 
 fn load_split_root_workspace_state_for_preflight_locked(
@@ -1416,7 +1440,7 @@ pub fn transact_workspace_state_with_commit<T>(
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    let events_path = repo_local_work_event_store_dir_with_migration(repo_path)?;
     transact_workspace_state_at_with_commit(
         &current_path,
         &work_items_path,
@@ -1519,7 +1543,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
     Ok(result)
 }
 
-const WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 3;
+const WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 4;
 const MIN_WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 1;
 const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
     ".gwt-pending-workspace-state-transactions";
@@ -2127,7 +2151,9 @@ fn build_workspace_state_transaction_locked<T>(
     }
 
     let transaction = PendingWorkspaceStateTransaction {
-        version: WORKSPACE_STATE_TRANSACTION_VERSION,
+        version: workspace_state_transaction_version_for_events_path(
+            (!events.is_empty()).then_some(events_path),
+        ),
         transaction_id: Some(Uuid::new_v4().to_string()),
         current_path: current_path.to_path_buf(),
         work_items_path: work_items_path.to_path_buf(),
@@ -2259,9 +2285,9 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
     // does not even run the legacy→repo-local migration, so a settled worktree
     // stays byte-for-byte clean.
     let events_path = match tracked_event_policy {
-        TrackedWorkEventPolicy::Persist => {
-            Some(repo_local_work_events_path_with_migration(work_event_root)?)
-        }
+        TrackedWorkEventPolicy::Persist => Some(repo_local_work_event_store_dir_with_migration(
+            work_event_root,
+        )?),
         TrackedWorkEventPolicy::SkipTracked => None,
     };
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
@@ -2298,7 +2324,7 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
             None => Vec::new(),
         };
         let transaction = PendingWorkspaceStateTransaction {
-            version: WORKSPACE_STATE_TRANSACTION_VERSION,
+            version: workspace_state_transaction_version_for_events_path(events_path.as_deref()),
             transaction_id: Some(Uuid::new_v4().to_string()),
             current_path: current_path.clone(),
             work_items_path: work_items_path.clone(),
@@ -2396,7 +2422,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     update: WorkspaceProjectionUpdate,
     tracked_event_policy: TrackedWorkEventPolicy,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
-    before_persist: impl FnOnce(&WorkEvent, &WorkspaceJournalEntry) -> Result<()>,
+    before_persist: impl FnOnce(&mut WorkEvent, &mut WorkspaceJournalEntry) -> Result<()>,
 ) -> Result<WorkspaceJournalEntry> {
     validate_session_bound_target_shape(target, &update)?;
 
@@ -2405,7 +2431,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
     let events_path = match tracked_event_policy {
         TrackedWorkEventPolicy::Persist => {
-            Some(gwt_repo_local_work_events_path(&target.work_event_root))
+            Some(gwt_repo_local_work_events_dir(&target.work_event_root))
         }
         TrackedWorkEventPolicy::SkipTracked => None,
     };
@@ -2431,20 +2457,6 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             }
         }
     }
-    if let Some(events_path) = events_path.as_ref() {
-        match events_path.try_exists() {
-            Ok(true) => {}
-            Ok(false) => return Err(GwtError::Other(
-                "Session-bound workspace transaction requires an existing tracked Work event log"
-                    .to_string(),
-            )),
-            Err(_) => return Err(GwtError::Other(
-                "Session-bound workspace transaction could not verify the tracked Work event log"
-                    .to_string(),
-            )),
-        }
-    }
-
     with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
         let current_precondition = workspace_state_file_fingerprint(&current_path)?;
         let work_items_precondition = workspace_state_file_fingerprint(&work_items_path)?;
@@ -2471,14 +2483,14 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         revalidate(&projection, &work_items)?;
 
         let updated_at = Utc::now();
-        let entry = apply_sparse_update_to_locked_projection(
+        let mut entry = apply_sparse_update_to_locked_projection(
             &mut projection,
             target,
             &update,
             locked.target_owner.clone(),
             updated_at,
         );
-        let event = session_bound_work_event(
+        let mut event = session_bound_work_event(
             &projection,
             target,
             &update,
@@ -2486,14 +2498,27 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             locked.execution_container,
             updated_at,
         );
+        let event_before_identity_recovery = event.clone();
+        let entry_before_identity_recovery = entry.clone();
+        before_persist(&mut event, &mut entry)?;
+        let mut event_without_recovered_id = event.clone();
+        event_without_recovered_id.id = event_before_identity_recovery.id.clone();
+        let mut entry_without_recovered_id = entry.clone();
+        entry_without_recovered_id.id = entry_before_identity_recovery.id.clone();
+        if event_without_recovered_id != event_before_identity_recovery
+            || entry_without_recovered_id != entry_before_identity_recovery
+        {
+            return Err(GwtError::Other(
+                "Session-bound workspace pre-persist recovery may only replace event and journal ids"
+                    .to_string(),
+            ));
+        }
         if work_items.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Err(GwtError::Other(
                 "Session-bound workspace transaction rejected a conflicting Session attachment"
                     .to_string(),
             ));
         }
-        before_persist(&event, &entry)?;
-
         let events = events_path.as_ref().map_or_else(Vec::new, |_| vec![event]);
         // The legacy journal has no Work identity: synthesis attributes every
         // entry to the shared current projection. A foreign target is already
@@ -2505,7 +2530,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             Vec::new()
         };
         let transaction = PendingWorkspaceStateTransaction {
-            version: WORKSPACE_STATE_TRANSACTION_VERSION,
+            version: workspace_state_transaction_version_for_events_path(events_path.as_deref()),
             transaction_id: Some(Uuid::new_v4().to_string()),
             current_path: current_path.clone(),
             work_items_path: work_items_path.clone(),
@@ -3833,8 +3858,19 @@ fn validate_pending_workspace_state_transaction(
     if transaction.external_commit.is_some() && transaction.version < 3 {
         return Err(malformed_workspace_state_transaction_error(
             marker_path,
-            "external commit metadata requires transaction version 3",
+            "external commit metadata requires transaction version 3 or newer",
         ));
+    }
+    if let Some(events_path) = transaction.events_path.as_deref() {
+        let uses_shard_store = is_workspace_work_event_store_dir(events_path);
+        if (transaction.version <= 3 && uses_shard_store)
+            || (transaction.version == 4 && !uses_shard_store)
+        {
+            return Err(malformed_workspace_state_transaction_error(
+                marker_path,
+                "transaction version does not match Work event storage path",
+            ));
+        }
     }
     if let Some(external_commit) = transaction.external_commit.as_ref() {
         validate_external_workspace_operation_id(&external_commit.operation_id).map_err(|_| {
@@ -3936,6 +3972,10 @@ fn write_workspace_state_transaction_markers(
     transaction: &PendingWorkspaceStateTransaction,
     cleanup_on_error: bool,
 ) -> Result<()> {
+    validate_pending_workspace_state_transaction(
+        transaction,
+        &pending_workspace_state_transaction_path(&transaction.current_path),
+    )?;
     let bytes = serde_json::to_vec_pretty(transaction)
         .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
     let coordinator_path = pending_workspace_state_transaction_coordinator_path(transaction);
@@ -4327,7 +4367,15 @@ fn apply_workspace_state_transaction_locked(
         }
     }
     if let Some(events_path) = transaction.events_path.as_deref() {
-        if recovering {
+        if is_workspace_work_event_store_dir(events_path) {
+            // New v4 markers store the canonical shard directory. Immutable
+            // create is idempotent for both the first publication and crash
+            // recovery, so no separate recovering branch is needed.
+            write_workspace_work_event_shards_to_dir(events_path, &transaction.events)?;
+        } else if recovering {
+            // Compatibility: v1-v3 markers written before W-33 name a JSONL
+            // file. Recover those exact markers with their historical
+            // monolith append semantics and never reinterpret their path.
             append_workspace_work_events_if_missing(events_path, &transaction.events)?;
         } else {
             append_workspace_work_events_to_path(events_path, &transaction.events)?;
@@ -4355,6 +4403,20 @@ fn apply_workspace_state_transaction_locked(
     let mut marker_paths = pending_workspace_state_transaction_paths(transaction);
     marker_paths.sort_by_key(|path| coordinator_path.as_ref() == Some(path));
     remove_workspace_state_transaction_markers(&marker_paths)
+}
+
+fn is_workspace_work_event_store_dir(path: &Path) -> bool {
+    path.ends_with(Path::new(".gwt").join("work").join("events"))
+}
+
+fn workspace_state_transaction_version_for_events_path(events_path: Option<&Path>) -> u32 {
+    match events_path {
+        // Explicit path-injected compatibility callers keep producing a
+        // recoverable legacy marker instead of mislabelling a monolith as the
+        // v4 shard store.
+        Some(path) if !is_workspace_work_event_store_dir(path) => 3,
+        _ => WORKSPACE_STATE_TRANSACTION_VERSION,
+    }
 }
 
 fn workspace_state_snapshot_matches_precondition(
@@ -4440,10 +4502,35 @@ fn append_workspace_work_events_if_missing(path: &Path, events: &[WorkEvent]) ->
 }
 
 pub fn record_workspace_work_event(repo_path: &Path, event: WorkEvent) -> Result<()> {
+    // Refuse a symlinked managed store path before either legacy projection or
+    // event-log migration can create files through it.
+    validate_workspace_work_event_store_path(&gwt_repo_local_work_events_dir(repo_path))?;
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
-    record_workspace_work_event_paths(&work_items_path, &events_path, event)
+    let events_dir = repo_local_work_event_store_dir_with_migration(repo_path)?;
+    record_workspace_work_events_to_store(&work_items_path, &events_dir, vec![event])
+}
+
+fn record_workspace_work_events_to_store(
+    work_items_path: &Path,
+    events_dir: &Path,
+    events: Vec<WorkEvent>,
+) -> Result<()> {
+    with_workspace_work_items_lock(work_items_path, || {
+        let initial_updated_at = events
+            .first()
+            .map(|event| event.updated_at)
+            .unwrap_or_else(Utc::now);
+        let mut projection = load_workspace_work_items_from_path(work_items_path)?
+            .unwrap_or_else(|| WorkItemsProjection::empty(initial_updated_at));
+        persist_workspace_work_events_to_store_locked(
+            work_items_path,
+            events_dir,
+            &mut projection,
+            events,
+        )?;
+        Ok(())
+    })
 }
 
 pub fn record_workspace_work_event_paths(
@@ -4492,6 +4579,27 @@ fn persist_workspace_work_events_locked(
         }
     }
     append_workspace_work_events_to_path(events_path, &events)?;
+    *projection = candidate;
+    save_workspace_work_items_projection_to_path(work_items_path, projection)?;
+    Ok(events.len())
+}
+
+fn persist_workspace_work_events_to_store_locked(
+    work_items_path: &Path,
+    events_dir: &Path,
+    projection: &mut WorkItemsProjection,
+    events: Vec<WorkEvent>,
+) -> Result<usize> {
+    if events.is_empty() {
+        return Ok(0);
+    }
+    let mut candidate = projection.clone();
+    for event in &events {
+        if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
+            return Ok(0);
+        }
+    }
+    write_workspace_work_event_shards_to_dir(events_dir, &events)?;
     *projection = candidate;
     save_workspace_work_items_projection_to_path(work_items_path, projection)?;
     Ok(events.len())
@@ -4565,6 +4673,16 @@ pub fn record_workspace_backfill_event_paths(
     worktree_path: &Path,
     updated_at: DateTime<Utc>,
 ) -> Result<()> {
+    let event = workspace_backfill_event(work_id, branch, worktree_path, updated_at);
+    record_workspace_work_event_paths(work_items_path, events_path, event)
+}
+
+fn workspace_backfill_event(
+    work_id: &str,
+    branch: &str,
+    worktree_path: &Path,
+    updated_at: DateTime<Utc>,
+) -> WorkEvent {
     let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id, updated_at);
     event.title = Some(branch.to_string());
     event.execution_container = Some(WorkspaceExecutionContainerRef {
@@ -4574,7 +4692,7 @@ pub fn record_workspace_backfill_event_paths(
         pr_url: None,
         pr_state: None,
     });
-    record_workspace_work_event_paths(work_items_path, events_path, event)
+    event
 }
 
 /// #3065: find the Work item that owns a given execution container. The
@@ -4627,11 +4745,19 @@ pub fn reconcile_worktree_work_items_paths(
     let projection = load_workspace_work_items_from_path(work_items_path)?
         .unwrap_or_else(|| WorkItemsProjection::empty(now));
     let pending = worktree_sources_needing_backfill(&projection, project_root, sources);
+    for (_, source) in &pending {
+        if source.branch.is_some() {
+            validate_workspace_work_event_store_path(&gwt_repo_local_work_events_dir(
+                &source.worktree_path,
+            ))?;
+        }
+    }
     for (work_id, source) in &pending {
         let Some(branch) = source.branch.as_deref() else {
             continue;
         };
-        let events_path = gwt_repo_local_work_events_path(&source.worktree_path);
+        let _ = migrate_repo_local_legacy_work_events(&source.worktree_path)?;
+        let events_dir = gwt_repo_local_work_events_dir(&source.worktree_path);
         // FR-403: the baseline timestamp is the worktree's last real activity
         // — the HEAD committer time for git worktrees (directory mtime is
         // polluted by unrelated writes such as the backfill itself creating
@@ -4647,14 +4773,8 @@ pub fn reconcile_worktree_work_items_paths(
             })
             .unwrap_or(now)
             .min(now);
-        record_workspace_backfill_event_paths(
-            work_items_path,
-            &events_path,
-            work_id,
-            branch,
-            &source.worktree_path,
-            baseline,
-        )?;
+        let event = workspace_backfill_event(work_id, branch, &source.worktree_path, baseline);
+        record_workspace_work_events_to_store(work_items_path, &events_dir, vec![event])?;
     }
     Ok(pending.len())
 }
@@ -5592,11 +5712,22 @@ pub fn rebuild_work_items_from_events_paths(
     if !events_path.exists() {
         return Ok(WorkItemsRebuildOutcome::Missing);
     }
-    let mut events = read_workspace_work_event_records_from_path(events_path)?
+    let records = read_workspace_work_event_records_from_path(events_path)?;
+    rebuild_work_items_from_event_records(work_items_path, marker_path, records)
+}
+
+fn rebuild_work_items_from_event_records(
+    work_items_path: &Path,
+    marker_path: &Path,
+    records: Vec<WorkEventLogRecord>,
+) -> Result<WorkItemsRebuildOutcome> {
+    let mut events = records
         .into_iter()
         .filter_map(WorkEventLogRecord::into_known_event)
         .collect::<Vec<_>>();
     events.sort_by_key(|event| event.updated_at);
+    let mut seen_event_ids = HashSet::new();
+    events.retain(|event| seen_event_ids.insert(event.id.clone()));
     let initial_updated_at = events
         .first()
         .map(|event| event.updated_at)
@@ -5627,13 +5758,46 @@ pub fn rebuild_work_items_from_events_for_repo(
     repo_path: &Path,
 ) -> Result<WorkItemsRebuildOutcome> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    let events_path = gwt_repo_local_work_events_path(repo_path);
+    let events_dir = gwt_repo_local_work_events_dir(repo_path);
     let marker_path = work_items_path
         .parent()
         .map(|dir| dir.join("work_items.migration.json"))
         .unwrap_or_else(|| PathBuf::from("work_items.migration.json"));
-    rebuild_work_items_from_events_paths(&work_items_path, &events_path, &marker_path)
+    if rebuild_marker_at_or_above(&marker_path, WORK_ITEMS_REBUILD_VERSION)? {
+        return Ok(WorkItemsRebuildOutcome::AlreadyMigrated);
+    }
+
+    // Validate every effective event source into memory before migrations can
+    // publish WorkItems, the compatibility monolith, or `.gitattributes`.
+    let shards_exist = validate_workspace_work_event_store_path(&events_dir)?;
+    let legacy_source = if events_path.exists() {
+        Some(events_path.clone())
+    } else {
+        let primary = gwt_workspace_work_events_path_for_repo_path(repo_path);
+        if primary.is_file() {
+            Some(primary)
+        } else {
+            let fallback = legacy_workspace_work_events_path_for_repo_path(repo_path);
+            fallback.is_file().then_some(fallback)
+        }
+    };
+    if legacy_source.is_none() && !shards_exist {
+        return Ok(WorkItemsRebuildOutcome::Missing);
+    }
+    let mut records = match legacy_source.as_deref() {
+        Some(path) => read_workspace_work_event_records_from_path(path)?,
+        None => Vec::new(),
+    };
+    if shards_exist {
+        records.extend(read_workspace_work_event_shard_records_from_dir(
+            &events_dir,
+        )?);
+    }
+
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    let _ = repo_local_work_events_path_with_migration(repo_path)?;
+    rebuild_work_items_from_event_records(&work_items_path, &marker_path, records)
 }
 
 fn rebuild_marker_at_or_above(path: &Path, required: u32) -> Result<bool> {
@@ -5973,7 +6137,7 @@ const WORK_EVENT_CORRECTION_WRITER_ENABLED: bool = false;
 /// intentionally opaque, while known kinds expose only the current typed
 /// fields after additive top-level fields have been ignored.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DecodedWorkspaceWorkEvent {
+pub enum DecodedWorkspaceWorkEvent {
     Known(Box<WorkEvent>),
     Opaque,
 }
@@ -6037,7 +6201,7 @@ fn trim_ascii_json_line(mut line: &[u8]) -> &[u8] {
     line
 }
 
-pub(crate) fn decode_workspace_work_event_line(line: &[u8]) -> Result<DecodedWorkspaceWorkEvent> {
+pub fn decode_workspace_work_event_line(line: &[u8]) -> Result<DecodedWorkspaceWorkEvent> {
     let json_line = trim_ascii_json_line(line);
     let value: serde_json::Value = serde_json::from_slice(json_line)
         .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
@@ -6103,6 +6267,112 @@ fn read_workspace_work_event_records_from_path(path: &Path) -> Result<Vec<WorkEv
         .filter(|line| !trim_ascii_json_line(line).is_empty())
         .map(decode_workspace_work_event_record)
         .collect()
+}
+
+fn read_workspace_work_event_shard_records_from_dir(
+    events_dir: &Path,
+) -> Result<Vec<WorkEventLogRecord>> {
+    if !validate_workspace_work_event_store_path(events_dir)? {
+        return Ok(Vec::new());
+    }
+    let entries = match fs::read_dir(events_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+
+    let mut records = Vec::with_capacity(paths.len());
+    for path in paths {
+        if is_workspace_work_event_writer_temp_residue(&path) {
+            if fs::symlink_metadata(&path)?.file_type().is_file() {
+                continue;
+            }
+            return Err(GwtError::Other(format!(
+                "workspace Work event shard temp residue has an invalid file type: {}",
+                path.display()
+            )));
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                GwtError::Other(format!(
+                    "workspace Work event shard has an invalid filename: {}",
+                    path.display()
+                ))
+            })?;
+        let Some(hash) = name.strip_suffix(".jsonl") else {
+            return Err(GwtError::Other(format!(
+                "workspace Work event shard has an invalid filename: {}",
+                path.display()
+            )));
+        };
+        if !is_lowercase_sha256_hex(hash) || !fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(GwtError::Other(format!(
+                "workspace Work event shard has an invalid filename or file type: {}",
+                path.display()
+            )));
+        }
+        let content = fs::read(&path)?;
+        if content.last() != Some(&b'\n')
+            || content.iter().filter(|byte| **byte == b'\n').count() != 1
+        {
+            return Err(GwtError::Other(format!(
+                "workspace Work event shard must contain exactly one newline-terminated event: {}",
+                path.display()
+            )));
+        }
+        let payload = &content[..content.len() - 1];
+        let record = decode_workspace_work_event_record(payload)?;
+        let value: serde_json::Value = serde_json::from_slice(payload).map_err(|error| {
+            GwtError::Other(format!(
+                "workspace Work event shard json {}: {error}",
+                path.display()
+            ))
+        })?;
+        let event_id = value
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                GwtError::Other(format!(
+                    "workspace Work event shard payload has no string id: {}",
+                    path.display()
+                ))
+            })?;
+        if path != gwt_work_event_shard_path(events_dir, event_id) {
+            return Err(GwtError::Other(format!(
+                "workspace Work event shard filename does not match payload id: {}",
+                path.display()
+            )));
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn is_lowercase_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_workspace_work_event_writer_temp_residue(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((hash, suffix)) = rest.split_once(".jsonl.create-") else {
+        return false;
+    };
+    is_lowercase_sha256_hex(hash) && !suffix.is_empty()
 }
 
 // The machine-local close log owns lifecycle truth, so recovery must reject
@@ -6194,6 +6464,159 @@ fn append_workspace_work_events_to_path(path: &Path, events: &[WorkEvent]) -> Re
         .map(WorkEventLogRecord::from_local_event)
         .collect::<Vec<_>>();
     append_workspace_work_event_records_to_path(path, &records)
+}
+
+fn canonical_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
+    let mut canonical = serde_json::to_vec(event)
+        .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
+    canonical.push(b'\n');
+    Ok(canonical)
+}
+
+fn divergent_workspace_work_event_shard_error(event: &WorkEvent, shard_path: &Path) -> GwtError {
+    GwtError::Other(format!(
+        "divergent Work event shard for event {} at {}",
+        event.id,
+        shard_path.display()
+    ))
+}
+
+/// Reject symlinks and other non-directory nodes in the repo-managed tail of
+/// `.gwt/work/events`. The repository root itself may legitimately have been
+/// reached through a symlink, so only the store and its two managed parents
+/// are inspected without following links.
+fn validate_workspace_work_event_store_path(events_dir: &Path) -> Result<bool> {
+    let mut store_exists = false;
+    for (index, path) in events_dir.ancestors().take(3).enumerate() {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                if index == 0 {
+                    store_exists = true;
+                }
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "workspace Work event store path is not a real directory: {}",
+                        path.display()
+                    ),
+                )
+                .into())
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(store_exists)
+}
+
+fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEvent]) -> Result<()> {
+    validate_workspace_work_event_store_path(events_dir)?;
+    let mut prepared = Vec::with_capacity(events.len());
+    let mut canonical_by_id = HashMap::with_capacity(events.len());
+    for event in events {
+        let canonical = canonical_workspace_work_event_bytes(event)?;
+        let shard_path = gwt_work_event_shard_path(events_dir, &event.id);
+        if let Some(existing) = canonical_by_id.get(&event.id) {
+            if existing != &canonical {
+                return Err(divergent_workspace_work_event_shard_error(
+                    event,
+                    &shard_path,
+                ));
+            }
+            continue;
+        }
+        canonical_by_id.insert(event.id.clone(), canonical.clone());
+        prepared.push((event, shard_path, canonical));
+    }
+
+    // Refuse a known divergent identity before publishing any member of this
+    // transaction batch. A concurrent create is checked again below.
+    for (event, shard_path, canonical) in &prepared {
+        match fs::symlink_metadata(shard_path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(GwtError::Other(format!(
+                    "workspace Work event shard is not a regular file: {}",
+                    shard_path.display()
+                )))
+            }
+            Ok(_) => match fs::read(shard_path) {
+                Ok(existing) if existing != *canonical => {
+                    return Err(divergent_workspace_work_event_shard_error(
+                        event, shard_path,
+                    ))
+                }
+                Ok(_) => {}
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for (event, shard_path, canonical) in prepared {
+        write_workspace_work_event_shard_bytes(event, &shard_path, &canonical)?;
+    }
+    Ok(())
+}
+
+/// Publish one fully-written canonical event at its immutable shard path.
+fn write_workspace_work_event_shard_bytes(
+    event: &WorkEvent,
+    shard_path: &Path,
+    canonical: &[u8],
+) -> Result<()> {
+    let parent = shard_path.parent().ok_or_else(|| {
+        GwtError::Other("Work event shard path has no parent directory".to_string())
+    })?;
+    create_dir_all_durable(parent)?;
+
+    let file_name = shard_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("work-event.jsonl");
+    let temp_path = shard_path.with_file_name(format!(
+        ".{file_name}.create-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    {
+        let mut temp = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        temp.write_all(canonical)?;
+        temp.sync_all()?;
+    }
+
+    match fs::hard_link(&temp_path, &shard_path) {
+        Ok(()) => {
+            fs::remove_file(&temp_path)?;
+            sync_directory(parent)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            fs::remove_file(&temp_path)?;
+            if !fs::symlink_metadata(shard_path)?.file_type().is_file() {
+                return Err(GwtError::Other(format!(
+                    "workspace Work event shard is not a regular file: {}",
+                    shard_path.display()
+                )));
+            }
+            let existing = fs::read(&shard_path)?;
+            if existing == canonical {
+                Ok(())
+            } else {
+                Err(divergent_workspace_work_event_shard_error(
+                    event, shard_path,
+                ))
+            }
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error.into())
+        }
+    }
 }
 
 fn append_workspace_work_event_records_to_path(

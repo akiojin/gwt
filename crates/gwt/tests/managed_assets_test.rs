@@ -256,6 +256,19 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         coordination_body.contains("regardless of project AGENTS.md / CLAUDE.md content"),
         "coordination skill description must declare project-AGENTS.md-independence"
     );
+    assert!(
+        coordination_body.contains(".gwt/work/events/*.jsonl")
+            && coordination_body.contains("immutable event shard"),
+        "materialized coordination guidance must deliver new Work events as immutable shards"
+    );
+    assert!(
+        coordination_body.contains("frozen read-only compatibility history"),
+        "materialized coordination guidance must make legacy events.jsonl read-only"
+    );
+    assert!(
+        coordination_body.contains(".gwt/work/events/.*.jsonl.create-*"),
+        "materialized guidance must exclude writer temp residue from delivery"
+    );
     let claude_settings = std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
         .expect("read claude");
     let codex_hooks =

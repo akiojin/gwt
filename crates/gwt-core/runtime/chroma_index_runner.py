@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import stat
 import shutil
 import subprocess
 import sys
@@ -3530,6 +3531,200 @@ def _work_project_state_dir(repo_hash: str) -> Path:
     return _gwt_home() / "projects" / repo_hash / "project-state"
 
 
+_KNOWN_WORK_EVENT_KINDS = {
+    "start",
+    "claim",
+    "update",
+    "blocked",
+    "handoff",
+    "resume",
+    "split",
+    "merge",
+    "pr",
+    "pause",
+    "done",
+    "discard",
+    "backfill",
+}
+_WORK_EVENT_OPTIONAL_STRING_FIELDS = {
+    "title",
+    "intent",
+    "summary",
+    "progress_summary",
+    "owner",
+    "next_action",
+    "agent_session_id",
+    "agent_id",
+    "display_name",
+    "board_entry_id",
+    "related_work_item_id",
+}
+_WORK_EVENT_CONTAINER_FIELDS = {
+    "branch",
+    "worktree_path",
+    "pr_number",
+    "pr_url",
+    "pr_state",
+}
+_RFC3339_INSTANT_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _parse_rfc3339_instant(value: str) -> tuple[int, int]:
+    match = _RFC3339_INSTANT_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("invalid RFC 3339 timestamp")
+    date, time, fraction, offset = match.groups()
+    parsed = datetime.datetime.fromisoformat(
+        f"{date}T{time}{'+00:00' if offset == 'Z' else offset}"
+    )
+    if parsed.tzinfo is None:
+        raise ValueError("timezone required")
+    utc = parsed.astimezone(datetime.timezone.utc)
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    delta = utc - epoch
+    seconds = delta.days * 86_400 + delta.seconds
+    nanoseconds = int((fraction or "0").ljust(9, "0"))
+    return seconds, nanoseconds
+
+
+def _validate_work_event_schema(event: Any, source: Path) -> bool:
+    """Validate the current compatible WorkEvent surface.
+
+    Additive top-level fields remain future-compatible. Unknown event kinds
+    validate all current fields but return ``False`` so the fallback leaves
+    their immutable source bytes untouched and skips projection.
+    """
+    if not isinstance(event, dict):
+        raise ValueError(f"Work event shard must contain a JSON object: {source}")
+    for field in ("id", "work_item_id", "kind", "updated_at"):
+        if not isinstance(event.get(field), str):
+            raise ValueError(
+                f"Work event shard field {field!r} must be a string: {source}"
+            )
+    try:
+        _parse_rfc3339_instant(event["updated_at"])
+    except ValueError as error:
+        raise ValueError(f"Work event shard has invalid updated_at: {source}") from error
+
+    for field in _WORK_EVENT_OPTIONAL_STRING_FIELDS:
+        value = event.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(
+                f"Work event shard field {field!r} must be a string or null: {source}"
+            )
+    status = event.get("status_category")
+    if status is not None and status not in {
+        "active",
+        "idle",
+        "blocked",
+        "done",
+        "unknown",
+    }:
+        raise ValueError(f"Work event shard has invalid status_category: {source}")
+    container = event.get("execution_container")
+    if container is not None:
+        if not isinstance(container, dict) or not set(container).issubset(
+            _WORK_EVENT_CONTAINER_FIELDS
+        ):
+            raise ValueError(
+                f"Work event shard has invalid execution_container: {source}"
+            )
+        for field in ("branch", "worktree_path", "pr_url", "pr_state"):
+            value = container.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(
+                    f"Work event shard execution_container.{field} is invalid: {source}"
+                )
+        pr_number = container.get("pr_number")
+        if pr_number is not None and (
+            isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or pr_number < 0
+            or pr_number > (1 << 64) - 1
+        ):
+            raise ValueError(
+                f"Work event shard execution_container.pr_number is invalid: {source}"
+            )
+    return event["kind"] in _KNOWN_WORK_EVENT_KINDS
+
+
+def _is_work_event_writer_temp_residue(path: Path) -> bool:
+    if re.fullmatch(r"\.[0-9a-f]{64}\.jsonl\.create-.+", path.name) is None:
+        return False
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _reject_non_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _read_work_event_shard(path: Path) -> Optional[str]:
+    if re.fullmatch(r"[0-9a-f]{64}\.jsonl", path.name) is None:
+        raise ValueError(f"invalid Work event shard filename or file type: {path}")
+    try:
+        is_regular_file = stat.S_ISREG(path.lstat().st_mode)
+    except OSError as error:
+        raise ValueError(f"failed to inspect Work event shard: {path}") from error
+    if not is_regular_file:
+        raise ValueError(f"invalid Work event shard filename or file type: {path}")
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"failed to read Work event shard: {path}") from error
+    if not content.endswith(b"\n") or content.count(b"\n") != 1:
+        raise ValueError(
+            f"Work event shard must contain exactly one newline-terminated event: {path}"
+        )
+    payload = content[:-1]
+    try:
+        text = payload.decode("utf-8")
+        event = json.loads(text, parse_constant=_reject_non_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"invalid Work event shard JSON: {path}") from error
+    known = _validate_work_event_schema(event, path)
+    expected = hashlib.sha256(event["id"].encode("utf-8")).hexdigest() + ".jsonl"
+    if path.name != expected:
+        raise ValueError(f"Work event shard filename does not match payload id: {path}")
+    return text if known else None
+
+
+def _work_event_shard_store_exists(shard_dir: Path) -> bool:
+    for managed_parent in (shard_dir.parent, shard_dir.parent.parent):
+        try:
+            managed_parent_mode = managed_parent.lstat().st_mode
+        except FileNotFoundError as error:
+            raise ValueError(
+                f"Work event shard store parent is missing: {managed_parent}"
+            ) from error
+        except OSError as error:
+            raise ValueError(
+                f"failed to inspect Work event shard store parent: {managed_parent}"
+            ) from error
+        if not stat.S_ISDIR(managed_parent_mode):
+            raise ValueError(
+                "Work event shard store parent must be a real directory: "
+                f"{managed_parent}"
+            )
+    try:
+        shard_dir_mode = shard_dir.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ValueError(
+            f"failed to inspect Work event shard store: {shard_dir}"
+        ) from error
+    if not stat.S_ISDIR(shard_dir_mode):
+        raise ValueError(
+            f"Work event shard store must be a real directory: {shard_dir}"
+        )
+    return True
+
+
 def _fold_work_events_into_items(
     items_by_id: Dict[str, Dict[str, Any]],
     order: List[str],
@@ -3553,7 +3748,11 @@ def _fold_work_events_into_items(
             event = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("work_item_id"):
+        if (
+            isinstance(event, dict)
+            and event.get("work_item_id")
+            and event.get("kind") in _KNOWN_WORK_EVENT_KINDS
+        ):
             events.append(event)
 
     seen_event_ids: set = set()
@@ -3563,7 +3762,16 @@ def _fold_work_events_into_items(
             if ev_id:
                 seen_event_ids.add(ev_id)
 
-    events.sort(key=lambda ev: str(ev.get("updated_at") or ""))
+    def updated_at_key(event: Dict[str, Any]) -> tuple[int, Any]:
+        value = str(event.get("updated_at") or "")
+        try:
+            return (0, _parse_rfc3339_instant(value))
+        except (ValueError, OverflowError):
+            # Legacy JSONL is intentionally tolerant; keep malformed legacy
+            # timestamps in a deterministic compatibility bucket.
+            return (1, value)
+
+    events.sort(key=updated_at_key)
     for event in events:
         event_id = event.get("id")
         if event_id and event_id in seen_event_ids:
@@ -3655,51 +3863,79 @@ def _load_work_documents(
                 if isinstance(item, dict) and str(item.get("id") or "").strip()
             ]
             try:
-                stat = projection_path.stat()
+                projection_stat = projection_path.stat()
                 manifest_entries.append(
                     {
                         "path": f"project-state/{projection_path.name}",
-                        "mtime": int(stat.st_mtime),
-                        "size": int(stat.st_size),
+                        "mtime": int(projection_stat.st_mtime),
+                        "size": int(projection_stat.st_size),
                     }
                 )
             except OSError:
                 pass
             return works, manifest_entries
 
-    # Fallback: fold the event logs into items.
+    # Fallback: validate/discover every event source, then fold one globally
+    # ordered stream so source enumeration does not decide event order.
     items_by_id: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
-    event_sources: List[Path] = [state_dir / "work-events.jsonl"]
+    event_sources: List[tuple[Path, str, bool]] = [
+        (state_dir / "work-events.jsonl", "project-state/work-events.jsonl", False)
+    ]
     if project_root:
+        repo_work_dir = Path(project_root) / ".gwt" / "work"
         event_sources.append(
-            Path(project_root) / ".gwt" / "work" / "events.jsonl"
+            (
+                repo_work_dir / "events.jsonl",
+                ".gwt/work/events.jsonl",
+                False,
+            )
         )
+        shard_dir = repo_work_dir / "events"
+        if _work_event_shard_store_exists(shard_dir):
+            try:
+                shard_paths = sorted(shard_dir.iterdir())
+            except OSError as error:
+                raise ValueError(
+                    f"failed to enumerate Work event shards: {shard_dir}"
+                ) from error
+            for shard in shard_paths:
+                if _is_work_event_writer_temp_residue(shard):
+                    continue
+                event_sources.append(
+                    (shard, f".gwt/work/events/{shard.name}", True)
+                )
 
-    for source in event_sources:
+    event_contents: List[str] = []
+    for source, path_label, is_shard in event_sources:
         if not source.is_file():
+            if is_shard:
+                raise ValueError(
+                    f"invalid Work event shard filename or file type: {source}"
+                )
             continue
+        if is_shard:
+            content = _read_work_event_shard(source)
+        else:
+            try:
+                content = source.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        if content is not None:
+            event_contents.append(content)
         try:
-            content = source.read_text(encoding="utf-8", errors="replace")
+            source_stat = source.stat()
         except OSError:
             continue
-        _fold_work_events_into_items(items_by_id, order, content)
-        try:
-            stat = source.stat()
-        except OSError:
-            continue
-        try:
-            rel = source.relative_to(_gwt_home() / "projects" / repo_hash)
-            path_label = rel.as_posix()
-        except ValueError:
-            path_label = ".gwt/work/events.jsonl"
         manifest_entries.append(
             {
                 "path": path_label,
-                "mtime": int(stat.st_mtime),
-                "size": int(stat.st_size),
+                "mtime": int(source_stat.st_mtime),
+                "size": int(source_stat.st_size),
             }
         )
+
+    _fold_work_events_into_items(items_by_id, order, "\n".join(event_contents))
 
     works = [items_by_id[work_id] for work_id in order]
     return works, manifest_entries

@@ -1024,9 +1024,16 @@ fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix("./").unwrap_or(entry);
 
+    // Fail closed for the tracked Work history contract even when a stale or
+    // user-authored exclude file reports a durable path as ignored. New event
+    // shards are direct non-hidden `.jsonl` children; writer temp residue is
+    // hidden and has a `.create-*` suffix, so it deliberately does not match.
+    if is_durable_gwt_work_entry(entry) {
+        return false;
+    }
+
     // `.gwt/` is a gwt-owned namespace and is excluded by managed worktrees.
-    // Only ignored entries are disposable: a tracked `.gwt/work/events.jsonl`
-    // modification carries durable Work history and must remain fail-closed.
+    // Only ignored non-durable entries are disposable.
     if status == "!!" && (entry == ".gwt" || entry.starts_with(".gwt/")) {
         return true;
     }
@@ -1041,6 +1048,26 @@ fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
     }
 
     entry == ".DS_Store" || entry.ends_with("/.DS_Store")
+}
+
+fn is_durable_gwt_work_entry(entry: &str) -> bool {
+    if matches!(
+        entry,
+        ".gwt/work/events.jsonl" | ".gwt/work/board-remote-roots.jsonl"
+    ) {
+        return true;
+    }
+
+    let Some(file_name) = entry.strip_prefix(".gwt/work/events/") else {
+        return false;
+    };
+    let Some(digest) = file_name.strip_suffix(".jsonl") else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
@@ -1611,6 +1638,20 @@ prunable gitdir file points to non-existent location
             "the startup reaper can remove an intake containing only ignored .gwt output"
         );
 
+        let ignored_shard = tmp.path().join(".intake-gwt-ignored-shard");
+        manager.create_detached("develop", &ignored_shard).unwrap();
+        let shard = ignored_shard
+            .join(".gwt/work/events")
+            .join(format!("{}.jsonl", "a".repeat(64)));
+        std::fs::create_dir_all(shard.parent().expect("shard parent")).unwrap();
+        std::fs::write(&shard, "{\"id\":\"durable-shard\"}\n").unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&ignored_shard)
+                .unwrap(),
+            "a canonical Work event shard remains durable even under a stale broad ignore"
+        );
+
         let tracked = tmp.path().join(".intake-gwt-tracked");
         manager.create_detached("develop", &tracked).unwrap();
         std::fs::write(
@@ -1622,6 +1663,32 @@ prunable gitdir file points to non-existent location
             manager.ephemeral_worktree_has_local_work(&tracked).unwrap(),
             "a tracked .gwt Work event change is durable local work"
         );
+    }
+
+    #[test]
+    fn cleanup_keeps_canonical_work_event_shards_but_discards_writer_temp_residue() {
+        let shard = format!(".gwt/work/events/{}.jsonl", "a".repeat(64));
+        let writer_temp = format!(".gwt/work/events/.{}.jsonl.create-123-test", "b".repeat(64));
+
+        assert!(
+            !is_disposable_worktree_entry("!!", &shard),
+            "a canonical shard is durable Work history even if a stale exclude file reports it ignored"
+        );
+        assert!(
+            is_disposable_worktree_entry("!!", &writer_temp),
+            "an uncommitted writer temp file is disposable residue"
+        );
+        for non_canonical in [
+            ".gwt/work/events/not-a-hash.jsonl".to_string(),
+            format!(".gwt/work/events/{}.jsonl", "A".repeat(64)),
+            format!(".gwt/work/events/nested/{}.jsonl", "c".repeat(64)),
+        ] {
+            assert!(
+                is_disposable_worktree_entry("!!", &non_canonical),
+                "only exact lowercase sha256 shard names are durable: {non_canonical}"
+            );
+        }
+        assert!(is_disposable_worktree_entry("!!", ".gwt/state.json"));
     }
 
     #[test]

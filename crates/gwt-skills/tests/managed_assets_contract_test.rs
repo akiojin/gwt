@@ -622,6 +622,19 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
+        assert!(
+            content.contains(".gwt/work/events/*.jsonl")
+                && content.contains("immutable event shard"),
+            "generated guidance must deliver new Work events as immutable shards"
+        );
+        assert!(
+            content.contains("frozen read-only compatibility history"),
+            "generated guidance must freeze the legacy events.jsonl monolith"
+        );
+        assert!(
+            content.contains(".gwt/work/events/.*.jsonl.create-*"),
+            "generated guidance must identify writer temp residue as non-delivery state"
+        );
     }
 }
 
@@ -655,4 +668,75 @@ fn update_git_exclude_inserts_managed_block_and_preserves_user_entries() {
         "managed block must not be duplicated on repeated calls"
     );
     assert_eq!(content.matches("# gwt-managed-end").count(), 1);
+}
+
+#[test]
+fn git_exclude_tracks_only_canonical_work_history_and_ignores_writer_temp() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    update_git_exclude(dir.path()).expect("update exclude");
+
+    let work = dir.path().join(".gwt/work");
+    let events = work.join("events");
+    fs::create_dir_all(&events).expect("create events dir");
+    fs::write(work.join("events.jsonl"), "legacy\n").expect("write legacy store");
+    fs::write(events.join(format!("{}.jsonl", "a".repeat(64))), "shard\n")
+        .expect("write canonical shard");
+    fs::write(events.join("not-a-hash.jsonl"), "invalid\n").expect("write noncanonical shard");
+    fs::write(
+        events.join(format!(".{}.jsonl.create-123-test", "b".repeat(64))),
+        "temp\n",
+    )
+    .expect("write writer temp");
+    fs::write(work.join("memory.md"), "local note\n").expect("write local note");
+
+    let output = hidden_command("git")
+        .args(["status", "--short", "--ignored", "--untracked-files=all"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git status");
+    assert!(output.status.success(), "git status failed: {output:?}");
+    let status = String::from_utf8(output.stdout).expect("utf-8 status");
+
+    assert!(status.contains("?? .gwt/work/events.jsonl\n"), "{status}");
+    assert!(
+        status.contains(&format!("?? .gwt/work/events/{}.jsonl\n", "a".repeat(64))),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!(
+            "!! .gwt/work/events/.{}.jsonl.create-123-test\n",
+            "b".repeat(64)
+        )),
+        "{status}"
+    );
+    assert!(
+        status.contains("!! .gwt/work/events/not-a-hash.jsonl\n"),
+        "{status}"
+    );
+    assert!(status.contains("!! .gwt/work/memory.md\n"), "{status}");
+}
+
+#[test]
+fn repository_attributes_leave_immutable_shards_on_default_merge() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let attributes = fs::read_to_string(workspace_root.join(".gitattributes"))
+        .expect("read repository .gitattributes");
+
+    assert!(
+        attributes.contains("frozen read-only compatibility history"),
+        "attributes must document that the legacy union file is frozen"
+    );
+    assert!(
+        attributes
+            .lines()
+            .any(|line| line == "**/.gwt/work/events.jsonl merge=union"),
+        "legacy union behavior must remain compatible"
+    );
+    assert!(
+        !attributes
+            .lines()
+            .any(|line| { line.contains(".gwt/work/events/") && line.contains("merge=") }),
+        "immutable shards must use Git's default merge behavior"
+    );
 }

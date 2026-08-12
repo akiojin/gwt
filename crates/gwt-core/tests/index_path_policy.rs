@@ -97,6 +97,15 @@ fn index_path_policy_allowlists_shared_knowledge_files_only_under_gwt_work() {
     assert!(policy.is_indexable_path(&matcher, dir.path(), &work.join("discussions.md")));
     // The Work event log under the same directory is not allowlisted.
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &work.join("events.jsonl")));
+    for relative in [
+        format!("events/{}.jsonl", "a".repeat(64)),
+        format!("events/.{}.jsonl.create-123-test", "b".repeat(64)),
+    ] {
+        assert!(
+            !policy.is_indexable_path(&matcher, dir.path(), &work.join(relative)),
+            "Work event shards and writer temp residue are coordination records, not project index input"
+        );
+    }
     // Legacy `tasks/` knowledge files are no longer allowlisted.
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &tasks.join("memory.md")));
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &tasks.join("discussions.md")));
