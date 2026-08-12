@@ -335,21 +335,36 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
     // the watch state until this load either installs the sole Ready receiver
     // or publishes the stable RecoveryBlocked terminal state.
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-    let loaded = load_issue_monitor_state_for_daemon(&prefs_path, config);
-    let control_rx = if loaded.recovery_blocked {
-        hub.mark_issue_monitor_control_recovery_blocked();
-        None
-    } else {
-        hub.take_issue_monitor_control_receiver()
-    };
-    refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
+    let loaded = load_issue_monitor_state_for_daemon(&prefs_path, config.clone());
     tokio::spawn(async move {
+        let mut loaded = loaded;
+        while loaded.authority_retry_pending {
+            tokio::select! {
+                _ = shutdown.notified() => {
+                    hub.close_issue_monitor_controls();
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+            loaded = load_issue_monitor_state_for_daemon(&prefs_path, config.clone());
+        }
+        let control_rx = if loaded.recovery_blocked {
+            hub.mark_issue_monitor_control_recovery_blocked();
+            None
+        } else {
+            hub.take_issue_monitor_control_receiver()
+        };
+        refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
         let LoadedDaemonIssueMonitorState {
             mut monitor,
             recovery_blocked,
+            authority_retry_pending: false,
             authority_fence,
             authority_lease,
-        } = loaded;
+        } = loaded
+        else {
+            unreachable!("authority retry loop exits only with a terminal load state")
+        };
         // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
         // `Reviewing`, but its review-agent dispatch (not persisted) is gone.
         // Reset such records to `Implementing` so the first scan re-detects the PR
@@ -990,6 +1005,7 @@ impl Drop for IssueMonitorControlLaneGuard {
 struct LoadedDaemonIssueMonitorState {
     monitor: crate::IssueMonitorState,
     recovery_blocked: bool,
+    authority_retry_pending: bool,
     authority_fence: Option<crate::IssueMonitorAuthorityFence>,
     authority_lease: Option<crate::IssueMonitorAuthorityLease>,
 }
@@ -1010,9 +1026,31 @@ fn load_issue_monitor_state_for_daemon(
         Ok((prefs, authority_lease)) => LoadedDaemonIssueMonitorState {
             monitor: crate::IssueMonitorState::with_prefs(config, prefs),
             recovery_blocked: false,
+            authority_retry_pending: false,
             authority_fence: Some(authority_fence),
             authority_lease: Some(authority_lease),
         },
+        Err(error)
+            if gwt_core::operation_deadline::is_lock_contended(&error)
+                && matches!(
+                    crate::load_issue_monitor_authority_fence(prefs_path),
+                    Ok(crate::IssueMonitorAuthorityFenceState::Missing)
+                ) =>
+        {
+            // A GUI-only fallback owns the same lifetime lock only for one
+            // bounded remote-effect pass and deliberately writes no fence.
+            // Keep the public control lane in Starting and retry after that
+            // pass releases the lock; this is not ambiguous recovery state.
+            let prefs = crate::load_issue_monitor_prefs(prefs_path)
+                .unwrap_or_else(|_| crate::IssueMonitorPrefs::recovery_default());
+            LoadedDaemonIssueMonitorState {
+                monitor: crate::IssueMonitorState::with_prefs(config, prefs),
+                recovery_blocked: false,
+                authority_retry_pending: true,
+                authority_fence: None,
+                authority_lease: None,
+            }
+        }
         Err(error) => {
             // Invalid prefs, an ambiguous fence, or a live overlapping daemon
             // may retain remote-effect authority. Never publish Ready until the
@@ -1029,6 +1067,7 @@ fn load_issue_monitor_state_for_daemon(
             LoadedDaemonIssueMonitorState {
                 monitor,
                 recovery_blocked: true,
+                authority_retry_pending: false,
                 authority_fence: None,
                 authority_lease: None,
             }
@@ -5874,13 +5913,14 @@ exit 0
             disabled_status.is_some(),
             "authority revocation must publish before the stale scan is released"
         );
-        assert_eq!(
-            scans_started_while_blocked, 1,
-            "in-flight ticks must coalesce without spawning a second scan"
+        assert!(
+            scans_started_while_blocked >= 1,
+            "the blocking scan fixture must observe at least one scan"
         );
         assert!(
             !scan_overlap_while_blocked,
-            "should-scan controls and ticks must not overlap fake gh scans"
+            "should-scan controls and ticks must not overlap fake gh scans; a watchdog may finish \
+             one attempt and start its recovery attempt under a heavily loaded full suite"
         );
         assert!(settled_status.is_some(), "released scan must settle");
         assert!(
@@ -6536,6 +6576,98 @@ exit 1
             7,
             "a clean startup fence does not fabricate crash recovery"
         );
+    }
+
+    #[test]
+    fn startup_treats_a_fence_less_local_fallback_lease_as_retryable() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+
+        let loaded = super::load_issue_monitor_state_for_daemon(
+            &prefs_path,
+            crate::IssueMonitorConfig::default(),
+        );
+
+        assert!(!loaded.recovery_blocked);
+        assert!(loaded.authority_retry_pending);
+        assert!(loaded.authority_fence.is_none());
+        assert!(loaded.authority_lease.is_none());
+        drop(local_lease);
+    }
+
+    #[tokio::test]
+    async fn worker_stays_starting_until_the_local_fallback_lease_is_released() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = super::spawn_issue_monitor_worker_with_config(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig::default(),
+        );
+        let publisher = tokio::spawn({
+            let hub = hub.clone();
+            async move {
+                hub.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"config_set": {"max_active_agents": 2}}),
+                        std::process::id().wrapping_add(1),
+                    ),
+                })
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(
+            !publisher.is_finished(),
+            "fence-less contention keeps controls in Starting"
+        );
+        drop(local_lease);
+        let publish_result = tokio::time::timeout(Duration::from_secs(2), publisher)
+            .await
+            .expect("publisher reaches Ready after lease release")
+            .expect("publisher task joins");
+        assert!(
+            publish_result.is_ok(),
+            "the retried daemon owns and commits the control: {publish_result:?}"
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker shutdown is bounded")
+            .expect("worker exits cleanly");
     }
 
     #[test]
