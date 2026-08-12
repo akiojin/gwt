@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.78.1] - 2026-08-12
+
+### Bug Fixes
+
+- **hooks:** Codex hooks の監査対象と自己修復対象のパス集合を一致させる
+- **launch:** Provenance 未解決時は legacy Session 移行を skip して launch を継続する
+- **issue-monitor:** Scan の probe を claim 候補に限定し commit を独立 budget で実行する
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3474 の作業状態を記録
+- **work:** Issue #3474 の視覚検証完了を記録
+- **work:** Issue #3474 の完了状態を記録
+- **work:** Develop worktree の Work event を記録する
+
+
 ## [9.78.0] - 2026-08-12
 
 ### Bug Fixes
