@@ -3390,6 +3390,118 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     );
 }
 
+#[test]
+fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
+    let temp = tempdir().expect("tempdir");
+    let foreign_project = temp.path().join("foreign-project");
+    let authenticated_project = temp.path().join("authenticated-project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    fs::create_dir_all(&authenticated_project).expect("authenticated project");
+    let foreign_tab = sample_project_tab_with_window_at(
+        "tab-foreign",
+        "agent-foreign",
+        foreign_project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let authenticated_tab = sample_project_tab_with_window_at(
+        "tab-authenticated",
+        "agent-authenticated",
+        authenticated_project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(
+        temp.path(),
+        vec![foreign_tab, authenticated_tab],
+        Some("tab-authenticated"),
+    );
+    let window_id = "tab-authenticated::agent-authenticated";
+    let mut pane = long_running_test_pane(window_id);
+    pane.process_bytes(b"pane list must not serialize this snapshot\n");
+    let pane = Arc::new(Mutex::new(pane));
+    runtime.runtimes.insert(
+        window_id.to_string(),
+        WindowRuntime {
+            pane: pane.clone(),
+            output_thread: None,
+            status_thread: None,
+        },
+    );
+    let principal =
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal");
+    let intake_worktree = temp.path().join(".intake-pane-list");
+    fs::create_dir(&intake_worktree).expect("intake-shaped worktree");
+    let mut active_session = sample_active_agent_session("tab-authenticated", window_id);
+    active_session.worktree_path = intake_worktree;
+    runtime
+        .active_agent_sessions
+        .insert(window_id.to_string(), active_session);
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let holder = thread::spawn(move || {
+        let _pane = pane.lock().expect("hold terminal snapshot mutex");
+        held_tx.send(()).expect("announce held snapshot mutex");
+        release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+    });
+    held_rx.recv().expect("snapshot mutex must be held");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::ListWindows,
+    );
+    release_tx
+        .send(())
+        .expect("list response must not wait for the snapshot mutex");
+    assert!(
+        holder.join().expect("snapshot mutex holder"),
+        "list response waited for the terminal snapshot mutex"
+    );
+
+    let [OutboundEvent {
+        target: DispatchTarget::Client(client_id),
+        event: BackendEvent::WindowCanvasState { workspace },
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("pane list must return exactly one workspace_state reply");
+    };
+    assert_eq!(client_id, "pane-client");
+    assert_eq!(workspace.tabs.len(), 1);
+    assert_eq!(
+        workspace.tabs[0].project_root,
+        authenticated_project.to_string_lossy()
+    );
+    assert_eq!(workspace.tabs[0].workspace.windows.len(), 1);
+    assert_eq!(workspace.tabs[0].workspace.windows[0].id, window_id);
+    assert_eq!(
+        workspace.tabs[0].workspace.windows[0].worktree_form,
+        gwt::WindowWorktreeForm::Unknown,
+        "pane list must use the persisted no-I/O projection instead of resolving Git worktree form"
+    );
+
+    let ready_events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
+            .expect("authenticated principal"),
+        AgentFrontendRequest::Ready,
+    );
+    let ready_workspace = ready_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("frontend_ready workspace state");
+    assert_eq!(
+        ready_workspace.tabs[0].workspace.windows[0].worktree_form,
+        gwt::WindowWorktreeForm::BranchBacked,
+        "existing frontend_ready payload must retain resolved worktree-form semantics"
+    );
+}
+
 fn materialize_active_agent_pane_binding(
     project: &Path,
     session_id: &str,

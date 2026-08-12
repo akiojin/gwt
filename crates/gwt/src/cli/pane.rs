@@ -30,6 +30,7 @@ use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
 const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
+const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 type PaneWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -284,10 +285,19 @@ async fn request_window_list(
     ws_url: &str,
     project_root: &str,
 ) -> Result<Vec<PersistedWindowState>, String> {
-    let mut socket = connect_pane_websocket(ws_url).await?;
-    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
+    request_window_list_with_timeout(ws_url, project_root, BACKEND_RESPONSE_TIMEOUT).await
+}
 
-    next_workspace_windows(&mut socket, project_root, "pane list").await
+async fn request_window_list_with_timeout(
+    ws_url: &str,
+    project_root: &str,
+    response_timeout: Duration,
+) -> Result<Vec<PersistedWindowState>, String> {
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({ "kind": "list_windows" })).await?;
+
+    next_workspace_windows_with_timeout(&mut socket, project_root, "pane list", response_timeout)
+        .await
 }
 
 async fn read_pane_snapshot(
@@ -433,7 +443,14 @@ async fn send_frontend_event(socket: &mut PaneWebSocket, payload: Value) -> Resu
 }
 
 async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
-    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+    next_backend_json_with_timeout(socket, BACKEND_RESPONSE_TIMEOUT).await
+}
+
+async fn next_backend_json_with_timeout(
+    socket: &mut PaneWebSocket,
+    response_timeout: Duration,
+) -> Result<Value, String> {
+    let message = tokio::time::timeout(response_timeout, socket.next())
         .await
         .map_err(|_| "pane websocket timed out waiting for backend response".to_string())?
         .ok_or_else(|| "pane websocket closed before backend response".to_string())?
@@ -455,8 +472,20 @@ async fn next_workspace_windows(
     project_root: &str,
     context: &str,
 ) -> Result<Vec<PersistedWindowState>, String> {
+    next_workspace_windows_with_timeout(socket, project_root, context, BACKEND_RESPONSE_TIMEOUT)
+        .await
+}
+
+async fn next_workspace_windows_with_timeout(
+    socket: &mut PaneWebSocket,
+    project_root: &str,
+    context: &str,
+    response_timeout: Duration,
+) -> Result<Vec<PersistedWindowState>, String> {
     for _ in 0..32 {
-        let value = next_backend_json(socket).await?;
+        let value = next_backend_json_with_timeout(socket, response_timeout)
+            .await
+            .map_err(|error| format!("{context}: {error}"))?;
         if let Some(windows) = parse_workspace_windows(&value, project_root) {
             return Ok(windows);
         }
@@ -1223,6 +1252,119 @@ mod tests {
             .to_string()
     }
 
+    async fn spawn_window_list_mock(
+        project_root: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind pane list mock");
+        let address = listener.local_addr().expect("pane list mock address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept pane list connection");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept pane list websocket");
+            let request_kind = next_frontend_kind(&mut socket).await;
+            let state = workspace_state_for_test(
+                project_root,
+                vec![window(
+                    "tab-project::agent-project",
+                    WindowPreset::Agent,
+                    Some("codex"),
+                )],
+            );
+            socket
+                .send(Message::Text(state.to_string().into()))
+                .await
+                .expect("send pane list workspace state");
+            request_kind
+        });
+
+        (format!("ws://{address}/internal/pane-ws"), server)
+    }
+
+    #[test]
+    fn request_window_list_uses_lightweight_list_windows_request() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-list-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane list test runtime");
+
+        runtime.block_on(async {
+            let project_root = "/repo/project";
+            let (ws_url, server) = spawn_window_list_mock(project_root).await;
+
+            let windows = request_window_list(&ws_url, project_root)
+                .await
+                .expect("pane list response");
+            let request_kind = server.await.expect("pane list mock task");
+
+            assert_eq!(request_kind, "list_windows");
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, "tab-project::agent-project");
+        });
+    }
+
+    #[test]
+    fn request_window_list_identifies_backend_response_timeout() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "pane-list-capability",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane list test runtime");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind pane list mock");
+            let address = listener.local_addr().expect("pane list mock address");
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept pane list connection");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept pane list websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
+                let _socket = socket;
+                let _ = release_rx.await;
+            });
+
+            let error = request_window_list_with_timeout(
+                &format!("ws://{address}/internal/pane-ws"),
+                "/repo/project",
+                Duration::from_millis(20),
+            )
+            .await
+            .expect_err("pane list response must time out");
+            release_tx.send(()).expect("release pane list mock");
+            server.await.expect("pane list mock task");
+
+            assert_eq!(
+                error,
+                "pane list: pane websocket timed out waiting for backend response"
+            );
+        });
+    }
+
     #[derive(Clone, Copy)]
     enum SelfCloseMockReply {
         Matching,
@@ -1357,7 +1499,7 @@ mod tests {
             assert_eq!(result, Ok("close requested agent-self\n".to_string()));
             assert_eq!(
                 received_kinds,
-                vec!["frontend_ready", "frontend_ready", "close_window"],
+                vec!["list_windows", "frontend_ready", "close_window"],
                 "self-close must not send a second frontend_ready after revocation"
             );
         });
@@ -1496,7 +1638,7 @@ mod tests {
                 assert_eq!(
                     received_kinds,
                     vec![
-                        "frontend_ready",
+                        "list_windows",
                         "frontend_ready",
                         "close_window",
                         "frontend_ready"
@@ -1541,7 +1683,7 @@ mod tests {
             assert!(error.starts_with("pane "), "{error}");
             assert_eq!(
                 received_kinds,
-                vec!["frontend_ready", "frontend_ready", "close_window"]
+                vec!["list_windows", "frontend_ready", "close_window"]
             );
         });
     }
@@ -1612,7 +1754,7 @@ mod tests {
             assert_eq!(
                 received_kinds,
                 vec![
-                    "frontend_ready",
+                    "list_windows",
                     "frontend_ready",
                     "close_window",
                     "frontend_ready"
