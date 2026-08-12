@@ -16,11 +16,11 @@ use base64::Engine;
 use chrono::{TimeZone, Utc};
 use gwt::{
     empty_workspace_state, load_restored_workspace_state, load_session_state, load_workspace_state,
-    workspace_state_path, ArrangeMode, BackendEvent, BranchCleanupInfo, BranchListEntry,
-    BranchScope, ContentLimits, FocusCycleDirection, FrontendEvent, LaunchWizardAction,
-    LaunchWizardContext, LaunchWizardState, LinkedIssueKind, ProfileEnvEntryView, ProjectKind,
-    UiTracePayload, WindowCanvasState, WindowGeometry, WindowPlacement, WindowPreset,
-    WindowProcessStatus,
+    refresh_managed_gwt_assets_for_worktree, workspace_state_path, ArrangeMode, BackendEvent,
+    BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits, FocusCycleDirection,
+    FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState, LinkedIssueKind,
+    ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState, WindowGeometry,
+    WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -19659,6 +19659,7 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
     for worktree in [&first, &second] {
         let local = worktree.join("target/debug/gwtd");
         fs::create_dir_all(local.parent().unwrap()).unwrap();
+        run_git(worktree, &["init", "-q"]);
         fs::write(&local, "local").unwrap();
         let _local_hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &local);
         gwt_skills::generate_settings_local(worktree).unwrap();
@@ -19672,6 +19673,16 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
 
     super::startup::self_heal_managed_hooks_in_worktrees([first.as_path(), second.as_path()]);
+
+    // Reproduce the second half of the historical failure: after startup
+    // self-heal converges every provider, an old/debug GUI rematerializes the
+    // same worktree while carrying its checkout runtime in GWT_BIN_PATH. The
+    // stable generation fallback must remain unchanged.
+    for worktree in [&first, &second] {
+        let local = worktree.join("target/debug/gwtd");
+        let _runtime_bin = ScopedEnvVar::set("GWT_BIN_PATH", &local);
+        refresh_managed_gwt_assets_for_worktree(worktree).expect("old/debug GUI rematerialization");
+    }
 
     for worktree in [&first, &second] {
         let local = worktree.join("target/debug/gwtd");
@@ -32832,6 +32843,99 @@ fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
 }
 
 #[test]
+fn local_fallback_transaction_preserves_the_background_worker_deadline() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let background_deadline = Instant::now() + Duration::from_secs(5);
+    let _deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(background_deadline);
+
+    let observed =
+        super::try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
+            &prefs_path,
+            &mut monitor,
+            |_| gwt_core::operation_deadline::current(),
+        )
+        .expect("fallback transaction");
+
+    assert_eq!(
+        observed,
+        Some(background_deadline),
+        "the GUI-local 250 ms bound must not shorten a background worker deadline"
+    );
+}
+
+#[test]
+fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open prefs lock");
+    lock.lock_exclusive().expect("hold prefs lock");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let scan_deadline = Instant::now() + Duration::from_secs(5);
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
+
+    let started = Instant::now();
+    let rebase_mutated =
+        super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |_| true);
+    let control = runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ());
+    let authorizing =
+        runtime.commit_local_issue_monitor_authorizing_control(|_| Ok::<_, String>(()));
+    let elapsed = started.elapsed();
+    FileExt::unlock(&lock).expect("release prefs lock");
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "GUI fallback transactions outlived their cumulative short lock budget: {elapsed:?}"
+    );
+    assert!(
+        !rebase_mutated,
+        "timed-out rebase must not run its mutation"
+    );
+    assert!(
+        control.is_err(),
+        "timed-out control commit must fail closed"
+    );
+    assert!(
+        authorizing.is_err(),
+        "timed-out authorizing commit must fail closed"
+    );
+    assert_eq!(
+        fs::read(&prefs_path).expect("reload prefs"),
+        before,
+        "timed-out GUI fallback transactions must be zero-write"
+    );
+}
+
+#[test]
 fn app_runtime_initial_recovery_keeps_legacy_failure_migration_unapplied() {
     let temp = tempdir().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");
@@ -43675,6 +43779,66 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
             .as_deref(),
         Some("2026-08-10T01:00:00Z"),
         "standing-work wake is independent of scan authority"
+    );
+}
+
+#[test]
+fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..gwt::IssueMonitorConfig::default()
+        },
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-10T00:00:00Z",
+    );
+    monitor.complete_active_launch(42, "tab-1::other-window");
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("quiet loop");
+    fs::write(&prefs_path, b"{").expect("corrupt prefs after worker completion");
+    runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+
+    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-10T01:00:00Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, .. } if level == "error"
+    )));
+    assert_eq!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("rearmed loop")
+            .last_wake_at
+            .as_deref(),
+        Some("2026-08-10T01:00:00Z"),
+        "a malformed disk snapshot must not discard the worker's standing-work wake"
     );
 }
 

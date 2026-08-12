@@ -346,7 +346,20 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
                 }
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {}
             }
-            loaded = load_issue_monitor_state_for_daemon(&prefs_path, config.clone());
+            let retry_prefs_path = prefs_path.clone();
+            let retry_config = config.clone();
+            loaded = match tokio::task::spawn_blocking(move || {
+                load_issue_monitor_state_for_daemon(&retry_prefs_path, retry_config)
+            })
+            .await
+            {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    tracing::error!(%error, "Issue Monitor authority retry worker failed");
+                    hub.close_issue_monitor_controls();
+                    return;
+                }
+            };
         }
         let control_rx = if loaded.recovery_blocked {
             hub.mark_issue_monitor_control_recovery_blocked();
@@ -6668,6 +6681,62 @@ exit 1
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authority_retry_state_load_does_not_block_the_tokio_worker() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = super::spawn_issue_monitor_worker_with_config(
+            scope,
+            hub,
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig::default(),
+        );
+        let prefs_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(prefs_path.with_extension("lock"))
+            .expect("prefs lock file");
+        prefs_lock
+            .lock_exclusive()
+            .expect("hold prefs lock across retry");
+
+        let timer_started_at = Instant::now();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            timer_started_at.elapsed() < Duration::from_millis(200),
+            "blocking retry load starved the async timer for {:?}",
+            timer_started_at.elapsed()
+        );
+
+        prefs_lock.unlock().expect("release prefs lock");
+        drop(local_lease);
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker stops")
+            .expect("worker joins");
     }
 
     #[test]

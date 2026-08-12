@@ -1083,9 +1083,11 @@ fn try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence<T>(
     monitor: &mut gwt::IssueMonitorState,
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
 ) -> std::io::Result<T> {
-    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        std::time::Instant::now() + std::time::Duration::from_millis(250),
-    );
+    let _deadline = gwt_core::operation_deadline::current().is_none().then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        )
+    });
     let recovery_baseline = monitor.prefs();
     let transaction =
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(prefs_path, |disk| {
@@ -4064,11 +4066,17 @@ impl AppRuntime {
             Ok(_) => return Vec::new(),
             Err(error) => {
                 tracing::error!(%error, "Issue Monitor scheduled completion could not reload prefs");
-                return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
                     level: "error".to_string(),
                     message: format!("Issue Monitor scheduled completion failed: {error}"),
                     issue_number: None,
                 })];
+                events.extend(self.pm_periodic_wake_events_for_monitor_at(
+                    &project_root,
+                    &monitor,
+                    now,
+                ));
+                return events;
             }
         };
         // The worker carries the ephemeral live queue/inbox, while disk owns

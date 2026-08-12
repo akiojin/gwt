@@ -191,3 +191,27 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
         );
     }
 }
+
+#[test]
+fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
+    let workflow_path = repo_root().join(".github/workflows/test.yml");
+    let workflow = fs::read_to_string(&workflow_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
+
+    for step_name in [
+        "Run real Claude probe caller regressions",
+        "Run Issue Monitor scheduled driver contracts",
+    ] {
+        let marker = format!("      - name: {step_name}");
+        let (_, tail) = workflow
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing Windows CI step `{step_name}`"));
+        let step = tail
+            .split_once("\n      - name:")
+            .map_or(tail, |(step, _)| step);
+        assert!(
+            step.contains("\n        shell: bash\n"),
+            "Windows multi-command step `{step_name}` must stop at the first failed cargo command"
+        );
+    }
+}
