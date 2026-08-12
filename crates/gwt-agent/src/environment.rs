@@ -19,8 +19,10 @@ use crate::{
 const GWT_PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 const GWT_REPO_HASH_ENV: &str = "GWT_REPO_HASH";
 const GWT_WORKTREE_HASH_ENV: &str = "GWT_WORKTREE_HASH";
+const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
+    CODEX_THREAD_ID_ENV,
     GWT_BIN_PATH_ENV,
     GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
@@ -177,12 +179,16 @@ impl LaunchEnvironment {
         I: IntoIterator<Item = (String, String)>,
     {
         let mut env: HashMap<String, String> = base_env.into_iter().collect();
+        let remove_env = inherited_launch_scope_remove_env();
         normalize_windows_path_key(&mut env);
+        for key in &remove_env {
+            remove_env_key(&mut env, key);
+        }
         apply_required_terminal_defaults(&mut env);
         Self {
             base_env: env,
             profile_env: HashMap::new(),
-            remove_env: inherited_terminal_color_suppressor_remove_env(),
+            remove_env,
             override_env: HashMap::new(),
         }
     }
@@ -219,13 +225,13 @@ impl LaunchEnvironment {
             return Err(format!("active profile not found: {active_name}"));
         };
 
-        let inherited_remove_env = inherited_terminal_color_suppressor_remove_env();
+        let inherited_remove_env = inherited_launch_scope_remove_env();
         let profile_remove_env = normalized_remove_env(&profile.disabled_env);
         let remove_env = merged_remove_env(&inherited_remove_env, &profile_remove_env);
         let mut base_env: HashMap<String, String> = base_env.into_iter().collect();
         normalize_windows_path_key(&mut base_env);
         for key in &remove_env {
-            base_env.remove(key);
+            remove_env_key(&mut base_env, key);
         }
         apply_required_terminal_defaults(&mut base_env);
 
@@ -302,7 +308,7 @@ impl LaunchEnvironment {
 
         let mut merged_env = self.base_env.clone();
         for key in &merged_remove_env {
-            merged_env.remove(key);
+            remove_env_key(&mut merged_env, key);
         }
         merged_env.extend(self.profile_env.clone());
         merged_env.extend(explicit_env);
@@ -326,7 +332,7 @@ impl LaunchEnvironment {
 
 fn apply_required_terminal_defaults(env: &mut HashMap<String, String>) {
     for key in INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS {
-        env.remove(*key);
+        remove_env_key(env, key);
     }
     let replace_term = env
         .get("TERM")
@@ -351,10 +357,28 @@ fn inherited_terminal_color_suppressor_remove_env() -> Vec<String> {
         .collect()
 }
 
+fn inherited_launch_scope_remove_env() -> Vec<String> {
+    merged_remove_env(
+        &inherited_terminal_color_suppressor_remove_env(),
+        &INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
     for key in INHERITED_LAUNCH_ENV_KEYS {
-        env.remove(*key);
+        remove_env_key(env, key);
     }
+}
+
+fn remove_env_key(env: &mut HashMap<String, String>, key: &str) {
+    #[cfg(windows)]
+    env.retain(|candidate, _| !candidate.eq_ignore_ascii_case(key));
+
+    #[cfg(not(windows))]
+    env.remove(key);
 }
 
 #[cfg(windows)]
@@ -541,6 +565,14 @@ mod tests {
         profile
     }
 
+    fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
+        let additional = additional
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>();
+        merged_remove_env(&inherited_launch_scope_remove_env(), &additional)
+    }
+
     #[test]
     fn merges_active_profile_over_host_base() {
         let (_dir, config_path) = write_profile_config(dev_profile());
@@ -561,10 +593,7 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(!env.contains_key("SECRET"));
-        assert_eq!(
-            remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["SECRET"]));
     }
 
     #[test]
@@ -590,10 +619,7 @@ mod tests {
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(!env.contains_key("HOST_ONLY"));
         assert!(!env.contains_key("SECRET"));
-        assert_eq!(
-            remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["SECRET"]));
     }
 
     #[test]
@@ -632,11 +658,7 @@ mod tests {
         assert!(!env_vars.contains_key("SECRET"));
         assert_eq!(
             remove_env,
-            vec![
-                "EXPLICIT_REMOVE".to_string(),
-                "NO_COLOR".to_string(),
-                "SECRET".to_string()
-            ]
+            expected_launch_remove_env(&["EXPLICIT_REMOVE", "SECRET"])
         );
     }
 
@@ -735,14 +757,7 @@ mod tests {
             Some("/profile/bin")
         );
         assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
-        assert_eq!(
-            remove_env,
-            vec![
-                "NO_COLOR".to_string(),
-                "PATH".to_string(),
-                "SECRET".to_string()
-            ]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["PATH", "SECRET"]));
     }
 
     #[test]
@@ -754,7 +769,7 @@ mod tests {
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
-        assert_eq!(remove_env, vec!["NO_COLOR".to_string()]);
+        assert_eq!(remove_env, expected_launch_remove_env(&[]));
     }
 
     #[cfg(windows)]
@@ -804,8 +819,8 @@ mod tests {
         );
         assert_eq!(
             remove_env,
-            vec!["NO_COLOR".to_string()],
-            "NO_COLOR must be removed from inherited process env, not only omitted from explicit env_vars"
+            expected_launch_remove_env(&[]),
+            "NO_COLOR and parent launch scope must be removed from the inherited process env"
         );
     }
 
@@ -829,7 +844,7 @@ mod tests {
         assert_eq!(env.get("NO_COLOR").map(String::as_str), Some("1"));
         assert_eq!(
             remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()],
+            expected_launch_remove_env(&["SECRET"]),
             "profile NO_COLOR is explicit env and should be re-applied after inherited env removal"
         );
     }
@@ -925,6 +940,73 @@ mod tests {
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
         assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_base_env_drops_inherited_launch_scoped_env_case_insensitively() {
+        let env = hydrate_host_base_env(
+            INHERITED_LAUNCH_ENV_KEYS
+                .iter()
+                .map(|key| (key.to_ascii_lowercase(), format!("parent-{key}"))),
+        );
+
+        for key in INHERITED_LAUNCH_ENV_KEYS {
+            assert!(
+                !env.keys().any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "parent launch-scoped value must be removed regardless of Windows env-key casing: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_environment_removes_parent_launch_scope_from_the_spawn_contract() {
+        let base_env = INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .map(|key| ((*key).to_string(), format!("parent-{key}")))
+            .collect::<Vec<_>>();
+
+        let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
+
+        for key in INHERITED_LAUNCH_ENV_KEYS {
+            assert!(
+                !env.contains_key(*key),
+                "parent launch-scoped value must not remain in explicit env: {key}"
+            );
+            assert!(
+                remove_env.iter().any(|candidate| candidate == key),
+                "parent launch-scoped value must be removed from inherited child env: {key}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launch_environment_removes_parent_scope_and_no_color_case_insensitively() {
+        let base_env = INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .map(|key| (key.to_ascii_lowercase(), format!("parent-{key}")))
+            .chain(std::iter::once(("no_color".to_string(), "1".to_string())))
+            .collect::<Vec<_>>();
+
+        let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
+
+        for key in INHERITED_LAUNCH_ENV_KEYS
+            .iter()
+            .copied()
+            .chain(INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS.iter().copied())
+        {
+            assert!(
+                !env.keys().any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "inherited value must be absent from the explicit spawn env regardless of Windows env-key casing: {key}"
+            );
+            assert!(
+                remove_env
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "spawn contract must remove the inherited Windows env key: {key}"
+            );
+        }
     }
 
     #[cfg(not(windows))]
