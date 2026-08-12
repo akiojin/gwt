@@ -32747,7 +32747,7 @@ fn local_fallback_transaction_preserves_the_background_worker_deadline() {
 }
 
 #[test]
-fn sibling_local_fallback_transactions_preserve_the_background_worker_deadline() {
+fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -32763,32 +32763,50 @@ fn sibling_local_fallback_transactions_preserve_the_background_worker_deadline()
         ..gwt::IssueMonitorPrefs::default()
     };
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+    let before = fs::read(&prefs_path).expect("read seeded prefs");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open prefs lock");
+    lock.lock_exclusive().expect("hold prefs lock");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-    let background_deadline = Instant::now() + Duration::from_secs(5);
-    let _deadline =
-        gwt_core::operation_deadline::ScopedOperationDeadline::enter(background_deadline);
+    let scan_deadline = Instant::now() + Duration::from_secs(5);
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
 
-    let rebase_observed =
-        super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |_| {
-            gwt_core::operation_deadline::current()
-        });
-    let (_, control_observed) = runtime
-        .commit_local_issue_monitor_control_for_project(&repo, |_| {
-            gwt_core::operation_deadline::current()
-        })
-        .expect("fallback control commit");
-    let (_, authorizing_observed) = runtime
-        .commit_local_issue_monitor_authorizing_control(|_| {
-            Ok::<_, String>(gwt_core::operation_deadline::current())
-        })
-        .expect("authorizing fallback control commit");
+    let started = Instant::now();
+    let rebase_mutated =
+        super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |_| true);
+    let control = runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ());
+    let authorizing =
+        runtime.commit_local_issue_monitor_authorizing_control(|_| Ok::<_, String>(()));
+    let elapsed = started.elapsed();
+    FileExt::unlock(&lock).expect("release prefs lock");
 
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "GUI fallback transactions outlived their cumulative short lock budget: {elapsed:?}"
+    );
+    assert!(
+        !rebase_mutated,
+        "timed-out rebase must not run its mutation"
+    );
+    assert!(
+        control.is_err(),
+        "timed-out control commit must fail closed"
+    );
+    assert!(
+        authorizing.is_err(),
+        "timed-out authorizing commit must fail closed"
+    );
     assert_eq!(
-        [rebase_observed, control_observed, authorizing_observed],
-        [Some(background_deadline); 3],
-        "every sibling helper must preserve the outer background deadline"
+        fs::read(&prefs_path).expect("reload prefs"),
+        before,
+        "timed-out GUI fallback transactions must be zero-write"
     );
 }
 

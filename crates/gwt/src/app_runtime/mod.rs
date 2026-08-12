@@ -1043,11 +1043,9 @@ fn rebase_mutate_and_persist_issue_monitor_state<T: Default>(
     monitor: &mut gwt::IssueMonitorState,
     mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
 ) -> T {
-    let _deadline = gwt_core::operation_deadline::current().is_none().then(|| {
-        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            std::time::Instant::now() + std::time::Duration::from_millis(250),
-        )
-    });
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        std::time::Instant::now() + std::time::Duration::from_millis(250),
+    );
     let mut mutation = Some(mutation);
     let mut result = None;
     let recovery_baseline = monitor.prefs();
@@ -3384,11 +3382,9 @@ impl AppRuntime {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
-        let _deadline = gwt_core::operation_deadline::current().is_none().then(|| {
-            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                std::time::Instant::now() + std::time::Duration::from_millis(250),
-            )
-        });
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
                 gwt::IssueMonitorConfig::default(),
@@ -3432,11 +3428,9 @@ impl AppRuntime {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
         let (cached_issues, projection_error, now) =
             Self::load_local_issue_monitor_fallback_projection(project_root);
-        let _deadline = gwt_core::operation_deadline::current().is_none().then(|| {
-            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                std::time::Instant::now() + std::time::Duration::from_millis(250),
-            )
-        });
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_millis(250),
+        );
         gwt::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
             let mut monitor = gwt::IssueMonitorState::with_prefs(
                 gwt::IssueMonitorConfig::default(),
