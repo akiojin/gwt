@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.78.0] - 2026-08-12
+
+### Bug Fixes
+
+- Harden Windows official provider launches
+- **workspace:** Rebind continued sessions to canonical work
+- **agent:** Keep launch status config cross-platform
+- **agent:** Address Windows launch review findings
+- Stabilize browser check hook fallback
+- Converge browser check hook authority
+- **hooks:** 並行する Codex hook 再生成を安定化する
+- **workspace:** 子 Work が projection の owner/agents を継承表示する不具合を修正 (#3455)
+- **launch:** Resume / Continue 起動で Skip Permissions を新規起動と同じ設定源から引き継ぐ (#3462)
+- **monitor:** GUI scheduled scan から自律起動を駆動する
+- **monitor:** Authority leaseの回収と競合を直列化する
+- **monitor:** Corrective駆動のレビュー指摘を解消する
+- **monitor:** Fallback期限を外側へ継承する
+- **monitor:** GUI fallbackのロック待機を制限する
+- **hooks:** Hook-authority スクリプトの rg 依存を除去し rg 不在環境での fail-open を防ぐ (#3398)
+
+### Features
+
+- **workspace:** Closed owner の滞留 Work を整理する work_prune を追加 (#3448)
+- **workspace:** 孤児化した worktree placeholder の整理と対象プロジェクト指定を work_prune に追加 (#3448)
+- **gui:** Issues ビューと Issue Monitor を単一 Issue サーフェスへ統合する (#3461)
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 3398 continuation events
+- **work:** Record Issue 3398 resume
+- **work:** #3455 検証中の Work event bookkeeping
+- **work:** #3455/#3448 作業中の Work event bookkeeping
+- **work:** Issue #3505 の実行前調査を記録する
+- **work:** Issue #3505 の検証完了を記録する
+- **work:** Issue #3505 のterminal receiptを記録する
+- **ci:** Retrigger checks for PR #3520 after ETXTBSY test flake
+- **work:** Issue 3461 の blocker を記録する
+- **work:** Issue #3461 の Work event を記録する
+- **work:** Issue #3461 の配信状態を記録する
+
+### Testing
+
+- Stabilize workspace proxy loss coverage
+- **core:** Gate Windows registry path regression
+- **hooks:** Managed assets の hook audit テストから host rg 依存を除去する (#3398)
+
+
 ## [9.77.0] - 2026-08-11
 
 ### Bug Fixes
