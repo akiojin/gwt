@@ -232,6 +232,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
         ]),
         remove_env: Vec::new(),
         cwd: None,
+        pending_tool_runtime_migration: None,
     };
 
     let debug = format!("{launch:?}");
@@ -1559,7 +1560,9 @@ fn save_assigned_workspace_projection_for_test(
 
 #[test]
 fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1724,7 +1727,9 @@ fn workspace_agent_summary_for_test(
 // identity may belong to a different Work.
 #[test]
 fn workspace_resume_context_prefers_work_item_over_shared_projection() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1794,7 +1799,9 @@ fn workspace_resume_context_prefers_work_item_over_shared_projection() {
 // projection so dead entries stop accumulating ("765 active agents").
 #[test]
 fn save_workspace_launch_projection_retains_only_live_agents() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -1862,7 +1869,9 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
 // branch.
 #[test]
 fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -3135,6 +3144,7 @@ fn sample_runtime_with_events(
         issue_monitor_scheduled_scans_in_flight: HashSet::new(),
         pending_continue_work: HashMap::new(),
         pending_fresh_execution_launches: HashMap::new(),
+        pending_tool_runtime_migrations: HashMap::new(),
         continue_work_outcomes: HashMap::new(),
         continue_work_waiters: HashMap::new(),
         pending_auto_resume_sources: HashMap::new(),
@@ -4302,6 +4312,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
             env: HashMap::new(),
             remove_env: Vec::new(),
             cwd: Some(temp.path().to_path_buf()),
+            pending_tool_runtime_migration: None,
         },
         "session-1".to_string(),
         "feature/test".to_string(),
@@ -7627,6 +7638,7 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
+                pending_tool_runtime_migration: None,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -7806,6 +7818,7 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
+                pending_tool_runtime_migration: None,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -9399,6 +9412,46 @@ fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
 }
 
 #[test]
+fn legacy_tool_runtime_migration_commits_only_from_authenticated_session_start() {
+    let launch_source = include_str!("launch.rs");
+    let async_start = launch_source
+        .find("pub(crate) fn spawn_agent_window_async(")
+        .expect("async launch preparation function");
+    let launch_end = launch_source[async_start..]
+        .find("#[path = \"agent_launch_stage_tests.rs\"]")
+        .map(|offset| async_start + offset)
+        .expect("production launch implementation boundary");
+    let async_launch = &launch_source[async_start..launch_end];
+    assert!(
+        !async_launch.contains("persist_lazy_tool_runtime_provenance_migration("),
+        "pre-spawn preparation must stage, not persist, legacy provenance"
+    );
+    assert!(
+        async_launch.contains("pending_lazy_tool_runtime_provenance_migration("),
+        "the exact plan must be carried to the authenticated commit boundary"
+    );
+
+    let runtime_event_source = include_str!("runtime_events.rs");
+    let session_start = runtime_event_source
+        .find("event.source_event.as_deref() == Some(\"SessionStart\")")
+        .expect("SessionStart dispatch");
+    let dispatch = &runtime_event_source[session_start..];
+    let migration = dispatch
+        .find("finalize_tool_runtime_migration_session_start")
+        .expect("provenance migration finalizer");
+    let fresh = dispatch
+        .find("finalize_fresh_execution_launch_session_start")
+        .expect("fresh execution finalizer");
+    let continuation = dispatch
+        .find("finalize_continue_work_session_start")
+        .expect("continue work finalizer");
+    assert!(
+        migration < fresh && migration < continuation,
+        "provenance must commit or fail closed before route lifecycle activation"
+    );
+}
+
+#[test]
 fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_authority() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -9671,6 +9724,193 @@ fn continue_work_provider_preflight_distinguishes_present_missing_and_foreign_co
         super::continuation::provider_conversation_availability(&session),
         super::continuation::ProviderConversationAvailability::Unknown
     );
+}
+
+#[test]
+fn persisted_session_launch_config_restores_path_independent_tool_runtime_provenance() {
+    let temp = tempdir().expect("tempdir");
+    let mut session =
+        gwt_agent::Session::new(temp.path(), "work/issue-3456", gwt_agent::AgentId::Codex);
+    session.tool_version = Some("latest".to_string());
+    session.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
+        schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+        official_package: "@openai/codex".to_string(),
+        requested_selector: "latest".to_string(),
+        resolved_exact_version: "0.116.0".to_string(),
+        runner_kind: gwt_agent::ToolRuntimeRunnerKind::Npx,
+        resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
+    });
+
+    let config = super::launch_config_from_persisted_session(&session);
+
+    assert_eq!(
+        config.tool_runtime_provenance,
+        session.tool_runtime_provenance
+    );
+    assert_eq!(
+        config.tool_runtime_source_session_id.as_deref(),
+        Some(session.id.as_str())
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_success() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut source = gwt_agent::Session::new(&repo, "work/issue-3456", gwt_agent::AgentId::Codex);
+    source.tool_version = Some("latest".to_string());
+    source.save(&runtime.sessions_dir).expect("save source");
+    let source_path = runtime.sessions_dir.join(format!("{}.toml", source.id));
+    let source_bytes = fs::read(&source_path).expect("read source bytes");
+
+    let launch_effect_id = "effect-phase75-metadata-failure";
+    let delivery_id = format!("launch:{launch_effect_id}");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 3456,
+        title: "Windows official-provider metadata failure".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        3456,
+        "claim-phase75-metadata-failure",
+        "host/session",
+        launch_effect_id,
+        "2026-08-05T00:00:00Z",
+    ));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .expect("seed durable launch delivery");
+
+    let missing_npx = temp.path().join("missing-runner").join("npx.cmd");
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(repo.clone())
+        .branch("work/issue-3456")
+        .version("latest")
+        .tool_runtime_source_session_id(source.id.clone())
+        .build();
+    config.command = missing_npx.display().to_string();
+    config.args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+    config.tool_version = Some("latest".to_string());
+    let initial_events = runtime
+        .spawn_agent_window_with_feedback(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            LaunchFeedbackContext {
+                client_id: "client-1".to_string(),
+                title: "Issue Monitor".to_string(),
+                issue_monitor_issue_number: Some(3456),
+                issue_monitor_delivery_id: Some(delivery_id.clone()),
+                issue_monitor_project_root: Some(repo.clone()),
+            },
+        )
+        .expect("start gated launch");
+    let window_id = initial_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus { id, status, .. } => {
+                assert_eq!(*status, WindowProcessStatus::Starting);
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .expect("initial Starting status");
+    assert!(monitor.claim_launch_delivery(
+        3456,
+        &delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        &window_id,
+        |_| false,
+    ));
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &monitor.prefs(),
+    )
+    .expect("bind durable launch delivery");
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::Materializing { .. })
+    ));
+
+    wait_for_recorded_event("targeted metadata failure", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchComplete {
+                    window_id: completed_window,
+                    result: Err(_),
+                } if completed_window == &window_id
+            )
+        })
+    });
+    let completion = {
+        let mut events = recorded_events.lock().expect("event log");
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchComplete {
+                        window_id: completed_window,
+                        result: Err(_),
+                    } if completed_window == &window_id
+                )
+            })
+            .expect("failed completion");
+        events.remove(index)
+    };
+    let UserEvent::LaunchComplete { result, .. } = completion else {
+        unreachable!("matched launch completion")
+    };
+    let failure_events = runtime.handle_launch_complete(window_id, result);
+
+    assert!(initial_events.iter().chain(&failure_events).all(|event| {
+        !matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Running,
+                ..
+            }
+        )
+    }));
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. })
+    ));
+    assert_eq!(
+        fs::read(source_path).expect("read source after failed metadata probe"),
+        source_bytes,
+        "failed metadata resolution must not migrate the source Session"
+    );
+    assert!(recorded_events
+        .lock()
+        .expect("event log")
+        .iter()
+        .all(|event| { !matches!(event, UserEvent::LaunchComplete { result: Ok(_), .. }) }));
 }
 
 #[derive(Clone, Copy)]
@@ -17285,6 +17525,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
                 ]),
                 remove_env: Vec::new(),
                 cwd: Some(fixture.repo.clone()),
+                pending_tool_runtime_migration: None,
             },
             fixture.candidate_session_id.clone(),
             "work/issue-2359".to_string(),
@@ -18034,6 +18275,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -18168,6 +18410,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -18227,12 +18470,25 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake tool directory");
+    let fake_gh = write_fake_gh_issue_list(&fake_bin);
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
     Cache::new(issue_cache_root(&repo))
         .write_snapshot(&sample_issue_snapshot(
             42,
@@ -18596,7 +18852,9 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
 
 #[test]
 fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -18638,6 +18896,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-1".to_string(),
             "work/20260504-1234".to_string(),
@@ -18686,7 +18945,9 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
 
 #[test]
 fn app_runtime_non_work_launch_registers_unassigned_agent() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -18726,6 +18987,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-develop".to_string(),
             "develop".to_string(),
@@ -18755,7 +19017,9 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
 
 #[test]
 fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let project_root = temp.path().join("workspace-home");
@@ -18825,6 +19089,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-projection-failure".to_string(),
             "work/issue-3412".to_string(),
@@ -18884,7 +19149,9 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
 
 #[test]
 fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -18935,6 +19202,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-1".to_string(),
             "work/20260507-0001".to_string(),
@@ -18977,7 +19245,9 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
 
 #[test]
 fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -19029,6 +19299,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-unlinked-resume".to_string(),
             "work/issue-2359".to_string(),
@@ -19063,7 +19334,9 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
 
 #[test]
 fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authentication() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -19133,6 +19406,7 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-stale-binding".to_string(),
             "work/stale-binding".to_string(),
@@ -19249,7 +19523,9 @@ fn app_runtime_spec_launch_wizard_seeds_canonical_spec_workspace_owner() {
 
 #[test]
 fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let repo = temp.path().join("repo");
@@ -19301,6 +19577,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
+                pending_tool_runtime_migration: None,
             },
             "session-issue-3096".to_string(),
             "work/issue-3096".to_string(),
@@ -19338,7 +19615,9 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
 
 #[test]
 fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -19394,6 +19673,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             env: HashMap::new(),
             remove_env: Vec::new(),
             cwd: Some(cwd),
+            pending_tool_runtime_migration: None,
         }
     };
 
@@ -19538,7 +19818,9 @@ fn app_runtime_active_work_projection_includes_managed_hook_health() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    let stable = temp.path().join("stable/gwtd");
+    let stable = temp
+        .path()
+        .join(format!("stable/gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&repo).expect("generate codex hooks");
@@ -19582,7 +19864,9 @@ fn managed_hook_health_for_saved_row_ignores_ambient_session_runtime_state() {
     let temp = tempdir().expect("tempdir");
     let worktree = temp.path().join("saved-worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
-    let stable = temp.path().join("stable/gwtd");
+    let stable = temp
+        .path()
+        .join(format!("stable/gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
@@ -19608,7 +19892,9 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
     let temp = tempdir().expect("tempdir");
     let worktree = temp.path().join("worktree");
     fs::create_dir_all(&worktree).expect("create worktree");
-    let stable = temp.path().join("stable/gwtd");
+    let stable = temp
+        .path()
+        .join(format!("stable/gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
@@ -19652,12 +19938,14 @@ fn managed_hook_health_for_worktree_uses_the_latest_matching_session_state() {
 
 #[test]
 fn startup_self_heals_managed_hooks_in_every_known_worktree() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let first = root.path().join("first");
     let second = root.path().join("second");
     for worktree in [&first, &second] {
-        let local = worktree.join("target/debug/gwtd");
+        let local = worktree.join(format!("target/debug/gwtd{}", std::env::consts::EXE_SUFFIX));
         fs::create_dir_all(local.parent().unwrap()).unwrap();
         run_git(worktree, &["init", "-q"]);
         fs::write(&local, "local").unwrap();
@@ -19668,7 +19956,9 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
         gwt_skills::generate_openclaw_hooks(worktree).unwrap();
         gwt_skills::generate_hermes_hooks(worktree).unwrap();
     }
-    let stable = root.path().join("stable/gwtd");
+    let stable = root
+        .path()
+        .join(format!("stable/gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
 
@@ -19685,7 +19975,7 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
     }
 
     for worktree in [&first, &second] {
-        let local = worktree.join("target/debug/gwtd");
+        let local = worktree.join(format!("target/debug/gwtd{}", std::env::consts::EXE_SUFFIX));
         for relative in [
             ".claude/settings.local.json",
             ".codex/hooks.json",
@@ -19712,10 +20002,14 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
 
 #[test]
 fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
-    let missing_pin = root.path().join("missing/gwtd");
+    let missing_pin = root
+        .path()
+        .join(format!("missing/gwtd{}", std::env::consts::EXE_SUFFIX));
     let config = worktree.join(".codex/hooks.json");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(
@@ -19729,20 +20023,28 @@ fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
 
     let rendered = fs::read_to_string(&config).unwrap();
     assert!(rendered.contains("GWT_BIN_PATH"), "{rendered}");
-    assert!(
-        rendered.contains(&missing_pin.display().to_string()),
-        "{rendered}"
-    );
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("parse healed hooks");
+    let session_start_command = parsed
+        .pointer("/hooks/SessionStart/0/hooks/0/command")
+        .and_then(serde_json::Value::as_str)
+        .expect("SessionStart command");
+    let normalized_command = session_start_command.replace('\\', "/");
+    let normalized_pin = missing_pin.display().to_string().replace('\\', "/");
+    assert!(normalized_command.contains(&normalized_pin), "{rendered}");
     assert!(!rendered.contains("/repo/target/debug/gwtd"), "{rendered}");
     assert!(worktree.join(".gwt/managed-hook-self-healed").exists());
 }
 
 #[test]
 fn startup_self_heal_does_not_rewrite_canonical_config_for_missing_explicit_pin() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
-    let missing_pin = root.path().join("missing/gwtd");
+    let missing_pin = root
+        .path()
+        .join(format!("missing/gwtd{}", std::env::consts::EXE_SUFFIX));
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
     let config = worktree.join(".codex/hooks.json");
@@ -19756,10 +20058,14 @@ fn startup_self_heal_does_not_rewrite_canonical_config_for_missing_explicit_pin(
 
 #[test]
 fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
-    let stable = root.path().join("stable/gwtd");
+    let stable = root
+        .path()
+        .join(format!("stable/gwtd{}", std::env::consts::EXE_SUFFIX));
     write_executable_test_file(&stable, "stable");
     let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &stable);
     gwt_skills::generate_codex_hooks(&worktree).expect("generate hooks");
@@ -19777,7 +20083,9 @@ fn startup_self_heal_ignores_ambient_corrupt_runtime_state() {
 
 #[test]
 fn startup_self_heal_does_not_loop_on_missing_current_literal_fallback() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     {
@@ -21589,7 +21897,9 @@ fn app_runtime_paused_work_dedups_by_session_when_live_row_has_no_git_identity()
 
 #[test]
 fn app_runtime_active_work_projection_resolves_branch_known_unassigned_agents_as_work() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -21690,7 +22000,9 @@ fn app_runtime_live_work_agent_lookup_ignores_stopped_or_error_windows() {
 
 #[test]
 fn app_runtime_active_work_projection_promotes_branch_known_unassigned_agents_to_active_work() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -27283,6 +27595,14 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
     session.model = Some("gpt-5.4".to_string());
     session.reasoning_level = Some("high".to_string());
     session.tool_version = Some("latest".to_string());
+    session.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
+        schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+        official_package: "@openai/codex".to_string(),
+        requested_selector: "latest".to_string(),
+        resolved_exact_version: "0.116.0".to_string(),
+        runner_kind: gwt_agent::ToolRuntimeRunnerKind::Npx,
+        resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
+    });
     session.skip_permissions = true;
     session.codex_fast_mode = true;
     session.save(&runtime.sessions_dir).expect("save session");
@@ -27300,6 +27620,14 @@ fn board_origin_agent_resume_config_uses_exact_saved_session() {
     assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
     assert_eq!(config.model.as_deref(), Some("gpt-5.4"));
     assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+    assert_eq!(
+        config.tool_runtime_provenance, session.tool_runtime_provenance,
+        "Board resume must keep the persisted exact package resolution"
+    );
+    assert_eq!(
+        config.tool_runtime_source_session_id.as_deref(),
+        Some("session-origin")
+    );
     assert!(config.skip_permissions);
     assert!(config.codex_fast_mode);
 }
@@ -30839,6 +31167,10 @@ fn app_runtime_issue_monitor_enable_reports_missing_origin_detail() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -32562,7 +32894,7 @@ fn app_runtime_quick_issue_monitor_snapshot_does_not_migrate_legacy_failure() {
 }
 
 #[test]
-fn app_runtime_agent_failed_full_scan_migrates_then_keeps_new_same_failure() {
+fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -32575,14 +32907,31 @@ fn app_runtime_agent_failed_full_scan_migrates_then_keeps_new_same_failure() {
     let fake_gh = write_fake_gh_issue_list(temp.path());
     let _path = prepend_fake_gh_to_path(&fake_gh);
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
-    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            43,
+            "Cached issue",
+            &["bug"],
+            "Cached body",
+            "2026-07-21T00:00:00Z",
+        ))
+        .expect("write cache fallback");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(&prefs_path, &legacy_issue_monitor_failed_prefs(&repo, 43))
-        .expect("seed legacy prefs");
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            legacy_git_launch_failure_migration_version:
+                gwt::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed completed migration");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-43".to_string();
@@ -32598,8 +32947,16 @@ fn app_runtime_agent_failed_full_scan_migrates_then_keeps_new_same_failure() {
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
 
-    let events = runtime.issue_monitor_agent_failed_events(&repo, &window_id, &failure);
-
+    let events = runtime.issue_monitor_agent_failed_result_events(
+        &window_id,
+        &failure,
+        Some(43),
+        Err(
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                "deterministic local fallback".to_string(),
+            ),
+        ),
+    );
     let inbox = events
         .iter()
         .find_map(|event| match &event.event {
@@ -32685,10 +33042,15 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let writer_failure = failure.clone();
     let writer_repo = repo.clone();
     let writer = thread::spawn(move || {
-        let events = runtime.issue_monitor_agent_failed_events(
-            &writer_repo,
+        let events = runtime.issue_monitor_agent_failed_result_events(
             &writer_window,
             &writer_failure,
+            Some(43),
+            Err(
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                    format!("deterministic local fallback for {}", writer_repo.display()),
+                ),
+            ),
         );
         done_tx.send(events).expect("return GUI events");
     });
@@ -33760,12 +34122,25 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
+    let fake_bin = temp.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("create fake tool directory");
+    let fake_gh = write_fake_gh_issue_list(&fake_bin);
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
     Cache::new(issue_cache_root(&repo))
         .write_snapshot(&sample_issue_snapshot(
             42,
@@ -33922,9 +34297,14 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     };
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
     assert_eq!(
-        process.args.last().map(String::as_str),
-        Some("$gwt-execute #3165"),
-        "Issue Monitor auto launch must pass the generated prompt to the agent"
+        process
+            .args
+            .iter()
+            .filter(|argument| argument.contains("$gwt-execute #3165"))
+            .count(),
+        1,
+        "Issue Monitor auto launch must pass the generated prompt to the agent: {:?}",
+        process.args
     );
 }
 
@@ -37625,7 +38005,9 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
     // and must stay structural. Workspace history/work items are carried by
     // active_work_projection so every window/status update does not serialize
     // the full work item event log.
-    let _env_guard = env_test_lock().lock().expect("env lock");
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
