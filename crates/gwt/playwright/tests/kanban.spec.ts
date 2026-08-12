@@ -65,7 +65,7 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(
       page.locator(".surface-knowledge .kanban-column[data-phase='implementation']"),
     ).toHaveCount(0);
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
     await expect(page.locator(".surface-knowledge .knowledge-heading")).toHaveText(
       "Cached work items",
     );
@@ -86,7 +86,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.goto(APP_URL);
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
     await expect(page.getByText("Closed issue hidden by default")).toHaveCount(0);
 
     await page.locator(".surface-knowledge [data-issue-filter='closed']").click();
@@ -96,7 +96,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.locator(".surface-knowledge [data-issue-filter='all']").click();
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
   });
 
   test("selecting an Issue row renders cached detail in the right pane", async ({
@@ -128,7 +128,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.goto(APP_URL);
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
     await page.locator(".surface-knowledge .knowledge-row[data-issue-number='3095']").click();
     await expect(
       page.locator(".surface-knowledge .knowledge-detail-pane"),
@@ -162,7 +162,7 @@ test.describe("Issue Bridge load recovery", () => {
     await page.goto(APP_URL);
 
     await expect(page.locator(".surface-knowledge .knowledge-list")).toBeVisible();
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
   });
 
   test("manual refresh recovers a stale empty loading state", async ({ page }) => {
@@ -177,7 +177,118 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(refresh).toBeEnabled();
     await refresh.click();
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
+  });
+
+  test("projects monitor state and controls through the canonical Issue surface", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page);
+
+    await page.goto(APP_URL);
+
+    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    await expect(issueSurface).toBeVisible();
+    await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
+    await expect(
+      issueSurface.locator('[data-issue-number="3273"] .knowledge-monitor-chip'),
+    ).toHaveText("Queued");
+    await expect(issueSurface.locator('[data-issue-number="3273"]')).toContainText(
+      "Queue 1",
+    );
+    await expect(
+      issueSurface.locator('[data-issue-number="3096"] .knowledge-monitor-chip'),
+    ).toHaveText("Needs human");
+    await expect(
+      issueSurface.locator('[data-issue-number="3097"] .knowledge-monitor-chip'),
+    ).toHaveText("On hold");
+    await expect(issueSurface.locator('[data-issue-number="3097"]')).toContainText(
+      "Excluded by label: hold",
+    );
+    await expect(issueSurface.locator("button button")).toHaveCount(0);
+    await expect(issueSurface.locator(".knowledge-monitor-summary")).toContainText(
+      "Queue 3 | Active 1/2",
+    );
+
+    await issueSurface
+      .locator('[data-issue-number="3273"] [data-action="launch-now"]')
+      .click();
+    await issueSurface
+      .locator('[data-issue-number="3095"] [data-action="move-up"]')
+      .click();
+    await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
+    await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
+    await issueSurface.locator('[data-action="monitor-toggle"]').click();
+    await issueSurface.locator('[data-action="monitor-autonomous"]').click();
+    await issueSurface.locator('[data-action="monitor-settings"]').click();
+    await issueSurface.locator(".knowledge-monitor-quick-title").fill(
+      "Investigate flaky release gate",
+    );
+    await issueSurface.locator('[data-action="quick-register-launch"]').click();
+
+    const messages = await page.evaluate(() => window.__knowledgeLoadMessages);
+    expect(messages).toContainEqual({
+      kind: "issue_monitor_launch_now",
+      issue_number: 3273,
+      linked_issue_kind: "spec",
+    });
+    expect(messages).toContainEqual({
+      kind: "reorder_issue_monitor_issues",
+      issue_numbers: [3095, 3273, 3094],
+    });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_max_active_agents",
+      max_active_agents: 4,
+    });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_enabled",
+      enabled: true,
+    });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_autonomous_mode",
+      enabled: true,
+    });
+    expect(messages).toContainEqual({ kind: "issue_monitor_configure_profile" });
+    expect(messages).toContainEqual({
+      kind: "quick_register_issue",
+      title: "Investigate flaky release gate",
+      launch: true,
+    });
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("redirects a persisted issue_monitor preset to the Issue surface", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { legacyPreset: true });
+
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-window.surface-knowledge")).toBeVisible();
+    await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
+    await expect(page.locator(".surface-knowledge .knowledge-heading")).toHaveText(
+      "Cached work items",
+    );
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
   });
 });
 
@@ -757,7 +868,9 @@ async function installKnowledgeSelectionBackend(
         const pane = () => root.querySelector(".knowledge-detail-pane");
         return {
           rowFor: (number) =>
-            root.querySelector(`.knowledge-row[data-issue-number="${number}"]`),
+            root.querySelector(
+              `.knowledge-row[data-issue-number="${number}"] .knowledge-row-select`,
+            ),
           nextFrame: () =>
             new Promise((resolve) => requestAnimationFrame(() => resolve(null))),
           identity: () => {
@@ -782,9 +895,11 @@ async function installKnowledgeSelectionBackend(
           },
           selectedNumber: () => {
             const selected = root.querySelector(
-              ".knowledge-row.selected[aria-current='true']",
+              ".knowledge-row.selected .knowledge-row-select[aria-current='true']",
             );
-            return selected ? Number(selected.dataset.issueNumber) : null;
+            return selected
+              ? Number(selected.closest(".knowledge-row")?.dataset.issueNumber)
+              : null;
           },
           loadingPlaceholder: () =>
             (pane()?.textContent || "").includes("Loading detail"),
@@ -1161,6 +1276,7 @@ async function installIssueBridgeBackend(
   {
     errorOnForcedRefresh = false,
     ignoreFirstLoad = false,
+    legacyPreset = false,
     staleDetailBeforeWorkspace = false,
     triggerAutoRefreshOnce = false,
   } = {},
@@ -1169,6 +1285,7 @@ async function installIssueBridgeBackend(
     ({
       errorOnForcedRefresh: shouldErrorOnForcedRefresh,
       ignoreFirstLoad: shouldIgnoreFirstLoad,
+      legacyPreset: shouldUseLegacyPreset,
       staleDetailBeforeWorkspace: shouldSeedStaleDetail,
       triggerAutoRefreshOnce: shouldTriggerAutoRefreshOnce,
     }) => {
@@ -1201,6 +1318,9 @@ async function installIssueBridgeBackend(
           phase: "implementation",
           has_unknown_phase: false,
           is_spec: true,
+          monitor_state: "queued",
+          queue_position: 1,
+          exclusion_reason: null,
         },
         {
           number: 3096,
@@ -1213,6 +1333,9 @@ async function installIssueBridgeBackend(
           phase: null,
           has_unknown_phase: false,
           is_spec: false,
+          monitor_state: "needs_human",
+          queue_position: null,
+          exclusion_reason: null,
         },
         {
           number: 3094,
@@ -1225,6 +1348,9 @@ async function installIssueBridgeBackend(
           phase: null,
           has_unknown_phase: false,
           is_spec: false,
+          monitor_state: "queued",
+          queue_position: 3,
+          exclusion_reason: null,
         },
         {
           number: 3095,
@@ -1237,6 +1363,24 @@ async function installIssueBridgeBackend(
           phase: null,
           has_unknown_phase: false,
           is_spec: false,
+          monitor_state: "queued",
+          queue_position: 2,
+          exclusion_reason: null,
+        },
+        {
+          number: 3097,
+          title: "Issue excluded from autonomous launch",
+          state: "open",
+          meta: "Excluded fixture",
+          labels: ["hold"],
+          linked_branch_count: 0,
+          match_score: 93,
+          phase: null,
+          has_unknown_phase: false,
+          is_spec: false,
+          monitor_state: "hold_excluded",
+          queue_position: null,
+          exclusion_reason: "Excluded by label: hold",
         },
       ];
 
@@ -1255,8 +1399,8 @@ async function installIssueBridgeBackend(
                 windows: [
                   {
                     id: "issue-kanban",
-                    title: "Issue",
-                    preset: "issue",
+                    title: shouldUseLegacyPreset ? "Issue Monitor" : "Issue",
+                    preset: shouldUseLegacyPreset ? "issue_monitor" : "issue",
                     geometry: { x: 40, y: 60, width: 1320, height: 760 },
                     z_index: 1,
                     status: "running",
@@ -1321,6 +1465,23 @@ async function installIssueBridgeBackend(
               });
             }
             this.emit(workspaceState);
+            return;
+          }
+          if (message.kind === "list_issue_monitor") {
+            this.emit({
+              kind: "issue_monitor_status",
+              status: {
+                enabled: false,
+                state: "disabled",
+                queue_len: 3,
+                active_count: 1,
+                max_active_agents: 2,
+                total_candidates: 5,
+                autonomous_mode: false,
+                launch_profile_source: "saved",
+                launch_profile_summary: "codex / host",
+              },
+            });
             return;
           }
           if (message.kind === "load_knowledge_bridge") {
@@ -1402,6 +1563,7 @@ async function installIssueBridgeBackend(
     {
       errorOnForcedRefresh,
       ignoreFirstLoad,
+      legacyPreset,
       staleDetailBeforeWorkspace,
       triggerAutoRefreshOnce,
     },

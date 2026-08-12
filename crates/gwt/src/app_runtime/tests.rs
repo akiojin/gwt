@@ -3166,6 +3166,7 @@ fn sample_runtime_with_events(
         pending_agent_self_closes: HashMap::new(),
         issue_link_cache_dir: gwt_cache_dir(),
         knowledge_related_snapshot: Default::default(),
+        knowledge_monitor_snapshot: Default::default(),
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
         pty_writers,
@@ -27518,6 +27519,119 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             if detail.sections.iter().any(|section| section.title == "spec"
                 && section.body.contains("Cache-backed issue view"))
     ));
+}
+
+#[test]
+fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    for (number, title) in [
+        (42, "First queued Issue"),
+        (43, "Second queued Issue"),
+        (44, "Held Issue"),
+        (45, "Unmonitored Issue"),
+    ] {
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                number,
+                title,
+                &["bug"],
+                "Issue body",
+                "2026-08-10T00:00:00Z",
+            ))
+            .expect("write issue snapshot");
+    }
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::HoldExcluded);
+    held.exclusion_reason = Some("Excluded by label: hold".to_string());
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.inbox = vec![
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued),
+        pm_wake_inbox_item(99, gwt::MonitorInboxState::Launching),
+        pm_wake_inbox_item(43, gwt::MonitorInboxState::Queued),
+        held,
+    ];
+    let _ = runtime.issue_monitor_snapshot_events_for(None, Some(&repo), monitor);
+
+    let window_id = combined_window_id("tab-1", "issue-1");
+    assert!(runtime
+        .load_knowledge_bridge_events(
+            "client-1",
+            KnowledgeLoadRequest {
+                id: &window_id,
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+            },
+        )
+        .is_empty());
+    let events = wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    let entries = events
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+            BackendEvent::KnowledgeEntries { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .expect("knowledge entries");
+    let entry = |number| {
+        entries
+            .iter()
+            .find(|entry| entry.number == number)
+            .unwrap_or_else(|| panic!("missing Issue #{number}"))
+    };
+
+    assert_eq!(
+        (
+            entry(42).monitor_state,
+            entry(42).queue_position,
+            entry(42).exclusion_reason.as_deref(),
+        ),
+        (Some(gwt::MonitorInboxState::Queued), Some(1), None),
+    );
+    assert_eq!(
+        (entry(43).monitor_state, entry(43).queue_position),
+        (Some(gwt::MonitorInboxState::Queued), Some(2)),
+    );
+    assert_eq!(
+        (
+            entry(44).monitor_state,
+            entry(44).queue_position,
+            entry(44).exclusion_reason.as_deref(),
+        ),
+        (
+            Some(gwt::MonitorInboxState::HoldExcluded),
+            None,
+            Some("Excluded by label: hold"),
+        ),
+    );
+    assert_eq!(
+        (
+            entry(45).monitor_state,
+            entry(45).queue_position,
+            entry(45).exclusion_reason.as_deref(),
+        ),
+        (None, None, None),
+    );
 }
 
 /// Issue #3297: the cache-backed knowledge load must not run on the GUI
