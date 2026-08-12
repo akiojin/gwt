@@ -463,11 +463,12 @@ fn browser_check_hook_audit_allows_missing_logical_fallback() {
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
     let tools = tempdir().expect("isolated tool PATH");
-    for name in ["bash", "env", "jq", "rg"] {
+    for name in ["bash", "env", "jq"] {
         let source = which::which(name).unwrap_or_else(|error| panic!("resolve {name}: {error}"));
         std::os::unix::fs::symlink(&source, tools.path().join(name))
             .unwrap_or_else(|error| panic!("link {name} from {}: {error}", source.display()));
     }
+    write_fake_rg(tools.path());
     assert!(
         which::which_in("gwtd", Some(tools.path().as_os_str()), dir.path()).is_err(),
         "isolated audit PATH must not contain gwtd"
@@ -849,6 +850,25 @@ fn browser_check_shell_block(name: &str) -> String {
         .map(|line| line.strip_prefix("     ").unwrap_or(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Place an `rg` stand-in on the isolated audit PATH so the test does not
+/// depend on ripgrep being installed on the host (CI ubuntu runners lack it).
+/// The shim delegates `rg -qi -- <pattern>` stdin matching to the host
+/// `grep -qiE`, preserving real match/no-match exit semantics.
+#[cfg(unix)]
+fn write_fake_rg(tools: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let grep = which::which("grep").expect("resolve grep");
+    let shim = format!(
+        "#!/bin/sh\npattern=\"\"\nfor arg do pattern=\"$arg\"; done\nexec {} -qiE -- \"$pattern\"\n",
+        grep.display()
+    );
+    let shim_path = tools.join("rg");
+    std::fs::write(&shim_path, shim).expect("write fake rg");
+    std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake rg executable");
 }
 
 #[cfg(unix)]
