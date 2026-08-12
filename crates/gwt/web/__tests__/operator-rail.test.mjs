@@ -102,7 +102,7 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
   );
 });
 
-test("Issue Monitor status strip cell stays visible and opens the monitor surface", async () => {
+test("Issue Monitor status strip cell stays visible and requests the canonical Issue entry", async () => {
   const { applyIssueMonitorStatus } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const originalCustomEvent = globalThis.CustomEvent;

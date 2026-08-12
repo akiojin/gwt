@@ -67,7 +67,8 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime, WindowAddress,
+    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
+    ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
@@ -1123,6 +1124,12 @@ enum UserEvent {
     /// Issue #3505 / SPEC-3431 FR-108(b): the GUI-owned scheduled monitor
     /// tick — drives local scans and the PM periodic wake.
     IssueMonitorScheduledTick,
+    IssueMonitorScheduledScanComplete {
+        project_root: PathBuf,
+        prefs_path: PathBuf,
+        now: String,
+        outcome: Result<ScheduledIssueMonitorScanOutcome, String>,
+    },
     /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
     /// autonomous issue (daemon → GUI).
     IssueMonitorReviewDispatch {
@@ -1327,6 +1334,17 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
+        let mut env = HashMap::new();
+        let mut remove_env = additional
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<Vec<_>>();
+        gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
+            .apply_to_parts(&mut env, &mut remove_env);
+        remove_env
     }
 
     #[test]
@@ -2646,9 +2664,11 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
             pending_fresh_execution_launches: HashMap::new(),
+            pending_tool_runtime_migrations: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             inflight_launches: HashMap::new(),
@@ -2685,6 +2705,7 @@ mod tests {
             pending_agent_self_closes: HashMap::new(),
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             knowledge_related_snapshot: Default::default(),
+            knowledge_monitor_snapshot: Default::default(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -4002,6 +4023,7 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
+                    pending_tool_runtime_migration: None,
                 },
                 "session-3".to_string(),
                 "feature/demo".to_string(),
@@ -4035,6 +4057,7 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
+                pending_tool_runtime_migration: None,
             }),
         );
         assert!(matches!(
@@ -5102,6 +5125,7 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
+                    pending_tool_runtime_migration: None,
                 },
                 "session-1".to_string(),
                 "feature/demo".to_string(),
@@ -5144,6 +5168,7 @@ mod tests {
                     env: HashMap::new(),
                     remove_env: Vec::new(),
                     cwd: None,
+                    pending_tool_runtime_migration: None,
                 },
                 "session-2".to_string(),
                 "feature/demo".to_string(),
@@ -5177,6 +5202,7 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
+                pending_tool_runtime_migration: None,
             }),
         );
         assert!(matches!(
@@ -5198,6 +5224,7 @@ mod tests {
                 env: HashMap::new(),
                 remove_env: Vec::new(),
                 cwd: None,
+                pending_tool_runtime_migration: None,
             }),
         );
         assert!(matches!(
@@ -5391,6 +5418,7 @@ mod tests {
         config
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
@@ -5425,6 +5453,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn host_package_runner_fallback_keeps_bunx_when_probe_succeeds() {
         let mut config = sample_versioned_launch_config();
@@ -5560,10 +5589,7 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
-        assert_eq!(
-            launch.remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(launch.remove_env, expected_launch_remove_env(&["SECRET"]));
     }
 
     #[test]
@@ -5732,8 +5758,26 @@ mod tests {
         assert_eq!(config.args[1], "-NoProfile");
         assert_eq!(config.args[2], "-Command");
         let script = config.args[3].as_str();
-        assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
-        assert!(script.contains("'value''s'"));
+        #[cfg(not(windows))]
+        {
+            assert!(
+                script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"),
+                "{script}"
+            );
+            assert!(script.contains("'value''s'"));
+        }
+        #[cfg(windows)]
+        {
+            let inner = config
+                .env_vars
+                .get(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV)
+                .expect("resolver-owned inner cmd expression");
+            assert_eq!(inner, r#""C:\Program Files\nodejs\npx.cmd" "value's""#);
+            assert!(
+                script.contains(gwt_core::process::WINDOWS_CMD_WRAPPER_EXPRESSION_ENV),
+                "{script}"
+            );
+        }
         assert!(script.contains("[gwt] launching agent"));
         assert!(script.contains("[gwt] process exited with status"));
         assert!(script.contains("exit $gwtExitCode"));
@@ -7500,10 +7544,7 @@ mod tests {
             Some("enabled")
         );
         assert!(!effective_env.contains_key("SECRET"));
-        assert_eq!(
-            remove_env,
-            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
-        );
+        assert_eq!(remove_env, expected_launch_remove_env(&["SECRET"]));
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -7797,7 +7838,7 @@ fn main() -> std::io::Result<()> {
                 .poll_interval_secs
                 .max(60),
         );
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("issue-monitor-scheduled-tick".to_string())
             .spawn(move || loop {
                 std::thread::sleep(interval);
@@ -7808,7 +7849,9 @@ fn main() -> std::io::Result<()> {
                     break;
                 }
             })
-            .ok();
+        {
+            tracing::error!(%error, "failed to start Issue Monitor scheduled tick thread");
+        }
     }
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
@@ -8238,12 +8281,27 @@ fn main() -> std::io::Result<()> {
                 let events = app.issue_monitor_scheduled_tick_events();
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorScheduledScanComplete {
+                project_root,
+                prefs_path,
+                now,
+                outcome,
+            }) => {
+                let events = app.issue_monitor_scheduled_scan_complete_events(
+                    &project_root,
+                    &prefs_path,
+                    &now,
+                    outcome,
+                );
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
                 project_root,
                 items,
             }) => {
                 // SPEC-3431 T-093: the wake decision runs before the frontend
                 // broadcast so a parked PM is revived by daemon-side activity.
+                app.replace_knowledge_monitor_snapshot(&project_root, &items);
                 let mut events = app.pm_wake_events(&project_root, &items);
                 events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
                     items,

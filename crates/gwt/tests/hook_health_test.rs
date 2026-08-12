@@ -23,6 +23,12 @@ impl ScopedEnvVar {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnvVar {
@@ -71,6 +77,10 @@ fn stable_hook_bin_guard() -> StableHookBinGuard {
         _env: env,
         path: stable,
     }
+}
+
+fn normalized_embedded_path_text(value: &str) -> String {
+    value.replace("\\\\", "/").replace('\\', "/")
 }
 
 #[test]
@@ -436,16 +446,19 @@ fn managed_hook_health_understands_runtime_indirect_fallbacks() {
     let hook_bin = stable_hook_bin_guard();
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
     gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
+    let expected_hook_bin = normalized_embedded_path_text(&hook_bin.path().display().to_string());
+    let unexpected_worktree = normalized_embedded_path_text(&worktree.path().display().to_string());
 
     for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
         let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
+        let normalized_rendered = normalized_embedded_path_text(&rendered);
         assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
         assert!(
-            rendered.contains(&hook_bin.path().display().to_string()),
+            normalized_rendered.contains(&expected_hook_bin),
             "{artifact}: {rendered}"
         );
         assert!(
-            !rendered.contains(&worktree.path().display().to_string()),
+            !normalized_rendered.contains(&unexpected_worktree),
             "{artifact} persisted the tested worktree: {rendered}"
         );
     }
@@ -642,6 +655,8 @@ fn managed_hook_health_understands_all_provider_runtime_indirect_fallbacks() {
     gwt_skills::generate_opencode_hooks(worktree.path()).expect("OpenCode hooks");
     gwt_skills::generate_openclaw_hooks(worktree.path()).expect("OpenClaw hooks");
     gwt_skills::generate_hermes_hooks(worktree.path()).expect("Hermes hooks");
+    let expected_hook_bin = normalized_embedded_path_text(&hook_bin.path().display().to_string());
+    let unexpected_worktree = normalized_embedded_path_text(&worktree.path().display().to_string());
 
     for artifact in [
         ".gwt/opencode/plugins/gwt-hooks.js",
@@ -649,13 +664,14 @@ fn managed_hook_health_understands_all_provider_runtime_indirect_fallbacks() {
         ".gwt/hermes/agent-hooks/gwt-hook.sh",
     ] {
         let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
+        let normalized_rendered = normalized_embedded_path_text(&rendered);
         assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
         assert!(
-            rendered.contains(&hook_bin.path().display().to_string()),
+            normalized_rendered.contains(&expected_hook_bin),
             "{artifact}: {rendered}"
         );
         assert!(
-            !rendered.contains(&worktree.path().display().to_string()),
+            !normalized_rendered.contains(&unexpected_worktree),
             "{artifact} persisted the tested worktree: {rendered}"
         );
     }
@@ -675,6 +691,7 @@ fn managed_hook_health_reports_incomplete_codex_managed_entries() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _hook_bin = ScopedEnvVar::remove("GWT_HOOK_BIN");
     let worktree = tempfile::tempdir().expect("worktree");
     let bin_dir = worktree.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();

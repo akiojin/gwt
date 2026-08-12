@@ -451,6 +451,26 @@ impl AppRuntime {
             self.issue_monitor_heartbeat(&project_root, &window_id);
         }
         if event.source_event.as_deref() == Some("SessionStart") {
+            if let Err(error) = self.finalize_tool_runtime_migration_session_start(&window_id) {
+                self.pending_tool_runtime_migrations.remove(&window_id);
+                self.stop_window_runtime_without_session_projection(&window_id);
+                if let Some(active) = self.active_agent_sessions.remove(&window_id) {
+                    let _ = gwt_agent::persist_session_status(
+                        &self.sessions_dir,
+                        &active.session_id,
+                        gwt_agent::AgentStatus::Interrupted,
+                    );
+                }
+                self.revoke_agent_capability_for_window(&window_id);
+                events.extend(self.launch_error_events_with_continue_work(
+                    window_id,
+                    format!(
+                        "authenticated SessionStart could not commit tool runtime provenance migration: {error}"
+                    ),
+                    None,
+                ));
+                return events;
+            }
             events.extend(self.finalize_fresh_execution_launch_session_start(
                 &window_id,
                 event.continuation_readiness_nonce.as_deref(),
