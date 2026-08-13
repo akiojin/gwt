@@ -11,17 +11,21 @@ test.describe("Agent title role and worktree badges", () => {
     page,
   }, testInfo) => {
     await installEmbeddedRoutes(page);
-    await installAgentTitleBadgeBackend(page);
+    await installAgentTitleBadgeBackend(page, {
+      agentId: "grok",
+      color: "gray",
+      title: "Grok Build",
+    });
 
     await page.goto(APP_URL);
 
     const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
     await expect(agentWindow).toBeVisible({ timeout: 10_000 });
-    await expect(agentWindow.locator(".title-text")).toHaveText("Codex");
+    await expect(agentWindow.locator(".title-text")).toHaveText("Grok Build");
 
     const badge = agentWindow.locator(".window-role-badge").first();
     await expect(badge).toBeVisible();
-    await expect(badge).toHaveText("Codex");
+    await expect(badge).toHaveText("Grok Build");
 
     await agentWindow.screenshot({
       path:
@@ -377,12 +381,15 @@ function expectBoxInside(inner, outer, label) {
   );
 }
 
-async function installAgentTitleBadgeBackend(page) {
-  await page.addInitScript(() => {
+async function installAgentTitleBadgeBackend(
+  page,
+  primaryAgent = { agentId: "codex", color: "cyan", title: "Codex" },
+) {
+  await page.addInitScript((primaryAgentFixture) => {
     const windows = [
       {
         id: "agent-1",
-        title: "Codex",
+        title: primaryAgentFixture.title,
         preset: "agent",
         geometry: { x: 20, y: 640, width: 520, height: 280 },
         geometry_revision: 0,
@@ -395,8 +402,8 @@ async function installAgentTitleBadgeBackend(page) {
         purpose_title: null,
         dynamic_title: null,
         dynamic_title_detail: null,
-        agent_id: "codex",
-        agent_color: "cyan",
+        agent_id: primaryAgentFixture.agentId,
+        agent_color: primaryAgentFixture.color,
         lane_kind: "execution",
         tab_group_id: null,
         tab_group_active: false,
@@ -516,5 +523,5 @@ async function installAgentTitleBadgeBackend(page) {
       configurable: true,
       value: FixtureWebSocket,
     });
-  });
+  }, primaryAgent);
 }

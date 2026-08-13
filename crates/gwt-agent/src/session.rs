@@ -3738,6 +3738,30 @@ display_name = "Claude Code"
         assert_eq!(session.status, AgentStatus::Running);
     }
 
+    #[test]
+    fn grok_build_session_roundtrips_launch_identity_and_resume_args() {
+        let config = crate::AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .working_dir("/tmp/worktree")
+            .branch("feature/grok")
+            .session_mode(crate::SessionMode::Resume)
+            .resume_session_id("grok-session-42")
+            .build();
+        let session = Session::from_launch_config("/tmp/worktree", "feature/grok", &config);
+
+        assert_eq!(session.agent_id, AgentId::GrokBuild);
+        assert_eq!(session.launch_command, "grok");
+        assert_eq!(
+            session.launch_args,
+            ["--no-alt-screen", "--resume", "grok-session-42"]
+        );
+        assert_eq!(session.session_mode, crate::SessionMode::Resume);
+
+        let encoded = toml::to_string(&session).expect("serialize Grok Build session");
+        let decoded: Session = toml::from_str(&encoded).expect("deserialize Grok Build session");
+        assert_eq!(decoded.agent_id, AgentId::GrokBuild);
+        assert_eq!(decoded.launch_args, session.launch_args);
+    }
+
     #[cfg(windows)]
     #[test]
     fn session_from_launch_config_does_not_persist_absolute_targeted_npx_runner() {

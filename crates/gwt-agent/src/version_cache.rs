@@ -393,6 +393,7 @@ mod tests {
     fn agent_key_mapping() {
         assert_eq!(VersionCache::agent_key(&AgentId::ClaudeCode), "claude-code");
         assert_eq!(VersionCache::agent_key(&AgentId::Codex), "codex");
+        assert_eq!(VersionCache::agent_key(&AgentId::GrokBuild), "grok-build");
         assert_eq!(
             VersionCache::agent_key(&AgentId::Antigravity),
             "antigravity"
@@ -549,6 +550,25 @@ mod tests {
         assert_eq!(versions[0], "6.0.0");
         assert_eq!(versions[9], "1.1.0");
         assert_eq!(cache.get(&AgentId::ClaudeCode).unwrap()[0], "6.0.0");
+    }
+
+    #[tokio::test]
+    async fn grok_build_refresh_uses_official_npm_registry_package() {
+        let mut cache = VersionCache::new();
+        let versions = cache
+            .refresh_with_fetcher(&AgentId::GrokBuild, |url| async move {
+                assert_eq!(url, "https://registry.npmjs.org/%40xai-official%2Fgrok");
+                Ok(r#"{"versions":{"1.0.3":{}}}"#.to_string())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(versions, ["1.0.3"]);
+        assert_eq!(
+            cache.get(&AgentId::GrokBuild),
+            Some(["1.0.3".to_string()].as_slice())
+        );
     }
 
     #[tokio::test]

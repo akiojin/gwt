@@ -11,9 +11,9 @@ Agent workspace を materialize するために worktree を使いますが、�
 
 ## gwt の特徴
 
-- **Agent workspace** — `Claude Code` / `Codex` / `Antigravity CLI` /
-  `Gemini CLI (legacy)` / `OpenCode` / `Copilot` / custom agent を共有
-  canvas から起動・再開・状態確認できます。
+- **Agent workspace** — `Claude Code` / `Codex` / `Grok Build` /
+  `Antigravity CLI` / `Gemini CLI (legacy)` / `OpenCode` / `Copilot` /
+  custom agent を共有 canvas から起動・再開・状態確認できます。
 - **Shared Board** — user と agent の communication を repo-scoped timeline に集約し、
   `status` / `claim` / `next` / `blocked` / `handoff` / `decision` /
   `question` を扱えます。
@@ -100,10 +100,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 
   Gemini CLI は、対象となる Standard / Enterprise または API-key workflow
   向けの legacy option として gwt 内に残ります。
+
+  Grok Build は xAI 公式の `grok` command で提供されます。
+  `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
+  API-key workflow では `XAI_API_KEY` を設定してください。
 - エージェント利用時は必要な API キーを設定すること
   - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
   - `GOOGLE_API_KEY` または `GEMINI_API_KEY`
+  - `XAI_API_KEY`
 - shared project index runtime の bootstrap / repair が必要な場合は
   Python 3.9+ が使えること
 

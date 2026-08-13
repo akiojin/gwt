@@ -1137,6 +1137,55 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
   );
 });
 
+test("Work detail collapses Grok Build builtin aliases into one Agent identity", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = [
+    {
+      session_id: "grok-empty-command",
+      agent_id: "grok",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T03:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+    {
+      session_id: "grok-usable-display",
+      agent_id: "Grok Build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T02:00:00Z",
+      status_category: "idle",
+      sessions: [{
+        agent_session_id: "grok-conversation",
+        started_at: "2026-08-13T02:00:00Z",
+        is_active: true,
+        resumable: true,
+      }],
+    },
+    {
+      session_id: "grok-empty-hyphen",
+      agent_id: "grok-build",
+      display_name: "Grok Build",
+      updated_at: "2026-08-13T01:00:00Z",
+      status_category: "idle",
+      sessions: [],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session-empty").length, 0);
+  assert.equal(
+    fixture.body.querySelector('[data-action="resume-session"]').dataset.sessionId,
+    "grok-usable-display",
+  );
+});
+
 test("Open session pending timeout keeps the pending label (SPEC-2359 FR-581)", () => {
   const projection = continuationProjection({ sessions: [{
     agent_session_id: "inspect-conversation",

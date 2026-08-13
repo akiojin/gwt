@@ -1125,6 +1125,10 @@ mod tests {
             Some(gwt_agent::AgentColor::Cyan)
         );
         assert_eq!(
+            agent_option_color("grok"),
+            Some(gwt_agent::AgentColor::Gray)
+        );
+        assert_eq!(
             agent_option_color("gemini"),
             Some(gwt_agent::AgentColor::Magenta)
         );
@@ -1204,8 +1208,11 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec!["claude", "codex", "agy", "gemini", "opencode", "openclaw", "hermes", "gh"]
+            vec![
+                "claude", "codex", "grok", "agy", "gemini", "opencode", "openclaw", "hermes", "gh"
+            ]
         );
+        assert!(options.iter().any(|option| option.name == "Grok Build"));
         assert!(options
             .iter()
             .any(|option| option.name == "Antigravity CLI"));
@@ -1215,6 +1222,32 @@ mod tests {
         assert!(options.iter().any(|option| option.name == "OpenCode"));
         assert!(options.iter().any(|option| option.name == "OpenClaw"));
         assert!(options.iter().any(|option| option.name == "Hermes Agent"));
+    }
+
+    #[test]
+    fn build_builtin_agent_options_projects_detected_grok_version_and_cache() {
+        let mut cache = gwt_agent::VersionCache::new();
+        cache.record_versions(
+            &gwt_agent::AgentId::GrokBuild,
+            vec!["1.0.3".to_string(), "1.0.2".to_string()],
+        );
+        let options = build_builtin_agent_options(
+            vec![gwt_agent::DetectedAgent {
+                agent_id: gwt_agent::AgentId::GrokBuild,
+                version: Some("1.0.3".to_string()),
+                path: PathBuf::from("/usr/local/bin/grok"),
+            }],
+            &cache,
+        );
+        let grok = options
+            .iter()
+            .find(|option| option.id == "grok")
+            .expect("Grok Build option");
+
+        assert_eq!(grok.name, "Grok Build");
+        assert!(grok.available);
+        assert_eq!(grok.installed_version.as_deref(), Some("1.0.3"));
+        assert_eq!(grok.versions, ["1.0.3", "1.0.2"]);
     }
 
     // SPEC-2014 2026-05-18 amendment FR-D / SC-C:

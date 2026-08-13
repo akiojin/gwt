@@ -148,10 +148,10 @@ fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
 /// etc.) remain the responsibility of the agent-specific builder methods.
 pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
     match agent {
-        // Keep Codex out of the alternate screen so the PTY emits normal
+        // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
         // CLI's documented inline mode for preserving terminal history.
-        AgentId::Codex => vec!["--no-alt-screen".to_string()],
+        AgentId::Codex | AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
         | AgentId::Gemini
@@ -1279,6 +1279,9 @@ impl AgentLaunchBuilder {
             AgentId::Codex => {
                 self.build_codex_args(&mut args, &mut env_vars);
             }
+            AgentId::GrokBuild => {
+                self.build_grok_build_args(&mut args);
+            }
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
             }
@@ -1650,6 +1653,25 @@ impl AgentLaunchBuilder {
         }
     }
 
+    fn build_grok_build_args(&self, args: &mut Vec<String>) {
+        args.extend(canonical_launch_args(&AgentId::GrokBuild));
+
+        match self.session_mode {
+            SessionMode::Continue => args.push("--continue".to_string()),
+            SessionMode::Resume => {
+                args.push("--resume".to_string());
+                if let Some(ref id) = self.resume_session_id {
+                    args.push(id.clone());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+
+        if self.skip_permissions {
+            args.push("--always-approve".to_string());
+        }
+    }
+
     fn build_antigravity_args(&self, args: &mut Vec<String>) {
         match self.session_mode {
             SessionMode::Continue => args.push("--continue".to_string()),
@@ -1835,7 +1857,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_launch_args_for_non_codex_agents_is_empty() {
+    fn canonical_launch_args_for_grok_build_contains_no_alt_screen() {
+        assert_eq!(
+            canonical_launch_args(&AgentId::GrokBuild),
+            vec!["--no-alt-screen".to_string()]
+        );
+    }
+
+    #[test]
+    fn canonical_launch_args_for_agents_without_defaults_is_empty() {
         // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
@@ -2477,6 +2507,7 @@ mod tests {
     fn build_non_codex_agents_do_not_enable_goal_feature() {
         for agent in [
             AgentId::ClaudeCode,
+            AgentId::GrokBuild,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -2733,6 +2764,49 @@ mod tests {
             spec_arg.map(String::as_str),
             Some("@google/gemini-cli@latest")
         );
+    }
+
+    #[test]
+    fn resolve_runner_latest_uses_official_grok_build_package() {
+        let runner = resolve_runner(&AgentId::GrokBuild, "latest");
+        let spec_arg = runner.base_args.iter().find(|arg| arg.contains('@'));
+        assert_eq!(
+            spec_arg.map(String::as_str),
+            Some("@xai-official/grok@latest")
+        );
+    }
+
+    #[test]
+    fn build_grok_build_maps_launch_modes_and_permission_flag() {
+        let normal = AgentLaunchBuilder::new(AgentId::GrokBuild).build();
+        assert_eq!(normal.command, "grok");
+        assert_eq!(normal.display_name, "Grok Build");
+        assert_eq!(normal.args, ["--no-alt-screen"]);
+
+        let continue_latest = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Continue)
+            .build();
+        assert_eq!(continue_latest.args, ["--no-alt-screen", "--continue"]);
+
+        let resume = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("grok-session-42")
+            .skip_permissions(true)
+            .build();
+        assert_eq!(
+            resume.args,
+            [
+                "--no-alt-screen",
+                "--resume",
+                "grok-session-42",
+                "--always-approve",
+            ]
+        );
+
+        let resume_latest = AgentLaunchBuilder::new(AgentId::GrokBuild)
+            .session_mode(SessionMode::Resume)
+            .build();
+        assert_eq!(resume_latest.args, ["--no-alt-screen", "--resume"]);
     }
 
     #[test]

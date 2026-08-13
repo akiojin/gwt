@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum AgentId {
     ClaudeCode,
     Codex,
+    GrokBuild,
     Antigravity,
     Gemini,
     OpenCode,
@@ -72,7 +73,12 @@ impl AgentId {
     pub fn supports_continue_latest(&self) -> bool {
         matches!(
             self,
-            Self::ClaudeCode | Self::Codex | Self::Antigravity | Self::OpenCode | Self::Hermes
+            Self::ClaudeCode
+                | Self::Codex
+                | Self::GrokBuild
+                | Self::Antigravity
+                | Self::OpenCode
+                | Self::Hermes
         )
     }
 
@@ -82,6 +88,7 @@ impl AgentId {
             self,
             Self::ClaudeCode
                 | Self::Codex
+                | Self::GrokBuild
                 | Self::Antigravity
                 | Self::OpenCode
                 | Self::OpenClaw
@@ -164,6 +171,17 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         color: AgentColor::Cyan,
         aliases: &["codex"],
         cache_key: "codex",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::GrokBuild,
+        command: "grok",
+        display_name: "Grok Build",
+        package_name: Some("@xai-official/grok"),
+        color: AgentColor::Gray,
+        aliases: &["grok", "grok build", "grok-build"],
+        cache_key: "grok-build",
         version_flag: "--version",
         version_prefix_args: &[],
     },
@@ -392,6 +410,7 @@ mod tests {
     fn agent_id_command_returns_expected() {
         assert_eq!(AgentId::ClaudeCode.command(), "claude");
         assert_eq!(AgentId::Codex.command(), "codex");
+        assert_eq!(AgentId::GrokBuild.command(), "grok");
         assert_eq!(AgentId::Antigravity.command(), "agy");
         assert_eq!(AgentId::Gemini.command(), "gemini");
         assert_eq!(AgentId::OpenCode.command(), "opencode");
@@ -404,6 +423,7 @@ mod tests {
     #[test]
     fn agent_id_display_name_returns_expected() {
         assert_eq!(AgentId::ClaudeCode.display_name(), "Claude Code");
+        assert_eq!(AgentId::GrokBuild.display_name(), "Grok Build");
         assert_eq!(AgentId::Antigravity.display_name(), "Antigravity CLI");
         assert_eq!(AgentId::Gemini.display_name(), "Gemini CLI (legacy)");
         assert_eq!(AgentId::OpenCode.display_name(), "OpenCode");
@@ -420,6 +440,10 @@ mod tests {
             Some("@anthropic-ai/claude-code")
         );
         assert_eq!(AgentId::Antigravity.package_name(), None);
+        assert_eq!(
+            AgentId::GrokBuild.package_name(),
+            Some("@xai-official/grok")
+        );
         assert_eq!(AgentId::Gemini.package_name(), Some("@google/gemini-cli"));
         assert_eq!(AgentId::OpenCode.package_name(), Some("opencode-ai"));
         assert_eq!(AgentId::OpenClaw.package_name(), None);
@@ -431,6 +455,7 @@ mod tests {
     fn agent_id_default_color() {
         assert_eq!(AgentId::ClaudeCode.default_color(), AgentColor::Yellow);
         assert_eq!(AgentId::Codex.default_color(), AgentColor::Cyan);
+        assert_eq!(AgentId::GrokBuild.default_color(), AgentColor::Gray);
         assert_eq!(AgentId::Antigravity.default_color(), AgentColor::Green);
         assert_eq!(AgentId::Gemini.default_color(), AgentColor::Magenta);
         assert_eq!(AgentId::OpenCode.default_color(), AgentColor::Green);
@@ -454,7 +479,7 @@ mod tests {
     #[test]
     fn builtin_agent_descriptors_drive_agent_info_contract() {
         let descriptors = builtin_agent_descriptors();
-        assert_eq!(descriptors.len(), 8);
+        assert_eq!(descriptors.len(), 9);
 
         for descriptor in descriptors {
             let info = AgentInfo::from_id(descriptor.id.clone());
@@ -473,6 +498,21 @@ mod tests {
                 descriptor.command
             );
         }
+    }
+
+    #[test]
+    fn grok_build_descriptor_matches_official_cli_contract() {
+        let descriptor =
+            builtin_agent_descriptor_for_command("grok").expect("Grok Build must be built in");
+
+        assert_eq!(descriptor.id, AgentId::GrokBuild);
+        assert_eq!(descriptor.display_name, "Grok Build");
+        assert_eq!(descriptor.package_name, Some("@xai-official/grok"));
+        assert_eq!(descriptor.cache_key, "grok-build");
+        assert_eq!(descriptor.version_flag, "--version");
+        assert!(descriptor.version_prefix_args.is_empty());
+        assert!(descriptor.aliases.contains(&"grok build"));
+        assert!(descriptor.aliases.contains(&"grok-build"));
     }
 
     #[test]
@@ -534,6 +574,7 @@ mod tests {
         assert!(AgentId::Codex.supports_resume_picker());
         for non_picker in [
             AgentId::Antigravity,
+            AgentId::GrokBuild,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -553,6 +594,7 @@ mod tests {
         for supported in [
             AgentId::ClaudeCode,
             AgentId::Codex,
+            AgentId::GrokBuild,
             resolve_agent_id("agy").expect("Antigravity must resolve"),
             AgentId::OpenCode,
             AgentId::Hermes,
@@ -580,6 +622,7 @@ mod tests {
         for supported in [
             AgentId::ClaudeCode,
             AgentId::Codex,
+            AgentId::GrokBuild,
             resolve_agent_id("agy").expect("Antigravity must resolve"),
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -608,6 +651,7 @@ mod tests {
         assert!(AgentId::Codex.supports_fast_mode());
         for unsupported in [
             AgentId::Antigravity,
+            AgentId::GrokBuild,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -632,7 +676,12 @@ mod tests {
         assert!(AgentId::OpenCode.supports_freetext_model());
         assert!(!AgentId::OpenCode.supports_provider_selection());
         assert!(!AgentId::OpenCode.supports_profile_selection());
-        for other in [AgentId::ClaudeCode, AgentId::Codex, AgentId::Gemini] {
+        for other in [
+            AgentId::ClaudeCode,
+            AgentId::Codex,
+            AgentId::GrokBuild,
+            AgentId::Gemini,
+        ] {
             assert!(!other.supports_provider_selection());
             assert!(!other.supports_profile_selection());
             assert!(!other.supports_freetext_model());
@@ -653,6 +702,9 @@ mod tests {
         }
         assert_eq!(resolve_agent_id("codex"), Some(AgentId::Codex));
         assert_eq!(resolve_agent_id("Codex"), Some(AgentId::Codex));
+        for raw in ["grok", "Grok Build", "grok-build"] {
+            assert_eq!(resolve_agent_id(raw), Some(AgentId::GrokBuild), "{raw}");
+        }
         assert_eq!(resolve_agent_id("gemini"), Some(AgentId::Gemini));
         assert_eq!(
             resolve_agent_id("Gemini CLI (legacy)"),
@@ -709,6 +761,7 @@ mod tests {
         let custom_inputs = [
             "my-claude-wrapper",
             "codex-wrapper",
+            "grok-helper",
             "gemini-helper",
             "antigravity-helper",
             "opencode-mentor",
@@ -732,6 +785,7 @@ mod tests {
         let cases = [
             ("claude", AgentColor::Yellow),
             ("codex", AgentColor::Cyan),
+            ("grok", AgentColor::Gray),
             ("agy", AgentColor::Green),
             ("antigravity", AgentColor::Green),
             ("gemini", AgentColor::Magenta),
@@ -754,6 +808,7 @@ mod tests {
         let ids = vec![
             AgentId::ClaudeCode,
             AgentId::Codex,
+            AgentId::GrokBuild,
             AgentId::Antigravity,
             AgentId::Gemini,
             AgentId::OpenCode,
