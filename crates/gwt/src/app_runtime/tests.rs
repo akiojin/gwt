@@ -4109,12 +4109,25 @@ fn wait_for_recorded_event(
     events: &Arc<Mutex<Vec<UserEvent>>>,
     predicate: impl Fn(&[UserEvent]) -> bool,
 ) {
-    for _ in 0..800 {
+    wait_for_recorded_event_with_timeout(label, events, Duration::from_secs(20), predicate);
+}
+
+fn wait_for_recorded_event_with_timeout(
+    label: &str,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    timeout: Duration,
+    predicate: impl Fn(&[UserEvent]) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
         {
             let events = events.lock().expect("event log");
             if predicate(&events) {
                 return;
             }
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -34793,7 +34806,10 @@ fn take_monitor_launch_complete(
     label: &str,
     events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> AgentLaunchResult {
-    wait_for_recorded_event(label, events, |events| {
+    // This integration-style fixture performs real Git setup plus managed
+    // asset/trust materialization in a debug build. Under parallel CI load it
+    // can legitimately exceed the generic 20-second unit-test poll budget.
+    wait_for_recorded_event_with_timeout(label, events, Duration::from_secs(60), |events| {
         events
             .iter()
             .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
@@ -35095,6 +35111,186 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
         &different.recorded_events,
     );
     assert_monitor_exact_resume(result, &different);
+}
+
+/// SPEC #3165 T-228 / FR-104: if another live gwt window wins the native
+/// conversation after preflight, the typed late-race failure retains that
+/// known holder instead of degrading every production payload to `None`.
+#[test]
+fn app_runtime_late_writer_conflict_preserves_known_holder_window_id() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "late-known-holder",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        false,
+    );
+    let source_raw_id = fixture.runtime.tabs[0]
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds())
+        .id;
+    assert!(fixture.runtime.tabs[0]
+        .workspace
+        .set_session_id(&source_raw_id, Some(fixture.source_session_id.clone())));
+    fixture.runtime.register_window("tab-1", &source_raw_id);
+    let source_window_id = combined_window_id("tab-1", &source_raw_id);
+    fixture.runtime.active_agent_sessions.insert(
+        source_window_id.clone(),
+        ActiveAgentSession {
+            window_id: source_window_id.clone(),
+            session_id: fixture.source_session_id.clone(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/issue-3165".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: fixture.worktree.clone(),
+            agent_project_root: fixture.worktree.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+    let detail = "Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
+        thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
+        (code -32600)";
+
+    let failure = fixture.runtime.issue_monitor_failure_for_window(
+        &source_window_id,
+        detail,
+        gwt_agent::SessionMode::Resume,
+    );
+    assert_eq!(
+        failure,
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: fixture.holder_window_id.clone(),
+        })
+    );
+    let payload = AppRuntime::issue_monitor_agent_failed_payload_with_failure(
+        &source_window_id,
+        detail,
+        Some(3165),
+        failure.as_ref(),
+    );
+    assert_eq!(
+        payload
+            .pointer("/agent_failed/failure/holder_window_id")
+            .and_then(serde_json::Value::as_str),
+        fixture.holder_window_id.as_deref(),
+        "the production AgentFailed envelope must retain the resolved holder"
+    );
+    assert_eq!(
+        payload
+            .pointer("/agent_failed/failure/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("resume_writer_conflict")
+    );
+
+    fixture
+        .runtime
+        .active_agent_sessions
+        .remove(&source_window_id);
+    assert_eq!(
+        fixture.runtime.issue_monitor_failure_for_window(
+            &source_window_id,
+            detail,
+            gwt_agent::SessionMode::Resume,
+        ),
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: fixture.holder_window_id.clone(),
+        }),
+        "PTY teardown removes the active source before failure publication, so the persisted window Session must retain holder resolution"
+    );
+
+    let holder_window_id = fixture
+        .holder_window_id
+        .as_deref()
+        .expect("known holder window");
+    fixture
+        .runtime
+        .active_agent_sessions
+        .remove(holder_window_id);
+    assert_eq!(
+        fixture.runtime.issue_monitor_failure_for_window(
+            &source_window_id,
+            detail,
+            gwt_agent::SessionMode::Resume,
+        ),
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: None,
+        }),
+        "the failing source window must never identify itself as the holder"
+    );
+}
+
+#[test]
+fn app_runtime_monitor_holder_resolution_prefers_durable_session_over_stale_cache() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+    let fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "durable-holder-refresh",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveOtherConversation,
+        false,
+    );
+    let holder_window_id = fixture.holder_window_id.as_deref().expect("holder window");
+    let holder_session_id = fixture
+        .runtime
+        .active_agent_sessions
+        .get(holder_window_id)
+        .expect("active holder")
+        .session_id
+        .clone();
+    let holder_path = fixture
+        .sessions_dir
+        .join(format!("{holder_session_id}.toml"));
+    let mut durable_holder = gwt_agent::Session::load(&holder_path).expect("durable holder");
+    assert_ne!(
+        durable_holder.exact_resume_session_id(),
+        Some(fixture.native_conversation_id.as_str()),
+        "fixture cache and disk initially describe another conversation"
+    );
+    durable_holder.agent_session_id = Some(fixture.native_conversation_id.clone());
+    durable_holder
+        .save(&fixture.sessions_dir)
+        .expect("refresh durable holder");
+    assert_ne!(
+        fixture
+            .runtime
+            .launch_wizard_cache
+            .session_by_id(&holder_session_id)
+            .and_then(gwt_agent::Session::exact_resume_session_id),
+        Some(fixture.native_conversation_id.as_str()),
+        "the in-memory launch cache intentionally remains stale"
+    );
+    let candidate = gwt_agent::Session::load(
+        &fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id)),
+    )
+    .expect("resume candidate");
+
+    assert_eq!(
+        fixture
+            .runtime
+            .issue_monitor_native_conversation_holder_excluding(&candidate, None),
+        Some(holder_window_id.to_string()),
+        "holder safety must use the latest durable Session written by hooks or another process"
+    );
 }
 
 /// Exact native identity alone is not a writer conflict: stale runtime maps

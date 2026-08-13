@@ -2486,6 +2486,14 @@ impl AppRuntime {
         &self,
         candidate: &gwt_agent::Session,
     ) -> Option<String> {
+        self.issue_monitor_native_conversation_holder_excluding(candidate, None)
+    }
+
+    pub(super) fn issue_monitor_native_conversation_holder_excluding(
+        &self,
+        candidate: &gwt_agent::Session,
+        excluded_window_id: Option<&str>,
+    ) -> Option<String> {
         let candidate_conversation_id = candidate.exact_resume_session_id()?;
         let matches_candidate = |source_session_id: &str| {
             self.issue_monitor_session_by_id(source_session_id)
@@ -2497,7 +2505,8 @@ impl AppRuntime {
         self.active_agent_sessions
             .iter()
             .find_map(|(window_id, active)| {
-                (self.window_lookup.contains_key(window_id.as_str())
+                (excluded_window_id != Some(window_id.as_str())
+                    && self.window_lookup.contains_key(window_id.as_str())
                     && self
                         .window_status(window_id.as_str())
                         .is_some_and(|status| {
@@ -2512,7 +2521,8 @@ impl AppRuntime {
             .or_else(|| {
                 self.pending_auto_resume_sources.iter().find_map(
                     |(window_id, source_session_id)| {
-                        (self.window_lookup.contains_key(window_id.as_str())
+                        (excluded_window_id != Some(window_id.as_str())
+                            && self.window_lookup.contains_key(window_id.as_str())
                             && self
                                 .inflight_launches
                                 .values()
@@ -2524,13 +2534,13 @@ impl AppRuntime {
             })
     }
 
-    fn issue_monitor_session_by_id(&self, session_id: &str) -> Option<gwt_agent::Session> {
-        self.launch_wizard_cache
-            .session_by_id(session_id)
-            .cloned()
-            .or_else(|| {
-                gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml"))).ok()
-            })
+    pub(super) fn issue_monitor_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Option<gwt_agent::Session> {
+        gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+            .ok()
+            .or_else(|| self.launch_wizard_cache.session_by_id(session_id).cloned())
     }
 
     fn resolve_silent_issue_monitor_launch_request(

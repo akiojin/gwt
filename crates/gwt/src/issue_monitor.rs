@@ -4334,6 +4334,7 @@ impl IssueMonitorState {
     /// that snapshot, however, so its `FreshRequired` decision must survive.
     /// Newer terminal/disabled disk state remains authoritative and prevents a
     /// stale scan from reviving the marker.
+    #[cfg(unix)]
     pub(crate) fn restore_scanned_launch_session_strategies(
         &mut self,
         proposed: &BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
@@ -5556,7 +5557,13 @@ impl IssueMonitorState {
         message: impl Into<String>,
         holder_window_id: Option<&str>,
     ) -> IssueMonitorResumeWriterConflictOutcome {
-        if self.launched_windows.get(&issue_number).map(String::as_str) != Some(source_window_id) {
+        if !self
+            .launched_windows
+            .get(&issue_number)
+            .is_some_and(|stored_window_id| {
+                issue_monitor_window_ids_match(stored_window_id, source_window_id)
+            })
+        {
             return IssueMonitorResumeWriterConflictOutcome::Rejected;
         }
         self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
@@ -7872,6 +7879,47 @@ mod tests {
             IssueMonitorLaunchSessionStrategy::FreshRequired,
             "delivery replay must never downgrade failover to ResumeIfSafe"
         );
+    }
+
+    #[test]
+    fn agent_writer_conflict_accepts_legacy_bare_and_qualified_window_ids() {
+        let mut legacy_stored = launched_monitor(42, "agent-old");
+        assert_eq!(
+            legacy_stored.try_requeue_agent_resume_writer_conflict(
+                42,
+                "tab-1::agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Requeued,
+            "a qualified runtime event must match a legacy bare persisted id"
+        );
+
+        let mut qualified_stored = launched_monitor(42, "tab-1::agent-old");
+        assert_eq!(
+            qualified_stored.try_requeue_agent_resume_writer_conflict(
+                42,
+                "agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Requeued,
+            "a legacy bare runtime event must match a qualified persisted id"
+        );
+
+        let mut foreign_tab = launched_monitor(42, "tab-1::agent-old");
+        let original = foreign_tab.prefs();
+        assert_eq!(
+            foreign_tab.try_requeue_agent_resume_writer_conflict(
+                42,
+                "tab-2::agent-old",
+                "resume writer conflict",
+                None,
+            ),
+            IssueMonitorResumeWriterConflictOutcome::Rejected,
+            "two qualified ids from different project tabs must remain distinct"
+        );
+        assert_eq!(foreign_tab.prefs(), original, "foreign source is inert");
     }
 
     #[test]

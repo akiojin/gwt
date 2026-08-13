@@ -3125,13 +3125,14 @@ impl AppRuntime {
             .pending_launch_feedback_contexts
             .get(window_id)
             .and_then(|context| context.issue_monitor_issue_number);
+        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         let publication = self.publish_issue_monitor_control(
             project_root,
-            Self::issue_monitor_agent_failed_payload(
+            Self::issue_monitor_agent_failed_payload_with_failure(
                 window_id,
                 message,
                 issue_number_hint,
-                session_mode,
+                failure.as_ref(),
             ),
         );
         self.issue_monitor_agent_failed_result_events_for_project(
@@ -3161,11 +3162,61 @@ impl AppRuntime {
             .unwrap_or(gwt_agent::SessionMode::Normal)
     }
 
+    fn issue_monitor_failure_for_window(
+        &self,
+        window_id: &str,
+        message: &str,
+        session_mode: gwt_agent::SessionMode,
+    ) -> Option<gwt::IssueMonitorFailure> {
+        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode)?;
+        let gwt::IssueMonitorFailure::ResumeWriterConflict {
+            holder_window_id: None,
+        } = failure
+        else {
+            return Some(failure);
+        };
+        let source_session_id = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|active| active.session_id.clone())
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                self.tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?
+                    .session_id
+                    .clone()
+            });
+        let holder_window_id = source_session_id
+            .as_deref()
+            .and_then(|session_id| self.issue_monitor_session_by_id(session_id))
+            .and_then(|candidate| {
+                self.issue_monitor_native_conversation_holder_excluding(&candidate, Some(window_id))
+            });
+        Some(gwt::IssueMonitorFailure::ResumeWriterConflict { holder_window_id })
+    }
+
+    #[cfg(test)]
     pub(crate) fn issue_monitor_agent_failed_payload(
         window_id: &str,
         message: &str,
         issue_number_hint: Option<u64>,
         session_mode: gwt_agent::SessionMode,
+    ) -> serde_json::Value {
+        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
+        Self::issue_monitor_agent_failed_payload_with_failure(
+            window_id,
+            message,
+            issue_number_hint,
+            failure.as_ref(),
+        )
+    }
+
+    fn issue_monitor_agent_failed_payload_with_failure(
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        failure: Option<&gwt::IssueMonitorFailure>,
     ) -> serde_json::Value {
         let mut agent_failed = serde_json::json!({
             "window_id": window_id,
@@ -3174,8 +3225,7 @@ impl AppRuntime {
         if let Some(issue_number) = issue_number_hint {
             agent_failed["issue_number"] = serde_json::json!(issue_number);
         }
-        if let Some(failure) = runtime_events::classify_issue_monitor_failure(message, session_mode)
-        {
+        if let Some(failure) = failure {
             agent_failed["failure"] =
                 serde_json::to_value(failure).expect("Issue Monitor failure serializes");
         }
@@ -3222,7 +3272,7 @@ impl AppRuntime {
         session_mode: gwt_agent::SessionMode,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
-        let failure = runtime_events::classify_issue_monitor_failure(message, session_mode);
+        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         match publication {
             Ok(()) => self.finalize_issue_monitor_agent_failed_events(
                 project_root,
