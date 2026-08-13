@@ -1424,8 +1424,14 @@ impl LaunchWizardState {
         }
     }
 
+    /// Issue #3462: Resume / Continue launches inherit the Skip Permissions
+    /// preference from the same source as Normal launches. The former
+    /// `mode == "normal"` gate silently dropped the flag on resume, leaving
+    /// restored agents stuck at permission prompts and persisting
+    /// `skip_permissions = false` into the relaunched Session, which then
+    /// poisoned every later restore of the same lineage.
     pub(super) fn effective_skip_permissions(&self) -> bool {
-        self.skip_permissions && self.mode == "normal"
+        self.skip_permissions
     }
 
     fn reset_default_launch_path(&mut self) {
@@ -2283,6 +2289,10 @@ mod tests {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.reasoning_level.as_deref(), Some("medium"));
+                    assert!(
+                        config.tool_runtime_source_session_id.is_none(),
+                        "StartNew must resolve the requested selector again"
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -2543,17 +2553,23 @@ mod tests {
         // SPEC-2014 FR-034: saved docker_service が現 context にあれば saved を採用する。
         assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
         assert_eq!(view.selected_docker_lifecycle, "restart");
+        // Issue #3462: Continue inherits the saved Skip Permissions preference.
         assert!(
             state.skip_permissions,
             "the saved preference remains stored"
         );
-        assert!(!view.skip_permissions);
+        assert!(view.skip_permissions);
+        // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.branch.as_deref(), Some("feature/current"));
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+        assert!(
+            config.skip_permissions,
+            "a Continue launch must carry the inherited Skip Permissions preference"
+        );
         assert!(config.resume_session_id.is_none());
         assert_eq!(config.linked_issue_number, None);
     }
@@ -3094,11 +3110,13 @@ mod tests {
         assert_eq!(view.selected_reasoning, "medium");
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
+        // Issue #3462: the preserved preference is advertised on Continue.
         assert!(
             state.skip_permissions,
             "hydration preserves the saved preference"
         );
-        assert!(!view.skip_permissions);
+        assert!(view.skip_permissions);
+        // Toggle visibility still follows the manual-setup launch path.
         assert!(!view.show_skip_permissions);
         assert!(view.codex_fast_mode);
     }
@@ -3251,6 +3269,92 @@ mod tests {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
                     assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
                     assert!(config.resume_session_id.is_none());
+                    assert_eq!(
+                        config.tool_runtime_source_session_id.as_deref(),
+                        Some("session-1")
+                    );
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_start_resume_uses_the_applied_entry_as_tool_runtime_source() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            vec![
+                quick_start_entry(
+                    "session-other",
+                    "codex",
+                    Some("resume-other"),
+                    None,
+                    gwt_agent::LaunchRuntimeTarget::Host,
+                    None,
+                ),
+                quick_start_entry(
+                    "session-selected",
+                    "codex",
+                    Some("resume-selected"),
+                    None,
+                    gwt_agent::LaunchRuntimeTarget::Host,
+                    None,
+                ),
+            ],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 1,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.resume_session_id.as_deref(), Some("resume-selected"));
+                    assert_eq!(
+                        config.tool_runtime_source_session_id.as_deref(),
+                        Some("session-selected")
+                    );
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_start_start_new_latest_does_not_reuse_tool_runtime_source() {
+        let mut entry = quick_start_entry(
+            "session-saved",
+            "codex",
+            Some("resume-saved"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+        entry.version = Some("latest".to_string());
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            vec![entry],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.tool_version.as_deref(), Some("latest"));
+                    assert!(
+                        config.tool_runtime_source_session_id.is_none(),
+                        "StartNew must re-resolve the latest requested selector"
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -3349,6 +3453,10 @@ mod tests {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::OpenClaw);
                     assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
                     assert_eq!(config.resume_session_id.as_deref(), Some("resume-1"));
+                    assert_eq!(
+                        config.tool_runtime_source_session_id.as_deref(),
+                        Some("session-1")
+                    );
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -3572,11 +3680,13 @@ mod tests {
         assert_eq!(codex_view.selected_reasoning, "high");
         assert_eq!(codex_view.selected_version, "0.110.0");
         assert_eq!(codex_view.selected_execution_mode, "continue");
+        // Issue #3462: the Codex draft's preference is advertised on Continue.
         assert!(
             state.skip_permissions,
             "the Codex draft retains its preference"
         );
-        assert!(!codex_view.skip_permissions);
+        assert!(codex_view.skip_permissions);
+        // Toggle visibility still follows the manual-setup launch path.
         assert!(!codex_view.show_skip_permissions);
         assert!(codex_view.codex_fast_mode);
 

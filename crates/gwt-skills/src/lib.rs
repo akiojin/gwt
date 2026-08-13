@@ -7,6 +7,7 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
+pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
 pub mod settings_local;
@@ -44,8 +45,8 @@ pub use provider_hooks::{
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
-    generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
-    managed_hook_config_has_user_content, CodexHookDiscoveryMode,
+    codex_hooks_paths_for_codex_discovery, generate_codex_hooks, generate_codex_hooks_for_mode,
+    generate_settings_local, managed_hook_config_has_user_content, CodexHookDiscoveryMode,
 };
 
 #[cfg(test)]

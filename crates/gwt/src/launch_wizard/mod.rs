@@ -626,6 +626,28 @@ impl LaunchWizardLaunchRequest {
             }
         }
     }
+
+    /// Issue #3478 (AC-1): inject the machine-readable autonomous execution
+    /// context so the agent's hooks can recognize an unattended session and
+    /// convert its confirmation questions into NeedsHuman handoffs.
+    ///
+    /// A no-op when autonomous mode is off and for non-agent (shell) launches,
+    /// so every human-driven launch keeps its exact current environment.
+    pub fn set_autonomous_execution_context(&mut self, autonomous_mode: bool, issue_number: u64) {
+        if !autonomous_mode {
+            return;
+        }
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.env_vars.insert(
+                crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV.to_string(),
+                "1".to_string(),
+            );
+            config.env_vars.insert(
+                crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV.to_string(),
+                issue_number.to_string(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +668,50 @@ mod autonomous_launch_tests {
         request.force_skip_permissions_for_autonomous(true);
         match request {
             LaunchWizardLaunchRequest::Agent(config) => assert!(config.skip_permissions),
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Issue #3478 (AC-1): the autonomous execution context is machine-readable
+    /// in the launched agent's environment.
+    #[test]
+    fn autonomous_launch_injects_the_execution_context() {
+        let mut request = agent_request(false);
+        request.set_autonomous_execution_context(true, 3478);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert_eq!(
+                    config
+                        .env_vars
+                        .get(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV)
+                        .map(String::as_str),
+                    Some("1")
+                );
+                assert_eq!(
+                    config
+                        .env_vars
+                        .get(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV)
+                        .map(String::as_str),
+                    Some("3478")
+                );
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// AC-1/AC-6 non-regression: a human-driven launch's environment is
+    /// untouched, so nothing intercepts its question UI.
+    #[test]
+    fn non_autonomous_launch_leaves_the_environment_untouched() {
+        let mut request = agent_request(false);
+        request.set_autonomous_execution_context(false, 3478);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => assert!(
+                !config
+                    .env_vars
+                    .contains_key(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV),
+                "off ⇒ no autonomous marker (SPEC #3165 preserved)"
+            ),
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }
     }

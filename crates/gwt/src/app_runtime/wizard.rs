@@ -341,9 +341,12 @@ impl AppRuntime {
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        // SPEC #3431 FR-070: this must be the spelling the durable execution
+        // binding produces, not a display label. `workspace.ensure` compares
+        // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
         let owner_label = match linked_issue_kind {
             LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
-            LinkedIssueKind::Spec => format!("SPEC #{issue_number}"),
+            LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
         };
         let workspace_resume_context = Some(linked_issue_workspace_context(
             project_root,
@@ -968,6 +971,10 @@ impl AppRuntime {
         if let Some(linked) = session.linked_issue_number {
             builder = builder.linked_issue_number(linked);
         }
+        if let Some(provenance) = session.tool_runtime_provenance.clone() {
+            builder = builder.tool_runtime_provenance(provenance);
+        }
+        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         // Resume the specific Session (conversation UUID) the user clicked when
         // one was requested; otherwise resume the Work's latest conversation.
@@ -2273,6 +2280,10 @@ impl AppRuntime {
         .map(|prefs| prefs.autonomous_mode)
         .unwrap_or(false);
         launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // Issue #3478 (AC-1): the unattended agent must know it is unattended,
+        // so its hooks can convert a confirmation question into a NeedsHuman
+        // handoff instead of letting it hold this slot until the stuck timeout.
+        launch_request.set_autonomous_execution_context(autonomous_mode, issue_number);
         // SPEC #3200 FR-015: apply the distinct review model for the review agent.
         if let (Some(model), LaunchWizardLaunchRequest::Agent(config)) =
             (&review_model_override, &mut launch_request)
@@ -2356,6 +2367,17 @@ impl AppRuntime {
         }
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return Ok(None);
+        }
+        // Issue #3478 (AC-5): a parked question that a human answered resumes
+        // this exact session with the answer as its first prompt, so the work
+        // continues with the decision context it was parked on. Taken once —
+        // a later resume of the same session must not replay a stale answer.
+        if let Some(prompt) = gwt::take_autonomous_resume_prompt_from_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+            issue_number,
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ) {
+            config.args.push(prompt);
         }
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
             project_root,
@@ -3406,6 +3428,9 @@ mod launch_agent_branch_resolution_tests {
 
     #[test]
     fn launch_agent_branch_resolution_does_not_report_branch_zero_for_detached_nondefault_branch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         init_committed_repo(&repo, "feature/current");

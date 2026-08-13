@@ -111,9 +111,6 @@ fn frontend_bundle_source() -> &'static str {
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
         "\n",
-        // SPEC-3165 — Issue auto-improve monitor card/inbox/toast surface.
-        include_str!("../web/issue-monitor-surface.js"),
-        "\n",
         // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
         // app.js.
         include_str!("../web/file-tree-surface.js"),
@@ -194,41 +191,48 @@ fn embedded_web_terminal_copy_shortcut_module_is_registered() {
 }
 
 #[test]
-fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
+fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     let paths: Vec<&str> = root_js_module_assets()
         .iter()
         .map(|asset| asset.path)
         .collect();
     assert!(
-        paths.contains(&"/issue-monitor-surface.js"),
-        "issue monitor surface must be served as a root JS module"
+        !paths.contains(&"/issue-monitor-surface.js"),
+        "the retired independent Issue Monitor asset must not be served"
     );
 
     let html = app_js();
     assert!(
-        html.contains("createIssueMonitorSurface"),
-        "app.js must import and instantiate the issue monitor surface"
+        !html.contains("createIssueMonitorSurface"),
+        "app.js must not import or instantiate the retired monitor presenter"
     );
     assert!(
-        html.contains("issueMonitorSurface"),
-        "issue monitor surface must be reachable through frontendUnits"
+        !html.contains("surface === \"issue-monitor\""),
+        "the canvas must not mount a second Issue Monitor surface"
     );
     assert!(
-        html.contains("surface === \"issue-monitor\""),
-        "Issue Monitor must mount through the canvas window body surface path"
+        html.contains("preset === \"issue_monitor\"") && html.contains("return \"knowledge\";"),
+        "legacy issue_monitor windows must render through the Knowledge Issue surface"
     );
     assert!(
-        index_html().contains("data-preset=\"issue_monitor\""),
-        "Issue Monitor must be available through the same Add Window preset flow as other canvas windows"
+        !index_html().contains("data-preset=\"issue_monitor\""),
+        "Add Window must expose only the canonical Issue entrypoint"
     );
-    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+    let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     assert!(
-        surface_js.contains("mount(body"),
-        "issue monitor surface must expose a window-body mount API"
+        surface_js.contains("applyIssueMonitorStatus")
+            && surface_js.contains("scheduleIssueMonitorProjectionRefresh")
+            && surface_js.contains("monitorStateView"),
+        "the canonical Issue surface must own monitor status, invalidation, and row rendering"
     );
     assert!(
-        !surface_js.contains("position: fixed"),
-        "Issue Monitor must not render as a fixed overlay card"
+        html.contains("applyKnowledgeIssueMonitorStatus(event.status || {})"),
+        "status events must update the canonical Issue surface"
+    );
+    assert!(
+        html.contains("case \"open-issue-monitor\":")
+            && html.contains("focusOrSpawnPreset(\"issue\")"),
+        "the operator status strip must focus or spawn the canonical Issue preset"
     );
     assert!(
         html.contains("case \"issue_monitor_status\""),
@@ -245,8 +249,8 @@ fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
 }
 
 #[test]
-fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls() {
-    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
+    let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
 
     assert!(
         surface_js.contains("set_issue_monitor_max_active_agents"),
@@ -261,7 +265,7 @@ fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls(
             && surface_js.contains("↓")
             && surface_js.contains("Move up")
             && surface_js.contains("Move down"),
-        "Issue Monitor queue must expose icon priority controls with accessible labels"
+        "Issue rows must expose icon priority controls with accessible labels"
     );
     assert!(
         surface_js.contains("Start") && surface_js.contains("Stop"),
@@ -271,11 +275,11 @@ fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls(
         surface_js.contains("Agent settings")
             && surface_js.contains("Project Agent settings")
             && surface_js.contains("issue_monitor_configure_profile"),
-        "Issue Monitor queue must expose global Agent settings plus row shortcut configuration"
+        "Issue surface must expose global Agent settings plus row shortcut configuration"
     );
     assert!(
-        surface_js.contains("No queued issues"),
-        "Issue Monitor empty state must describe the all-Issue queue, not watched labels"
+        surface_js.contains("exclusion_reason") && surface_js.contains("Unknown (${state})"),
+        "Issue rows must show exclusion reasons and preserve unknown monitor states"
     );
 }
 
@@ -1692,31 +1696,68 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
 }
 
 #[test]
-fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
+fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
     let paths: Vec<&str> = root_js_module_assets()
         .iter()
         .map(|asset| asset.path)
         .collect();
     assert!(
-        paths.contains(&"/window-lane-identity.js"),
-        "window lane identity helper must be served as a root JS module"
+        paths.contains(&"/window-worktree-form.js"),
+        "window worktree form helper must be served as a root JS module"
     );
+    assert!(
+        !paths.contains(&"/window-lane-identity.js"),
+        "legacy lane identity module must not remain registered"
+    );
+    let form_module = root_js_module_assets()
+        .iter()
+        .find(|asset| asset.path == "/window-worktree-form.js")
+        .expect("registered worktree form module");
     let js = app_js();
     let shell_js = project_shell_surface_js();
     let styles = frontend_styles_bundle();
     assert!(
-        js.contains("applyWindowLaneData(element, windowData)")
-            && js.contains("renderWindowLaneBadge"),
-        "app.js must put data-lane-kind and the titlebar lane badge on workspace windows"
+        form_module.source.contains("lane_kind")
+            && form_module.source.contains("laneKind")
+            && form_module.source.contains("ephemeral")
+            && form_module.source.contains("branch-backed"),
+        "worktree form adapter must translate the legacy wire fixture to semantic values"
     );
     assert!(
-        shell_js.contains("window-list-lane"),
-        "window list rows must render lane identity"
+        js.contains("applyWindowWorktreeData(element, windowData)")
+            && js.contains("renderWindowWorktreeBadge"),
+        "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        styles.contains(".window-lane-badge")
-            && styles.contains(".fleet-minimap__cell[data-lane-symbol]::before"),
-        "titlebar/list/minimap lane badge styling must ship in embedded CSS"
+        shell_js.contains("window-list-worktree"),
+        "window list rows must render worktree form"
+    );
+    assert!(
+        styles.contains(".window-worktree-badge")
+            && styles.contains(".fleet-minimap__cell[data-worktree-symbol]::before"),
+        "titlebar/list/minimap worktree badge styling must ship in embedded CSS"
+    );
+    let consumer_wiring = format!("{js}\n{shell_js}");
+    for legacy in [
+        "window-lane-identity",
+        "WindowLane",
+        "windowLane",
+        "window-lane-badge",
+        "window-list-lane",
+        "data-lane-kind",
+        "data-lane-label",
+        "data-lane-symbol",
+        "Intake lane",
+        "Execution lane",
+    ] {
+        assert!(
+            !consumer_wiring.contains(legacy) && !styles.contains(legacy),
+            "old production lane vocabulary must be absent: {legacy}"
+        );
+    }
+    assert!(
+        !consumer_wiring.contains("lane_kind") && !consumer_wiring.contains("laneKind"),
+        "legacy backend fields must be read only by the worktree-form adapter"
     );
 }
 
@@ -2266,9 +2307,10 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
         "expected knowledge bridge guidance to avoid direct gh issue/pr commands",
     );
     assert!(
-        html.contains("if (preset === \"issue\" || preset === \"spec\")")
-            && html.contains("return \"issue\";"),
-        "expected legacy spec preset to open the unified Work Item issue view",
+        html.contains(
+            "if (preset === \"issue\" || preset === \"issue_monitor\" || preset === \"spec\")",
+        ) && html.contains("return \"issue\";"),
+        "expected legacy SPEC and Issue Monitor presets to open the unified Work Item issue view",
     );
 }
 
@@ -2288,9 +2330,26 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
         html.contains("request_id"),
         "expected semantic search requests to carry request ids for stale-response guards",
     );
+    let knowledge_status_block = html
+        .split("function renderKnowledgeStatusOnly")
+        .nth(1)
+        .and_then(|tail| tail.split("function renderIssueRow").next())
+        .expect("knowledge status renderer");
     assert!(
-        html.contains("Searching semantic index"),
-        "expected semantic search to expose an in-progress state",
+        knowledge_status_block.contains("!issueSurface && state.searching")
+            && knowledge_status_block.contains("Searching semantic index"),
+        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+    );
+    let direct_send_block = html
+        .split("function sendKnowledgeSemanticSearchNow")
+        .nth(1)
+        .and_then(|tail| tail.split("const uiTraceWiring").next())
+        .expect("semantic direct-send helper");
+    assert!(
+        direct_send_block.contains("activeSocket.readyState !== WebSocket.OPEN")
+            && direct_send_block.contains("activeSocket.send(JSON.stringify(message))")
+            && !direct_send_block.contains("pendingMessages.push"),
+        "expected semantic search to use an OPEN-only direct send that cannot enter the generic queue",
     );
     assert!(
         html.contains("% match"),
@@ -2420,9 +2479,10 @@ fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results
         "expected semantic search state to track the single in-flight backend request",
     );
     assert!(
-        html.contains("queuedSearchQuery")
-            && html.contains("const nextQuery = state.queuedSearchQuery;"),
-        "expected semantic search state to coalesce additional input to the latest query",
+        html.contains("searchGeneration")
+            && html.contains("inFlightSearchIntent")
+            && html.contains("queuedSearchIntent"),
+        "expected semantic search to coalesce one physical request plus one generation-fenced latest intent",
     );
     assert!(
             !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
@@ -2442,9 +2502,27 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
         html.contains("request_id: requestId,\n          number,"),
         "expected select_knowledge_bridge_entry requests to carry the detail request id",
     );
+    let load_request_block = html
+        .split("function requestKnowledgeBridge")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
+                .next()
+        })
+        .expect("knowledge load request block");
+    let pr_compatibility_block = load_request_block
+        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n        }").next())
+        .expect("PR compatibility reset block");
     assert!(
-        html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
-        "expected new cache loads to invalidate older detail response ids",
+        load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
+            && load_request_block
+                .matches("state.detailRequestId = 0;")
+                .count()
+                == 1
+            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
+        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
@@ -3645,7 +3723,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Work, "work"),
         (WindowSurface::AgentKanban, "agent-kanban"),
         (WindowSurface::Console, "console"),
-        (WindowSurface::IssueMonitor, "issue-monitor"),
         (WindowSurface::Mock, "mock"),
     ];
 
@@ -3665,6 +3742,10 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
     assert!(
         js.contains("preset === \"branches\"") && js.contains("return \"work\";"),
         "expected JS `presetSurface()` to route branches preset to work surface",
+    );
+    assert!(
+        js.contains("preset === \"issue_monitor\"") && js.contains("return \"knowledge\";"),
+        "expected legacy issue_monitor preset to redirect to the Knowledge Issue surface",
     );
 }
 

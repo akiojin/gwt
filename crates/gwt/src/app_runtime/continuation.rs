@@ -117,9 +117,11 @@ use super::workspace::{
     apply_workspace_launch_transition, WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
 };
 use super::{
-    launch_config_from_persisted_session, non_empty_workspace_text, AppRuntime, BackendEvent,
-    CachedContinueWorkOutcome, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
-    PendingFreshExecutionLaunch, WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
+    continue_work_readiness_decision, launch_config_from_persisted_session,
+    non_empty_workspace_text, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, OutboundEvent, PendingContinueWork, PendingContinueWorkExecution,
+    PendingFreshExecutionLaunch, ReadinessDeadlineDecision, WindowGeometry, WindowProcessStatus,
+    WorkspaceResumeContext,
 };
 use regex::Regex;
 
@@ -3702,7 +3704,7 @@ impl AppRuntime {
                 Ok(true) => {}
                 Err(_) => return ActiveOwnerLiveness::Unknown,
             }
-            if gwt::process::is_process_alive(pid) {
+            if gwt::process::is_host_process_alive(pid) {
                 match gwt_agent::SessionRuntimeState::load(&sidecar) {
                     Ok(state)
                         if matches!(
@@ -6015,39 +6017,59 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #3475: a fired readiness deadline is a checkpoint, not an expiry.
+    /// It aborts the prepared successor only once the pane stops showing that
+    /// the agent is still coming up, and always within a bounded number of
+    /// extensions. The `operation_id` correlation is unchanged, so a timer that
+    /// fires after its launch already succeeded (or was superseded) is still a
+    /// no-op.
     pub(crate) fn handle_continue_work_ready_timeout(
         &mut self,
         window_id: &str,
-        operation_id: &str,
+        watch: &ContinueWorkReadinessWatch,
     ) -> Vec<OutboundEvent> {
-        if self
+        let operation_id = watch.operation_id.as_str();
+        let is_pending_continue_work = self
             .pending_continue_work
             .get(window_id)
-            .is_some_and(|pending| pending.operation_id == operation_id)
-        {
-            return self.continue_work_launch_failed_events(
-                window_id,
-                "authenticated SessionStart readiness timed out",
-            );
-        }
-        let feedback = self
+            .is_some_and(|pending| pending.operation_id == operation_id);
+        let is_pending_fresh_execution = self
             .pending_fresh_execution_launches
             .get(window_id)
-            .filter(|pending| pending.operation_id == operation_id)
-            .and_then(|pending| pending.launch_feedback_context.clone());
-        if feedback.is_some()
-            || self
-                .pending_fresh_execution_launches
-                .get(window_id)
-                .is_some_and(|pending| pending.operation_id == operation_id)
-        {
-            return self.launch_error_events_with_continue_work(
-                window_id.to_string(),
-                "authenticated SessionStart readiness timed out".to_string(),
-                feedback,
-            );
+            .is_some_and(|pending| pending.operation_id == operation_id);
+        if !is_pending_continue_work && !is_pending_fresh_execution {
+            return Vec::new();
         }
-        Vec::new()
+        let pane_alive = self.readiness_pane_is_alive(window_id);
+        let output_bytes = self.observed_window_output_bytes(window_id);
+        match continue_work_readiness_decision(watch, pane_alive, output_bytes) {
+            ReadinessDeadlineDecision::Extend(next) => {
+                tracing::info!(
+                    window_id = %window_id,
+                    operation_id = %operation_id,
+                    extensions = next.extensions,
+                    silent_extensions = next.silent_extensions,
+                    "extended authenticated SessionStart readiness deadline"
+                );
+                self.rearm_continue_work_readiness_deadline(window_id, next);
+                Vec::new()
+            }
+            ReadinessDeadlineDecision::Abort { detail } => {
+                if is_pending_continue_work {
+                    self.continue_work_launch_failed_events(window_id, &detail)
+                } else {
+                    let feedback = self
+                        .pending_fresh_execution_launches
+                        .get(window_id)
+                        .and_then(|pending| pending.launch_feedback_context.clone());
+                    self.launch_error_events_with_continue_work(
+                        window_id.to_string(),
+                        detail,
+                        feedback,
+                    )
+                }
+            }
+        }
     }
 
     pub(crate) fn finalize_fresh_execution_launch_session_start(

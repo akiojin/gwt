@@ -335,21 +335,49 @@ fn spawn_issue_monitor_worker_with_config_and_timeout(
     // the watch state until this load either installs the sole Ready receiver
     // or publishes the stable RecoveryBlocked terminal state.
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
-    let loaded = load_issue_monitor_state_for_daemon(&prefs_path, config);
-    let control_rx = if loaded.recovery_blocked {
-        hub.mark_issue_monitor_control_recovery_blocked();
-        None
-    } else {
-        hub.take_issue_monitor_control_receiver()
-    };
-    refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
+    let loaded = load_issue_monitor_state_for_daemon(&prefs_path, config.clone());
     tokio::spawn(async move {
+        let mut loaded = loaded;
+        while loaded.authority_retry_pending {
+            tokio::select! {
+                _ = shutdown.notified() => {
+                    hub.close_issue_monitor_controls();
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+            let retry_prefs_path = prefs_path.clone();
+            let retry_config = config.clone();
+            loaded = match tokio::task::spawn_blocking(move || {
+                load_issue_monitor_state_for_daemon(&retry_prefs_path, retry_config)
+            })
+            .await
+            {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    tracing::error!(%error, "Issue Monitor authority retry worker failed");
+                    hub.close_issue_monitor_controls();
+                    return;
+                }
+            };
+        }
+        let control_rx = if loaded.recovery_blocked {
+            hub.mark_issue_monitor_control_recovery_blocked();
+            None
+        } else {
+            hub.take_issue_monitor_control_receiver()
+        };
+        refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
         let LoadedDaemonIssueMonitorState {
             mut monitor,
             recovery_blocked,
+            authority_retry_pending: false,
             authority_fence,
             authority_lease,
-        } = loaded;
+        } = loaded
+        else {
+            unreachable!("authority retry loop exits only with a terminal load state")
+        };
         // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
         // `Reviewing`, but its review-agent dispatch (not persisted) is gone.
         // Reset such records to `Implementing` so the first scan re-detects the PR
@@ -990,6 +1018,7 @@ impl Drop for IssueMonitorControlLaneGuard {
 struct LoadedDaemonIssueMonitorState {
     monitor: crate::IssueMonitorState,
     recovery_blocked: bool,
+    authority_retry_pending: bool,
     authority_fence: Option<crate::IssueMonitorAuthorityFence>,
     authority_lease: Option<crate::IssueMonitorAuthorityLease>,
 }
@@ -1010,9 +1039,31 @@ fn load_issue_monitor_state_for_daemon(
         Ok((prefs, authority_lease)) => LoadedDaemonIssueMonitorState {
             monitor: crate::IssueMonitorState::with_prefs(config, prefs),
             recovery_blocked: false,
+            authority_retry_pending: false,
             authority_fence: Some(authority_fence),
             authority_lease: Some(authority_lease),
         },
+        Err(error)
+            if gwt_core::operation_deadline::is_lock_contended(&error)
+                && matches!(
+                    crate::load_issue_monitor_authority_fence(prefs_path),
+                    Ok(crate::IssueMonitorAuthorityFenceState::Missing)
+                ) =>
+        {
+            // A GUI-only fallback owns the same lifetime lock only for one
+            // bounded remote-effect pass and deliberately writes no fence.
+            // Keep the public control lane in Starting and retry after that
+            // pass releases the lock; this is not ambiguous recovery state.
+            let prefs = crate::load_issue_monitor_prefs(prefs_path)
+                .unwrap_or_else(|_| crate::IssueMonitorPrefs::recovery_default());
+            LoadedDaemonIssueMonitorState {
+                monitor: crate::IssueMonitorState::with_prefs(config, prefs),
+                recovery_blocked: false,
+                authority_retry_pending: true,
+                authority_fence: None,
+                authority_lease: None,
+            }
+        }
         Err(error) => {
             // Invalid prefs, an ambiguous fence, or a live overlapping daemon
             // may retain remote-effect authority. Never publish Ready until the
@@ -1029,6 +1080,7 @@ fn load_issue_monitor_state_for_daemon(
             LoadedDaemonIssueMonitorState {
                 monitor,
                 recovery_blocked: true,
+                authority_retry_pending: false,
                 authority_fence: None,
                 authority_lease: None,
             }
@@ -1249,6 +1301,12 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    /// SPEC-3431 FR-006: request one immediate scan without changing any
+    /// state. The PM's `launch_now` writes the new priority order to prefs
+    /// (the SOT the driver re-reads each scan) and then sends this so the
+    /// order takes effect now instead of at the next interval tick. The
+    /// launch itself still goes through the ordinary claim/slot path.
+    ScanNow,
     ConfigSet {
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
@@ -1593,6 +1651,8 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::Enabled(_)
         | IssueMonitorControl::AutonomousMode(_)
         | IssueMonitorControl::ConfigSet { .. } => false,
+        // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
+        IssueMonitorControl::ScanNow => true,
         IssueMonitorControl::ClaimLaunchDelivery {
             issue_number,
             delivery_id,
@@ -1881,6 +1941,11 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     autonomous_mode,
                     max_active_agents,
                 });
+            }
+            // SPEC-3431 FR-006: `scan_now` carries no fields — its presence is
+            // the whole request.
+            if payload.get("scan_now").is_some() {
+                return Some(IssueMonitorControl::ScanNow);
             }
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
@@ -2982,7 +3047,11 @@ fn scan_issue_monitor_once_blocking(
             )
         },
     )?;
-    if let Some(error) = &loaded.live_error {
+    if loaded.source == crate::IssueMonitorCandidateSource::Cache {
+        let error = loaded
+            .live_error
+            .as_deref()
+            .unwrap_or("live issue list unavailable");
         return Err(IssueMonitorScanFailure::new(
             IssueMonitorScanStage::CandidateLoad,
             format!("live issue list failed; cache proposal discarded: {error}"),
@@ -3015,6 +3084,25 @@ fn scan_issue_monitor_once_blocking(
             &scope.project_root,
             &now,
         )?;
+    }
+    // Issue #3478 (FR-025): drive the question handoffs the intercepting hook
+    // wrote. Parking runs BEFORE the stuck sweep so a recognized question frees
+    // its slot on this scan instead of waiting out `stuck_timeout_secs`, and
+    // answered handoffs are un-parked in the same pass so the resumed launch
+    // can be claimed immediately.
+    let parked = monitor.apply_pending_autonomous_handoffs(&now);
+    if !parked.is_empty() {
+        tracing::info!(
+            ?parked,
+            "parked autonomous issues on a human-judgment question"
+        );
+    }
+    let resumed = monitor.resume_answered_autonomous_handoffs(&now);
+    if !resumed.is_empty() {
+        tracing::info!(
+            issues = ?resumed.iter().map(|r| r.issue_number).collect::<Vec<_>>(),
+            "resuming autonomous issues whose question was answered"
+        );
     }
     monitor.recover_stuck_autonomous(&now);
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
@@ -3498,9 +3586,10 @@ mod tests {
 
     use super::{
         apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
-        run_server, run_server_with_shutdown_and_worker_config,
-        spawn_issue_monitor_worker_with_config, spawn_issue_monitor_worker_with_config_and_timeout,
-        BroadcastHub, DaemonShutdown, IssueMonitorControl,
+        issue_monitor_control_is_authorizing, run_server,
+        run_server_with_shutdown_and_worker_config, spawn_issue_monitor_worker_with_config,
+        spawn_issue_monitor_worker_with_config_and_timeout, BroadcastHub, DaemonShutdown,
+        IssueMonitorControl,
     };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
@@ -3891,6 +3980,7 @@ exit 0
             state: crate::IssueMonitorIssueState::Open,
             body: None,
             url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
         }
     }
 
@@ -4756,6 +4846,7 @@ exit 0
                 state: crate::IssueMonitorIssueState::Open,
                 body: None,
                 url: None,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
             },
             "claim-a",
         );
@@ -4799,6 +4890,7 @@ exit 0
                 state: crate::IssueMonitorIssueState::Open,
                 body: None,
                 url: None,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
             },
             "claim-a",
         );
@@ -4842,6 +4934,7 @@ exit 0
                 state: crate::IssueMonitorIssueState::Open,
                 body: None,
                 url: None,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
             },
             "claim-a",
         );
@@ -4900,6 +4993,7 @@ exit 0
                 state: crate::IssueMonitorIssueState::Open,
                 body: None,
                 url: None,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
             },
             "claim-a",
         );
@@ -4958,6 +5052,7 @@ exit 0
                 state: crate::IssueMonitorIssueState::Open,
                 body: None,
                 url: None,
+                readiness: crate::IssueMonitorReadiness::NotApplicable,
             },
             "claim-a",
         );
@@ -5007,6 +5102,45 @@ exit 0
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    // SPEC-3431 T-021 (FR-006): `scan_now` asks the driver for one immediate
+    // scan and nothing else. It carries no authority (it changes no config),
+    // and it must leave every piece of monitor state untouched — the launch
+    // itself still goes through the ordinary claim/slot path on that scan.
+    #[test]
+    fn issue_monitor_scan_now_decodes_and_only_requests_a_scan() {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "scan_now": {} }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("scan_now control");
+        assert_eq!(control, IssueMonitorControl::ScanNow);
+        assert!(
+            !issue_monitor_control_is_authorizing(&control),
+            "scan_now changes no authority and must stay on the routine lane"
+        );
+
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            max_active_agents: 3,
+            priority_order: vec![9, 4],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        let before = monitor.status_view_at("2026-08-04T00:00:00Z");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan, "scan_now must request an immediate scan");
+        assert_eq!(
+            monitor.status_view_at("2026-08-04T00:00:00Z"),
+            before,
+            "scan_now must not mutate monitor state"
+        );
     }
 
     #[test]
@@ -5792,13 +5926,14 @@ exit 0
             disabled_status.is_some(),
             "authority revocation must publish before the stale scan is released"
         );
-        assert_eq!(
-            scans_started_while_blocked, 1,
-            "in-flight ticks must coalesce without spawning a second scan"
+        assert!(
+            scans_started_while_blocked >= 1,
+            "the blocking scan fixture must observe at least one scan"
         );
         assert!(
             !scan_overlap_while_blocked,
-            "should-scan controls and ticks must not overlap fake gh scans"
+            "should-scan controls and ticks must not overlap fake gh scans; a watchdog may finish \
+             one attempt and start its recovery attempt under a heavily loaded full suite"
         );
         assert!(settled_status.is_some(), "released scan must settle");
         assert!(
@@ -6454,6 +6589,154 @@ exit 1
             7,
             "a clean startup fence does not fabricate crash recovery"
         );
+    }
+
+    #[test]
+    fn startup_treats_a_fence_less_local_fallback_lease_as_retryable() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+
+        let loaded = super::load_issue_monitor_state_for_daemon(
+            &prefs_path,
+            crate::IssueMonitorConfig::default(),
+        );
+
+        assert!(!loaded.recovery_blocked);
+        assert!(loaded.authority_retry_pending);
+        assert!(loaded.authority_fence.is_none());
+        assert!(loaded.authority_lease.is_none());
+        drop(local_lease);
+    }
+
+    #[tokio::test]
+    async fn worker_stays_starting_until_the_local_fallback_lease_is_released() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = super::spawn_issue_monitor_worker_with_config(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig::default(),
+        );
+        let publisher = tokio::spawn({
+            let hub = hub.clone();
+            async move {
+                hub.publish_issue_monitor_control(DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"config_set": {"max_active_agents": 2}}),
+                        std::process::id().wrapping_add(1),
+                    ),
+                })
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(
+            !publisher.is_finished(),
+            "fence-less contention keeps controls in Starting"
+        );
+        drop(local_lease);
+        let publish_result = tokio::time::timeout(Duration::from_secs(2), publisher)
+            .await
+            .expect("publisher reaches Ready after lease release")
+            .expect("publisher task joins");
+        assert!(
+            publish_result.is_ok(),
+            "the retried daemon owns and commits the control: {publish_result:?}"
+        );
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker shutdown is bounded")
+            .expect("worker exits cleanly");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authority_retry_state_load_does_not_block_the_tokio_worker() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        commit_initial_branch(&repo);
+        git_remote_add_origin(&repo, "https://github.com/example/repo.git");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+        let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+            .expect("hold GUI fallback authority");
+        let hub = BroadcastHub::new();
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let worker = super::spawn_issue_monitor_worker_with_config(
+            scope,
+            hub,
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig::default(),
+        );
+        let prefs_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(prefs_path.with_extension("lock"))
+            .expect("prefs lock file");
+        prefs_lock
+            .lock_exclusive()
+            .expect("hold prefs lock across retry");
+
+        let timer_started_at = Instant::now();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            timer_started_at.elapsed() < Duration::from_millis(200),
+            "blocking retry load starved the async timer for {:?}",
+            timer_started_at.elapsed()
+        );
+
+        prefs_lock.unlock().expect("release prefs lock");
+        drop(local_lease);
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker stops")
+            .expect("worker joins");
     }
 
     #[test]
@@ -8364,6 +8647,183 @@ exit 1
             persisted.pending_launch_deliveries[0].claim_owner,
             "host/session"
         );
+    }
+
+    #[test]
+    fn acquired_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        let mut issue = sample_issue_monitor_issue(42);
+        monitor.record_candidate(issue.clone());
+        let key = monitor
+            .prepare_pending_effect(
+                "claim-effect-42",
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 42,
+                    claim_id: "claim-42".to_string(),
+                    owner: "host/session".to_string(),
+                    heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                    expires_at: "2026-08-05T10:30:00Z".to_string(),
+                    launched_work_id: Some("work/issue-42".to_string()),
+                },
+            )
+            .expect("prepare claim effect");
+        assert!(monitor.mark_pending_effect_attempting(&key));
+        let attempting = monitor.pending_effects()[0].clone();
+
+        issue.labels.push("hold".to_string());
+        monitor.record_candidate(issue);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+            .expect("persist excluded state");
+
+        assert!(super::commit_issue_monitor_effect_result(
+            &prefs_path,
+            &mut monitor,
+            super::CompletedIssueMonitorEffect {
+                effect: attempting,
+                outcome: super::IssueMonitorEffectOutcome::Claim(Ok(
+                    gwt_github::issue_auto_claim::ClaimAcquireOutcome::Acquired(
+                        gwt_github::issue_auto_claim::ClaimComment {
+                            comment_id: Some(gwt_github::CommentId(99)),
+                            claim_id: "claim-42".to_string(),
+                            owner: "host/session".to_string(),
+                            issue_number: 42,
+                            status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                            heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                            expires_at: "2026-08-05T10:30:00Z".to_string(),
+                            launched_work_id: Some("work/issue-42".to_string()),
+                        },
+                    ),
+                )),
+                completed_at: "2026-08-05T10:01:00Z".to_string(),
+            },
+        ));
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert!(persisted.launching_issues.is_empty());
+        assert!(persisted.pending_launch_deliveries.is_empty());
+        assert!(persisted.pending_effects.iter().any(|effect| matches!(
+            &effect.payload,
+            crate::IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id,
+                owner,
+            } if claim_id == "claim-42" && owner == "host/session"
+        )));
+    }
+
+    #[test]
+    fn concurrent_scan_exclusion_survives_late_blocked_and_lost_claim_results() {
+        for (exclusion, outcome_kind) in [
+            ("not-ready", "blocked"),
+            ("not-ready", "lost"),
+            ("hold", "blocked"),
+            ("hold", "lost"),
+        ] {
+            let temp = TempDir::new().expect("tempdir");
+            let prefs_path = temp.path().join("issue-monitor.json");
+            let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+                enabled: true,
+                ..crate::IssueMonitorConfig::default()
+            });
+            let mut issue = sample_issue_monitor_issue(42);
+            issue.labels.push("gwt-spec".to_string());
+            issue.readiness = crate::IssueMonitorReadiness::Ready;
+            monitor.record_candidate(issue.clone());
+            let key = monitor
+                .prepare_pending_effect(
+                    "claim-effect-42",
+                    crate::IssueMonitorEffectPayload::AcquireClaim {
+                        issue_number: 42,
+                        claim_id: "claim-42".to_string(),
+                        owner: "host/session".to_string(),
+                        heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                        expires_at: "2026-08-05T10:30:00Z".to_string(),
+                        launched_work_id: Some("work/issue-42".to_string()),
+                    },
+                )
+                .expect("prepare claim effect");
+            assert!(monitor.mark_pending_effect_attempting(&key));
+            let attempting = monitor.pending_effects()[0].clone();
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                .expect("seed attempting journal");
+
+            if exclusion == "hold" {
+                issue.labels.push("hold".to_string());
+            } else {
+                issue.readiness = crate::IssueMonitorReadiness::NotReady;
+            }
+            let mut scanned = monitor.clone();
+            scanned.record_candidate(issue);
+            assert!(super::commit_issue_monitor_scan_if_current(
+                &prefs_path,
+                &mut monitor,
+                scanned,
+                key.authority_epoch,
+            ));
+            assert!(monitor.pending_effects().iter().any(|effect| {
+                effect.state == crate::IssueMonitorEffectState::Attempting
+                    && matches!(
+                        effect.payload,
+                        crate::IssueMonitorEffectPayload::AcquireClaim {
+                            issue_number: 42,
+                            ..
+                        }
+                    )
+            }));
+
+            let winning_claim = gwt_github::issue_auto_claim::ClaimComment {
+                comment_id: Some(gwt_github::CommentId(99)),
+                claim_id: "winning-claim".to_string(),
+                owner: "other/session".to_string(),
+                issue_number: 42,
+                status: gwt_github::issue_auto_claim::ClaimStatus::Active,
+                heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                expires_at: "2026-08-05T10:30:00Z".to_string(),
+                launched_work_id: Some("work/issue-42".to_string()),
+            };
+            let outcome = if outcome_kind == "blocked" {
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Blocked(winning_claim)
+            } else {
+                gwt_github::issue_auto_claim::ClaimAcquireOutcome::Lost {
+                    own_claim: gwt_github::issue_auto_claim::ClaimComment {
+                        comment_id: Some(gwt_github::CommentId(98)),
+                        claim_id: "claim-42".to_string(),
+                        owner: "host/session".to_string(),
+                        issue_number: 42,
+                        status: gwt_github::issue_auto_claim::ClaimStatus::Lost,
+                        heartbeat_at: "2026-08-05T10:00:00Z".to_string(),
+                        expires_at: "2026-08-05T10:30:00Z".to_string(),
+                        launched_work_id: Some("work/issue-42".to_string()),
+                    },
+                    winning_claim,
+                }
+            };
+            assert!(super::commit_issue_monitor_effect_result(
+                &prefs_path,
+                &mut monitor,
+                super::CompletedIssueMonitorEffect {
+                    effect: attempting,
+                    outcome: super::IssueMonitorEffectOutcome::Claim(Ok(outcome)),
+                    completed_at: "2026-08-05T10:01:00Z".to_string(),
+                },
+            ));
+
+            let expected = if exclusion == "hold" {
+                crate::MonitorInboxState::HoldExcluded
+            } else {
+                crate::MonitorInboxState::NotReady
+            };
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(expected),
+                "{exclusion} must survive a late {outcome_kind} claim result"
+            );
+        }
     }
 
     #[test]

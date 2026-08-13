@@ -3361,3 +3361,164 @@ test("a pending Work renders focusable disabled semantics with progress label", 
   assert.equal(continueButton.getAttribute("aria-busy"), "true");
   assert.match(continueButton.textContent, /Continuing/);
 });
+
+// Issue #3455: `workspacesFromProjection` normalized every child Work with the
+// whole projection as the per-item fallback, so a Work with no owner inherited
+// the CURRENT Work's owner. On real data 648 of 783 works had no owner and all
+// of them rendered the current owner ("3410") — June date-branches showed a
+// July-created Issue number. The projection is the container, never the
+// identity of its children.
+test("child Work with no owner does not inherit the projection owner (#3455)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-owner-bleed",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-20260621-2342-3c84198a",
+          title: "work/20260621-2342",
+          owner: null,
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260621-2342",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-work-20260621-2342-3c84198a"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `an ownerless Work must not show the projection owner: ${row.textContent}`,
+  );
+  assert.match(
+    row.textContent,
+    /work\/20260621-2342/,
+    "the branch stays visible as the row heading",
+  );
+});
+
+// Issue #3455: the same fallback leaked agents and board_refs. 536 of 783 works
+// had no agents and rendered the current Work's agent list instead of their own.
+test("child Work does not inherit projection agents or board_refs (#3455)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-agent-bleed",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      session_agent_total: 4,
+      board_refs: [{ id: "board-parent", kind: "status", body: "parent board entry" }],
+      active_works: [
+        {
+          id: "work-no-agents",
+          title: "Refactor command palette",
+          owner: null,
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260620-0114",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+          board_refs: [],
+        },
+      ],
+      agents: [
+        { session_id: "s1", agent_id: "codex", display_name: "Codex", status_category: "active" },
+        { session_id: "s2", agent_id: "codex", display_name: "Codex", status_category: "active" },
+        { session_id: "s3", agent_id: "claude", display_name: "Claude", status_category: "active" },
+        { session_id: "s4", agent_id: "claude", display_name: "Claude", status_category: "active" },
+      ],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-no-agents"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `owner must not bleed into the agent-less row: ${row.textContent}`,
+  );
+  assert.ok(
+    !/\+\s*\d+\s*more session/i.test(row.textContent),
+    `a Work with no agents must not surface the projection's sessions: ${row.textContent}`,
+  );
+});
+
+// Issue #3455 AC-3: the fix must not over-block. A Work carrying its own owner
+// keeps showing it.
+test("child Work with its own owner still renders it (#3455 regression)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-own-owner",
+      title: "Issue #3410",
+      owner: "3410",
+      status_category: "active",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-with-owner",
+          title: "Coordination domain",
+          owner: "SPEC-2359",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/issue-2359",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-with-owner"]',
+  );
+  assert.ok(row, "the child Work row must render");
+  assert.match(
+    row.textContent,
+    /SPEC-2359/,
+    "a Work that declares its own owner keeps showing it",
+  );
+  assert.ok(
+    !row.textContent.includes("3410"),
+    `the projection owner must never replace a declared owner: ${row.textContent}`,
+  );
+});

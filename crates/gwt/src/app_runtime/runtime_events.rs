@@ -132,6 +132,11 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             return Vec::new();
         };
+        // Issue #3475: progress evidence for the authenticated SessionStart
+        // readiness deadline. Saturating because the counter only ever needs to
+        // answer "did this pane emit anything since the last deadline".
+        let observed = self.window_output_bytes.entry(id.clone()).or_insert(0);
+        *observed = observed.saturating_add(data.len() as u64);
         if publish_to_daemon {
             if let Some(tab) = self.tab(&address.tab_id) {
                 publish_runtime_output_change(&tab.project_root, &id, &data);
@@ -183,6 +188,13 @@ impl AppRuntime {
             .tab(&address.tab_id)
             .map(|tab| tab.project_root.clone());
         let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
+        // SPEC-3431 FR-003: capture the exiting window's session before the
+        // teardown below removes the active entry — the PM crash handler
+        // matches it against the durable registration.
+        let pm_crash_candidate = self
+            .active_agent_sessions
+            .get(&id)
+            .map(|session| session.session_id.clone());
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {
                 if let Some(tab) = self.tab(&address.tab_id) {
@@ -220,6 +232,16 @@ impl AppRuntime {
         }
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
+        // The `window_hook_states == Some(Stopped)` condition is unreachable
+        // (`window_state_for_hook_event` only returns `Idle` / `Running`), so
+        // in practice an exiting agent window is never auto-closed. That is
+        // deliberate for the pane itself — a stopped agent window stays on the
+        // canvas so its final output remains readable
+        // (`app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics`,
+        // #3274). SPEC-3431 FR-067 keeps that behaviour and fixes the separate
+        // bug it was masking: the Issue Monitor was never told either, so the
+        // launch's slot stayed held. Visibility and accounting are decided
+        // independently below.
         let should_auto_close =
             should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
                 && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
@@ -248,6 +270,23 @@ impl AppRuntime {
             }
             let _ = self.persist();
             let mut events = cleanup_events;
+            // SPEC-3431 FR-067: auto-close reaps the window itself instead of
+            // going through `close_window_events`, so it also owes the Issue
+            // Monitor the notification that path would have sent. Without it
+            // the launch's slot stays held by a window that no longer exists.
+            if is_agent_window {
+                if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                    let message = detail
+                        .as_deref()
+                        .unwrap_or("Agent exited without completing the work")
+                        .to_string();
+                    events.extend(self.issue_monitor_agent_failed_events(
+                        project_root,
+                        &id,
+                        &message,
+                    ));
+                }
+            }
             self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             return events;
         }
@@ -273,16 +312,68 @@ impl AppRuntime {
         // exited — drain any intake worktree cleanup queued by the session
         // stop above (or by an earlier explicit stop of this window).
         let mut events = self.take_ephemeral_worktree_cleanup_events();
+        // SPEC-3431 FR-065: notify the Issue Monitor whenever an agent window
+        // reaches Error, including when the pane is kept on screen.
+        //
+        // `keep_active_agent_session_for_recovery` used to gate this too, but
+        // the two concerns are different. That flag is about **display**
+        // (#3274: hold the pane so the user can read the final screen instead
+        // of an empty Error window); whether the slot is still occupied is
+        // about **accounting**. `WindowProcessStatus::Error` on an agent comes
+        // from `try_wait` (gwt-terminal `Pane::check_status`), so the process
+        // is gone either way and the slot is free either way.
+        //
+        // Conflating them leaked slots permanently: an agent whose last hook
+        // state was `Idle` — which is every agent that ran its Stop hook —
+        // satisfied the guard, so `agent_failed` was never published and the
+        // row stayed `launched` forever. `recoverable_agent_error_windows` is
+        // only cleared by a later hook event, and a dead process sends none.
+        // With the default `max_active = 1` that stops the whole queue.
+        //
+        // SPEC-3431 FR-067: `Stopped` (a clean `exit 0`) leaks the same way.
+        // It never reached `agent_failed`, and the auto-close gate below
+        // additionally required `window_hook_states == Some(Stopped)` — a
+        // value `window_state_for_hook_event` cannot produce — so the window
+        // was never closed either and no `WindowClosed` control was published.
+        // Nothing told the Monitor, so the row stayed `launched` holding the
+        // slot. The process is gone in both cases, so both release the slot.
+        //
+        // This reports a clean exit through the failure channel on purpose:
+        // the Monitor decides completion from the PR, not from an exit code,
+        // so the only claim being made here is "this launch is over". Naming
+        // it a success would be the lie, not naming it a failure.
         if is_agent_window
-            && composed_status == WindowProcessStatus::Error
-            && !keep_active_agent_session_for_recovery
+            && matches!(
+                composed_status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
         {
-            let message = detail
-                .as_deref()
-                .unwrap_or("Agent entered error state")
-                .to_string();
+            let default_message = if composed_status == WindowProcessStatus::Error {
+                "Agent entered error state"
+            } else {
+                "Agent exited without completing the work"
+            };
+            let message = detail.as_deref().unwrap_or(default_message).to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
                 events.extend(self.issue_monitor_agent_failed_events(project_root, &id, &message));
+            }
+        }
+        // SPEC-3431 FR-003: an unexpected exit of the registered PM records a
+        // crash and respawns when the backoff ladder allows. Clean self-exits
+        // take the auto-close branch above (resident turnover: the ensure
+        // gate revives the PM on the next project open); explicit closes run
+        // `close_window_events`, which deregisters instead.
+        if matches!(
+            status,
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
+        ) && !keep_active_agent_session_for_recovery
+        {
+            if let (Some(session_id), Some(project_root)) = (
+                pm_crash_candidate.as_deref(),
+                issue_monitor_project_root.as_ref(),
+            ) {
+                let tab_id = address.tab_id.clone();
+                events.extend(self.handle_pm_crash(&tab_id, project_root, session_id));
             }
         }
         if matches!(
@@ -350,7 +441,36 @@ impl AppRuntime {
             return events;
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
+        // SPEC-3431 FR-068: a hook arrival is the one signal that an agent is
+        // actually making progress. The PTY-status heartbeat below never fires
+        // for a working agent (the watcher thread stays silent until the
+        // process exits), so without this the activity clock froze at launch
+        // and a rate-limited or hung agent was indistinguishable from a busy
+        // one. Throttled inside `issue_monitor_heartbeat`.
+        if let Some(project_root) = issue_monitor_project_root.clone() {
+            self.issue_monitor_heartbeat(&project_root, &window_id);
+        }
         if event.source_event.as_deref() == Some("SessionStart") {
+            if let Err(error) = self.finalize_tool_runtime_migration_session_start(&window_id) {
+                self.pending_tool_runtime_migrations.remove(&window_id);
+                self.stop_window_runtime_without_session_projection(&window_id);
+                if let Some(active) = self.active_agent_sessions.remove(&window_id) {
+                    let _ = gwt_agent::persist_session_status(
+                        &self.sessions_dir,
+                        &active.session_id,
+                        gwt_agent::AgentStatus::Interrupted,
+                    );
+                }
+                self.revoke_agent_capability_for_window(&window_id);
+                events.extend(self.launch_error_events_with_continue_work(
+                    window_id,
+                    format!(
+                        "authenticated SessionStart could not commit tool runtime provenance migration: {error}"
+                    ),
+                    None,
+                ));
+                return events;
+            }
             events.extend(self.finalize_fresh_execution_launch_session_start(
                 &window_id,
                 event.continuation_readiness_nonce.as_deref(),
