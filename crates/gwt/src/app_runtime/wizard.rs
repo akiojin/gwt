@@ -26,6 +26,7 @@ use gwt::{
 };
 use uuid::Uuid;
 
+use super::continuation::{provider_conversation_availability, ProviderConversationAvailability};
 use crate::{ShellLaunchConfig, UserEvent};
 
 /// `Pr => None` because Launch Agent is not exposed for PR bridges
@@ -72,6 +73,15 @@ fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
         width: 860.0,
         height: 520.0,
     }
+}
+
+struct SilentIssueMonitorLaunchRequest {
+    issue_number: u64,
+    linked_issue_kind: gwt::LinkedIssueKind,
+    review_prompt: Option<String>,
+    review_model: Option<String>,
+    delivery_id: Option<String>,
+    launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
 }
 
 /// SPEC #3200 Option A: build the independent-review agent's prompt from a
@@ -1877,6 +1887,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         )
     }
 
@@ -1886,6 +1897,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
         let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
             return self.issue_monitor_launch_failed_delivery_events(
@@ -1900,6 +1912,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             delivery_id,
+            launch_session_strategy,
         )
     }
 
@@ -1909,6 +1922,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
         let mut recovery_events = Vec::new();
         if let Some(delivery_id) = delivery_id.as_deref() {
@@ -1953,12 +1967,16 @@ impl AppRuntime {
                         Some(delivery_id),
                     );
                 }
-                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { message }) => {
-                    return self.issue_monitor_launch_failed_delivery_events(
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+                    message,
+                    session_mode,
+                }) => {
+                    return self.issue_monitor_launch_failed_delivery_events_with_mode(
                         Some(project_root),
                         issue_number,
                         &message,
                         Some(delivery_id),
+                        session_mode,
                     );
                 }
                 None => {}
@@ -2017,11 +2035,14 @@ impl AppRuntime {
         }
         match self.silent_issue_monitor_launch_events_for_project(
             project_root,
-            issue_number,
-            linked_issue_kind,
-            None,
-            None,
-            delivery_id.clone(),
+            SilentIssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+                review_prompt: None,
+                review_model: None,
+                delivery_id: delivery_id.clone(),
+                launch_session_strategy,
+            },
         ) {
             Ok(Some(events)) => {
                 recovery_events.extend(events);
@@ -2131,11 +2152,14 @@ impl AppRuntime {
         .and_then(|prefs| prefs.autonomous_tuning.review_model);
         match self.silent_issue_monitor_launch_events_for_project(
             project_root,
-            dispatch.issue_number,
-            dispatch.linked_issue_kind,
-            Some(prompt),
-            review_model,
-            None,
+            SilentIssueMonitorLaunchRequest {
+                issue_number: dispatch.issue_number,
+                linked_issue_kind: dispatch.linked_issue_kind,
+                review_prompt: Some(prompt),
+                review_model,
+                delivery_id: None,
+                launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            },
         ) {
             Ok(Some(events)) => events,
             Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
@@ -2157,12 +2181,16 @@ impl AppRuntime {
     fn silent_issue_monitor_launch_events_for_project(
         &mut self,
         requested_project_root: &Path,
-        issue_number: u64,
-        linked_issue_kind: gwt::LinkedIssueKind,
-        review_prompt: Option<String>,
-        review_model: Option<String>,
-        delivery_id: Option<String>,
+        request: SilentIssueMonitorLaunchRequest,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
+        let SilentIssueMonitorLaunchRequest {
+            issue_number,
+            linked_issue_kind,
+            review_prompt,
+            review_model,
+            delivery_id,
+            launch_session_strategy,
+        } = request;
         let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
         else {
             return Err("Project tab not found".to_string());
@@ -2233,17 +2261,23 @@ impl AppRuntime {
         // (no shared context with the implementation agent), so the review path
         // skips resume and always launches a new agent.
         let target_branch = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
-        if review_prompt.is_none() {
-            if let Some(events) = self.silent_issue_monitor_resume_events(
+        let resume_holder_window_id = if review_prompt.is_none()
+            && launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        {
+            let (events, holder_window_id) = self.silent_issue_monitor_resume_events(
                 &tab_id,
                 &project_root,
                 &target_branch,
                 issue_number,
                 delivery_id.clone(),
-            )? {
+            )?;
+            if let Some(events) = events {
                 return Ok(Some(events));
             }
-        }
+            holder_window_id
+        } else {
+            None
+        };
 
         let mut session = self.build_knowledge_launch_wizard_session(
             &tab_id,
@@ -2271,6 +2305,14 @@ impl AppRuntime {
             &project_root,
             launch_profiles,
         )?;
+        // Any path that reaches this point is a raw fresh launch: either the
+        // durable policy requires it, the exact-resume preflight failed closed,
+        // no candidate exists, or this is an independent review. Preserve the
+        // current saved provider profile while clearing conversation identity.
+        if let LaunchWizardLaunchRequest::Agent(config) = &mut launch_request {
+            config.session_mode = gwt_agent::SessionMode::Normal;
+            config.resume_session_id = None;
+        }
         // SPEC #3200 T-040/FR-006: in unattended autonomous mode the
         // monitor-launched implementation agent must not stall on a permission
         // prompt. Default OFF leaves the SPEC #3165 human-gated launch untouched.
@@ -2310,12 +2352,17 @@ impl AppRuntime {
             })
             .unwrap_or(0);
         let geometry = issue_monitor_auto_launch_geometry(launch_index);
+        let issue_monitor_session_mode = match &launch_request {
+            LaunchWizardLaunchRequest::Agent(config) => Some(config.session_mode),
+            LaunchWizardLaunchRequest::Shell(_) => None,
+        };
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(issue_number),
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.clone()),
+            issue_monitor_session_mode,
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
@@ -2330,6 +2377,15 @@ impl AppRuntime {
                 return Err("Issue Monitor automatic launch requires an agent target".to_string());
             }
         };
+        if let Some(holder_window_id) = resume_holder_window_id {
+            events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                level: "warn".to_string(),
+                message: format!(
+                    "Issue Monitor started a fresh session because native conversation is already held by window {holder_window_id}"
+                ),
+                issue_number: Some(issue_number),
+            }));
+        }
         let message = if review_prompt.is_some() {
             "Issue Monitor independent review launched".to_string()
         } else {
@@ -2353,20 +2409,27 @@ impl AppRuntime {
         target_branch: &str,
         issue_number: u64,
         delivery_id: Option<String>,
-    ) -> Result<Option<Vec<OutboundEvent>>, String> {
+    ) -> Result<(Option<Vec<OutboundEvent>>, Option<String>), String> {
         let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
         else {
-            return Ok(None);
+            return Ok((None, None));
         };
         if !session_exact_resume_materializable(project_root, &session) {
-            return Ok(None);
+            return Ok((None, None));
+        }
+        if provider_conversation_availability(&session) != ProviderConversationAvailability::Present
+        {
+            return Ok((None, None));
+        }
+        if let Some(holder_window_id) = self.issue_monitor_native_conversation_holder(&session) {
+            return Ok((None, Some(holder_window_id)));
         }
         let mut config = super::launch_config_from_persisted_session(&session);
         if !session.worktree_path.as_path().exists() {
             config.working_dir = None;
         }
         if config.session_mode != gwt_agent::SessionMode::Resume {
-            return Ok(None);
+            return Ok((None, None));
         }
         // Issue #3478 (AC-5): a parked question that a human answered resumes
         // this exact session with the answer as its first prompt, so the work
@@ -2402,6 +2465,7 @@ impl AppRuntime {
             issue_monitor_issue_number: Some(issue_number),
             issue_monitor_delivery_id: delivery_id,
             issue_monitor_project_root: Some(project_root.to_path_buf()),
+            issue_monitor_session_mode: Some(config.session_mode),
         };
         let mut events = self.spawn_agent_window_with_feedback_at_geometry(
             tab_id,
@@ -2415,7 +2479,58 @@ impl AppRuntime {
             message: "Issue Monitor resumed existing session".to_string(),
             issue_number: Some(issue_number),
         }));
-        Ok(Some(events))
+        Ok((Some(events), None))
+    }
+
+    fn issue_monitor_native_conversation_holder(
+        &self,
+        candidate: &gwt_agent::Session,
+    ) -> Option<String> {
+        let candidate_conversation_id = candidate.exact_resume_session_id()?;
+        let matches_candidate = |source_session_id: &str| {
+            self.issue_monitor_session_by_id(source_session_id)
+                .is_some_and(|source| {
+                    source.agent_id == candidate.agent_id
+                        && source.exact_resume_session_id() == Some(candidate_conversation_id)
+                })
+        };
+        self.active_agent_sessions
+            .iter()
+            .find_map(|(window_id, active)| {
+                (self.window_lookup.contains_key(window_id.as_str())
+                    && self
+                        .window_status(window_id.as_str())
+                        .is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        })
+                    && matches_candidate(&active.session_id))
+                .then(|| window_id.clone())
+            })
+            .or_else(|| {
+                self.pending_auto_resume_sources.iter().find_map(
+                    |(window_id, source_session_id)| {
+                        (self.window_lookup.contains_key(window_id.as_str())
+                            && self
+                                .inflight_launches
+                                .values()
+                                .any(|(pending_window_id, _)| pending_window_id == window_id)
+                            && matches_candidate(source_session_id))
+                        .then(|| window_id.clone())
+                    },
+                )
+            })
+    }
+
+    fn issue_monitor_session_by_id(&self, session_id: &str) -> Option<gwt_agent::Session> {
+        self.launch_wizard_cache
+            .session_by_id(session_id)
+            .cloned()
+            .or_else(|| {
+                gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml"))).ok()
+            })
     }
 
     fn resolve_silent_issue_monitor_launch_request(
@@ -2441,6 +2556,11 @@ impl AppRuntime {
                     branch_name,
                     self.launch_wizard_cache.clone(),
                 )?;
+                // A silent fresh fallback must use the current saved Monitor
+                // profile, not a target-branch Quick Start Session. Leaving
+                // these entries populated lets the predecessor conversation
+                // overwrite the selected provider/model during hydration.
+                hydration.quick_start_entries.clear();
                 hydration.previous_profiles = Some(previous_profiles);
                 session.wizard.apply_runtime_context(hydration);
                 if let Some(agent_id) = preferred_agent_id {
@@ -2725,6 +2845,7 @@ impl AppRuntime {
         match config {
             LaunchWizardLaunchRequest::Agent(config) => {
                 let requested_agent_id = config.agent_id.command().to_string();
+                let issue_monitor_session_mode = config.session_mode;
                 let workspace_resume_context = session.workspace_resume_context.clone();
                 let launch_feedback_context = client_id.map(|client_id| LaunchFeedbackContext {
                     client_id,
@@ -2736,6 +2857,7 @@ impl AppRuntime {
                     issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
                     issue_monitor_delivery_id: None,
                     issue_monitor_project_root: issue_monitor_project_root.clone(),
+                    issue_monitor_session_mode: Some(issue_monitor_session_mode),
                 });
                 let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
                     self.spawn_agent_window_in_agent_kanban(

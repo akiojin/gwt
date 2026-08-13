@@ -486,6 +486,12 @@ pub struct IssueMonitorPrefs {
     /// returns the matching delivery id in a Launched/LaunchFailed ACK.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_launch_deliveries: Vec<PendingIssueMonitorLaunchDelivery>,
+    /// SPEC #3165 FR-100/FR-101: one-shot strategy for an issue's next launch.
+    /// The marker is removed only after it has been copied into a durable
+    /// delivery (or the legacy direct request path), making failover/retry
+    /// intent survive reload without leaking into later launches.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -537,6 +543,7 @@ impl Default for IssueMonitorPrefs {
             launched_issues: Vec::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
+            queued_launch_session_strategies: BTreeMap::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
             autonomous_mode: false,
@@ -598,6 +605,8 @@ impl IssueMonitorPrefs {
             .retain(|launching| !adopted_failure_numbers.contains(&launching.issue_number));
         self.pending_launch_deliveries
             .retain(|delivery| !adopted_failure_numbers.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue_number, _| !adopted_failure_numbers.contains(issue_number));
         true
     }
 
@@ -664,6 +673,36 @@ pub struct IssueMonitorLaunchingIssue {
     pub claimed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorLaunchSessionStrategy {
+    #[default]
+    ResumeIfSafe,
+    FreshRequired,
+}
+
+/// Typed failure metadata carried across the AppRuntime/daemon/Monitor
+/// boundary. Message-only legacy failures omit this value and retain their
+/// existing retry/terminal behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorFailure {
+    ResumeWriterConflict {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_window_id: Option<String>,
+    },
+}
+
+/// Result of applying a typed late-resume writer-conflict recovery. The
+/// authority-exhausted case is distinct from a stale source so callers can
+/// fail closed instead of acknowledging a transition that never committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueMonitorResumeWriterConflictOutcome {
+    Requeued,
+    Rejected,
+    AuthorityExhausted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingIssueMonitorLaunchDelivery {
     pub delivery_id: String,
@@ -683,6 +722,8 @@ pub struct PendingIssueMonitorLaunchDelivery {
     pub materialized_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_durable_window_id: Option<String>,
+    #[serde(default)]
+    pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
     pub created_at: String,
 }
 
@@ -1005,6 +1046,9 @@ pub enum IssueMonitorFailoverOutcome {
     Restarting {
         stopped_window_id: Option<String>,
     },
+    /// The exact source was current, but the durable effect authority could
+    /// not advance. No field was mutated and automation must remain denied.
+    AuthorityExhausted,
     Mismatch(IssueMonitorStopMismatch),
 }
 
@@ -1020,6 +1064,8 @@ pub struct IssueMonitorLaunchRequest {
     pub linked_issue_kind: LinkedIssueKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    #[serde(default)]
+    pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1207,6 +1253,9 @@ pub struct IssueMonitorState {
     /// Durable ACK-driven deliveries. Unlike `pending_launches`, this queue is
     /// projected non-destructively and mirrored in prefs across restart.
     pending_launch_deliveries: VecDeque<PendingIssueMonitorLaunchDelivery>,
+    /// Durable one-shot policy for an issue's next launch. Once materialized,
+    /// the delivery/request carries the policy and this marker is consumed.
+    queued_launch_session_strategies: BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
@@ -2209,6 +2258,7 @@ impl IssueMonitorState {
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_launch_deliveries: VecDeque::new(),
+            queued_launch_session_strategies: BTreeMap::new(),
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
             launching_claimed_at: BTreeMap::new(),
@@ -2224,6 +2274,7 @@ impl IssueMonitorState {
             prefs.legacy_git_launch_failure_migration_version;
         state.priority_order = prefs.priority_order;
         state.launch_profile = prefs.launch_profile;
+        state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
                 continue;
@@ -2279,6 +2330,12 @@ impl IssueMonitorState {
         }
         state.autonomous_handoffs = prefs.autonomous_handoffs;
         state
+            .queued_launch_session_strategies
+            .retain(|issue_number, _| {
+                !state.failed_issues.contains_key(issue_number)
+                    && !state.merged_issues.contains(issue_number)
+            });
+        state
     }
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
@@ -2307,6 +2364,7 @@ impl IssueMonitorState {
                 })
                 .collect(),
             pending_launch_deliveries: self.pending_launch_deliveries.iter().cloned().collect(),
+            queued_launch_session_strategies: self.queued_launch_session_strategies.clone(),
             failed_issues: self
                 .failed_issues
                 .iter()
@@ -2428,6 +2486,7 @@ impl IssueMonitorState {
                 format!("Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"),
             );
             self.clear_active_tracking(issue_number);
+            self.require_fresh_launch_session(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
             self.autonomous_record_mut(issue_number).retry_not_before =
@@ -2811,6 +2870,7 @@ impl IssueMonitorState {
         if !enabled {
             self.active_launches.clear();
             self.pending_launches.clear();
+            self.queued_launch_session_strategies.clear();
         }
     }
 
@@ -2857,6 +2917,7 @@ impl IssueMonitorState {
             self.active_launches.clear();
             self.pending_launches.clear();
             self.pending_launch_deliveries.clear();
+            self.queued_launch_session_strategies.clear();
         }
         Some(next_epoch)
     }
@@ -2929,6 +2990,7 @@ impl IssueMonitorState {
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
         self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
+        self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
         // Issue #3478: the hook (and the answer operation) write handoffs from
@@ -3024,6 +3086,7 @@ impl IssueMonitorState {
             .merged_issues
             .iter()
             .copied()
+            .chain(self.failed_issues.keys().copied())
             .chain(
                 self.inbox
                     .iter()
@@ -3033,6 +3096,8 @@ impl IssueMonitorState {
             .collect::<BTreeSet<_>>();
         self.pending_launch_deliveries
             .retain(|delivery| !terminal_issue_numbers.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue_number, _| !terminal_issue_numbers.contains(issue_number));
 
         // SPEC-3431 FR-033: a stop another process committed is terminal for
         // this one too. Applied last, after the in-flight launch merge above,
@@ -3219,6 +3284,7 @@ impl IssueMonitorState {
                 .retain(|pending| pending.issue_number != issue_number);
             self.pending_launch_deliveries
                 .retain(|delivery| delivery.issue_number != issue_number);
+            self.queued_launch_session_strategies.remove(&issue_number);
             if !self.launched_windows.contains_key(&issue_number) {
                 self.active_launches
                     .retain(|active| *active != issue_number);
@@ -3318,6 +3384,7 @@ impl IssueMonitorState {
                 .retain(|pending| pending.issue_number != issue_number);
             self.pending_launch_deliveries
                 .retain(|delivery| delivery.issue_number != issue_number);
+            self.queued_launch_session_strategies.remove(&issue_number);
             if let Some(item) = self
                 .inbox
                 .iter_mut()
@@ -4243,6 +4310,52 @@ impl IssueMonitorState {
         });
     }
 
+    fn require_fresh_launch_session(&mut self, issue_number: u64) {
+        self.queued_launch_session_strategies.insert(
+            issue_number,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    }
+
+    fn take_launch_session_strategy(
+        &mut self,
+        issue_number: u64,
+    ) -> IssueMonitorLaunchSessionStrategy {
+        self.queued_launch_session_strategies
+            .remove(&issue_number)
+            .unwrap_or_default()
+    }
+
+    /// Restore one-shot launch policy produced by a scan clone after the
+    /// daemon rebases that clone on the latest disk-owned preferences.
+    ///
+    /// The rebase intentionally replaces the persisted policy map wholesale.
+    /// A transient autonomous failure discovered by the scan is newer than
+    /// that snapshot, however, so its `FreshRequired` decision must survive.
+    /// Newer terminal/disabled disk state remains authoritative and prevents a
+    /// stale scan from reviving the marker.
+    pub(crate) fn restore_scanned_launch_session_strategies(
+        &mut self,
+        proposed: &BTreeMap<u64, IssueMonitorLaunchSessionStrategy>,
+    ) {
+        if !self.config.enabled || !self.autonomous_mode {
+            return;
+        }
+        for (&issue_number, &strategy) in proposed {
+            if strategy != IssueMonitorLaunchSessionStrategy::FreshRequired
+                || self.merged_issues.contains(&issue_number)
+                || self.failed_issues.contains_key(&issue_number)
+                || self
+                    .inbox_item(issue_number)
+                    .is_some_and(|item| item.state.is_terminal())
+                || !self.queue.contains(&issue_number)
+            {
+                continue;
+            }
+            self.require_fresh_launch_session(issue_number);
+        }
+    }
+
     pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected || self.active_launches.len() >= max_active {
@@ -4271,6 +4384,7 @@ impl IssueMonitorState {
             branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
             linked_issue_kind,
             delivery_id: None,
+            launch_session_strategy: self.take_launch_session_strategy(issue_number),
         })
     }
 
@@ -4481,6 +4595,7 @@ impl IssueMonitorState {
                                 branch_name: delivery.branch_name.clone(),
                                 linked_issue_kind: delivery.linked_issue_kind,
                                 delivery_id: Some(delivery.delivery_id.clone()),
+                                launch_session_strategy: delivery.launch_session_strategy,
                             })
                         {
                             launches.push(request);
@@ -4523,6 +4638,7 @@ impl IssueMonitorState {
                 branch_name: delivery.branch_name.clone(),
                 linked_issue_kind: delivery.linked_issue_kind,
                 delivery_id: Some(delivery.delivery_id.clone()),
+                launch_session_strategy: delivery.launch_session_strategy,
             }
         }));
         requests
@@ -4680,6 +4796,7 @@ impl IssueMonitorState {
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let delivery_id = format!("launch:{claim_effect_id}");
+        let launch_session_strategy = self.take_launch_session_strategy(issue_number);
         self.record_claimed(issue, claim_id.clone());
         self.queue.retain(|queued| *queued != issue_number);
         if !self.active_launches.contains(&issue_number) {
@@ -4706,6 +4823,7 @@ impl IssueMonitorState {
                     materializer_window_id: None,
                     materialized_window_id: None,
                     workspace_durable_window_id: None,
+                    launch_session_strategy,
                     created_at: now.to_string(),
                 });
         }
@@ -4971,6 +5089,7 @@ impl IssueMonitorState {
             .retain(|pending| pending.issue_number != issue_number);
         self.pending_launch_deliveries
             .retain(|pending| pending.issue_number != issue_number);
+        self.queued_launch_session_strategies.remove(&issue_number);
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != issue_number);
     }
@@ -5371,8 +5490,11 @@ impl IssueMonitorState {
         // Revoke before requeueing: an effect still in flight for the old
         // provider must not be able to act once the issue belongs to the next
         // launch.
-        self.advance_effect_authority_epoch();
+        if self.advance_effect_authority_epoch().is_none() {
+            return IssueMonitorFailoverOutcome::AuthorityExhausted;
+        }
         self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
         self.set_active_launch_id(issue_number, None);
         self.record_autonomous_heartbeat(issue_number, now);
@@ -5408,6 +5530,129 @@ impl IssueMonitorState {
         IssueMonitorFailoverOutcome::Restarting {
             stopped_window_id: live_window,
         }
+    }
+
+    /// Recover an AgentFailed writer conflict only when the reporting window
+    /// is still the exact launched window for the hinted issue.
+    pub fn requeue_agent_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> bool {
+        self.try_requeue_agent_resume_writer_conflict(
+            issue_number,
+            source_window_id,
+            message,
+            holder_window_id,
+        ) == IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    pub fn try_requeue_agent_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_window_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        if self.launched_windows.get(&issue_number).map(String::as_str) != Some(source_window_id) {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+        self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
+    }
+
+    /// Recover a LaunchFailed writer conflict only when the reporting
+    /// materializer still owns the exact pending delivery for this issue.
+    pub fn requeue_launch_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_delivery_id: &str,
+        source_materializer_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> bool {
+        self.try_requeue_launch_resume_writer_conflict(
+            issue_number,
+            source_delivery_id,
+            source_materializer_id,
+            message,
+            holder_window_id,
+        ) == IssueMonitorResumeWriterConflictOutcome::Requeued
+    }
+
+    pub fn try_requeue_launch_resume_writer_conflict(
+        &mut self,
+        issue_number: u64,
+        source_delivery_id: &str,
+        source_materializer_id: &str,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        let source_matches = self.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == issue_number
+                && delivery.delivery_id == source_delivery_id
+                && delivery.materializer_id.as_deref() == Some(source_materializer_id)
+        });
+        if !source_matches {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+        self.requeue_resume_writer_conflict_core(issue_number, message, holder_window_id)
+    }
+
+    /// Apply the shared mutation only after a public entry point validates the
+    /// exact source identity. Keeping this private prevents an issue hint alone
+    /// from revoking a newer successor launch.
+    fn requeue_resume_writer_conflict_core(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        holder_window_id: Option<&str>,
+    ) -> IssueMonitorResumeWriterConflictOutcome {
+        let inbox_state = self.inbox_item(issue_number).map(|item| item.state);
+        if self.merged_issues.contains(&issue_number)
+            || self.failed_issues.contains_key(&issue_number)
+            || inbox_state.is_some_and(MonitorInboxState::is_terminal)
+        {
+            return IssueMonitorResumeWriterConflictOutcome::Rejected;
+        }
+
+        // Revoke before dropping the old delivery/tracking. If the epoch
+        // cannot advance, leave the complete transition unapplied.
+        if self.advance_effect_authority_epoch().is_none() {
+            return IssueMonitorResumeWriterConflictOutcome::AuthorityExhausted;
+        }
+        self.clear_active_tracking(issue_number);
+        self.require_fresh_launch_session(issue_number);
+        if let Some(record) = self.autonomous_records.get_mut(&issue_number) {
+            record.phase = AutonomousPhase::Idle;
+            record.active_launch_id = None;
+        }
+        self.queue.retain(|queued| *queued != issue_number);
+        self.queue.push_back(issue_number);
+        self.apply_priority_order_to_queue();
+
+        let message = message.into();
+        let diagnostic = holder_window_id
+            .map(str::trim)
+            .filter(|holder| !holder.is_empty())
+            .map(|holder| format!("{message} (writer held by window {holder})"))
+            .unwrap_or(message);
+        self.last_error = Some(format!("issue #{issue_number}: {diagnostic}"));
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::Queued;
+            item.claim_id = None;
+            item.blocked_by_owner = None;
+            item.claim_expires_at = None;
+            item.launched_window_id = None;
+            item.error_message = Some(diagnostic);
+            item.exclusion_reason = None;
+        }
+        IssueMonitorResumeWriterConflictOutcome::Requeued
     }
 
     /// SPEC-3431 FR-033: refuse a stop without mutating any launch state.
@@ -5522,6 +5767,7 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
+        self.queued_launch_session_strategies.remove(&issue_number);
         self.launch_auth_required = false;
         self.last_error = Some(format!("issue #{issue_number}: {message}"));
         if let Some(item) = self
@@ -7568,6 +7814,230 @@ mod tests {
         );
     }
 
+    /// SPEC #3165 FR-100/FR-101 / T-224: an explicit failover must carry its
+    /// fresh-session origin through the queued state, a prefs reload, the
+    /// durable delivery, and every replay of the launch request.
+    #[test]
+    fn failover_launch_strategy_survives_reload_and_delivery_replay() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let attempts_before = monitor.attempt_count(42);
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+
+        assert!(matches!(
+            monitor.failover_restart(&target, "switch provider", "2026-08-13T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(monitor.attempt_count(42), attempts_before);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_deref()),
+            None,
+            "provider failover must not schedule autonomous retry backoff"
+        );
+        assert_ne!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "provider failover must not spend the NeedsHuman budget"
+        );
+
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-08-13T00:00:01Z");
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-42-retry",
+            "host/session",
+            "effect-42-retry",
+            "2026-08-13T00:00:02Z",
+        ));
+
+        let durable = restored.prefs();
+        assert_eq!(
+            durable.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+            "the durable delivery must retain the failover origin"
+        );
+        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let first = replayed.take_pending_launch_requests();
+        let second = replayed.take_pending_launch_requests();
+        assert_eq!(first, second, "an unacked delivery remains replayable");
+        assert_eq!(
+            first[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired,
+            "delivery replay must never downgrade failover to ResumeIfSafe"
+        );
+    }
+
+    #[test]
+    fn agent_writer_conflict_requires_exact_launched_window_and_cannot_revoke_successor() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let original = monitor.prefs();
+
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            43,
+            "tab-1::agent-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-foreign",
+            "resume writer conflict",
+            None,
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-old",
+            "resume writer conflict",
+            Some("tab-1::agent-holder"),
+        ));
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor
+            .status_view()
+            .last_error
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("tab-1::agent-holder")));
+
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-successor",
+            "host/session",
+            "effect-successor",
+            "2026-08-13T00:00:01Z",
+        ));
+        let successor = monitor.prefs();
+        assert_eq!(
+            successor.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+
+        assert!(!monitor.requeue_agent_resume_writer_conflict(
+            42,
+            "tab-1::agent-old",
+            "late duplicate",
+            Some("tab-1::agent-holder"),
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale source window cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn launch_writer_conflict_requires_exact_delivery_materializer_identity() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            101,
+            "tab-1::agent-old",
+            |_| false,
+        ));
+        let original = monitor.prefs();
+
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:foreign",
+            "gui-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-foreign",
+            "resume writer conflict",
+            None,
+        ));
+        assert_eq!(monitor.prefs(), original, "identity mismatch is inert");
+
+        assert!(monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            "resume writer conflict",
+            None,
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-successor",
+            "host/session",
+            "effect-successor",
+            "2026-08-13T00:00:01Z",
+        ));
+        let successor = monitor.prefs();
+
+        assert!(!monitor.requeue_launch_resume_writer_conflict(
+            42,
+            "launch:effect-42",
+            "gui-old",
+            "late duplicate",
+            None,
+        ));
+        assert_eq!(
+            monitor.prefs(),
+            successor,
+            "a stale delivery/materializer cannot revoke the fresh successor"
+        );
+    }
+
+    #[test]
+    fn terminal_failures_clear_queued_fresh_launch_strategy_locally_and_from_disk() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.failover_restart(&target, "switch", "2026-08-13T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        assert_eq!(
+            monitor.prefs().queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+
+        monitor.record_agent_issue_failed(42, "terminal agent failure");
+
+        assert!(monitor.prefs().queued_launch_session_strategies.is_empty());
+
+        let disk = IssueMonitorPrefs {
+            queued_launch_session_strategies: BTreeMap::from([(
+                42,
+                IssueMonitorLaunchSessionStrategy::FreshRequired,
+            )]),
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "terminal disk failure".to_string(),
+                window_id: None,
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        assert!(restored.prefs().queued_launch_session_strategies.is_empty());
+
+        let mut rebased = IssueMonitorState::new(IssueMonitorConfig::default());
+        rebased.record_candidate(issue(42));
+        rebased.rebase_gui_observer_prefs(&disk);
+        assert!(rebased.prefs().queued_launch_session_strategies.is_empty());
+    }
+
     /// SPEC-3431 FR-030 / T-080: the failover shares `stop_only`'s exact
     /// identity gate, so a stale request restarts nothing.
     #[test]
@@ -8283,6 +8753,63 @@ mod tests {
         );
     }
 
+    /// SPEC #3165 FR-100 / T-224: pre-policy persisted delivery/request shapes
+    /// remain compatible and preserve the ordinary re-engage behavior.
+    #[test]
+    fn legacy_launch_session_strategy_defaults_to_resume_if_safe() {
+        let delivery: PendingIssueMonitorLaunchDelivery =
+            serde_json::from_value(serde_json::json!({
+                "delivery_id": "launch:legacy-effect",
+                "issue_number": 42,
+                "branch_name": "work/issue-42",
+                "linked_issue_kind": "issue",
+                "claim_id": "claim-42",
+                "claim_owner": "host/session",
+                "created_at": "2026-08-13T00:00:00Z"
+            }))
+            .expect("legacy delivery without launch_session_strategy");
+        assert_eq!(
+            delivery.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+
+        let request: IssueMonitorLaunchRequest = serde_json::from_value(serde_json::json!({
+            "issue_number": 42,
+            "branch_name": "work/issue-42",
+            "linked_issue_kind": "issue",
+            "delivery_id": "launch:legacy-effect"
+        }))
+        .expect("legacy request without launch_session_strategy");
+        assert_eq!(
+            request.launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: a normal first delivery has no
+    /// failover/failure origin and therefore retains exact-resume continuity.
+    #[test]
+    fn ordinary_confirmed_claim_uses_resume_if_safe() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(42));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+
+        assert_eq!(
+            monitor.prefs().pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+        assert_eq!(
+            monitor.take_pending_launch_requests()[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+        );
+    }
+
     #[test]
     fn deduped_confirmed_claim_returns_its_exact_delivery_not_the_queue_tail() {
         use gwt_github::{
@@ -8657,6 +9184,100 @@ mod tests {
         assert!(
             monitor.prefs().pending_launch_deliveries.is_empty(),
             "a retryable issue cannot also replay its previous durable delivery"
+        );
+    }
+
+    /// SPEC #3165 FR-100/FR-101 / T-224: a generic AgentFailed autonomous
+    /// retry still uses the existing attempt/backoff ladder, but its successor
+    /// delivery must be fresh and must retain that strategy across restart and
+    /// ACK-driven delivery replay.
+    #[test]
+    fn autonomous_agent_failed_retry_keeps_fresh_strategy_across_reload() {
+        let candidate = auto_issue(
+            42,
+            "## Acceptance Criteria\n- [ ] AC-1: replacement agent completes the work\n",
+        );
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(candidate.clone());
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-08-13T00:00:00Z",
+        ));
+
+        monitor.record_agent_issue_failed(42, "agent process exited");
+
+        assert_eq!(
+            monitor.attempt_count(42),
+            1,
+            "generic AgentFailed keeps the existing autonomous retry budget contract"
+        );
+        assert!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_ref())
+                .is_some(),
+            "generic AgentFailed keeps the existing bounded backoff contract"
+        );
+        assert_ne!(
+            monitor.autonomous_record(42).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "one retry below the cap remains retryable"
+        );
+
+        let retry_at = chrono::DateTime::parse_from_rfc3339(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.retry_not_before.as_deref())
+                .expect("AgentFailed retry has a durable backoff floor"),
+        )
+        .expect("retry_not_before is RFC3339")
+            + chrono::Duration::seconds(1);
+        let retry_at = retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, std::slice::from_ref(&candidate), &retry_at);
+        let branch_protection = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert_eq!(
+            restored.prepare_autonomous_candidate(&candidate, &branch_protection, &retry_at),
+            EligibilityDecision::Eligible
+        );
+        assert!(restored.apply_confirmed_claim(
+            42,
+            "claim-42-retry",
+            "host/session",
+            "effect-42-retry",
+            &retry_at,
+        ));
+
+        let durable = restored.prefs();
+        assert_eq!(durable.autonomous_records[0].attempts, 1);
+        assert_eq!(
+            durable.pending_launch_deliveries[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        let mut replayed = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), durable);
+        let first = replayed.take_pending_launch_requests();
+        let second = replayed.take_pending_launch_requests();
+        assert_eq!(
+            first, second,
+            "an unacked AgentFailed retry remains replayable"
+        );
+        assert_eq!(
+            first[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
         );
     }
 
@@ -10896,6 +11517,30 @@ mod tests {
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman),
             "adopting a newer marker must not downgrade a terminal inbox row"
+        );
+    }
+
+    #[test]
+    fn failover_restart_at_authority_epoch_max_is_an_atomic_noop() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-max");
+        monitor.effect_authority_epoch = u64::MAX;
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: monitor.live_claim_id(42),
+            delivery_id: monitor.pending_launch_delivery_id(42),
+            window_id: monitor.launched_window_id(42),
+        };
+        let before = monitor.clone();
+
+        let outcome = monitor.failover_restart(&target, "switch provider", "2026-08-13T00:00:00Z");
+
+        assert!(
+            !matches!(outcome, IssueMonitorFailoverOutcome::Restarting { .. }),
+            "an exact source cannot report successful failover when its authority epoch cannot advance"
+        );
+        assert_eq!(
+            monitor, before,
+            "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
         );
     }
 }
